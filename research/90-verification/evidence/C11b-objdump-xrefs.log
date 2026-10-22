@@ -1,0 +1,25 @@
+715802 /tmp/ajs.dis
+=== call 42b1b4:
+49725:  42c1fa:	e8 b5 ef ff ff       	call   0x42b1b4
+49780:  42c2d3:	e8 dc ee ff ff       	call   0x42b1b4
+49854:  42c3f5:	e8 ba ed ff ff       	call   0x42b1b4
+49928:  42c517:	e8 98 ec ff ff       	call   0x42b1b4
+50002:  42c642:	e8 6d eb ff ff       	call   0x42b1b4
+50017:  42c684:	e8 2b eb ff ff       	call   0x42b1b4
+=== around 42b1b4:
+48711:  42b1b4:	55                   	push   rbp
+48712-  42b1b5:	48 89 e5             	mov    rbp,rsp
+48713-  42b1b8:	53                   	push   rbx
+48714-  42b1b9:	48 81 ec f8 00 00 00 	sub    rsp,0xf8
+48715-  42b1c0:	48 89 bd 08 ff ff ff 	mov    QWORD PTR [rbp-0xf8],rdi
+48716-  42b1c7:	48 89 b5 00 ff ff ff 	mov    QWORD PTR [rbp-0x100],rsi
+48717-  42b1ce:	48 8b 85 08 ff ff ff 	mov    rax,QWORD PTR [rbp-0xf8]
+48718-  42b1d5:	48 8b 40 08          	mov    rax,QWORD PTR [rax+0x8]
+48719-  42b1d9:	48 8d b0 40 02 00 00 	lea    rsi,[rax+0x240]
+48720-  42b1e0:	48 8d 85 50 ff ff ff 	lea    rax,[rbp-0xb0]
+48721-  42b1e7:	48 8b 95 00 ff ff ff 	mov    rdx,QWORD PTR [rbp-0x100]
+48722-  42b1ee:	b9 ff ff ff ff       	mov    ecx,0xffffffff
+48723-  42b1f3:	48 89 c7             	mov    rdi,rax
+=== call 451192:
+28706:  419dfc:	e8 91 73 03 00       	call   0x451192
+41008:  424a53:	e8 3a c7 02 00       	call   0x451192

@@ -1,0 +1,6 @@
+ajiasu-4.2.3.0.tar.gz members= [('ajiasu', 3578792, '0o755')]
+  member sha256 = 29e18740af8b69c6fa4f7b0ef269316b01e0400d7768583fc08044632be13b9f
+  archive sha256= c3d93551a9632c2e28f7a86e541363f3bbe81f01bae12358714ae96287304232
+ajiasu-amd64-4.3.0.1.tar.gz members= [('ajiasu', 3607464, '0o755')]
+  member sha256 = 08fcd8668f7aaf6660277778e67fd2afd622c3f1c8fb634e57f31605bf01c8f6
+  archive sha256= 0affe73aff4b7ee11cc6fab5c060d71dc3056a1c2903ca3435f4fe009d2689e7

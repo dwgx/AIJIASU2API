@@ -1,0 +1,14 @@
+=== date: 2026-10-23T08:01:15+09:00
+=== credential-ish files (expect none):
+  (end)
+=== private keys / tokens (expect only mbedTLS PEM header literals):
+.\research\30-linux-static\strings\ajiasu.strings.txt:314:0x002b9720	-----BEGIN RSA PRIVATE KEY-----
+.\research\30-linux-static\strings\ajiasu.strings.txt:316:0x002b9828	-----BEGIN RSA PUBLIC KEY-----
+=== emails in research text (expect none):
+=== CN mobile numbers (expect none):
+=== git history secrets scan:
+1
+  (end)
+=== C34/S23 redaction check:
+1
+S23	https://github.com/PainterXIII/YouRan_Proxy/blob/master/ajiasu/ajiasu.sh	2024-10-02	LOGIN_SYNC_FILE=/etc/ajiasu/ajiasu-data/LoginSync.dat ... nohup bash -c 

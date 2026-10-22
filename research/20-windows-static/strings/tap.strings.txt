@@ -1,0 +1,208 @@
+# TAP-Windows driver bundle - filtered strings
+# sources:
+#   tap/tap/amd64/tap0901.sys    sha256 89c5ca1440df186497ce158eb71c0c6bf570a75b6bc1880eac7c87a0250201c0 (9.21.2)
+#   tap/tap6/amd64/tap0901.sys   sha256 589c5667b1602837205da8ea8e92fe13f8c36048b293df931c99b39641052253 (9.24.6)
+#   tap/tap/amd64/tapinstall.exe sha256 c9963a3f8abf6fedc8f983a9655a387d67c752bd59b0d16fd6fc2396b4b4ca67
+# format: <file offset hex> <A=ASCII|W=UTF-16LE> <string>
+
+## tap0901.sys 9.21.2 (tap/tap/amd64) - device and build paths
+00003d40 W \Device\
+00003d70 W \DosDevices\Global\
+00003da0 A c:\users\samuli\opt\tap-windows6-mattock\src\rxpath.c
+00003de0 A c:\users\samuli\opt\tap-windows6-mattock\src\txpath.c
+00003e20 A TAP-Windows Adapter V9
+00004488 A c:\users\samuli\opt\tap-windows6-mattock\src\amd64\tap0901.pdb
+00005910 A c:\users\samuli\opt\tap-windows6-mattock\src\device.c
+000060ee A NdisMRegisterMiniportDriver
+0000610c A NdisMDeregisterMiniportDriver
+0000612c A NdisInitializeReadWriteLock
+0000614a A NdisFreeNetBufferListPool
+00006166 A NdisAllocateMemoryWithTagPriority
+0000618a A NdisInitializeEvent
+000061a0 A NdisAcquireReadWriteLock
+000061bc A NdisResetEvent
+000061ce A NdisCloseConfiguration
+000061e8 A NdisFreeMemory
+000061fa A NdisAllocateNetBufferListPool
+0000621a A NdisWaitEvent
+0000622a A NdisGetSystemUpTimeEx
+00006242 A NdisGetDataBuffer
+00006256 A NdisReleaseReadWriteLock
+00006272 A NdisReadConfiguration
+0000628a A NdisOpenConfigurationEx
+000062a4 A NdisMSetMiniportAttributes
+000062c2 A NdisDeregisterDeviceEx
+000062dc A NdisMIndicateStatusEx
+000062f4 A NdisRegisterDeviceEx
+0000630c A NdisFreeNetBufferList
+00006324 A NdisFreeMdl
+00006332 A NdisMIndicateReceiveNetBufferLists
+00006358 A NdisAllocateMdl
+0000636a A NdisSetEvent
+0000637a A NdisAllocateNetBufferAndNetBufferList
+000063a2 A NdisMSendNetBufferListsComplete
+000063c4 A NdisAllocateMemoryWithTag
+00006568 W TAP-Windows Virtual Network Driver (NDIS 6.0)
+00006640 W tap0901.sys
+# (38 unique)
+
+## tap0901.sys 9.24.6 (tap/tap6/amd64) - device and build paths
+00004140 W \Device\
+00004170 W \DosDevices\Global\
+000041a0 W .tapdiag
+000041c0 A TAP-Windows Adapter V9
+000041e0 A C:\Users\winsign\samuli\source\repos\tap-windows6\src\rxpath.c
+00004220 A C:\Users\winsign\samuli\source\repos\tap-windows6\src\txpath.c
+00004830 A C:\Users\winsign\samuli\source\repos\tap-windows6\src\x64\Release\tap0901.pdb
+00006180 A C:\Users\winsign\samuli\source\repos\tap-windows6\src\device.c
+00006b4c A NdisAcquireRWLockRead
+00006b64 A NdisAcquireRWLockWrite
+00006b7e A NdisReleaseRWLock
+00006b92 A NdisReadConfiguration
+00006baa A NdisCloseConfiguration
+00006bc4 A NdisReadNetworkAddress
+00006bde A NdisFreeMemory
+00006bf0 A NdisInitializeEvent
+00006c06 A NdisResetEvent
+00006c18 A NdisWaitEvent
+00006c28 A NdisOpenConfigurationEx
+00006c42 A NdisAllocateMemoryWithTagPriority
+00006c66 A NdisGetSystemUpTimeEx
+00006c7e A NdisAllocateNetBufferListPool
+00006c9e A NdisFreeNetBufferListPool
+00006cba A NdisGetDataBuffer
+00006cce A NdisMSetMiniportAttributes
+00006cec A NdisRegisterDeviceEx
+00006d04 A NdisDeregisterDeviceEx
+00006d1e A NdisMIndicateStatusEx
+00006d36 A NdisAllocateMemoryWithTag
+00006d52 A NdisSetEvent
+00006d62 A NdisFreeNetBufferList
+00006d7a A NdisAllocateNetBufferAndNetBufferList
+00006da2 A NdisAllocateMdl
+00006db4 A NdisFreeMdl
+00006dc2 A NdisMIndicateReceiveNetBufferLists
+00006de8 A NdisAllocateRWLock
+00006dfe A NdisFreeRWLock
+00006e10 A NdisGetVersion
+00006e22 A NdisMRegisterMiniportDriver
+00006e40 A NdisMDeregisterMiniportDriver
+00006e60 A NdisMSendNetBufferListsComplete
+000071f0 W TAP-Windows Virtual Network Driver (NDIS 6.0)
+000072a4 W tap0901.sys
+# (43 unique)
+
+## tapinstall.exe - DevCon usage
+00000a78 W InfPath
+00000aa8 W InfSection
+00000b58 A SetupVerifyInfFile
+00000bc0 W updateni
+00000bd8 W update
+00000c08 W sethwid
+00000c50 W remove
+00000c60 W reboot
+00000c88 W install
+00000c98 W hwids
+00000e50 A SetupUninstallOEMInfW
+00000e9c A c:\users\samuli\opt\tap-windows6-mattock\tapinstall\7600\objfre_wlh_amd64\amd64\tapinstall.pdb
+00007a24 A CloseServiceHandle
+00007a4c A OpenServiceW
+00007ea6 A SetupDiDestroyDeviceInfoList
+00007ec6 A SetupDiEnumDeviceInfo
+00007ede A SetupDiCreateDeviceInfoListExW
+00007f00 A SetupDiGetDeviceInfoListDetailW
+00007f22 A SetupDiOpenDeviceInfoW
+00007f7c A SetupDiGetDriverInfoDetailW
+00008008 A SetupOpenInfFileW
+0000801c A SetupDiDestroyDriverInfoList
+0000806e A SetupCloseInfFile
+0000813a A SetupDiEnumDriverInfoW
+000081e0 A SetupDiBuildDriverInfoList
+00008248 A SetupDiCreateDeviceInfoList
+00008266 A SetupDiCreateDeviceInfoW
+00008282 A SetupDiBuildClassInfoListExW
+000082f4 A SetupCopyOEMInfW
+00009382 W StringFileInfo
+0000966a W VarFileInfo
+000097ee W For more information, type: %1 help
+00009890 W For more information, type: %1 help %2
+00009972 W -r           Reboots the system only when a restart or reboot is required.
+00009a62 W <command>    Specifies a Devcon command (see command list below).
+00009bdc W %1!-20s! Display Devcon help.
+00009c4c W Devcon Classes Command
+00009f6c W Devcon Listclass Command
+0000a55c W Devcon Find Command
+0000ad3c W Devcon Findall Command
+0000b4b4 W Devcon Status Command
+0000baa0 W Devcon Driverfiles Command
+0000bad8 W List installed driver files for devices with the specified hardware or
+0000bfa0 W %1!-20s! List installed driver files for devices.
+0000c00c W Devcon Resources Command
+0000c62c W Devcon Hwids Command
+0000cc0c W Devcon Stack Command
+0000d2a8 W Devcon Enable Command
+0000d36c W the local computer. (To reboot when necessary, include -r.)
+0000da50 W reboot the system .
+0000dac4 W Devcon Disable Command
+0000db70 W Valid only on the local computer. (To reboot when necesary, Include -r .)
+0000e25e W devices or reboot the system .
+0000e2e0 W Devcon Restart Command
+0000e940 W The %1!u! device(s) are ready to be restarted. To restart the devices, reboot the system.
+0000ea4a W Reboots the local computer as part of a planned hardware installation.
+0000ee54 W Driver installed from %2 [%3]. %1!u! file(s) used by driver:
+0000eed8 W Driver installed from %2 [%3]. The driver is not using any files.
+0000ef64 W No driver information available for the device.
+0000f10c W Inf file is %1
+0000f134 W Inf section is %1
+0000f30c W Inf came from the Internet
+0000f38c W Inf is digitally signed
+0000f3c4 W Inf was installed by using F6 during text mode setup
+0000f52c W Controlling service:
+0000f6e0 W Devcon Install Command
+0000f7a8 W (To reboot when necesary, Include -r .)
+0000f82c W <inf>        Specifies an INF file with installation information for the device.
+0000f8d0 W <hwid>       Specifies a hardware ID for the device.
+0000fa2c W Device node created. Install is complete when drivers are installed...
+0000fac4 W Devcon Update Command
+0000faf2 W Updates drivers for all devices with the specified hardware ID (<hwid>). 
+0000fce8 W <inf>        Specifies an INF file with installation information for the devices.
+0000fd8e W <hwid>       Specifies the hardware ID of the devices.
+0000ffcc W Specify -r to reboot automatically if needed.
+0001002a W <inf> is an INF to use to install the device.
+00010088 W All devices that match <hwid> are updated.
+000100e0 W Unsigned installs will fail. No UI will be
+00010158 W %1!-20s! Manually update a device (non interactive).
+000101cc W Drivers installed successfully.
+0001022e W Adds (installs) a third-party (OEM) driver package.
+000102fe W <inf> is a full path to the INF of the Driver
+0001035c W Package that will be installed on this machine.
+000103c4 W %1!-20s! Adds (installs) a third-party (OEM) driver package.
+000105ca W <inf> is the name of a published INF on the local
+0001073a W Lists the third-party (OEM) driver packages installed on this machine.
+000108a0 W to be removed from the machine.
+000108e8 W %1!-20s! Lists the third-party (OEM) driver packages installed on this machine.
+00010d94 W The following third-party driver packages are installed on this computer:
+00010ff8 W Devcon Remove Command
+000110bc W the local computer. (To reboot when necesary, Include -r .)
+00011560 W No devices were removed.
+0001159c W The %1!u! device(s) are ready to be removed. To remove the devices, reboot the system.
+00011654 W %1!u! device(s) were removed.
+00011698 W Devcon Rescan Command
+00011900 W Devcon Drivernodes Command
+00011e48 W Devcon Classfilter Command
+00011fc8 W or the machine is rebooted.
+000122fe W type:  devcon classfilter <class> {upper | lower}
+00012368 W The Devcon classfilter command uses subcommands, which consist of an 
+00012462 W The Devcon classfilter command uses a virtual cursor to move through
+00012b16 W          is positioned. If the cursor is not positioned on a filter, Devcon inserts the
+0001352c W Class filters changed. Restart the devices or reboot the system to make the change effective.
+00013b08 W =hwid              - Clear hardware ID list and set it to hwid.
+00013b8a W +hwid              - Add or move hardware ID to head of list (better match).
+00013c26 W -hwid              - Add or move hardware ID to end of list (worse match).
+00013cbe W !hwid              - Remove hardware ID from list.
+00013d26 W hwid               - each additional hardware id is inserted after the previous.
+00014012 W Enabled on reboot
+00014064 W Disabled on reboot
+000140bc W Requires reboot
+00014110 W Removed on reboot
+# (112 unique)

@@ -1,0 +1,54 @@
+=== date: 2026-10-23T07:56:21+09:00
+=== git log -3
+3786ca5 Bootstrap research repo: plan, question tree, index, ledger
+=== branch
+main
+=== ls-files
+.gitignore
+PLAN.md
+README.md
+research/00-plan/LEDGER.md
+research/00-plan/MASTER-INDEX.md
+research/00-plan/QUESTION-TREE.md
+=== ls-files count
+6
+=== status --porcelain
+?? research/10-osint/
+?? research/20-windows-static/
+?? research/30-linux-static/
+?? research/40-protocol/
+=== status --ignored --porcelain
+?? research/10-osint/
+?? research/20-windows-static/
+?? research/30-linux-static/
+?? research/40-protocol/
+!! research/40-protocol/reference/__pycache__/
+!! research/90-verification/
+!! research/AJiaSu_4.9.6.0.exe
+=== check-ignore
+.gitignore:2:research/**/*.exe	research/AJiaSu_4.9.6.0.exe
+=== .gitignore
+# Binaries and vendor payloads — never commit
+research/**/*.exe
+*.sys
+*.dll
+*.cat
+*.tar.gz
+*.zip
+*.7z
+*.bin
+*.pcap
+*.pcapng
+*.dmp
+*.log
+
+# Secrets — never commit
+.env
+*.key
+*.pem
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
+# Research reports (*.md, *.json, *.txt, *.csv) stay tracked on purpose.

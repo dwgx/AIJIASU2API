@@ -1,0 +1,51 @@
+peer=('127.0.0.1', 40384) total=679 elapsed=0.03
+text_len=234 body_len=425
+TEXT=s=
+n=0e03c6770574fa0a95bd703b733baea7
+k=T0FFUEpIQFJY3TRsLndCDKTQ8YTPEx5t2M6HPPbWRgI3n72LFwkHfhp9GgGEP29JXYDtxED6ngoeC6VUmbMYls1dt3omnsTj+K4T4qCyrVZN4MmypQfJfQD+ei03PuX8m5UDO95OcPTGncxuKblz1ZNl6cWpjFzcaLHMSMFDaPd8+R4O
+l=425
+_=dqzjonwxy
+session_key=252a3a233e1cd2e781a9709e377d2cb8 oaep=sha1
+BODY=c=au
+ce=
+cseid=linux
+cuid=6ada95c900de9bbb3a82
+cv=20241105-1
+dim=lid=REDACTED,8e415e603088426aa42fed420212150c
+osd=x86_64
+osp=linux
+osv=Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 
+p=test
+peip=
+st=ajs
+t=1792711256
+u=test
+v=4.2.3.0
+_=fpxcmeqpxcfdivxlddubvvuxebweughngsqfmfeqrytri
+sent response 34 bytes key=1f5914aac3e1f3590ca811d4f378aa05
+RESP_HEX=eff58ae86dbcae22e178a5e4b82bb269af55ef6b17ae44b4e064aa8e68f44619884e
+sent auth fields 187 bytes iv=0e03c6770574fa0a95bd703b733baea7 body=c=aur
+r=ok
+sid=test
+s=test
+ok=1
+sip=10.0.0.1
+cip=10.0.0.2
+dns=1.1.1.1
+ka=30
+kat=90
+kapf=1
+mtu=1400
+au=test
+st=ajs
+cv=20241105-1
+osp=linux
+osd=x86_64
+osv=Linux
+dim=test
+peip=127.0.0.1
+ce=
+
+AUTH_HEX=f2f4f0940944b7fd72669b85eb0360c982012d3d8cb79806d42262088d99d48b1492e5da53c94bbba46c6e01fd0070ef5897d5e6481bfa4d7ff2d459564886f6c97b7f67869ff8f8344def657f214a6e58b1bd88e73714e79ef4ec8936de7914816d345e43d920c5a2cc60e50e3866be6012e6f8c2bf7380656215ce105714928252bf928ea2b9122bf8de97861235e09fb580f4ffb6d0401b0a4c597d08ee5fa5221119c2192cc718d744786d3dbf051c4c33f26a846dc67274d4
+shutdown write after auth
+post bytes=0

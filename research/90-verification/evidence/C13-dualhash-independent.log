@@ -1,0 +1,10 @@
+PASS dualHash('') = decaadfebebaefbe (want decaadfebebaefbe)  sign=cbfde26ee626242c (want cbfde26ee626242c)
+PASS dualHash('abc') = bf7ff86122acbd24 (want bf7ff86122acbd24)  sign=881953a05577bb2a (want 881953a05577bb2a)
+PASS dualHash('_site=ajs&_v=4.11.10.0&cmd=ClientA') = 27b77ba0004e206d (want 27b77ba0004e206d)  sign=80c6a846fc6a00f3 (want 80c6a846fc6a00f3)
+PASS dualHash('中文&ünïcode') = 3d7e935e13359844 (want 3d7e935e13359844)  sign=cfac37be29335bb4 (want cfac37be29335bb4)
+dualHash/sign vectors: 4/4
+PASS buildQuery({'b': '2', 'a': '1', 'c': 'a b&c=d/é'}) = a=1&b=2&c=a%20b%26c%3dd%2f%c3%a9  (want a=1&b=2&c=a%20b%26c%3dd%2f%c3%a9)
+PASS buildQuery({'_os_dim': 'w=1080&h=2400&d=440', '_site': 'ajs'}) = _os_dim=w%3d1080%26h%3d2400%26d%3d440&_site=ajs  (want _os_dim=w%3d1080%26h%3d2400%26d%3d440&_site=ajs)
+PASS buildQuery({'z': '', 'A': '~-._'}) = A=~-._&z=  (want A=~-._&z=)
+buildQuery vectors: 3/3
+RESULT: PASS

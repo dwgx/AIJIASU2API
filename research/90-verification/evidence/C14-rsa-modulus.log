@@ -1,0 +1,15 @@
+=== win/AJiaSu.exe: 1 long decimal literal(s)
+  0x314468 digits=309 bit_length=1024 byte_len=128 head=14160118790592690944.. tail=1138357721
+    exponent 65537 present after? False
+=== linux/4.2.3.0: 1 long decimal literal(s)
+  0x28a030 digits=309 bit_length=1024 byte_len=128 head=14160118790592690944.. tail=1138357721
+    exponent 65537 present after? True
+=== linux/4.3.0.1: 1 long decimal literal(s)
+  0x28f548 digits=309 bit_length=1024 byte_len=128 head=14160118790592690944.. tail=1138357721
+    exponent 65537 present after? True
+
+identical to win/AJiaSu.exe? linux/4.2.3.0: True
+identical to win/AJiaSu.exe? linux/4.3.0.1: True
+bit_length set: {'win/AJiaSu.exe': 1024, 'linux/4.2.3.0': 1024, 'linux/4.3.0.1': 1024}
+ciphertext block size = 128 bytes
+OAEP-SHA1 max message = 86 bytes

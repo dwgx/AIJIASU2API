@@ -1,0 +1,22 @@
+ajiasu 4.2.3.0 (core:20241105-1)
+
+More help: ./ajiasu -h
+Usage: ./ajiasu {login|list|logout}
+Usage: ./ajiasu connect "Shanghai 1*"
+Default config file: /etc/ajiasu.conf
+Config file options:
+	user your-account-name
+	pass your-password
+
+
+For experts: ./ajiasu -c /etc/ajiasu.conf {login|list|connect|logout}
+You can use '--sys-env-id 1234' to identify this client to avoid disconnecting the wrong client if you need to connect/disconnect frequently.
+
+Config file advanced options:
+	cache_dir /tmp
+	connect server-name(wildcard supported)
+	protocol {udp|tcp|lwip|socks5|http|proxy}
+	use_vpn_dns {yes|no}
+	use_vpn_route {yes|no}
+	up_down your-script-file
+

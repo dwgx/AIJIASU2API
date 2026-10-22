@@ -1,0 +1,29 @@
+=== ajiasu (3578792 B)
+  0x28ac34 'https://login.ajs-app.com/'             -> 'https://login.ajs-app.com/'                 MATCH
+  0x28ac4f 'https://login.mmegg.com/'               -> 'https://login.mmegg.com/'                   MATCH
+  0x28ac68 'https://login.mmegg.com:4443/'          -> 'https://login.mmegg.com:4443/'              MATCH
+  0x28ac86 'https://login.mbclubsh.com/'            -> 'https://login.mbclubsh.com/'                MATCH
+  0x28d901 '/client.php'                            -> '/client.php'                                MATCH
+  0x28da99 'ClientApiLogin/Login'                   -> 'ClientApiLogin/Login'                       MATCH
+  0x28ee18 'OPV2'                                   -> 'OPV2'                                       MATCH
+  0x28ee1d 'POST /s?s=%s&n=%s HTTP/1.1\r\n'         -> 'POST /s?s=%s&n=%s HTTP/1.1\r\n'             MATCH
+  0x28ee3a 'Upgrade: websocket\r\n'                 -> 'Upgrade: websocket\r\n'                     MATCH
+  0x28ee4f 'Connection: Upgrade\r\n'                -> 'Connection: Upgrade\r\n'                    MATCH
+  0x28ee65 'Content-Length: %d\r\n'                 -> 'Content-Length: %d\r\n'                     MATCH
+  0x28ee7a 'Sec-WebSocket-Key: %s\r\n'              -> 'Sec-WebSocket-Key: %s\r\n'                  MATCH
+  0x28eecf 'code=200'                               -> 'code=200'                                   MATCH
+  0x28a030 decimal literal: 309 digits, bit_length=1024, bytes=128, mod2^?  top bits=1024
+    value head=141601187905926909444644... tail=741138357721
+    scan login.ajs-app.com          -> ['0x28ac3c']
+    scan login.mmegg.com            -> ['0x28ac57', '0x28ac70']
+    scan login.mbclubsh.com         -> ['0x28ac8e']
+    scan /client.php                -> ['0x28d901']
+    scan ClientApiLogin/Login       -> ['0x28da99']
+    scan OPV2                       -> ['0x28ee18']
+    scan Sec-WebSocket-Key          -> ['0x28ee7a']
+    scan code=200                   -> ['0x28eecf']
+=== work/4301/ajiasu (3607464 B)
+  0x28ac34 'https://login.ajs-app.com/'             -> '\x85Àu@M\x85ít;A\x89]\x00ë5H\x89ØH\x8d¼$Ð\x00\x00\x00' MISMATCH
+  0x28d901 '/client.php'                            -> '\x00H\x89\x05\x8f´.\x00H\x8b\x05'           MISMATCH
+  0x28ee18 'OPV2'                                   -> 'file'                                       MISMATCH
+  0x28eecf 'code=200'                               -> 'guments,'                                   MISMATCH

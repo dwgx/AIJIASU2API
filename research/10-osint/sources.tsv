@@ -1,0 +1,37 @@
+source_id	url	date	quote
+S1	https://github.com/cubk1/OpenAJS	2026-06-07	重新实现爱加速客户端在纯Java / 功能: FV协议连接实现, 转Socks5, 注册、登录、获取服务器列表、查看通知等 / repo description: 爱加速客户端逆向
+S2	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/AjsClient.java	2026-06-07	hosts = List.of("https://login.ajs-app.com", "https://login.mmegg.com", "https://login.mmegg.com:4443", "https://login.mbclubsh.com"); new URL(host + "/client.php")
+S3	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/crypto/FVSign.java	2026-06-07	String input = secret + "|" + body + "|" + timestamp + "|" + secret; return hex(dualHash(input.getBytes(StandardCharsets.UTF_8)));
+S4	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/fv/FvConnection.java	2026-06-07	String text = "s=\nn=" + hex(bodyIv) + "\nk=" + base64(oaepBlock(sessionKey)) + "\nl=" + body.length + "\n_=" + randomPad();
+S5	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/fv/FvCrypto.java	2026-06-07	Cipher.getInstance("RSA/ECB/OAEPPadding"); OAEPParameterSpec spec = new OAEPParameterSpec(hash, "MGF1", mgf, PSource.PSpecified.DEFAULT); hash default "SHA-1"
+S6	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/AjsDevice.java	2026-06-07	private String appVersion = "4.11.10.0"; private String platform = "android"; private String osVersion = "13"; private String site = "ajs";
+S7	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/fv/FvConnection.java	2026-06-07	fields.put("c", "au"); fields.put("u", userName); fields.put("p", connectPassword); fields.put("cuid", ...); fields.put("cv", "20260525-1");
+S8	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/fv/FvConnection.java	2026-06-07	String text = "s=" + sid + "\nn=" + hex(div) + "\nk=\n_=" + randomPad(); if (!headerText.contains("code=200")) throw ... "data channel rejected"
+S9	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/fv/SocksProxyServer.java	2026-06-07	server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port)); if (cmd != 1) { out.write(new byte[]{5, 7, ...}); }
+S10	https://github.com/cubk1/OpenAJS/blob/master/src/main/java/us/cubk/openajs/api/net/InsecureTLS.java	2026-06-07	TrustManager[] trustAll = {new X509TrustManager() { ... } }; HttpsURLConnection.setDefaultHostnameVerifier(allowAll);
+S11	https://github.com/s1g0day/Aijiasu_Agent_Pool/blob/main/readme.md	2024-04-13	方法2：根据节点ID进行连接，输入命令：`./ajiasu connect "vvn-2466-1878"`；最后，根据需要选择协议类型：`udp、tcp、lwip、proxy`
+S12	https://github.com/s1g0day/Aijiasu_Agent_Pool/blob/main/dev/another_script.py	2024-04-13	process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True); if "ajiasu stopped. failure" in output:
+S13	https://github.com/dnomd343/ajiasu-docker/blob/main/README.md	2025-08-10	protocol {udp|tcp|lwip|socks5|http|proxy} / use_vpn_dns {yes|no} / use_vpn_route {yes|no} / up_down [SCRIPT_FILE] / ajiasu 4.1.1.0 (core:20210315-1730)
+S14	https://github.com/hanx11192-ship-it/LoveToSpeedup/blob/main/README.md	2026-10-05	该版本 `ajiasu` 的 SOCKS5 握手不可用，**HTTP 代理模式可用**，故对外只暴露 HTTP 代理。 / `ajiasu` 的 conf **没有 port 字段**
+S15	https://github.com/hanx11192-ship-it/LoveToSpeedup/blob/main/LoveToSpeedup/app/ajiasu_manager.py	2026-10-05	通过独立的 ``cache_dir`` + ``--sys-env-id`` 让多个实例互不干扰并行存活。conf 没有 port 字段；多个实例会自动从基准端口（默认 1080）顺延。
+S16	https://github.com/hanx11192-ship-it/LoveToSpeedup/blob/main/LoveToSpeedup/vendor/ajiasu-amd64-4.2.3.0.tar.gz	2026-10-05	vendor tarball, single member `ajiasu`, 1,253,814 bytes; sha256(c3d93551a9632c2e28f7a86e541363f3bbe81f01bae12358714ae96287304232) -> member sha256 29e18740af8b69c6
+S17	https://github.com/axe-browser/aijiasu-docker/blob/main/README.md	2026-09-30	默认将代理映射到宿主机 `127.0.0.1:1080` / 轻量自适应端口桥接 0.0.0.0:1080 -> 127.0.0.1:[内部实际端口] (兼容 1080/18888/28888等)
+S18	https://github.com/axe-browser/aijiasu-docker/blob/main/Dockerfile	2026-09-30	DOWNLOAD_URL="https://www.91ajs.com/files/downloads/linux/ajiasu-amd64-4.2.3.0.tar.gz"
+S19	https://github.com/znicelya/ajiasu-proxy/blob/main/README.md	2026-07-20	平台不会修改官方 AJiaSu CLI。Agent 会按需创建 Runner，每个活动连接使用独立的 Runner 隔离边界
+S20	https://github.com/znicelya/ajiasu-proxy/blob/main/docs/compliance/ajiasu-usage-gate.md	2026-07-20	Before any real-account CI or production use, the service owner must retain written evidence that the intended internal enterprise use complies with the applicable AJiaSu license and service terms.
+S21	https://github.com/RorschachE0/AjiPilot/blob/main/README.md	2026-03-18	默认首选 **lwip** 协议（兼容性与性能的最佳平衡），同时支持 TCP/UDP/Proxy。 / 连接节点：`./ajiasu connect "城市 #编号"`，把选定协议写入 stdin
+S22	https://github.com/LordVibeCoding/ajiasu-proxy-api/blob/main/README.md	2026-03-05	客户端 (Proxifier) → VPS:47076 (socat) → 127.0.0.1:1080 (爱加速 SOCKS5) → 国内 IP
+S23	https://github.com/PainterXIII/YouRan_Proxy/blob/master/ajiasu/ajiasu.sh	2024-10-02	LOGIN_SYNC_FILE=/etc/ajiasu/ajiasu-data/LoginSync.dat ... nohup bash -c 'while true; do ajiasu connect; ... sleep 5'
+S24	https://github.com/yuwanx/aijiasu-ip-list/blob/main/README.md	2026-07-26	ips.txt：2718 个去重后的 IPv4 地址 ... 客户端版本：4.12.0.3 ... 覆盖省份：31
+S25	https://www.91ajs.com/	2026-10-23	支持协议 UDP、TCP、Socks5、HTTP / 覆盖地区 31个省份，190+城市 / 爱加速使用AES技术加密线上数据
+S26	https://www.91ajs.com/download	2026-10-23	Windows 4.9.6.0 / Android 4.12.2.0 / HarmonyOS 1.0.1.0 / iOS 4.11.5.11 / macOS 4.9.6.0 / Linux 4.3.0.1 (x86, amd64, aarch64, armel, armeb)
+S27	https://www.91ajs.com/terms	2025-10-22	4.3 用户使用任意连接模式，均不得将网络流量或连接权限以任何形式提供、共享或转让给他人使用 / 7.2 不得通过反向工程、反编译、反汇编...
+S28	https://www.91ajs.com/help	2026-10-23	使用 udp、tcp、lwip 协议连接，会改变你的设备 IP，导致 ssh 断开 ... 如果你使用 proxy 协议，则没有此问题 / 默认主机地址都是 127.0.0.1:1080
+S29	https://www.91ajs.com/app-changelog-desktop.html	2025-07-11	PC 版 4.9.6.0 2025-07-11: 新增接口域名动态下发能力 / 4.9.0.5: 支持使用 账号#阿拉伯数字 的形式登录 / 使用最新版本的 TAP 虚拟网卡驱动
+S30	https://www.91ajs.com/information/Announcement.html	2020-01-31	服务费用为套餐价格乘以同时连接数。例如... 同时连接数应该选择 2。一个月的服务费用=￥25×2=￥50
+S31	https://play.google.com/store/apps/details?id=com.fvcorp.android.aijiasuclient	2026-09-03	Covering 206 cities nationwide with over 2700 servers. / 100K+ Downloads / Updated on Sep 3, 2026 / only mobile phone numbers in mainland China are supported
+S32	https://raw.githubusercontent.com/xOS/Config/master/RuleSet/Domestic.list	2026-10-23	line 56: DOMAIN-SUFFIX,ajs-app.com ; line 33: DOMAIN-SUFFIX,91ajs.com
+S33	C:/Users/dwgx1/AppData/Local/Temp/ajs-win-20261023/tap/tap6/amd64/OemVista.inf	2026-10-23	CatalogFile = tap0901.cat / DriverVer = 10/08/2020,9.24.6.601 / DeviceDescription = "TAP-Windows Adapter V9" (tap/ variant: 04/21/2016,9.00.00.21)
+S34	https://gitee.com/api/v5/search/repositories?q=ajiasu	2026-10-23	HTTP 200, body `[]` for q=ajiasu and q=爱加速 (per_page=50)
+S35	https://www.52pojie.cn/thread-1827832-1-1.html	2023-08-31	爱加速会员 [资源求助] 50 吾爱币 (membership request thread; no protocol/reverse-engineering content)
+S36	https://www.91ajs.com/about	2026-10-23	“爱加速” 是上海游盾网络科技有限公司开发运营的一款致力于解决公共WiFi安全隐患问题的网络加速软件

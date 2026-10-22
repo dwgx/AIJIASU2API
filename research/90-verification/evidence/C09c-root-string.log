@@ -1,0 +1,4 @@
+=== root/proxy string:
+file offset 0x28a210
+b'root required, please run with "sudo". (if you don\'t have root access, you can use protocol:proxy (socks5/http) which doesn\'t require root while you have to configure your browser manually)'
+protocol:proxy at 0x28a263

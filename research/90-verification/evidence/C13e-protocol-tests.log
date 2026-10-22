@@ -1,0 +1,9 @@
+ok test_sign_and_dual_hash_match_java
+ok test_build_query_matches_java
+ok test_frame_round_trip
+ok test_aes_ctr_nist_sp800_38a
+ok test_rsa_oaep_shape_and_local_roundtrip
+ok test_auth_body_serialization
+ok test_socks5_connect_request
+PASS 7
+EXIT=0

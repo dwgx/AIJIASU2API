@@ -1,0 +1,16 @@
+{
+  "goal": "hold the fixed 8/8 offline FV/API conformance suite green (regression gate)",
+  "metric_command": "python scripts/metric.py",
+  "direction": "max",
+  "mutable_scope": ["emulator/internal/fv"],
+  "fixed_budget_sec": 3600,
+  "baseline_command": "python scripts/metric.py",
+  "stop_policy": {
+    "max_iterations": 20,
+    "max_no_improve": 5,
+    "target_metric": 8
+  },
+  "tag": "fv-conformance",
+  "metric_regex": null,
+  "expected_runtime_sec": 60
+}

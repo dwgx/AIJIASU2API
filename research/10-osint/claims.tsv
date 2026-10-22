@@ -1,0 +1,37 @@
+claim_id	claim	source_ids	grade
+C1	OpenAJS (cubk1/OpenAJS, created 2026-06-07) is the only public repository found that reimplements the FV tunnel end-to-end rather than driving the official client.	S1;S2;S4;S8;S9	A
+C2	The control API is HTTP POST to /client.php with an application/x-www-form-urlencoded body of sorted key=value pairs, plus headers X-Timestamp and X-Sig and User-Agent okhttp/4.9.3.	S2	A
+C3	The X-Sig value is hex(dualHash(secret + "|" + body + "|" + timestamp + "|" + secret)); dualHash is two 32-bit rolling hashes (65599 multiplier and 32*x+x>>2 xor) emitted as 8 interleaved bytes.	S3	A
+C4	OpenAJS ships four candidate API hosts: login.ajs-app.com, login.mmegg.com, login.mmegg.com:4443 and login.mbclubsh.com, tried in order.	S2	A
+C5	ajs-app.com is independently recognised as an AJiaSu domain by a third-party proxy rule-set (DOMAIN-SUFFIX,ajs-app.com alongside 91ajs.com).	S32	B
+C6	FV authentication frame = 16-byte IV || AES-CTR(headerIV, zeroIV) over a 4-byte header (2 reserved bytes, 2-byte text length) plus the text s=/n=/k=/l=/_=; k is the literal ASCII 'OAEP' followed by RSA-OAEP(sessionKey).	S4;S5	A
+C7	The FV auth body is newline-delimited key=value text (c=au, u, p, cuid, cseid, st, v, cv=20260525-1, osp, osd, osv, dim, ce) encrypted with AES-CTR under a random 16-byte sessionKey and 16-byte bodyIV.	S7;S4	A
+C8	A successful auth response carries r=ok and sid; subsequent data channels reuse the same sessionKey with a fresh 16-byte IV per TCP connection and send an empty k= field.	S8	A
+C9	The FV data channel begins with a raw SOCKS5 CONNECT request (VER=5, CMD=1, ATYP=3 domain name) and the server answers with a header containing code=200 followed by a 10-byte SOCKS5 reply.	S8	A
+C10	OpenAJS's local SOCKS5 server is bound to 127.0.0.1 only, offers no authentication and rejects any command other than CONNECT with reply 0x07.	S9	A
+C11	OpenAJS disables TLS certificate and hostname verification globally, so that client implements no certificate pinning; whether the official clients pin certificates is [UNKNOWN].	S10	A
+C12	The Linux client is driven by subcommands login / list / connect and an /etc/ajiasu.conf holding user, pass, protocol, cache_dir, connect, use_vpn_dns and use_vpn_route; protocol values include udp, tcp, lwip, proxy (and socks5/http per dnomd343).	S11;S13;S28	A
+C13	The Linux client's local proxy listens on 127.0.0.1:1080 by default; the config file has no port field, so a second instance drifts to the next free port.	S14;S15;S28	A
+C14	Parallel Linux client instances are achievable by giving each a distinct cache_dir and --sys-env-id; the listener port must then be discovered at runtime.	S15	B
+C15	In client 4.2.3.0 the SOCKS5 handshake was reported unusable while the HTTP proxy mode worked, whereas 4.1.1.0-era scripts used socks5h successfully; the SOCKS5 data path is therefore version-dependent.	S14;S11	B
+C16	A single ajiasu client process holds at most one active node connection; this is a per-process constraint, not an account-wide one (see C21).	S14;S19	B
+C17	Official client matrix as of 2026-10-23: Windows 4.9.6.0, macOS 4.9.6.0, Android 4.12.2.0, iOS 4.11.5.11, HarmonyOS 1.0.1.0, Linux 4.3.0.1 in five architectures, Apple TV 1.0.2.3.	S26;S25	A
+C18	Client 4.9.6.0 (2025-07-11) introduced dynamic delivery of API interface domains, which explains a rotating multi-host API list.	S29;S2	A
+C19	Client 4.9.0.5 (2023-11-21) added account#N login for per-device connection management and switched to the newer TAP virtual adapter driver.	S29	A
+C20	The Windows installer payload ships TAP-Windows driver files (tap0901.sys, tap0901.cat, OemVista.inf, tapinstall.exe) for amd64/arm64/i386 in two variants (DriverVer 9.00.00.21 and 9.24.6.601), plus per-architecture sysproxy.exe.	S33;S29	A
+C21	Account concurrency is a purchased quantity from 1 to 2000 simultaneous devices, priced as plan price multiplied by concurrent-connection count.	S27;S28;S30	A
+C22	The AJiaSu terms of service (version 2025-10-22) forbid sharing, providing or transferring network traffic or connection rights to others, and forbid reverse engineering, decompilation or disassembly.	S27	A
+C23	Node identifiers have the form vvn-<number>-<number> and node listings expose an ok/other status column.	S11;S13;S22	A
+C24	Connecting a node outside the account's entitlement returns `服务器不可用于用户组` (server not available for the user group) according to an observed client transcript.	S11	B
+C25	The Android build is com.fvcorp.android.aijiasuclient by developer YOUDUN, 100K+ installs, updated 2026-09-03, and registration is restricted to mainland-China mobile numbers.	S31	A
+C26	2718 distinct node IPv4 addresses covering 31 provinces were extracted from Android client 4.12.0.3 on 2026-07-26.	S24	B
+C27	The vendored ajiasu-amd64-4.2.3.0.tar.gz in LoveToSpeedup unpacks to a binary whose sha256 (29e18740af8b69c6fa4f7b0ef269316b01e0400d7768583fc08044632be13b9f) equals the Linux client extracted in this project.	S16	A
+C28	A Gitee API repository search for both `ajiasu` and `爱加速` returned zero results on 2026-10-23.	S34	B
+C29	No 52pojie, linux.do, v2ex or Zhihu thread describing AJiaSu protocol reverse engineering was found; the only 52pojie hit is a membership request.	S35	C
+C30	OpenAJS presents itself as Android client 4.11.10.0 with cv=20260525-1, i.e. it emulates a mobile profile while the current desktop build is 4.9.6.0; parameter sets therefore differ per platform.	S6;S7;S26	B
+C31	Public code documents the AutoMatch endpoint (ClientApiVpnServer/AutoMatch with LocationLevel/LocationCode) but not the server-side node-selection semantics.	S2	B
+C32	UDP mode, lwip mode and the TAP data path are not implemented in any public repository found; public work only drives the official client for those modes.	S13;S21;S1	B
+C33	znicelya/ajiasu-proxy wraps the unmodified official CLI in per-connection containers and gates real-account use behind written compliance evidence.	S19;S20	A
+C34	PainterXIII/YouRan_Proxy commits a plaintext account/password pair in ajiasu/ajiasu.conf and a hard-coded password in ajiasu/install.sh; values are redacted here and must not be reused.	S23	A
+C35	A typical third-party architecture is: official Linux client in proxy mode listening on 127.0.0.1:1080, with socat or a TCP forwarder republishing it on a public port.	S22;S17;S14	A
+C36	The official site describes the service as mainland-China-only (31 provinces, 190+ cities, 2600-2700+ servers) and forbids use for accessing blocked overseas sites or cross-border networking.	S25;S27;S31	A

@@ -1,0 +1,1335 @@
+# AJiaSu.exe 4.9.6.0 - filtered strings
+# source: C:/Users/dwgx1/AppData/Local/Temp/ajs-win-20261023/AJiaSu.exe
+# sha256: 0fd9d702bf9932836ad0ba3e4acf43bb1a587c45ee6247b7a5d88aede78101f6
+# format: <file offset hex> <A=ASCII|W=UTF-16LE> <string>
+# offsets are file offsets in the on-disk PE (raw extraction of both ASCII and UTF-16LE runs).
+# deduplicated by string content; first occurrence offset kept.
+
+## URLs and hostnames
+00316184 A asset.sciter.com
+0031d398 A http://
+0031d3a4 A https://
+00324d48 A  unzip 1.01 Copyright 1998-2004 Gilles Vollant - http://www.winimage.com/zLibDll
+0033c88c A # https://curl.se/docs/http-cookies.html
+0033d650 A ftp@example.com
+0033e5d8 A # Your alt-svc cache. https://curl.se/docs/alt-svc.html
+0033e7d8 A # Your HSTS cache. https://curl.se/docs/hsts.html
+003c47f0 A     <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+003c484b A       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+003c48ad A       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+003de4f4 A www.digicert.com1$0"
+003de57b A www.digicert.com1!0
+003de85b A http://ocsp.digicert.com0C
+003de880 A 7http://cacerts.digicert.com/DigiCertAssuredIDRootCA.crt0E
+003de8ca A 4http://crl3.digicert.com/DigiCertAssuredIDRootCA.crl0
+003dee02 A http://ocsp.digicert.com0A
+003dee27 A 5http://cacerts.digicert.com/DigiCertTrustedRootG4.crt0C
+003dee6f A 2http://crl3.digicert.com/DigiCertTrustedRootG4.crl0 
+003df4a7 A Ihttp://crl3.digicert.com/DigiCertTrustedG4RSA4096SHA256TimeStampingCA.crl0
+003df512 A http://ocsp.digicert.com0X
+003df537 A Lhttp://cacerts.digicert.com/DigiCertTrustedG4RSA4096SHA256TimeStampingCA.crt0
+003dfb9a A @http://secure.globalsign.com/cacert/gsgccr45evcodesignca2020.crt0?
+003dfbe8 A 3http://ocsp.globalsign.com/gsgccr45evcodesignca20200U
+003dfc43 A &https://www.globalsign.com/repository/0
+003dfc90 A 6http://crl.globalsign.com/gsgccr45evcodesignca2020.crl0
+# (26 unique)
+
+## ClientApi HTTP endpoints
+00315498 W /User/MessageCenter
+003163d4 A ClientApiUser/UserVpnServerFavoriteList
+0031641c A /client.php
+0031642c A ClientApiUser/VpnServerFavorite
+003165ac A ClientApiMessageCenter/GetAnnounce
+0031669c A ClientApiMessageCenter/CloseAnnounce
+003167f4 A ClientApiMessageCenter/GetMessageNum
+003168fc A ClientApiVerifyCode/Captcha
+003169b4 A ClientApiVerifyCode/SendVerifyCode
+00316a20 A ClientApiRegister/Register
+00316b48 A ClientApiUpgrade/UpgradeRecord
+00316b94 A ClientApiClientSetting/ClientSetting
+00317040 A ClientApiReport/Disconnect
+003170e8 A ClientApiReport/Report
+00319e8c A ClientApiVpnServer/AutoMatch
+0031e3f0 A ClientApiLogin/Login
+0031e730 A ClientApiClientSetting/LoadRoute
+0031e9c4 A ClientApiReport/WebsiteCheckReport
+# (18 unique)
+
+## FV tunnel / proxy protocol
+00316e14 A FV_TIME
+00316e20 A FV_USER_NAME
+00316e30 A FV_STACK_TRACE
+00316e44 A FV_CLIENT_SITE
+00316e58 A FV_LOCALE_LANGUAGE
+00316e70 A FV_CLIENT_VERSION
+00316e88 A FV_FVCORE_BUILD_VERSION
+00316ea4 A FV_OS_VERSION
+00316eb4 A FV_DIST_CHAN
+00316ec4 A FV_PLATFORM_NAME
+00318190 A %s FVCORE_BUILD_VERSION = %s
+0031d278 A FVHttpClient
+0031d6e8 A F:\workspace\vpn123\prog\fvclient\src\libevent\event.c
+0031e0ac A FVNetClient
+0031eff4 A FVClient
+0031f000 A FVClient::~FVClient start
+0031f020 A FVClient::~FVClient end
+0031f164 A prepare serverNat64Prefix = %s
+0031f18c A FVClient::clean() implClean
+0031f4dc A FVClientProxy
+0031f600 A fvproxy_auth_context_new: failed. cmd=%s, clientRequestFailureCount=%d, msg=%s
+0031f660 A fvproxy_auth_context_new: cmd=%s
+0031f688 A fvproxy_auth_context_new: unknown cmd=%s
+00320134 A FVPingManager
+00320428 A FVPingManager::~FVPingManager() enter
+00320458 A FVPingManager::~FVPingManager() exit
+00320484 A FVPingManager::loadReports: %s
+003204f4 A FVRoute
+00320698 A F:\workspace\vpn123\prog\fvclient\src\libevent\win32select.c
+00320f50 A F:\workspace\vpn123\prog\fvclient\src\libevent\signal.c
+0032168c A buffer_obscure_packet key size must be FV_CipherKeySize
+003216d8 A POST /s?s=%s&n=%s HTTP/1.1
+003216fc A Upgrade: websocket
+00321790 A FVProxyRequestHeader::fetch %s
+003217b8 A FVProxy
+00321808 A FVNetIpv6Nat64
+0032182c A Nat64Detector
+0032187c A nat64 detector found ip count = %d
+003218a8 A nat64 detector resolv ip: %s
+003218cc A nat64 detector found ipv4 addr, skip nat64
+00321900 A nat64 detector found ipv6 result with prefix: %s
+0032193c A nat64 detector final nat64 prefix: %s
+0032196c A ipv6 nat64 not allowed, skip detection
+003219a0 A nat64 detection: dnsDiff=%d, lastDetectionTime=%lld, timeDiff=%lld
+003219f0 A nat64 detection skipped: still valid
+00321a1c A nat64 detection dns check: hasIpv4=%d, hasIpv6=%d
+00321a58 A nat64 detection skipped, no ipv6
+00323588 A FVClientVpn
+003238a8 A FVDnsProxy
+003239e8 A F:\workspace\vpn123\prog\fvclient\src\libevent\buffer.c
+00323aac A F:\workspace\vpn123\prog\fvclient\src\libevent\bufferevent.c
+00323c78 A FVClientProxySocks
+00323f0c A %s transferBuffer: lwip ack recved
+003248a8 A lwip create context: %s
+003248c4 A lwip create context failed
+00324984 A fvclientproxy_udp_process failed to connect to server
+003249e0 A fvproxy_close_context_evcb: %d contexts in set to be closed
+00324a28 A fvproxy_delete_tcp_context_erase_port: %s, delayedErase=%s
+00324a70 A fvproxy_delete_udp_context_erase_port: %s, erased=%s
+00324ae0 A fvclientproxy_clean_timeout_contexts_impl: %s, set null to map, delayed delete
+00324b40 A fvclientproxy_clean_timeout_contexts_impl: no context, erase from map
+00324bc8 A FVNatItemMap can not active non-existing item
+00324c40 A lwip netif_add failed
+00324c6c A lwip tcp_new failed
+00324c88 A lwip tcp_bind_to_netif failed: 
+00324cb0 A lwip tcp_listen failed
+00324ccc A ~FVClientProxyLwip
+00324ce4 A ~FVClientProxyLwip tcp_close(lwipListener)
+00324dc0 A FVSys::getSystemDns is not implemented yet
+00359e18 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls.c
+0035b280 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_msg.c
+00361b68 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_client.c
+00362ec8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_server.c
+003642f8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_client.c
+003652a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_server.c
+00366370 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_client.c
+003672a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_generic.c
+00367a00 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_keys.c
+00392dcc A .?AV?$_Ref_count_obj2@VInternal@FVThread@@@std@@
+00392e78 A .?AV?$_Ref_count_obj2@VInternal@FVHttpClient@@@std@@
+00392eec A .?AUMocker@FVHttpClient@@
+00392f14 A .?AV?$_Ref_count_obj2@UMocker@FVHttpClient@@@std@@
+00393438 A .?AV?$_Ref_count@UItem@FVPingManager@@@std@@
+00393478 A .?AV?$_Ref_count@UItemDataProxy@FVPingManager@@@std@@
+003934c4 A .?AV?$_Ref_count@UItemDataVpn@FVPingManager@@@std@@
+0039350c A .?AVDetectorThread@FVNetIpv6Nat64@@
+00393540 A .?AV?$_Ref_count@VDetectorThread@FVNetIpv6Nat64@@@std@@
+# (87 unique)
+
+## TAP device / driver / network
+003146b8 W netsh
+003146c8 A cmd: netsh %s
+003146e8 W interface ipv4 set address "
+00314730 W interface ipv4 set dns "
+0031476c W interface ipv4 set address
+003147e4 W interface ipv4 set dns
+0031483c W interface ipv4 add dns
+00314a20 W TAP-Windows Adapter V9
+00314a5c W tapinstall.exe
+00314ab4 W OemVista.inf
+00314b54 A modify route table
+00314ba4 A PromptGlobalProxyFailedMessage
+00314bcc A adapter set by manually, reset to dhcp ...
+00314c24 A restore route table
+00314c70 A dwForwardDest = %08x
+00314c8c A dwForwardMask = %08x
+00314ca8 A dwForwardPolicy = %08x
+00314cc4 A dwForwardNextHop = %08x
+00314ce0 A dwForwardIfIndex = %08x
+00314cfc A dwForwardType = %08x
+00314d18 A dwForwardProto = %08x
+00314d34 A dwForwardAge = %08x
+00314d4c A dwForwardNextHopAS = %08x
+00314d6c A dwForwardMetric1 = %08x
+00314d88 A dwForwardMetric2 = %08x
+00314da4 A dwForwardMetric3 = %08x
+00314dc0 A dwForwardMetric4 = %08x
+00314ddc A dwForwardMetric5 = %08x
+00314ee8 A GetAdaptersAddresses
+0031502c A Error allocating memory needed to call GetAdaptersinfo
+0031507c A isatap adapter
+00315090 A 6to4 adapter
+003150d8 A adapter
+003150ec A Adapter: %s %s %s
+00315104 A GetAdaptersInfo failed with error: %d
+0031f908 A TunDev
+0031f920 W \\.\Global\
+0031f93c A TunDevWinThreadProc enter
+0031f968 A TunDevWinThreadProc exit
+0031fb74 A TunDevWin ctor
+0031fb88 A TunDevWin dtor
+0031fb9c A TunDevWin CloseDevice
+0031fcec A TunDevWin::Run enter
+0031fddc A TunDevWin::Run stopping
+0031fe30 A TunDevWin::Run exit
+0031fe48 A TunDev::TunDev ctor
+0031fe60 A TunDev::TunDev dtor
+0032183c A ipv4only.arpa
+003218cc A nat64 detector found ipv4 addr, skip nat64
+00323814 A write dev to net pkt: ignore, not ipv4
+00390440 A .?AVTunDevCallback@@
+00390464 A .?AV?$_Ref_count@VTunDev@@@std@@
+003954e2 A GetIpForwardTable
+003954f6 A CreateIpForwardEntry
+0039550e A DeleteIpForwardEntry
+00395526 A GetAdaptersInfo
+003df7dc A GlobalSign nv-sa1200
+003df7f6 A )GlobalSign GCC R45 EV CodeSigning CA 20200
+003dff71 A )GlobalSign GCC R45 EV CodeSigning CA 2020
+# (59 unique)
+
+## Registry / service / privilege
+003148a0 W SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\
+003151f0 W SYSTEM\CurrentControlSet\Services\Tcpip\Linkage
+00315270 W SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces
+00315370 W SeDebugPrivilege
+00315d94 A Failed to create an instance of ITaskService: %x
+00315dd0 A ITaskService::Connect failed: %x
+0031f988 W SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}
+0031faa8 W SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}
+0039537c A AdjustTokenPrivileges
+00395394 A LookupPrivilegeValueW
+003953ce A ChangeServiceConfigW
+003953e6 A CloseServiceHandle
+003953fc A ControlService
+0039540e A EnumServicesStatusExW
+00395438 A OpenServiceW
+00395448 A QueryServiceConfigW
+0039545e A QueryServiceStatus
+00395474 A QueryServiceStatusEx
+0039548c A StartServiceW
+003c46e3 A       <requestedPrivileges>
+003c476b A       </requestedPrivileges>
+# (21 unique)
+
+## HTTP / libcurl / TLS
+0031d3d8 A curl_easy_init already inited
+0031d3fc A curl_easy_init failed
+0031d480 A Content-Type: 
+0031d494 A (%d, %s) curl perform, host: idx=%d, count=%d
+0031d4d0 A (%d, %s) curl perform result: %d, HttpCode = %d, ResponseContentLength = %lld, ReceivedResponseLength = %lld
+0031d554 A (%d, %s) curl perform error: %d, %s
+0031d634 A (%d, %s) curl perform over
+0031eee8 A mbedtls_rsa_import failed
+0031ef08 A mbedtls_rsa_complete failed
+003216d8 A POST /s?s=%s&n=%s HTTP/1.1
+00321734 A Content-Length: %d
+00326028 A TLS Web Server Authentication
+0032606c A TLS Web Client Authentication
+00337718 A   AES-GCM-%3d #%d split (%s): 
+003390e8 A   KW-AES-%u 
+00339128 A   KWP-AES-%u 
+00339b2c A AES-128-ECB
+00339b3c A AES-192-ECB
+00339b4c A AES-256-ECB
+00339b5c A AES-128-CBC
+00339b6c A AES-192-CBC
+00339b7c A AES-256-CBC
+00339bc8 A AES-128-OFB
+00339bd8 A AES-192-OFB
+00339be8 A AES-256-OFB
+00339bf8 A AES-128-CTR
+00339c08 A AES-192-CTR
+00339c18 A AES-256-CTR
+00339c28 A AES-128-XTS
+00339c38 A AES-256-XTS
+00339c48 A AES-128-GCM
+00339c58 A AES-192-GCM
+00339c68 A AES-256-GCM
+00339c78 A AES-128-CCM
+00339c88 A AES-192-CCM
+00339c98 A AES-256-CCM
+00339ca8 A AES-128-CCM*-NO-TAG
+00339cc0 A AES-192-CCM*-NO-TAG
+00339cd8 A AES-256-CCM*-NO-TAG
+0033a0a4 A AES-128-KW
+0033a0b4 A AES-192-KW
+0033a0c4 A AES-256-KW
+0033a0d4 A AES-128-KWP
+0033a0e4 A AES-192-KWP
+0033a0f4 A AES-256-KWP
+0033bd20 A Content-Type
+0033bd50 A Content-Type: %s%s%s
+0033bd80 A Content-Disposition
+0033bdd4 A Content-Disposition: %s%s%s%s%s%s%s
+0033be00 A Content-Transfer-Encoding
+0033be20 A Content-Transfer-Encoding: %s
+0033c88c A # https://curl.se/docs/http-cookies.html
+0033c8b5 A # This file was generated by libcurl! Edit at your own risk.
+0033d358 A using HTTP/1.x
+0033d550 A Unsupported proxy '%s', libcurl is built without the HTTPS-proxy support.
+0033e5d8 A # Your alt-svc cache. https://curl.se/docs/alt-svc.html
+0033e7d8 A # Your HSTS cache. https://curl.se/docs/hsts.html
+0033f408 A Unrecognized content encoding type. libcurl understands %s content encodings.
+0033f7f4 A User-Agent: %s
+0033ff84 A Forcing HTTP/1.1 for NTLM
+003400f0 A Content-Length:
+003401e0 A User-Agent
+00340360 A Content-Length
+00340374 A Content-Length: %lld
+00340390 A Content-Type: application/x-www-form-urlencoded
+0034045c A Content-Range
+0034046c A Content-Range: bytes 0-%lld/%lld
+00340498 A Content-Range: bytes %s%lld/%lld
+003404c4 A Content-Range: bytes %s/%lld
+00340718 A Overflow Content-Length: value
+00340740 A Invalid Content-Length: value
+00340764 A Content-Encoding:
+0034078c A HTTP/1.0 connection set to keep alive
+003407bc A Content-Range:
+00340808 A HTTP/1.0 proxy connection set to keep alive
+0034083c A HTTP/1.1 proxy connection set close
+00340c34 A Unsupported HTTP/1 subversion in response
+00341010 A A requested feature, protocol or option was not found built-in in this libcurl due to a build-time decision.
+00341600 A A libcurl function was given a bad argument
+00341690 A An unknown option was passed in to libcurl
+00341e44 A Please call curl_multi_perform() soon
+003423c8 A libcurl lacks IDN support
+00342fbc A Content-Type: application/dns-message
+003431dc A mbedtls
+003431e8 A mbedtls_bio_cf_out_write(len=%zu) -> %zd, err=%d
+00343224 A mbedtls_bio_cf_in_read(len=%zu) -> %zd, err=%d
+0034325c A mbedTLS: unsupported minimum TLS version value
+00343294 A mbedTLS: unsupported maximum TLS version value
+003432cc A TLS_ECJPAKE_WITH_AES_128_CCM_8
+003432fc A mbedTLS: unknown cipher in list: "%.*s"
+0034332c A mbedTLS: duplicate cipher in list: "%.*s"
+00343360 A mbedTLS: no supported cipher in list
+003433d4 A mbedTLS: %s
+00343404 A mbedTLS psa_crypto_init returned (-0x%04X) %s
+0034343c A mbedtls_ctr_drbg_seed returned (-0x%04X) %s
+00343470 A Error importing ca cert blob - mbedTLS: (-0x%04X) %s
+003434b0 A Error reading ca cert file %s - mbedTLS: (-0x%04X) %s
+003434f0 A Error reading ca cert path %s - mbedTLS: (-0x%04X) %s
+00343530 A Error reading client cert file %s - mbedTLS: (-0x%04X) %s
+00343578 A Error reading client cert data %s - mbedTLS: (-0x%04X) %s
+003435c0 A Error reading private key %s - mbedTLS: (-0x%04X) %s
+00343600 A Error parsing private key - mbedTLS: (-0x%04X) %s
+0034363c A Error reading CRL file %s - mbedTLS: (-0x%04X) %s
+00343678 A mbedTLS: Connecting to %s:%d
+0034369c A mbedTLS: ssl_config failed
+003436bc A ssl_setup failed - mbedTLS: (-0x%04X) %s
+003436f0 A mbedTLS: failed to set cipher suites
+0034371c A mbedtls_ssl_set_session returned -0x%x
+0034374c A mbedTLS reusing session
+003437dc A TLS version %04X
+0034381c A mbedTLS: %s Handshake complete, cipher is %s
+003438f8 A mbedtls_ssl_get_session returned -0x%x
+00343928 A mbedtls_ssl_write(len=%zu) -> -0x%04X
+00343958 A mbedtls_shutdown error -0x%04X
+00343980 A mbedtls_shutdown, still getting data
+003439ac A mbedtls_shutdown done
+003439c8 A mbedtls_shutdown, need RECV
+003439ec A mbedtls_shutdown, need SEND
+00343a10 A mbedtls_ssl_read(len=%zu) -> -0x%04X
+00343a64 A mbedTLS/%u.%u.%u
+00343a78 A mbedtls_ctr_drbg_random returned (-0x%04X) %s
+00343e7c A installing subfilter for HTTP/1.1
+00343ea4 A CONNECT tunnel: HTTP/1.%d negotiated
+003440b4 A Ignoring Content-Length in CONNECT %03d response
+00344150 A HTTP/1.
+00346c10 A TLS_UNKNOWN_0x%04x
+003475c0 A %s %s%s%s%s HTTP/1.%d
+00355da0 A Mbed TLS 3.6.1
+00357120 A TLS1-3-AES-256-GCM-SHA384
+00357140 A TLS1-3-AES-128-GCM-SHA256
+00357160 A TLS1-3-AES-128-CCM-SHA256
+003571a4 A TLS1-3-CHACHA20-POLY1305-SHA256
+003571cc A TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+00357200 A TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256
+00357238 A TLS-DHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+0035726c A TLS-PSK-WITH-CHACHA20-POLY1305-SHA256
+0035729c A TLS-ECDHE-PSK-WITH-CHACHA20-POLY1305-SHA256
+003572d0 A TLS-DHE-PSK-WITH-CHACHA20-POLY1305-SHA256
+00357304 A TLS-RSA-PSK-WITH-CHACHA20-POLY1305-SHA256
+00357338 A TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA
+00357364 A TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA
+00357390 A TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA256
+003573c0 A TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256
+003573f0 A TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA384
+00357420 A TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384
+00357450 A TLS-ECDHE-ECDSA-WITH-AES-256-CCM
+00357478 A TLS-ECDHE-ECDSA-WITH-AES-256-CCM-8
+003574a4 A TLS-ECDHE-ECDSA-WITH-AES-128-CCM
+003574cc A TLS-ECDHE-ECDSA-WITH-AES-128-CCM-8
+003574f8 A TLS-ECDHE-ECDSA-WITH-CAMELLIA-128-CBC-SHA256
+00357530 A TLS-ECDHE-ECDSA-WITH-CAMELLIA-256-CBC-SHA384
+00357568 A TLS-ECDHE-ECDSA-WITH-CAMELLIA-128-GCM-SHA256
+003575a0 A TLS-ECDHE-ECDSA-WITH-CAMELLIA-256-GCM-SHA384
+003575d8 A TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
+00357604 A TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA
+00357630 A TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256
+00357660 A TLS-ECDHE-RSA-WITH-AES-128-GCM-SHA256
+00357690 A TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA384
+003576c0 A TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384
+003576f0 A TLS-ECDHE-RSA-WITH-CAMELLIA-128-CBC-SHA256
+00357724 A TLS-ECDHE-RSA-WITH-CAMELLIA-256-CBC-SHA384
+00357758 A TLS-ECDHE-RSA-WITH-CAMELLIA-128-GCM-SHA256
+0035778c A TLS-ECDHE-RSA-WITH-CAMELLIA-256-GCM-SHA384
+003577c0 A TLS-DHE-RSA-WITH-AES-256-GCM-SHA384
+003577ec A TLS-DHE-RSA-WITH-AES-128-GCM-SHA256
+00357818 A TLS-DHE-RSA-WITH-AES-128-CBC-SHA256
+00357844 A TLS-DHE-RSA-WITH-AES-256-CBC-SHA256
+00357870 A TLS-DHE-RSA-WITH-AES-128-CBC-SHA
+00357898 A TLS-DHE-RSA-WITH-AES-256-CBC-SHA
+003578c0 A TLS-DHE-RSA-WITH-AES-256-CCM
+003578e4 A TLS-DHE-RSA-WITH-AES-256-CCM-8
+0035790c A TLS-DHE-RSA-WITH-AES-128-CCM
+00357930 A TLS-DHE-RSA-WITH-AES-128-CCM-8
+00357958 A TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA256
+0035798c A TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA256
+003579c0 A TLS-DHE-RSA-WITH-CAMELLIA-128-CBC-SHA
+003579f0 A TLS-DHE-RSA-WITH-CAMELLIA-256-CBC-SHA
+00357a20 A TLS-DHE-RSA-WITH-CAMELLIA-128-GCM-SHA256
+00357a54 A TLS-DHE-RSA-WITH-CAMELLIA-256-GCM-SHA384
+00357a88 A TLS-RSA-WITH-AES-256-GCM-SHA384
+00357ab0 A TLS-RSA-WITH-AES-128-GCM-SHA256
+00357ad8 A TLS-RSA-WITH-AES-128-CBC-SHA256
+00357b00 A TLS-RSA-WITH-AES-256-CBC-SHA256
+00357b28 A TLS-RSA-WITH-AES-128-CBC-SHA
+00357b4c A TLS-RSA-WITH-AES-256-CBC-SHA
+00357b70 A TLS-RSA-WITH-AES-256-CCM
+00357b90 A TLS-RSA-WITH-AES-256-CCM-8
+00357bb0 A TLS-RSA-WITH-AES-128-CCM
+00357bd0 A TLS-RSA-WITH-AES-128-CCM-8
+00357bf0 A TLS-RSA-WITH-CAMELLIA-128-CBC-SHA256
+00357c1c A TLS-RSA-WITH-CAMELLIA-256-CBC-SHA256
+00357c48 A TLS-RSA-WITH-CAMELLIA-128-CBC-SHA
+00357c70 A TLS-RSA-WITH-CAMELLIA-256-CBC-SHA
+00357c98 A TLS-RSA-WITH-CAMELLIA-128-GCM-SHA256
+00357cc4 A TLS-RSA-WITH-CAMELLIA-256-GCM-SHA384
+00357cf0 A TLS-ECDH-RSA-WITH-AES-128-CBC-SHA
+00357d18 A TLS-ECDH-RSA-WITH-AES-256-CBC-SHA
+00357d40 A TLS-ECDH-RSA-WITH-AES-128-CBC-SHA256
+00357d6c A TLS-ECDH-RSA-WITH-AES-128-GCM-SHA256
+00357d98 A TLS-ECDH-RSA-WITH-AES-256-CBC-SHA384
+00357dc4 A TLS-ECDH-RSA-WITH-AES-256-GCM-SHA384
+00357df0 A TLS-ECDH-RSA-WITH-CAMELLIA-128-CBC-SHA256
+00357e24 A TLS-ECDH-RSA-WITH-CAMELLIA-256-CBC-SHA384
+00357e58 A TLS-ECDH-RSA-WITH-CAMELLIA-128-GCM-SHA256
+00357e8c A TLS-ECDH-RSA-WITH-CAMELLIA-256-GCM-SHA384
+00357ec0 A TLS-ECDH-ECDSA-WITH-AES-128-CBC-SHA
+00357eec A TLS-ECDH-ECDSA-WITH-AES-256-CBC-SHA
+00357f18 A TLS-ECDH-ECDSA-WITH-AES-128-CBC-SHA256
+00357f48 A TLS-ECDH-ECDSA-WITH-AES-128-GCM-SHA256
+00357f78 A TLS-ECDH-ECDSA-WITH-AES-256-CBC-SHA384
+00357fa8 A TLS-ECDH-ECDSA-WITH-AES-256-GCM-SHA384
+00357fd8 A TLS-ECDH-ECDSA-WITH-CAMELLIA-128-CBC-SHA256
+0035800c A TLS-ECDH-ECDSA-WITH-CAMELLIA-256-CBC-SHA384
+00358040 A TLS-ECDH-ECDSA-WITH-CAMELLIA-128-GCM-SHA256
+00358074 A TLS-ECDH-ECDSA-WITH-CAMELLIA-256-GCM-SHA384
+003580a8 A TLS-PSK-WITH-AES-128-GCM-SHA256
+003580d0 A TLS-PSK-WITH-AES-256-GCM-SHA384
+003580f8 A TLS-PSK-WITH-AES-128-CBC-SHA256
+00358120 A TLS-PSK-WITH-AES-256-CBC-SHA384
+00358148 A TLS-PSK-WITH-AES-128-CBC-SHA
+0035816c A TLS-PSK-WITH-AES-256-CBC-SHA
+00358190 A TLS-PSK-WITH-AES-256-CCM
+003581b0 A TLS-PSK-WITH-AES-256-CCM-8
+003581d0 A TLS-PSK-WITH-AES-128-CCM
+003581f0 A TLS-PSK-WITH-AES-128-CCM-8
+00358210 A TLS-PSK-WITH-CAMELLIA-128-CBC-SHA256
+0035823c A TLS-PSK-WITH-CAMELLIA-256-CBC-SHA384
+00358268 A TLS-PSK-WITH-CAMELLIA-128-GCM-SHA256
+00358294 A TLS-PSK-WITH-CAMELLIA-256-GCM-SHA384
+003582c0 A TLS-DHE-PSK-WITH-AES-128-GCM-SHA256
+003582ec A TLS-DHE-PSK-WITH-AES-256-GCM-SHA384
+00358318 A TLS-DHE-PSK-WITH-AES-128-CBC-SHA256
+00358344 A TLS-DHE-PSK-WITH-AES-256-CBC-SHA384
+00358370 A TLS-DHE-PSK-WITH-AES-128-CBC-SHA
+00358398 A TLS-DHE-PSK-WITH-AES-256-CBC-SHA
+003583c0 A TLS-DHE-PSK-WITH-AES-256-CCM
+003583e4 A TLS-DHE-PSK-WITH-AES-256-CCM-8
+0035840c A TLS-DHE-PSK-WITH-AES-128-CCM
+00358430 A TLS-DHE-PSK-WITH-AES-128-CCM-8
+00358458 A TLS-DHE-PSK-WITH-CAMELLIA-128-CBC-SHA256
+0035848c A TLS-DHE-PSK-WITH-CAMELLIA-256-CBC-SHA384
+003584c0 A TLS-DHE-PSK-WITH-CAMELLIA-128-GCM-SHA256
+003584f4 A TLS-DHE-PSK-WITH-CAMELLIA-256-GCM-SHA384
+00358528 A TLS-ECDHE-PSK-WITH-AES-128-CBC-SHA256
+00358558 A TLS-ECDHE-PSK-WITH-AES-256-CBC-SHA384
+00358588 A TLS-ECDHE-PSK-WITH-AES-128-CBC-SHA
+003585b4 A TLS-ECDHE-PSK-WITH-AES-256-CBC-SHA
+003585e0 A TLS-ECDHE-PSK-WITH-CAMELLIA-128-CBC-SHA256
+00358614 A TLS-ECDHE-PSK-WITH-CAMELLIA-256-CBC-SHA384
+00358648 A TLS-RSA-PSK-WITH-AES-128-GCM-SHA256
+00358674 A TLS-RSA-PSK-WITH-AES-256-GCM-SHA384
+003586a0 A TLS-RSA-PSK-WITH-AES-128-CBC-SHA256
+003586cc A TLS-RSA-PSK-WITH-AES-256-CBC-SHA384
+003586f8 A TLS-RSA-PSK-WITH-AES-128-CBC-SHA
+00358720 A TLS-RSA-PSK-WITH-AES-256-CBC-SHA
+00358748 A TLS-RSA-PSK-WITH-CAMELLIA-128-CBC-SHA256
+0035877c A TLS-RSA-PSK-WITH-CAMELLIA-256-CBC-SHA384
+003587b0 A TLS-RSA-PSK-WITH-CAMELLIA-128-GCM-SHA256
+003587e4 A TLS-RSA-PSK-WITH-CAMELLIA-256-GCM-SHA384
+00358818 A TLS-RSA-WITH-ARIA-256-GCM-SHA384
+00358840 A TLS-RSA-WITH-ARIA-256-CBC-SHA384
+00358868 A TLS-RSA-WITH-ARIA-128-GCM-SHA256
+00358890 A TLS-RSA-WITH-ARIA-128-CBC-SHA256
+003588b8 A TLS-RSA-PSK-WITH-ARIA-256-GCM-SHA384
+003588e4 A TLS-RSA-PSK-WITH-ARIA-256-CBC-SHA384
+00358910 A TLS-RSA-PSK-WITH-ARIA-128-GCM-SHA256
+0035893c A TLS-RSA-PSK-WITH-ARIA-128-CBC-SHA256
+00358968 A TLS-PSK-WITH-ARIA-256-GCM-SHA384
+00358990 A TLS-PSK-WITH-ARIA-256-CBC-SHA384
+003589b8 A TLS-PSK-WITH-ARIA-128-GCM-SHA256
+003589e0 A TLS-PSK-WITH-ARIA-128-CBC-SHA256
+00358a08 A TLS-ECDH-RSA-WITH-ARIA-256-GCM-SHA384
+00358a38 A TLS-ECDH-RSA-WITH-ARIA-256-CBC-SHA384
+00358a68 A TLS-ECDH-RSA-WITH-ARIA-128-GCM-SHA256
+00358a98 A TLS-ECDH-RSA-WITH-ARIA-128-CBC-SHA256
+00358ac8 A TLS-ECDHE-RSA-WITH-ARIA-256-GCM-SHA384
+00358af8 A TLS-ECDHE-RSA-WITH-ARIA-256-CBC-SHA384
+00358b28 A TLS-ECDHE-RSA-WITH-ARIA-128-GCM-SHA256
+00358b58 A TLS-ECDHE-RSA-WITH-ARIA-128-CBC-SHA256
+00358b88 A TLS-ECDHE-PSK-WITH-ARIA-256-CBC-SHA384
+00358bb8 A TLS-ECDHE-PSK-WITH-ARIA-128-CBC-SHA256
+00358be8 A TLS-ECDHE-ECDSA-WITH-ARIA-256-GCM-SHA384
+00358c1c A TLS-ECDHE-ECDSA-WITH-ARIA-256-CBC-SHA384
+00358c50 A TLS-ECDHE-ECDSA-WITH-ARIA-128-GCM-SHA256
+00358c84 A TLS-ECDHE-ECDSA-WITH-ARIA-128-CBC-SHA256
+00358cb8 A TLS-ECDH-ECDSA-WITH-ARIA-256-GCM-SHA384
+00358ce8 A TLS-ECDH-ECDSA-WITH-ARIA-256-CBC-SHA384
+00358d18 A TLS-ECDH-ECDSA-WITH-ARIA-128-GCM-SHA256
+00358d48 A TLS-ECDH-ECDSA-WITH-ARIA-128-CBC-SHA256
+00358d78 A TLS-DHE-RSA-WITH-ARIA-256-GCM-SHA384
+00358da4 A TLS-DHE-RSA-WITH-ARIA-256-CBC-SHA384
+00358dd0 A TLS-DHE-RSA-WITH-ARIA-128-GCM-SHA256
+00358dfc A TLS-DHE-RSA-WITH-ARIA-128-CBC-SHA256
+00358e28 A TLS-DHE-PSK-WITH-ARIA-256-GCM-SHA384
+00358e54 A TLS-DHE-PSK-WITH-ARIA-256-CBC-SHA384
+00358e80 A TLS-DHE-PSK-WITH-ARIA-128-GCM-SHA256
+00358eac A TLS-DHE-PSK-WITH-ARIA-128-CBC-SHA256
+00359e18 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls.c
+0035a060 A mbedtls_ssl_reset_checksum
+0035a080 A DTLS 1.3 is not yet supported.
+0035a100 A DTLS not yet supported in Hybrid TLS 1.3 + TLS 1.2
+0035a140 A The SSL configuration is TLS 1.3 or TLS 1.2.
+0035a1d0 A %d is not a valid TLS 1.3 ciphersuite.
+0035a20c A unknown (DTLS)
+0035a274 A You must use mbedtls_ssl_set_timer_cb() for DTLS
+0035a2ec A mbedtls_ssl_write_handshake_msg
+0035a344 A mbedtls_ssl_handshake
+0035a374 A mbedtls_ssl_start_renegotiation
+0035a45c A Only DTLS is supported
+0035a660 A mbedtls_md_finish
+0035a678 A mbedtls_ssl_parse_sig_alg_ext
+0035a8e8 A mbedtls_dhm_calc_secret
+0035a910 A mbedtls_ecdh_calc_secret
+0035aa80 A  mbedtls_x509_crt_parse_der
+0035ab10 A mbedtls_ssl_read_record
+0035ad04 A DTLS epoch would wrap
+0035ad20 A mbedtls_ssl_flight_transmit
+0035adf4 A mbedtls_md info for %u not found
+0035aea0 A mbedtls_md_setup
+0035aeec A mbedtls_cipher_setup
+0035af08 A mbedtls_cipher_setkey
+0035af24 A mbedtls_cipher_set_padding_mode
+0035af50 A Perform mbedtls-based computation of digest of ServerKeyExchange
+0035afa0 A mbedtls_md_starts
+0035afb8 A mbedtls_md_update
+0035b090 A mbedtls_ssl_parse_server_name_ext
+0035b0cc A mbedtls_ssl_parse_alpn_ext
+0035b280 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_msg.c
+0035b2dc A => mbedtls_ssl_check_record
+0035b32c A mbedtls_ssl_decrypt_buf
+0035b348 A <= mbedtls_ssl_check_record
+0035b4e8 A mbedtls_md_hmac_xxx
+0035b5a0 A mbedtls_cipher_auth_encrypt_ext
+0035b67c A mbedtls_cipher_crypt
+0035b7b0 A mbedtls_cipher_auth_decrypt_ext
+0035b868 A mbedtls_hmac_xxx
+0035b8a4 A mbedtls_ct_hmac
+0035b8e0 A Bad usage of mbedtls_ssl_set_bio() 
+0035ba04 A mbedtls_ssl_resend
+0035ba1c A mbedtls_ssl_resend_hello_request
+0035bbc0 A => mbedtls_ssl_resend
+0035bbdc A <= mbedtls_ssl_resend
+0035bbf8 A => mbedtls_ssl_flight_transmit
+0035bcb8 A mbedtls_ssl_write_record
+0035bcd8 A <= mbedtls_ssl_flight_transmit
+0035bd50 A DTLS handshake message too large: size %zu, maximum %zu
+0035bf20 A mbedtls_ssl_flush_output
+0035c0d8 A found fragmented DTLS handshake message
+0035c108 A TLS handshake fragmentation not supported
+0035c2cc A mbedtls_ssl_check_dtls_clihlo_cookie
+0035c350 A datagram of length %u too small to hold DTLS record header of length %u
+0035c3a8 A datagram of length %u too small to hold DTLS record header including CID, length %u
+0035c428 A TLS version mismatch: got %u, expected max %u
+0035c774 A mbedtls_ssl_handle_message_type
+0035c79c A mbedtls_ssl_update_handshake_status
+0035d038 A mbedtls_ssl_fetch_input
+0035d208 A Ignore ChangeCipherSpec in TLS 1.3 compatibility mode
+0035d80c A mbedtls_ssl_get_max_out_record_payload
+0035d8cc A mbedtls_ssl_send_alert_message
+0035f120 A SSL - A TLS 1.3 NewSessionTicket message has been received
+0035f198 A SSL - * Early data has been received as part of an on-going handshake. This error code can be returned only on server side if and only if early data has been enabled by means of the mbedtls_ssl_conf_early_data() API. This error code can then be returned by mbedtls_ssl_handshake(), mbedtls_ssl_handshake_step(), mbedtls_ssl_read() or mbedtls_ssl_write() if early data has been received as part of the handshake sequence they triggered. To read the early data, call mbedtls_ssl_read_early_data()
+0035f724 A SSL - DTLS client must retry for hello verification
+0035fa90 A SSL - An encrypted DTLS-frame with an unexpected CID was received
+0035fe28 A X509 - Signature algorithms do not match. (see \c ::mbedtls_x509_crt sig_oid)
+00361258 A DEK-Info: AES-
+0036126c A DEK-Info: AES-128-CBC,
+00361288 A DEK-Info: AES-192-CBC,
+003612a4 A DEK-Info: AES-256-CBC,
+00361b68 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_client.c
+00362614 A mbedtls_ssl_derive_keys
+00362700 A mbedtls_dhm_read_params
+00362778 A mbedtls_ecdh_read_params
+00362870 A mbedtls_rsa_pkcs1_encrypt
+003628b4 A mbedtls_ecdh_get_params
+00362a2c A mbedtls_pk_verify
+00362bf0 A mbedtls_dhm_make_public
+00362c24 A mbedtls_ecdh_make_public
+00362cc4 A mbedtls_ssl_psk_derive_premaster
+00362d88 A mbedtls_pk_sign
+00362ec8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_server.c
+00362fe0 A mbedtls_ssl_ticket_parse
+00363510 A server only supports TLS 1.2
+003637b0 A received TLS_EMPTY_RENEGOTIATION_INFO 
+00363d80 A mbedtls_dhm_set_group
+00363d9c A mbedtls_dhm_make_params
+00363df0 A mbedtls_ecp_group_load
+00363e0c A mbedtls_ecdh_make_params
+00363f88 A mbedtls_dhm_read_public
+00364078 A mbedtls_ecdh_read_public
+00364254 A mbedtls_ssl_ticket_write
+003642f8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_client.c
+00364770 A mbedtls_ssl_tls13_create_psk_binder
+00364960 A mbedtls_ssl_set_hs_psk
+00364b44 A Unsupported version of TLS.
+00364cfc A mbedtls_ssl_tls13_key_schedule_stage_early
+00364d30 A mbedtls_ssl_tls13_compute_handshake_transform
+003650a0 A mbedtls_ssl_tls13_compute_resumption_master_secret 
+003652a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_server.c
+003653a4 A Ticket TLS version is not 1.3.
+003659b4 A mbedtls_ssl_tls13_is_supported_versions_ext_present_in_exts
+00365a80 A mbedtls_ssl_parse_servername_ext
+00365b4c A mbedtls_ssl_add_hs_hdr_to_checksum
+00365c44 A mbedtls_ssl_tls1_3_key_schedule_stage_early
+00365c78 A TLS 1.2 not supported.
+00365ce0 A mbedtls_ssl_tls13_generate_and_write_xxdh_key_exchange
+00365eec A mbedtls_ssl_reset_transcript_for_hrr
+00366370 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_client.c
+00366844 A MBEDTLS_SSL_HELLO_REQUEST
+00366864 A MBEDTLS_SSL_CLIENT_HELLO
+00366884 A MBEDTLS_SSL_SERVER_HELLO
+003668a4 A MBEDTLS_SSL_SERVER_CERTIFICATE
+003668cc A MBEDTLS_SSL_SERVER_KEY_EXCHANGE
+003668f4 A MBEDTLS_SSL_CERTIFICATE_REQUEST
+0036691c A MBEDTLS_SSL_SERVER_HELLO_DONE
+00366940 A MBEDTLS_SSL_CLIENT_CERTIFICATE
+00366968 A MBEDTLS_SSL_CLIENT_KEY_EXCHANGE
+00366990 A MBEDTLS_SSL_CERTIFICATE_VERIFY
+003669b8 A MBEDTLS_SSL_CLIENT_CHANGE_CIPHER_SPEC
+003669e8 A MBEDTLS_SSL_CLIENT_FINISHED
+00366a0c A MBEDTLS_SSL_SERVER_CHANGE_CIPHER_SPEC
+00366a3c A MBEDTLS_SSL_SERVER_FINISHED
+00366a60 A MBEDTLS_SSL_FLUSH_BUFFERS
+00366a80 A MBEDTLS_SSL_HANDSHAKE_WRAPUP
+00366aa4 A MBEDTLS_SSL_NEW_SESSION_TICKET
+00366acc A MBEDTLS_SSL_SERVER_HELLO_VERIFY_REQUEST_SENT
+00366b04 A MBEDTLS_SSL_HELLO_RETRY_REQUEST
+00366b2c A MBEDTLS_SSL_ENCRYPTED_EXTENSIONS
+00366b54 A MBEDTLS_SSL_END_OF_EARLY_DATA
+00366b78 A MBEDTLS_SSL_CLIENT_CERTIFICATE_VERIFY
+00366ba8 A MBEDTLS_SSL_CLIENT_CCS_AFTER_SERVER_FINISHED
+00366be0 A MBEDTLS_SSL_CLIENT_CCS_BEFORE_2ND_CLIENT_HELLO
+00366c18 A MBEDTLS_SSL_SERVER_CCS_AFTER_SERVER_HELLO
+00366c4c A MBEDTLS_SSL_CLIENT_CCS_AFTER_CLIENT_HELLO
+00366c80 A MBEDTLS_SSL_SERVER_CCS_AFTER_HELLO_RETRY_REQUEST
+00366cbc A MBEDTLS_SSL_HANDSHAKE_OVER
+00366cdc A MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET
+00366d0c A MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET_FLUSH
+00366d50 A MBEDTLS_SSL_VERSION_UNKNOWN
+00366d74 A MBEDTLS_SSL_VERSION_TLS1_2
+00366d94 A MBEDTLS_SSL_VERSION_TLS1_3
+00366db4 A MBEDTLS_SSL_TLS_PRF_NONE
+00366dd4 A MBEDTLS_SSL_TLS_PRF_SHA384
+00366df4 A MBEDTLS_SSL_TLS_PRF_SHA256
+00366e14 A MBEDTLS_SSL_HKDF_EXPAND_SHA384
+00366e3c A MBEDTLS_SSL_HKDF_EXPAND_SHA256
+00366e64 A MBEDTLS_SSL_KEY_EXPORT_TLS12_MASTER_SECRET
+00366e98 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_EARLY_SECRET
+00366ed4 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_EARLY_EXPORTER_SECRET
+00366f14 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_HANDSHAKE_TRAFFIC_SECRET
+00366f60 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_HANDSHAKE_TRAFFIC_SECRET
+00366fb0 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_APPLICATION_TRAFFIC_SECRET
+00367000 A MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_APPLICATION_TRAFFIC_SECRET
+003672a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_generic.c
+0036743c A mbedtls_pk_verify_ext
+0036746c A mbedtls_ssl_tls13_process_certificate_verify
+003674a4 A mbedtls_ssl_tls13_parse_certificate
+00367540 A mbedtls_pk_sign_ext
+003675ac A mbedtls_ssl_tls13_calculate_verify_data
+00367760 A mbedtls_ssl_get_handshake_transcript
+003677b4 A mbedtls_ssl_tls13_read_public_xxdhe_share
+003678b0 A finishedresumptiontraffic updexporterkeyivc hs trafficc ap trafficc e traffics hs traffics ap traffics e traffice exp masterres masterexp masterext binderres binderderivedTLS 1.3, client CertificateVerifyTLS 1.3, server CertificateVerify
+003679d8 A mbedtls_ssl_tls13_evolve_secret
+00367a00 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_keys.c
+00367a68 A => mbedtls_ssl_tls13_calculate_verify_data
+00367ac4 A <= mbedtls_ssl_tls13_calculate_verify_data
+00367b58 A mbedtls_ssl_tls13_derive_secret
+00367bb4 A mbedtls_ssl_tls13_export_handshake_psk
+00367c34 A mbedtls_ssl_tls13_derive_handshake_secrets
+00367cb8 A mbedtls_ssl_tls13_make_traffic_keys
+00367e08 A mbedtls_ssl_tls13_derive_application_secrets
+00367f4c A mbedtls_ssl_tls13_derive_master_secret
+00367fa4 A mbedtls_ssl_tls13_populate_transform
+00367fd0 A => mbedtls_ssl_tls13_compute_resumption_master_secret
+00368030 A <= mbedtls_ssl_tls13_compute_resumption_master_secret
+# (474 unique)
+
+## Product config keys
+0031325c W \config.ini
+00316bc0 A ClientSettings[SetType]
+00316bfc A ClientSettings[Protocol]
+00316c30 A ClientSettings[Reconnect]
+00316c68 A ClientSettings[NetworkLock]
+00316ca4 A ClientSettings[Datetime]
+00316ce8 A ClientSettings[ConnectOnLaunch]
+00316d2c A ClientSettings[AutoLaunch]
+00316dc0 A ClientSettings[AdvancedRouteItem]
+00316de8 A ClientSettings[AdvancedRouteContent]
+00317468 A getProductShowLanguageSelect
+00317504 A getClientSite
+00317718 A getProductRegisterMode
+00317734 A getProductRegisterPasswordLengthLimit
+00317764 A getProductShowAntiFraudTips
+00317b74 A getProductPriorityDisplayAccountName
+00317ba0 A getProductShowAreaSelect
+00317bc0 A getProductShowRouteMode
+00317bdc A getProductServerFlagMode
+00317e18 A DesktopEngine::bootProduct
+00317e5c A [CONFIG]
+00317e68 A ProductFullName
+00317e7c A ProductShortName
+00317e90 A ProductWebSite
+00317ea4 A ProductMutexName
+00317eb8 A ProductLpClassName
+00317ed0 A ProductDefaultLanguage
+00317eec A ProductRegisterMode
+00317f04 A ProductPriorityDisplayAccountName
+00317f4c A ProductShowLanguageSelect
+00317f6c A ProductShowAreaSelect
+00317f88 A ProductShowRouteMode
+00317fa4 A ProductCustomerSupportPath
+00317fc4 A ProductSocks5TutorialPath
+00317fe4 A ProductServerFlagMode
+00318000 A ProductShowAntiFraudTips
+00318020 A ProductRegisterPasswordMinLength
+00318048 A ProductRegisterPasswordMaxLength
+00318070 A ClientSite
+00318080 A ClientDistChan
+00318094 A ServerApiUrls
+003182a4 W Product info not ready
+# (42 unique)
+
+## Build paths / PDB / version
+0031337c A %s Client Version = %s (%s), OS Version = %s
+00316e88 A FV_FVCORE_BUILD_VERSION
+00318190 A %s FVCORE_BUILD_VERSION = %s
+0031d6e8 A F:\workspace\vpn123\prog\fvclient\src\libevent\event.c
+00320698 A F:\workspace\vpn123\prog\fvclient\src\libevent\win32select.c
+00320f50 A F:\workspace\vpn123\prog\fvclient\src\libevent\signal.c
+003239e8 A F:\workspace\vpn123\prog\fvclient\src\libevent\buffer.c
+00323aac A F:\workspace\vpn123\prog\fvclient\src\libevent\bufferevent.c
+00359e18 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls.c
+0035b280 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_msg.c
+00361b68 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_client.c
+00362ec8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls12_server.c
+003642f8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_client.c
+003652a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_server.c
+00366370 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_client.c
+003672a8 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_generic.c
+00367a00 A F:\workspace\vpn123\prog\fvclient\src\mbedtls\library\ssl_tls13_keys.c
+00370204 A F:\workspace\vpn123\prog\fvapp-desktop-sciter\vpnclient\build\release\product\AJiaSu\AJiaSu.pdb
+# (18 unique)
+
+## Proxy modes and helpers
+003135b4 A proxy-tun
+003135c0 A proxy-socks
+003135d0 A proxy-global
+00314b78 A ProxyListenIp
+00314c0c A reset global proxy
+00314e30 W \sysproxy
+00314e48 W sysproxy.exe 
+003242d8 A %s handshake: keep socks5/http replay for socks5/http/udp proxy
+00324324 A %s handshake: nat/socks4 mode, drain socks5 replay
+00324364 A %s handshake: nat/socks4 mode, socks5 replay drained
+00324438 A %s handshake, nat/udp mode, skip socks5 request
+00324478 A %s handshake: socks5 mode, read socks5 request and reply no auth
+003244c8 A %s handshake: socks4 mode, read socks4 and prepare remote: %s:%d, domain="%s"
+00324528 A %s handshake: socks4 mode, unsupported command
+00324560 A %s handshake: http-proxy mode
+00324584 A %s handshake: socks5 mode error. input buffer len=%d
+0033d4cc A socks5h
+0033d4d8 A socks5
+0033d4e0 A socks4a
+0033d4ec A socks4
+# (20 unique)
+
+## Error and prompt messages
+0000004d A !This program cannot be run in DOS mode.
+00312e9c W Error
+00312eb0 W Internal error. Please restart.
+00313044 A PromptNetworkError
+0031305c W Can not save to local file
+0031309c W Can not download file
+003130e4 W Invalid installer
+00313110 A PromptDownloadUpdateCompletedToUpdate
+00313140 A PromptCanNotExecuteUpdateFile
+003133e8 W Can not initialize network library because it is blocked by Windows Firewall or third-party firewalls.
+00313660 A PromptInstallVpnDriver
+0031367c A PromptCannotInstallVpnDriver
+0031386c A Failed to get task: %x
+00313888 A Failed to create a task definition: %x
+00313b78 A QueryInterface call failed for IExecAction: %x
+00313be8 A Error saving the Task : %x
+00313c38 A invalid string position
+00313ca0 A invalid hash bucket count
+00314ba4 A PromptGlobalProxyFailedMessage
+00314c3c A Route %s/%s failed: %d
+0031502c A Error allocating memory needed to call GetAdaptersinfo
+00315104 A GetAdaptersInfo failed with error: %d
+003155e8 A CoCreateInstance for INetFwPolicy2 failed: 0x%08x
+00315748 A Can not find existing Windows Firewall item: %08x
+00315868 A Process Windows Firwall failed: %08x
+00315894 A INetFwPolicy2->Rules failed: 0x%08x
+003158c0 A INetFwPolicy2->get__NewEnum failed: 0x%08x
+00315a60 A CoCreateInstance for Firewall Rule failed: 0x%08x
+00315a9c A Firewall Rule Add failed: 0x%08x
+00315d94 A Failed to create an instance of ITaskService: %x
+00315dd0 A ITaskService::Connect failed: %x
+0031619c A invalid stoi argument
+003161d8 A invalid stol argument
+00316214 A invalid stoll argument
+00316394 A %s GetFavoriteServers response error
+003164c8 A ErrorMessage
+0031653c A %s GetAnnounce failed server error: %s, errorMessage: %s
+00316584 A %s GetAnnounce response error
+00316648 A %s ReportCloseAnnounce server error, error: %s, errorMessage: %s
+003167ac A %s GetMessageNum server error, error: %s, errorMessage: %s
+003168c0 A %s getCaptchaImage server error: %s
+00316984 A SendVerificationCodeFailedNetworkError
+00316a00 A RegisterFailedNetworkError
+00316adc A %s upgradeRecord server error
+00317514 A reportHtmlCustomErrorString
+00317d9c W No app/path not ready
+003180c0 W The configuration file failed to load, please reinstall or check the system settings.
+003182a4 W Product info not ready
+003187dc A NetworkErrorRetryOrNot
+00318818 A Prompt
+0031916c A PromptPleaseChooseVpnServer
+00319254 A PromptServerFullLoad
+00319270 A PromptServerFullLoadPromptBuy
+00319980 A PromptDownloadNetworkDataFailed
+00319d98 A %s pickServerFromWeb failed, %s
+00319de0 A %s pickServerFromWeb isOverSucceeded = Failed
+0031a4a0 A regex_error(error_collate): The expression contained an invalid collating element name.
+0031a510 A regex_error(error_ctype): The expression contained an invalid character class name.
+0031a578 A regex_error(error_escape): The expression contained an invalid escaped character, or a trailing escape.
+0031a5f8 A regex_error(error_backref): The expression contained an invalid back reference.
+0031a658 A regex_error(error_brack): The expression contained mismatched [ and ].
+0031a6b0 A regex_error(error_paren): The expression contained mismatched ( and ).
+0031a708 A regex_error(error_brace): The expression contained mismatched { and }.
+0031a760 A regex_error(error_badbrace): The expression contained an invalid range in a { expression }.
+0031a7d0 A regex_error(error_range): The expression contained an invalid character range, such as [b-a] in most encodings.
+0031a858 A regex_error(error_space): There was insufficient memory to convert the expression into a finite state machine.
+0031a8e0 A regex_error(error_badrepeat): One of *?+{ was not preceded by a valid regular expression.
+0031a950 A regex_error(error_complexity): The complexity of an attempted match against a regular expression exceeded a pre-set level.
+0031a9e8 A regex_error(error_stack): There was insufficient memory to determine whether the regular expression could match the specified character sequence.
+0031aa98 A regex_error(error_parse)
+0031aab8 A regex_error(error_syntax)
+0031aad8 A regex_error
+0031ad54 A invalid argument
+0031c3b8 A executable format error
+0031c4b0 A invalid seek
+0031c4c0 A io error
+0031c724 A protocol error
+0031c7a4 A stream timeout
+0031c878 A unknown error
+0031d2c0 A (%d, %s) WrapperProgressFunction, meet overError, progress abort
+0031d310 A (%d, %s) WrapperProgressFunction progress timeout, abort
+0031d3fc A curl_easy_init failed
+0031d554 A (%d, %s) curl perform error: %d, %s
+0031d5b8 A (%d, %s) response check failed, buf.size()=%d, data=%s
+0031d5fc A (%d, %s) response check failed, empty response
+0031dab8 A %s: Too many common timeouts already in use; we only support %d per event_base
+0031dda8 A event_add: event %p, timeout in %d seconds %d useconds, call %p
+0031de60 A timeout_next: event: %p, in %d seconds, %d useconds
+0031dea0 A timeout_process: event: %p, call %p
+0031e680 A appDownloadNetworkData %s, result failed
+0031e6b4 A appDownloadNetworkData %s, isOverSucceeded = Failed
+0031e95c A failed
+0031eee8 A mbedtls_rsa_import failed
+0031ef08 A mbedtls_rsa_complete failed
+0031efa0 A session.timeout
+0031efb4 A timeout
+0031f1b0 A read failed
+0031f23c A event failed
+0031f5b4 A client request failed
+0031f5ec A network error: 
+0031f600 A fvproxy_auth_context_new: failed. cmd=%s, clientRequestFailureCount=%d, msg=%s
+0031f710 A on dev ready, listen on %s:%d failed, errno=%d
+0031f748 A getsockname failed
+0031f760 A new/bind failed
+0031f7a8 A client keep alive timeout
+0031f7c8 A client connect auth timeout
+0031f7ec A bufferEventConnectServer socket failed: %s
+0031f820 A bufferEventConnectServer connect failed: %s
+0031f894 A socketConnectServer failed: err=%d
+0031fc48 A GetOverlappedResult failed, error = %d
+0031fc78 A WriteOverEmitQueue met error=%d
+0031fca0 A WriteOverEmitQueue met ERROR_INVALID_PARAMETER, invalid packet?
+0031fd08 A ReadFile -> TryEmitQueue error = %d
+0031fd34 A ReadFile error = %d
+0031fd4c A WaitForMultipleObjects -> TryEmitQueue error = %d
+0031fd88 A WaitForMultipleObjects -> WriteOverEmitQueue error
+0031fec0 A iostream stream error
+0031ffb4 A config %s invalid (corrupted?), reset
+0031fff8 A open zip file failed
+00320290 A recv failed
+003202d0 A proxy recv invalid header
+003202f0 A proxy connect failed
+00320360 A send failed
+00320370 A create socket failed
+0032038c A event loop failed
+003203c4 A clean timeout items
+00320bc0 A No error
+00320c2c A invalid value for ai_flags
+00320d70 A system error
+00320d80 A LocalAlloc failed during Winsock error
+00320db0 A winsock error 0x%08x
+00320dcc A malloc failed during Winsock error
+00320df8 A windows_socket_errors_lock_
+00321ae8 A break waiting by timeout
+00321c38 A Syntax error: value, object or array expected.
+003230c8 A failed at %d
+003230d8 A Unexpected error, return code = %08X
+00323610 A failed to connect to server
+003236ac A failed to write to net: size=%d, err=%d, wsaerr=%d
+00323710 A failed to write to dev: size=%d, err=%d, wsaerr=%d
+00323af8 A %s: cannot enable 0x%hx on %p
+00323b1c A %s: cannot disable 0x%hx on %p
+00323b44 A %s: cannot set fd for %p to %I64d
+00323b6c A %s: cannot get fd for %p
+00323bc8 A Error from accept() call
+00323be8 A Unexpected error on AcceptEx
+00323d04 A %s    onRead: handshake error
+00324130 A %s onWrite: error to send data: %d
+003241d8 A %s evcbInputRead: evbuffer_read error
+003243a4 A %s handshake: socks error: %d %d
+003243f8 A %s handshake: response too large, invalid
+00324584 A %s handshake: socks5 mode error. input buffer len=%d
+003245f4 A %s writeUdpToDev: invalid socks response
+003246cc A writeUdpToProxyPayload failed to evbuffer_reserve_space
+0032485c A can not create tcp context, failed to connect to remote server
+003248c4 A lwip create context failed
+003248e4 A invalid state: %d, can not accept tcp connection
+00324964 A evcb create context failed
+00324984 A fvclientproxy_udp_process failed to connect to server
+00324ae0 A fvclientproxy_clean_timeout_contexts_impl: %s, set null to map, delayed delete
+00324b40 A fvclientproxy_clean_timeout_contexts_impl: no context, erase from map
+00324b94 A linked map error: key in list but no in map
+00324c40 A lwip netif_add failed
+00324c6c A lwip tcp_new failed
+00324c88 A lwip tcp_bind_to_netif failed: 
+00324cb0 A lwip tcp_listen failed
+0032790c A invalid window size
+0032795c A invalid block type
+00327974 A invalid stored block lengths
+003279c4 A invalid code lengths set
+003279e4 A invalid bit length repeat
+00327a04 A invalid code -- missing end-of-block
+00327a30 A invalid literal/lengths set
+00327a54 A invalid distances set
+00327a70 A invalid literal/length code
+00327a94 A invalid distance code
+00327ab0 A invalid distance too far back
+0032b460 A Buffer allocation failed
+0032bdfc A   %s test %d error code: %d
+0032be20 A   %s test %d failed
+0032be70 A setup failed
+0032be84 A update error code: %i
+0032bea0 A finish error code: %d
+0032bfe8 A file error
+0032bff8 A stream error
+0032c008 A data error
+0032c030 A buffer error
+0032c324 A failed (%u)
+0033784c A   CCM: setup failed
+00337a18 A setkey() error code: %i
+00337a38 A crypt_and_tag() error code: %i
+00337e08 A test execution failed
+00338d14 A error code: %i
+00338d28 A failed (output)
+003390f8 A   KW: setup failed 
+00339110 A failed. 
+00339138 A   KWP: setup failed 
+0033a2dc A failed (mac)
+0033b8f0 A Failed to get recent socket
+0033be50 A cr_mime_read(len=%zu) is errored -> %d, eos=0
+0033bfc8 A read error getting mime data
+0033c3a4 A PENDING handle timeout
+0033c3c0 A Internal error removing splay node = %d
+0033c3f0 A Internal error clearing splay node = %d
+0033c598 A ignoring failed cookie_init for %s
+0033c658 A invalid octets in name/value, cookie dropped
+0033c7e0 A WARNING: failed to open cookie file "%s"
+0033c914 A WARNING: failed to save cookies in %s: %s
+0033c948 A getaddrinfo() thread failed to start
+0033cc60 A Failed to add Session ID to cache for %s://%s:%d [%s]
+0033ce34 A SSL shutdown timeout
+0033d15c A Connection #%lld is not open enough, cannot reuse
+0033d1d8 A Server upgrade cannot be used
+0033d3a4 A Invalid zoneid: %s; %s
+0033d62c A .netrc parser error
+0033d69c A Invalid IPv6 address format
+0033d7c4 A Failed to resolve %s '%s' with timeout after %lld ms
+0033d988 A shut down failed with %d
+0033dc6c A rewind of client reader '%s' failed: %d
+0033e00c A seek callback returned error %d
+0033e064 A ioctl callback returned error %d
+0033e254 A %s failed
+0033e260 A %s connect timeout after %lldms, move on!
+0033e2dc A Connection timeout after %lld ms
+0033e304 A %s starting (timeout=%lldms)
+0033e328 A all eyeballers failed
+0033e36c A Failed to connect to %s port %u after %lld ms: %s
+0033e3c0 A created %s (timeout %lldms)
+0033eb3c A Failed to set SO_KEEPALIVE on fd %d: errno %d
+0033eb74 A Failed to set TCP_KEEPIDLE on fd %d: errno %d
+0033ebac A Failed to set TCP_KEEPINTVL on fd %d: errno %d
+0033ebe4 A Failed to set TCP_KEEPCNT on fd %d: errno %d
+0033ed14 A Bind to local port %d failed, trying next
+0033ed48 A bind failed with errno %d: %s
+0033edc8 A getsockname() failed with errno %d: %s
+0033edf8 A ssloc inet_ntop() failed with errno %d: %s
+0033ee2c A sa_addr inet_ntop() failed with errno %d: %s
+0033ef00 A connect to %s port %u from %s port %d failed: %s
+0033f040 A is_alive: poll error, assume dead
+0033f068 A is_alive: poll timeout, assume alive
+0033f130 A cf_udp_connect(), open failed -> %d
+0033f1f0 A getpeername() failed with errno %d: %s
+0033f220 A ssrem inet_ntop() failed with errno %d: %s
+0033f348 A ce-error
+0033f354 A Error while processing content unencoding: %s
+0033f390 A Error while processing content unencoding: Unknown failure within decompression software.
+0033f7c4 A cannot mix POSTFIELDS with RESUME_FROM
+0033fc88 A too many IP, cannot show
+0033ffa4 A The requested URL returned error: %d
+00340154 A Invalid TIMEVALUE
+00340740 A Invalid Content-Length: value
+00340ba0 A HTTP error before end of send, keep sending
+00340bd4 A HTTP error before end of send, stop sending
+00340c9c A Invalid status line
+00340fc0 A Failed initialization
+0034113c A FTP: The server failed to connect to data port
+00341244 A FTP: cannot figure out the host in the PASV response
+00341284 A Error in the HTTP2 framing layer
+003412f0 A FTP: could not retrieve (RETR failed) the specified file
+00341334 A Quote command returned error
+00341358 A HTTP response code said error
+0034137c A Failed writing received data to disk/application
+003413b8 A Upload failed (at start/before it took off)
+003413ec A Failed to open/read local data from file/application
+00341454 A FTP: command PORT failed
+00341474 A FTP: command REST failed
+003414fc A SSL connect error
+00341558 A LDAP: cannot bind
+00341570 A LDAP: search failed
+00341634 A Failed binding local connection end
+00341750 A Can not set SSL crypto engine as default
+00341784 A Failed to initialise SSL crypto engine
+003417b4 A Failed sending data to the peer
+00341928 A Requested SSL level failed
+00341948 A Failed to shut down the SSL connection
+00341978 A Failed to load CRL file (path? access rights?, format?)
+003419bc A Issuer check against peer certificate failed
+003419f4 A Send failed since rewinding of the data stream failed
+00341b34 A Error in the SSH layer
+00341b50 A Socket not ready for send/recv
+00341b78 A RTSP CSeq mismatch or invalid CSeq
+00341ba4 A RTSP session error
+00341be0 A Chunk callback failed
+00341ca0 A Stream error in the HTTP/2 framing layer
+00341d08 A An authentication function returned an error
+00341d40 A HTTP/3 error
+00341d50 A QUIC connection error
+00341d6c A proxy handshake error
+00341db0 A Unrecoverable error in select/poll
+00341e14 A ECH attempted but failed
+00341e34 A Unknown error
+00341e74 A Invalid multi handle
+00341e90 A Invalid easy handle
+00341ea8 A Internal error
+00341ebc A Invalid socket argument
+00341f2c A Wakeup is unavailable or failed
+00341f8c A Invalid share handle
+00341fec A An invalid CURLU pointer was passed as argument
+00342028 A An invalid 'part' argument was passed as argument
+003420ec A URL decode error, most likely because of rubbish in the input
+00342138 A A memory function failed
+00342478 A Invalid arguments
+00342804 A Remote error
+00342824 A Winsock library is not ready
+003428c8 A Unrecoverable error in call to nameserver
+00342924 A Unknown error %d (%#x)
+00342940 A Unknown error %lu (0x%08lX)
+00342f40 A bad error code
+00342f94 A Failed to encode DoH packet [%d]
+003430e4 A NTLM handshake failure (internal error)
+00343470 A Error importing ca cert blob - mbedTLS: (-0x%04X) %s
+003434b0 A Error reading ca cert file %s - mbedTLS: (-0x%04X) %s
+003434f0 A Error reading ca cert path %s - mbedTLS: (-0x%04X) %s
+00343530 A Error reading client cert file %s - mbedTLS: (-0x%04X) %s
+00343578 A Error reading client cert data %s - mbedTLS: (-0x%04X) %s
+003435c0 A Error reading private key %s - mbedTLS: (-0x%04X) %s
+00343600 A Error parsing private key - mbedTLS: (-0x%04X) %s
+0034363c A Error reading CRL file %s - mbedTLS: (-0x%04X) %s
+0034369c A mbedTLS: ssl_config failed
+003436bc A ssl_setup failed - mbedTLS: (-0x%04X) %s
+003436f0 A mbedTLS: failed to set cipher suites
+00343768 A Failed to set SNI
+00343780 A error signaled by ssl ctx callback
+00343854 A Failed due to missing peer certificate
+00343884 A Failed copying peer certificate
+003438ac A Failed copying public key from peer certificate
+00343958 A mbedtls_shutdown error -0x%04X
+00343ab0 A SSL connection timeout
+00343f18 A %s cannot be done over CONNECT
+00344020 A new tunnel state 'failed'
+00344068 A Failed sending CONNECT to proxy
+00344258 A Proxy CONNECT aborted due to timeout
+00344308 A CONNECT tunnel failed, response %d
+003443f4 A hard timeout of %dms reached, starting h21
+00344428 A soft timeout of %dms reached, h3 has not seen any data, starting h21
+003444a8 A connect, all failed
+00344548 A Failed to send %s: %s
+00344564 A SOCKS: Failed receiving %s: %s
+00344694 A Failed to resolve "%s" for SOCKS4 connect.
+003447a0 A cannot complete SOCKS4 connection to %d.%d.%d.%d:%d. (%d), request rejected or failed.
+00344808 A cannot complete SOCKS4 connection to %d.%d.%d.%d:%d. (%d), request rejected because SOCKS server cannot connect to identd on the client.
+003448b0 A cannot complete SOCKS4 connection to %d.%d.%d.%d:%d. (%d), request rejected because the client program and identd report different user-ids.
+00344960 A cannot complete SOCKS4 connection to %d.%d.%d.%d:%d. (%d), Unknown.
+00344ad0 A Received invalid version in initial SOCKS5 response.
+00344ce8 A Failed to resolve "%s" for SOCKS5 connect.
+00344e68 A cannot complete SOCKS5 connection to %s. (%d)
+003454c4 A http_chunk error, expected 0x0a, seeing 0x%ux
+00345570 A Error writing data to client
+003455b4 A Failed reading the chunked-encoded stream
+00345aa8 A first aws-sigv4 provider cannot be empty
+00347594 A Failed extracting certificate chain
+0034b3b4 W Runtime Error!
+0034b848 A Visual C++ CRT: Not enough memory to complete call to strerror.
+0034bb54 A Input/output error
+0034bba4 A Exec format error
+0034bcc0 A Invalid argument
+0034bd6c A Invalid seek
+0034bdbc A Domain error
+00355db8 A invalid PK
+0035a034 A alloc() of ssl sub-contexts failed
+0035a178 A The SSL configuration is invalid.
+0035a1b4 A alloc(%zu bytes) failed
+0035b390 A update timeout value to %lu millisecs
+0035b6c8 A HMAC calculation failed
+0035b9b4 A f_recv_timeout: %lu ms
+0035b9d0 A ssl->f_recv(_timeout)
+0035b9ec A handshake timeout
+0035bb64 A alloc %zu bytes failed
+0035bfc0 A invalid handshake header
+0035c68c A invalid zero-length message type: %d
+0035d0a4 A discarding invalid record (header)
+0035d120 A discarding invalid record (mac)
+0035d148 A invalid CCS message, len: %zu
+0035d16c A invalid CCS message, content: %02x
+0035d248 A invalid alert message, len: %zu
+0035d970 A CIPHER - Failed to allocate memory
+0035d99c A CIPHER - Input data contains invalid padding and is rejected
+0035da28 A CIPHER - Authentication failed (for AEAD modes)
+0035da68 A CIPHER - The context is invalid. For example, because it was freed
+0035dad8 A DHM - Reading of the DHM parameters failed
+0035db0c A DHM - Making of the DHM parameters failed
+0035db40 A DHM - Reading of the public values failed
+0035db74 A DHM - Making of the public value failed
+0035dba4 A DHM - Calculation of the DHM secret failed
+0035dc14 A DHM - Allocation of memory failed
+0035dc3c A DHM - Read or write of file failed
+0035dc68 A DHM - Setting the modulus and generator failed
+0035dda4 A ECP - Memory allocation failed
+0035ddd0 A ECP - Generation of random value, such as ephemeral key, failed
+0035de1c A ECP - Invalid private or public key
+0035df58 A MD - Failed to allocate memory
+0035df80 A MD - Opening or reading of file failed
+0035e008 A PEM - Failed to allocate memory
+0035e194 A PK - Memory allocation failed
+0035e230 A PK - Read/write of file failed
+0035e27c A PK - Invalid key tag or value
+0035e380 A PK - The pubkey tag or value is invalid (only RSA and EC are supported)
+0035e3d8 A PK - The algorithm tag or value is invalid
+0035e728 A PKCS7 - The format is invalid, e.g. different type expected
+0035e7c0 A PKCS7 - The PKCS #7 version element is invalid or cannot be parsed
+0035e810 A PKCS7 - The PKCS #7 content info is invalid or cannot be parsed
+0035e860 A PKCS7 - The algorithm tag or value is invalid or cannot be parsed
+0035e8b0 A PKCS7 - The certificate tag or value is invalid or cannot be parsed
+0035e904 A PKCS7 - Error parsing the signature
+0035e930 A PKCS7 - Error parsing the signer's info
+0035e960 A PKCS7 - Input invalid
+0035e97c A PKCS7 - Allocation of memory failed
+0035e9a8 A PKCS7 - Verification Failed
+0035e9cc A PKCS7 - The PKCS #7 date issued/expired dates are invalid
+0035ea44 A RSA - Input data contains invalid padding and is rejected
+0035ea8c A RSA - Something failed during generation of a key
+0035eac8 A RSA - Key failed to pass the validity check of the library
+0035eb10 A RSA - The public key operation failed
+0035eb40 A RSA - The private key operation failed
+0035eb70 A RSA - The PKCS#1 verification failed
+0035ebe4 A RSA - The random generator failed to generate non-zeros
+0035ecdc A SSL - Verification of the message MAC failed
+0035ed14 A SSL - An invalid SSL record was received
+0035ed78 A SSL - A message could not be parsed due to a syntactic error
+0035f0d4 A SSL - Processing of the Certificate handshake message failed
+0035f198 A SSL - * Early data has been received as part of an on-going handshake. This error code can be returned only on server side if and only if early data has been enabled by means of the mbedtls_ssl_conf_early_data() API. This error code can then be returned by mbedtls_ssl_handshake(), mbedtls_ssl_handshake_step(), mbedtls_ssl_read() or mbedtls_ssl_write() if early data has been received as part of the handshake sequence they triggered. To read the early data, call mbedtls_ssl_read_early_data()
+0035f440 A SSL - Memory allocation failed
+0035f468 A SSL - Hardware acceleration function returned with error
+0035f53c A SSL - The handshake negotiation failed
+0035f640 A SSL - Internal error (eg, unexpected failure in lower-level module)
+0035f8e8 A SSL - The alert message received indicates a non-fatal error
+0035fae0 A SSL - An operation failed due to an unexpected version or configuration
+0035fb38 A SSL - Invalid value in SSL config
+0035fbe0 A X509 - The CRT/CRL/CSR format is invalid, e.g. different type expected
+0035fc38 A X509 - The CRT/CRL/CSR version element is invalid
+0035fc74 A X509 - The serial tag or value is invalid
+0035fca8 A X509 - The algorithm tag or value is invalid
+0035fce0 A X509 - The name tag or value is invalid
+0035fd10 A X509 - The date tag or value is invalid
+0035fd40 A X509 - The signature tag or value invalid
+0035fd74 A X509 - The extension tag or value is invalid
+0035fe88 A X509 - Certificate verification failed, e.g. CRL, CA or signature check failed
+0035ff1c A X509 - Input invalid
+0035ff38 A X509 - Allocation of memory failed
+0035ff64 A X509 - Read/write of file failed
+0035ffc0 A X509 - A fatal error occurred, eg the chain is too long or the vrfy callback failed
+00360024 A AES - Invalid key length
+00360044 A AES - Invalid data input length
+0036006c A AES - Invalid input data
+003600a8 A ARIA - Invalid data input length
+00360148 A ASN1 - Error when trying to determine the length or invalid length
+003601d4 A ASN1 - Data is invalid
+003601f0 A ASN1 - Memory allocation failed
+00360288 A BASE64 - Invalid character in input
+003602b8 A BIGNUM - An error occurred while reading from or writing to a file
+0036033c A BIGNUM - There is an invalid character in the digit string
+003604ac A BIGNUM - Memory allocation failed
+003604f4 A CAMELLIA - Invalid data input length
+00360554 A CCM - Authenticated decryption failed
+00360584 A CHACHA20 - Invalid input parameter(s)
+00360618 A CHACHAPOLY - Authenticated decryption failed: data was not authentic
+0036066c A CTR_DRBG - The entropy source failed
+00360728 A CTR_DRBG - Read or write error in file
+00360758 A DES - The data input has an invalid length
+00360868 A ENTROPY - Read/write error in file
+00360894 A ERROR - Generic error
+003608dc A PLATFORM - Hardware accelerator failed
+00360960 A GCM - Authenticated decryption failed
+00360a6c A HMAC_DRBG - Read/write error in file
+00360a98 A HMAC_DRBG - The entropy source failed
+00360b50 A LMS - LMS signature verification failed
+00360b80 A LMS - LMS failed to allocate space for a private key
+00360c0c A NET - Failed to open a socket
+00360c30 A NET - The connection to the given server / port failed
+00360c74 A NET - Binding of the socket failed
+00360d04 A NET - Reading information from the socket failed
+00360d40 A NET - Sending information through the socket failed
+00360dac A NET - Failed to get an IP address for the given hostname
+00360e24 A NET - The context is invalid, eg because it was free()ed
+00360e68 A NET - Polling the net context failed
+00360e94 A NET - Input invalid
+00360ef0 A POLY1305 - Invalid input parameter(s)
+00361020 A THREADING - Locking / unlocking / free failed with error code
+00361ef8 A CID extension invalid
+00362160 A alloc failed (%d bytes)
+00362e24 A ticket alloc failed
+00362ea0 A invalid state %d
+00363590 A cookie verification failed
+00364518 A Invalid key share in HRR
+0036455c A Invalid server key share, our group %u, their group %u
+003645ec A alloc failed ( %ud bytes )
+00364914 A Invalid PSK identity.
+00364930 A Invalid ciphersuite for external psk.
+00364b68 A invalid ciphersuite(%04x) parameter
+00364e38 A Record size limit extension cannot be used with max fragment length extension
+003651ec A Creating the ticket-resumed PSK failed
+003653d0 A Invalid ticket creation time ( now = %lld, creation_time = %lld )
+00365504 A PSK binder calculation failed.
+003655fc A Invalid binder.
+00365644 A pre_shared_key extension decode error
+003665b4 A Random bytes generation failed
+003665dc A creating session id failed
+003670ec A invalid PK context
+0036740c A hash computation PSA error
+003674d0 A alloc( %zu bytes ) failed
+0036750c A CertificateVerify signature failed with %s
+00367668 A calculate_verify_data failed
+003677e8 A Invalid public key length: %u > %zu
+0038f194 A .?AV_com_error@@
+0038f56c A .?AVruntime_error@std@@
+0038f61c A .?AVrange_error@std@@
+0038fbd4 A .?AVinvalid_argument@std@@
+0038fc00 A .?AVlogic_error@std@@
+0038fc24 A .?AVlength_error@std@@
+0038fc74 A .?AVoverflow_error@std@@
+0038fcc8 A .?AVregex_error@std@@
+0038fd0c A .?AVsystem_error@std@@
+0038fd34 A .?AV_System_error@std@@
+00392170 A .?AVerror_category@std@@
+00392198 A .?AV_Generic_error_category@std@@
+003933e0 A .?AV_Iostream_error_category2@std@@
+00394cf8 A GetLastError
+00395d20 A SetLastError
+# (518 unique)
+
+## Device identity / fingerprint fields
+0031374c A biosId
+00313760 A devName
+0031376c A osLan
+00313780 A osUname
+00313790 A sysVer
+003137a4 A volSn
+003137c0 A curBssid
+003137cc A curMac
+003137d8 A curSsid
+00313804 A procName
+00315c90 A adptName
+00315ca8 A intranetIp
+00315cb8 A netmask
+# (13 unique)

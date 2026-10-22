@@ -1,0 +1,4 @@
+hashes.tsv columns: ['path', 'size', 'sha256', 'type', 'arch', 'signature', 'version'] rows: 37
+files on disk: 37 missing: []
+mismatches: none
+RESULT: PASS 37/37

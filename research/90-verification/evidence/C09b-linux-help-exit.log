@@ -1,0 +1,14 @@
+/usr/bin/objdump
+/usr/bin/readelf
+/usr/bin/nm
+help_exit=0
+8642:/dev/net/tun
+8643:tun device open succeeded
+8644:tun device ioctl succeeded
+8645:tun device ioctl failed: %d
+8646:tun device open failed: %d
+8720:root required, please run with "sudo". (if you don't have root access, you can use protocol:proxy (socks5/http) which doesn't require root while you have to configure your browser manually)
+8736:try to open tun device
+8737:failed to open tun
+8738:opened tun: %s
+8749:tun: %s

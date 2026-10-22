@@ -1,0 +1,9 @@
+=== 10-osint/validate.py
+OK sources=36 claims=36
+EXIT=0
+=== 20-windows-static/validate.py
+OK files=37 hashes=37
+EXIT=0
+=== 30-linux-static/validate.py
+OK linux sha256=29e18740af8b69c6fa4f7b0ef269316b01e0400d7768583fc08044632be13b9f strings=236
+EXIT=0

@@ -1,0 +1,28 @@
+fetched chars: 24728
+  Windows    expect 4.9.6.0    page 4.9.6.0    PASS
+  macOS      expect 4.9.6.0    page 4.9.6.0    PASS
+  Android    expect 4.12.2.0   page None       CHECK
+  iOS        expect 4.11.5.11  page 4.11.5.11  PASS
+  HarmonyOS  expect 1.0.1.0    page 1.0.1.0    PASS
+  Linux      expect 4.3.0.1    page 4.3.0.1    PASS
+  Apple TV   expect 1.0.2.3    page 1.0.2.3    PASS
+Linux arches on page: []
+
+=== raw HTML hits:
+  Windows    -> 4.9.6.0
+  Android    -> 4.12.2.0
+  HarmonyOS  -> 1.0.1.0
+  iOS        -> 4.11.5.11
+  macOS      -> 4.9.6.0
+  Linux      -> 4.3.0.1
+  Apple TV   -> 1.0.2.3
+=== linux download links:
+=== windows/macos links:
+   AJiaSu_4.9.6.0.exe
+   AJiaSu_4.9.6.0.exe
+   AJiaSu_4.9.6.0.dmg
+/files/downloads/linux/ajiasu-aarch64-4.3.0.1.tar.gz
+/files/downloads/linux/ajiasu-amd64-4.3.0.1.tar.gz
+/files/downloads/linux/ajiasu-armeb-4.3.0.1.tar.gz
+/files/downloads/linux/ajiasu-armel-4.3.0.1.tar.gz
+/files/downloads/linux/ajiasu-x86-4.3.0.1.tar.gz

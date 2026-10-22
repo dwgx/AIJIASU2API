@@ -1,0 +1,36 @@
+# sysproxy.exe (amd64, 1.0.0.1) - filtered strings
+# source: C:/Users/dwgx1/AppData/Local/Temp/ajs-win-20261023/sysproxy/amd64/sysproxy.exe
+# sha256: e0d76ece45a0a7b63e10fe1782cd6f196700540da7af5cb9bbc187c265ecbec7
+# format: <file offset hex> <A=ASCII|W=UTF-16LE> <string>
+# NOTE: no WinINET registry value names (ProxyServer/ProxyEnable/AutoConfigURL) appear as
+# literals; the binary imports only InternetSetOptionW + RasEnumEntriesW (see INVENTORY.md).
+
+## Usage and errors
+00018d50 W Usage: %s global <proxy-server> [<bypass>]
+00018e00 W Error %s: %lu %s
+00018e28 W Error %s
+00018eb8 W Error RasEnumEntries: %d
+00018f20 W global
+00018f30 W Error: bypass list shouldn't contain spaces, please check parameters.
+0001a4f8 A GetLastError
+0001a6f4 A SetLastError
+# (8 unique)
+
+## Build path
+00019198 A F:\workspace\vpn123\prog\internal\sysproxy-master\x64\Release\sysproxy.pdb
+# (1 unique)
+
+## Version strings
+00019198 A F:\workspace\vpn123\prog\internal\sysproxy-master\x64\Release\sysproxy.pdb
+0001cb60 W System Proxy Agent
+0001cbd8 W sysproxy.exe
+0001cc58 W Windows Proxy Manager
+# (4 unique)
+
+## Manifest
+0001cd39 A <assembly xmlns='urn:schemas-microsoft-com:asm.v1' manifestVersion='1.0'>
+0001cd84 A   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+0001cde9 A         <requestedExecutionLevel level='asInvoker' uiAccess='false' />
+0001ce60 A   </trustInfo>
+0001ce70 A </assembly>
+# (5 unique)

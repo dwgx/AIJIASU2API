@@ -1,0 +1,29 @@
+=== URL-ish literals in AJiaSu.exe:
+  ajs-app.com          count>=0 at []
+  mmegg.com            count>=0 at []
+  mbclubsh.com         count>=0 at []
+  91ajs.com            count>=0 at []
+  https://             count>=5 at ['0x31d3a4', '0x33c88e', '0x33e5ee', '0x33e7eb', '0x3dfc44']
+  /client.php          count>=1 at ['0x31641c']
+  ClientApiLogin       count>=1 at ['0x31e3f0']
+  ServerApiUrls        count>=1 at ['0x318094']
+  ClientSite           count>=2 at ['0x317507', '0x318070']
+  ClientDistCha        count>=1 at ['0x318080']
+  product.dat          count>=0 at []
+
+=== context around 0x318080:
+b'axLength\x00\x00\x00\x00\x00\x00\x00\x00ClientSite\x00\x00\x00\x00\x00\x00ClientDistChan\x00\x00\x00\x00\x00\x00ServerApiUrls\x00\x00\x00;\x00\x00\x00l\x00a\x00n\x00g\x00'
+
+=== product.dat: size 818
+entropy bit/B = 7.7356, distinct bytes = 245
+first16 hex = a0711680d5be2a7b60f5e8e5c2364734
+  ZIP magic at 0: False
+  GZIP magic at 0: False
+  7z magic at 0: False
+  PE magic at 0: False
+  contains b'ServerApiUrls': False
+  contains b'[CONFIG]': False
+  contains b'Product': False
+  contains b'ClientSite': False
+  contains b'http': False
+  818 == 2 + 51*16 -> True ; distinct 16B blocks: 51

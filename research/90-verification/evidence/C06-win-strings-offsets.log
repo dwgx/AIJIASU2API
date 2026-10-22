@@ -1,0 +1,16 @@
+0x318080 expect='ServerApiUrls'                            actual='ClientDistCha'                              MISMATCH
+0x3216d0 expect='OPV2'                                     actual='OPV2'                                       MATCH
+0x3216d8 expect='POST /s?s=%s&n=%s HTTP/1.1'               actual='POST /s?s=%s&n=%s HTTP/1.1'                 MATCH
+0x3216fc expect='Upgrade: websocket'                       actual='Upgrade: websocket'                         MATCH
+0x321718 expect='Connection: Upgrade'                      actual='Connection: Upgrade'                        MATCH
+0x321734 expect='Content-Length: %d'                       actual='Content-Length: %d'                         MATCH
+0x321750 expect='Sec-WebSocket-Key: %s'                    actual='Sec-WebSocket-Key: %s'                      MATCH
+0x321784 expect='200 OK'                                   actual='200 OK'                                     MATCH
+0x3217c4 expect='code=200'                                 actual='code=200'                                   MATCH
+
+'OPV2': 1 shown at ['0x3216d0']
+'POST /s?s=%s&n=%s HTTP/1.1': 1 shown at ['0x3216d8']
+'Upgrade: websocket': 1 shown at ['0x3216fc']
+'Sec-WebSocket-Key: %s': 1 shown at ['0x321750']
+'code=200': 1 shown at ['0x3217c4']
+'ServerApiUrls': 1 shown at ['0x318094']

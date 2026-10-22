@@ -1,0 +1,22 @@
+size 3607464
+login.ajs-app.com            -> ['0x29021c']
+login.mmegg.com              -> ['0x290237', '0x290250']
+login.mbclubsh.com           -> ['0x29026e']
+/client.php                  -> ['0x2932d9']
+ClientApiLogin/Login         -> ['0x2932e5']
+OPV2                         -> ['0x294558']
+POST /s?s=%s&n=%s HTTP/1.1   -> ['0x29455d']
+Upgrade: websocket           -> ['0x29457a']
+Sec-WebSocket-Key            -> ['0x2945ba']
+code=200                     -> ['0x29460f']
+CommandCode_Ctrl             -> ['0x292465', '0x292488', '0x29261d']
+1080                         -> ['0x28fe99']
+18888                        -> []
+28888                        -> []
+38888                        -> []
+
+=== long decimal literals:
+  off=0x28f548 digits=309 bit_length=1024
+
+=== exponent 65537 near:
+  0x28f67e ctx=b'8357721\x0065537\x00\x00\x00'

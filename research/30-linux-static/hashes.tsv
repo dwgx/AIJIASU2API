@@ -1,0 +1,6 @@
+path	size	sha256	origin	version
+C:/Users/dwgx1/AppData/Local/Temp/ajs-linux-20261023/ajiasu	3578792	29e18740af8b69c6fa4f7b0ef269316b01e0400d7768583fc08044632be13b9f	extracted from ajiasu-4.2.3.0.tar.gz (mirror: https://raw.githubusercontent.com/hanx11192-ship-it/LoveToSpeedup/master/LoveToSpeedup/vendor/ajiasu-amd64-4.2.3.0.tar.gz)	4.2.3.0
+C:/Users/dwgx1/AppData/Local/Temp/ajs-linux-20261023/ajiasu-4.2.3.0.tar.gz	1253814	c3d93551a9632c2e28f7a86e541363f3bbe81f01bae12358714ae96287304232	third-party mirror (GitHub LoveToSpeedup vendor dir); contains only ./ajiasu	4.2.3.0
+C:/Users/dwgx1/AppData/Local/Temp/ajs-linux-20261023/ajiasu-amd64-4.3.0.1.tar.gz	1264209	0affe73aff4b7ee11cc6fab5c060d71dc3056a1c2903ca3435f4fe009d2689e7	official: https://www.91ajs.com/files/downloads/linux/ajiasu-amd64-4.3.0.1.tar.gz (HTTP 200, 2026-10-23)	4.3.0.1
+C:/Users/dwgx1/AppData/Local/Temp/ajs-linux-20261023/work/4301/ajiasu	3607464	08fcd8668f7aaf6660277778e67fd2afd622c3f1c8fb634e57f31605bf01c8f6	extracted from ajiasu-amd64-4.3.0.1.tar.gz (contains only ./ajiasu)	4.3.0.1
+C:/Users/dwgx1/AppData/Local/Temp/ajs-win-20261023/AJiaSu.exe	4064640	0fd9d702bf9932836ad0ba3e4acf43bb1a587c45ee6247b7a5d88aede78101f6	read-only comparison input: NSIS payload of research/AJiaSu_4.9.6.0.exe	4.9.6.0

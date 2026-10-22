@@ -11,6 +11,11 @@ research/**/*.exe
 *.pcapng
 *.dmp
 *.log
+# verifier evidence logs are machine-checkable citations for VERDICTS.md — keep them tracked
+!research/**/evidence/*.log
+
+# Decompiled vendor pseudocode stays local-only; reports describe findings instead
+research/**/pseudocode/
 
 # Secrets — never commit
 .env
@@ -22,3 +27,7 @@ __pycache__/
 .pytest_cache/
 
 # Research reports (*.md, *.json, *.txt, *.csv) stay tracked on purpose.
+
+# Dynamic-lab captures are evidence (dummy test data, no credentials)
+!research/60-dynamic/captures/*.bin
+!research/60-dynamic/captures/*.log

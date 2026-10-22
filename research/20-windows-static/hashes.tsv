@@ -1,0 +1,38 @@
+path	size	sha256	type	arch	signature	version
+$PLUGINSDIR/InstallOptions.dll	15872	ca092ba7f275b0c9000098cdd1a9876fe8dc050fcb40a0e8a1ab8335236e9dc5	PE32-GUI-DLL	x86	NotSigned	-
+$PLUGINSDIR/System.dll	12288	3eb38ae99653a7dbc724132ee240f6e5c4af4bfe7c01d31d23faf373f9f2eaca	PE32-GUI-DLL	x86	NotSigned	-
+$PLUGINSDIR/ioSpecial.ini	211	d95aed234f932a1c48a2b1b0d98c60ca31f962310c03158e2884ab4ddd3ea1e0	INI	n/a	N/A	-
+$PLUGINSDIR/modern-wizard.bmp	26494	3ad2dc318056d0a2024af1804ea741146cfc18cc404649a44610cbf8b2056cf2	BMP	n/a	N/A	-
+AJiaSu.exe	4064640	0fd9d702bf9932836ad0ba3e4acf43bb1a587c45ee6247b7a5d88aede78101f6	PE32-GUI	x86	Valid:GlobalSignEV:ShanghaiYouDun	-
+lang.fvr	4684	84a95a56cfccaa7690e267c711dc4dd722abb3486654d3f561bbf005bcb49aaa	ZIP	n/a	N/A	-
+product.dat	818	e3de3fe622214034f68eff48705cfb028dd401754ac1daaee080688c5a78884f	encrypted-blob	n/a	N/A	-
+res.fvr	289045	9e985bca60aab15e8930353745ea0e4adaff384d02feabb22e1263649235b6af	ZIP	n/a	N/A	-
+sciter.dll	6369280	42d0979c16c8f872aa89242878e8865a9ca708342784f6e5181154fa17f9f5fe	PE32-GUI-DLL	x86	NotSigned	-
+sysproxy/amd64/sysproxy.exe	120832	e0d76ece45a0a7b63e10fe1782cd6f196700540da7af5cb9bbc187c265ecbec7	PE32+-console	x64	NotSigned	1.0.0.1
+sysproxy/arm64/sysproxy.exe	90112	ab68825ca267b9589487f6bc6eb0077d7531a536fb06b7c6bd8edbfb96091e33	PE32-console	armv7	NotSigned	1.0.0.1
+sysproxy/i386/sysproxy.exe	105984	21d16a04909a0434e397b3b749661b196b335de145b77acedb8c1984e4d33d13	PE32-console	x86	NotSigned	1.0.0.1
+tap/tap/amd64/OemVista.inf	7523	b5728e42ea12c67577cb9188b472005ee74399b6ac976e7f72b48409baee3b41	INF	n/a	N/A	-
+tap/tap/amd64/tap0901.cat	19458	91ebea8ad199e97832cf91ea77328ed7ff49a1b5c06ddaacb0e420097a9b079e	CAT	n/a	Valid:OpenVPNTechnologies	-
+tap/tap/amd64/tap0901.sys	27136	89c5ca1440df186497ce158eb71c0c6bf570a75b6bc1880eac7c87a0250201c0	PE32+-native	x64	NotSigned	9.21.2 9/21 built by: WinDDK
+tap/tap/amd64/tapinstall.exe	92304	c9963a3f8abf6fedc8f983a9655a387d67c752bd59b0d16fd6fc2396b4b4ca67	PE32+-console	x64	Valid:OpenVPNTechnologies	6.1.7600.16385 built by: WinDDK
+tap/tap/arm64/OemVista.inf	7537	fdfd0e0145a4b70e02bafcdc81b73b51621fde790c953eda0c31e5b7c8148fe9	INF	n/a	N/A	-
+tap/tap/arm64/tap0901.cat	10861	ead186bd1ceb7c571f4c145e7d911aa04217b6be2373e6e6958c5f5b5cf00c6c	CAT	n/a	Valid:MSWHQL	-
+tap/tap/arm64/tap0901.sys	40128	8417dc5070a32b620c53299db7fc8105a1394c2d79e4bcd4388f9b7c01c29e8c	PE32+-native	arm64	Valid:MSWHQL	9.24.2 9/24
+tap/tap/arm64/tapinstall.exe	566824	c24b1c75a5bd39595151b74d2aa53861d618269c35a2b682dee15f03a8a9e917	PE32+-console	arm64	Valid:OpenVPNInc	10.0.10011.16384
+tap/tap/i386/OemVista.inf	7506	a461b764e248d3e59a1a730ff94af7e61121f5a02004e02b3b866ac8fd1689be	INF	n/a	N/A	-
+tap/tap/i386/tap0901.cat	19426	878c1b205887b61906f6f4f8da5783d2bb8756d0a39359288d09f65f983b27c2	CAT	n/a	Valid:OpenVPNTechnologies	-
+tap/tap/i386/tap0901.sys	23040	3b1ff5252012d6e8a7dd6e4621ec43812510dca1a25a9a2e07288800f445dd41	PE32-native	x86	NotSigned	9.21.2 9/21 built by: WinDDK
+tap/tap/i386/tapinstall.exe	87696	5c6aae8c345e5eda7185cabafcf9270ef3d73f198290842654d8916f8321b150	PE32-console	x86	Valid:OpenVPNTechnologies	6.1.7600.16385 built by: WinDDK
+tap/tap6/amd64/OemVista.inf	7632	150ef8eb07532146f833dc020c02238161043260b8a565c3cfcb2365bad980d9	INF	n/a	N/A	-
+tap/tap6/amd64/tap0901.cat	10739	cc74cdb88c198eb00aef4caa20bf1fda9256917713a916e6b94435cd4dcb7f7b	CAT	n/a	Valid:MSWHQL	-
+tap/tap6/amd64/tap0901.sys	39920	589c5667b1602837205da8ea8e92fe13f8c36048b293df931c99b39641052253	PE32+-native	x64	Valid:MSWHQL	9.24.6 9/24
+tap/tap6/amd64/tapinstall.exe	101536	9f45a39015774eeaa2a6218793edc8e6273eb9f764f3aedee5cf9e9ccacdb53f	PE32+-console	x64	Valid:OpenVPNTechnologies	6.1.7600.16385 built by: WinDDK
+tap/tap6/arm64/OemVista.inf	7537	fdfd0e0145a4b70e02bafcdc81b73b51621fde790c953eda0c31e5b7c8148fe9	INF	n/a	N/A	-
+tap/tap6/arm64/tap0901.cat	10861	ead186bd1ceb7c571f4c145e7d911aa04217b6be2373e6e6958c5f5b5cf00c6c	CAT	n/a	Valid:MSWHQL	-
+tap/tap6/arm64/tap0901.sys	40128	8417dc5070a32b620c53299db7fc8105a1394c2d79e4bcd4388f9b7c01c29e8c	PE32+-native	arm64	Valid:MSWHQL	9.24.2 9/24
+tap/tap6/arm64/tapinstall.exe	566824	c24b1c75a5bd39595151b74d2aa53861d618269c35a2b682dee15f03a8a9e917	PE32+-console	arm64	Valid:OpenVPNInc	10.0.10011.16384
+tap/tap6/i386/OemVista.inf	7628	9d5c0548de3c0f785a88fb1bdb220665f463dc9714d35b6285dcd79d6d72a9be	INF	n/a	N/A	-
+tap/tap6/i386/tap0901.cat	10685	b6ab523b804947f5ad7b59561650b9f5d54327e839328e0477d70be8cdeda2c1	CAT	n/a	Valid:MSWHQL	-
+tap/tap6/i386/tap0901.sys	34816	ef3c161252cf9fea624699aed7e3afbb0d91c1a14fbd3b6840905240329108a2	PE32-native	x86	Valid:MSWHQL	9.24.6 9/24
+tap/tap6/i386/tapinstall.exe	96936	f852a3dcb9b45583cf2361f4024b16abe97a7c1da560bf593e50ee61a43a04d7	PE32-console	x86	Valid:OpenVPNTechnologies	6.1.7600.16385 built by: WinDDK
+uninst.exe.nsis	20742	e70162f2e6e108e6b1a4e3218cfe26abfb1bc49d56f2614cc5dc68d53c583165	NSIS-script	n/a	N/A	-

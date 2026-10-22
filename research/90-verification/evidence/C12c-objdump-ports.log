@@ -1,0 +1,30 @@
+
+ajiasu:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000041a3a0 <.text+0x1a240>:
+  41a3a0:	89 c7                	mov    edi,eax
+  41a3a2:	e8 79 98 22 00       	call   0x643c20
+  41a3a7:	48 8b 85 f8 fe ff ff 	mov    rax,QWORD PTR [rbp-0x108]
+  41a3ae:	48 83 c0 28          	add    rax,0x28
+  41a3b2:	48 89 c7             	mov    rdi,rax
+  41a3b5:	e8 90 11 00 00       	call   0x41b54a
+  41a3ba:	66 c7 40 30 00 00    	mov    WORD PTR [rax+0x30],0x0
+  41a3c0:	66 c7 45 a6 38 04    	mov    WORD PTR [rbp-0x5a],0x438
+  41a3c6:	66 c7 45 a8 c8 49    	mov    WORD PTR [rbp-0x58],0x49c8
+  41a3cc:	66 c7 45 aa d8 70    	mov    WORD PTR [rbp-0x56],0x70d8
+  41a3d2:	66 c7 45 ac e8 97    	mov    WORD PTR [rbp-0x54],0x97e8
+  41a3d8:	66 c7 45 ae 00 00    	mov    WORD PTR [rbp-0x52],0x0
+  41a3de:	48 c7 45 e8 00 00 00 	mov    QWORD PTR [rbp-0x18],0x0
+  41a3e5:	00 
+  41a3e6:	48 83 7d e8 04       	cmp    QWORD PTR [rbp-0x18],0x4
+  41a3eb:	0f 87 e7 01 00 00    	ja     0x41a5d8
+  41a3f1:	48 c7 45 90 00 00 00 	mov    QWORD PTR [rbp-0x70],0x0
+  41a3f8:	00 
+  41a3f9:	48                   	rex.W
+  41a3fa:	c7                   	.byte 0xc7
+  41a3fb:	45 98                	rex.RB cwde
+  41a3fd:	00 00                	add    BYTE PTR [rax],al
+	...

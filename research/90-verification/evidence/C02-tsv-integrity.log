@@ -1,0 +1,8 @@
+sources rows: 36 >=20: True
+claims rows: 36 >=15: True
+claims with no source id and no [INFERENCE]/[UNKNOWN]: []
+dangling source refs: none
+claims tagged [UNKNOWN]/[INFERENCE]: [('C11', '[UNKNOWN]', '')]
+duplicate source ids: False
+sources with empty quote: []
+RESULT: PASS
