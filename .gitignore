@@ -1,0 +1,24 @@
+# Binaries and vendor payloads — never commit
+research/**/*.exe
+*.sys
+*.dll
+*.cat
+*.tar.gz
+*.zip
+*.7z
+*.bin
+*.pcap
+*.pcapng
+*.dmp
+*.log
+
+# Secrets — never commit
+.env
+*.key
+*.pem
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
+# Research reports (*.md, *.json, *.txt, *.csv) stay tracked on purpose.
