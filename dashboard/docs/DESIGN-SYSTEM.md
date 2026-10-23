@@ -197,6 +197,36 @@ and their measurements are recorded below so nothing is silently discarded.
 | `--bg-active #22302A` as a *border* colour | 1.28:1 vs surface — invisible as an edge | selection edges use `--border-mint` `#254C44`; `--bg-active` stays a fill |
 | disabled text implied by 3:1 | `#55665E` = 2.90:1 | `--text-disabled` lifted to `#5E7067` (3.36 on surface, 3.03 on elevated) |
 
+### 3.9 Accent variants
+
+Mint is the default and keeps the `:root` / `[data-theme="light"]` values above. The Appearance card
+stores one of four accents under `localStorage["ajs.accent"]` and sets `data-accent` on `<html>`;
+the accent is a per-browser preference, not part of the daemon settings payload. Only the accent
+trio changes, so every `--mint` / `--mint-strong` consumer follows without a component rule. Each
+override is declared once in `app.css` directly after the light block: `[data-accent="…"]` for dark,
+`[data-theme="light"][data-accent="…"]` for light. An unknown stored value falls back to `mint`.
+
+| Accent | Theme | `--mint` | `--mint-strong` | `--on-mint` | `--on-mint` on `--mint` |
+|---|---|---|---|---|---|
+| Mint (default) | dark | `#5EEAD4` | `#2DD4BF` | `#04211C` | 11.45:1 |
+| Mint (default) | light | `#0F766E` | `#115E59` | `#FFFFFF` | 5.47:1 |
+| Indigo | dark | `#818CF8` | `#6D74F5` | `#0B0A2E` | 6.42:1 |
+| Indigo | light | `#4F46E5` | `#4338CA` | `#FFFFFF` | 6.29:1 |
+| Violet | dark | `#C4B5FD` | `#A78BFA` | `#1A0B2E` | 10.06:1 |
+| Violet | light | `#6D28D9` | `#5B21B6` | `#FFFFFF` | 7.10:1 |
+| Orange | dark | `#FB923C` | `#F97316` | `#2A1204` | 7.82:1 |
+| Orange | light | `#C2410C` | `#9A3412` | `#FFFFFF` | 5.18:1 |
+
+Storage key: `ajs.accent` (`mint` | `indigo` | `violet` | `orange`). An accent must never read as a
+status: no `--mint` value equals `--info` or `--warning` in either theme. `--mint-strong` is the
+primary-button hover fill, so `--on-mint` must clear 4.5:1 on it as well as on `--mint`: light mint
+uses `#115E59` (7.58:1) and dark indigo uses `#6D74F5` (4.98:1) to keep every one of the sixteen
+pairs at or above the bar. The Settings swatches are the only place outside these blocks that
+repeats accent hex, because each 12 px dot must show its own hue rather than the active `--mint`.
+`tests/theme-accent.test.tsx` asserts the eight definitions, holds `--on-mint` on both `--mint` and
+`--mint-strong` to ≥4.5:1 for every accent/theme pair, rejects a `--info`/`--warning` collision, and
+checks the live cascade plus `aria-pressed` and persistence across remounts.
+
 ## 4. Type tokens
 
 Families: **Inter** (UI, variable, weights 400/500/600) and **JetBrains Mono** (IPs, ports, byte
@@ -961,6 +991,7 @@ and the "New" discovery purple — none of them have a job in an operator consol
 | Chart library theming | Recharts cannot read CSS vars directly; the implementer must pass resolved hex from a token map | no — derive from §3.6 |
 | Virtualised table above 500 rows | v1 renders up to 500 rows unpaginated, then pages server-side | no — v1 tradeoff |
 | Light theme | **supported derived theme** (dark-first): `ThemeProvider` sets `[data-theme="light"]` and persists the choice under `localStorage` key `ajs.theme`; `tests/theme-contrast.test.ts` holds both themes to ≥4.5:1 | no — settled |
+| Accent themes | **supported** (Mint default, Indigo, Violet, Orange): `data-accent` on `<html>`, `localStorage` key `ajs.accent`, tokens in §3.9; never sent to the daemon; no accent may equal `--info`/`--warning` | no — settled |
 | Density toggle (28/32/36 rows) | not in v1; the 36 px row is fixed | yes, later |
 | Per-page saved column widths | `localStorage`, key `ajs.table.<page>` | no |
 | Font subsetting | ship Inter + JetBrains Mono latin subset only (~120 KB total woff2) | no |

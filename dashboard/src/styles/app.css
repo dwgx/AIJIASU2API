@@ -65,7 +65,7 @@
   --border-strong: rgba(16, 32, 26, 0.17);
 
   --mint: #0f766e;
-  --mint-strong: #0d9488;
+  --mint-strong: #115e59;
   --success: #047857;
   --warning: #b45309;
   --danger: #be123c;
@@ -74,6 +74,46 @@
 
   --shadow-card: 0 1px 2px rgba(16, 32, 26, 0.05), 0 10px 26px rgba(16, 32, 26, 0.06);
   --shadow-pop: 0 24px 64px rgba(16, 32, 26, 0.18);
+}
+
+/* ==========================================================================
+   Accents — mint is the default palette above; these blocks only retune the
+   accent trio. Every --mint consumer follows because the roles stay the same.
+   ========================================================================== */
+[data-accent="indigo"] {
+  --mint: #818cf8;
+  --mint-strong: #6d74f5;
+  --on-mint: #0b0a2e;
+}
+
+[data-theme="light"][data-accent="indigo"] {
+  --mint: #4f46e5;
+  --mint-strong: #4338ca;
+  --on-mint: #ffffff;
+}
+
+[data-accent="violet"] {
+  --mint: #c4b5fd;
+  --mint-strong: #a78bfa;
+  --on-mint: #1a0b2e;
+}
+
+[data-theme="light"][data-accent="violet"] {
+  --mint: #6d28d9;
+  --mint-strong: #5b21b6;
+  --on-mint: #ffffff;
+}
+
+[data-accent="orange"] {
+  --mint: #fb923c;
+  --mint-strong: #f97316;
+  --on-mint: #2a1204;
+}
+
+[data-theme="light"][data-accent="orange"] {
+  --mint: #c2410c;
+  --mint-strong: #9a3412;
+  --on-mint: #ffffff;
 }
 
 /* ==========================================================================
@@ -2580,6 +2620,79 @@ svg {
 
 .segmented__item.is-active svg {
   color: var(--mint);
+}
+
+.accent-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.accent-field__label {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.accent-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.accent-picker__item {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.accent-picker__item:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.accent-picker__item.is-active {
+  border-color: var(--mint);
+  color: var(--text);
+  box-shadow: 0 0 0 2px var(--mint);
+}
+
+.accent-picker__dot {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+/* Swatch previews are the one place accent hex is repeated: each dot must show
+   its own hue, not the active --mint. */
+.accent-picker__dot--mint {
+  background: #5eead4;
+}
+
+.accent-picker__dot--indigo {
+  background: #818cf8;
+}
+
+.accent-picker__dot--violet {
+  background: #c4b5fd;
+}
+
+.accent-picker__dot--orange {
+  background: #fb923c;
 }
 
 .tabs {

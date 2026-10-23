@@ -1,7 +1,9 @@
+import clsx from 'clsx'
 import { Database, Moon, RefreshCw, Save, Sun } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, isMockMode } from '../lib/api'
 import { useTheme } from '../lib/theme'
+import type { AccentName } from '../lib/theme'
 import type { PanelSettings } from '../lib/types'
 import { useAsync } from '../lib/useAsync'
 import { ConfirmDialog } from '../components/Overlay'
@@ -19,11 +21,18 @@ import {
   Skeleton,
 } from '../components/primitives'
 
+const ACCENTS: ReadonlyArray<{ value: AccentName; label: string }> = [
+  { value: 'mint', label: 'Mint' },
+  { value: 'indigo', label: 'Indigo' },
+  { value: 'violet', label: 'Violet' },
+  { value: 'orange', label: 'Orange' },
+]
+
 export default function Settings() {
   const mock = isMockMode()
   const settings = useAsync(() => api.getSettings(), [])
   const { push } = useToast()
-  const { theme, setTheme } = useTheme()
+  const { theme, setTheme, accent, setAccent } = useTheme()
   const [draft, setDraft] = useState<PanelSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
@@ -194,7 +203,7 @@ export default function Settings() {
             </Field>
           </Card>
 
-          <Card title="Appearance" subtitle="Obsidian Mint, dark-first.">
+          <Card title="Appearance" subtitle="Theme and accent, stored in this browser.">
             <SegmentedControl
               label="Theme"
               value={theme}
@@ -207,9 +216,32 @@ export default function Settings() {
                 { value: 'light', label: 'Light', icon: <Sun size={13} /> },
               ]}
             />
+            <div className="accent-field">
+              <span className="accent-field__label" id="accent-group-label">
+                Accent
+              </span>
+              <div className="accent-picker" role="group" aria-labelledby="accent-group-label">
+                {ACCENTS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={clsx('accent-picker__item', accent === option.value && 'is-active')}
+                    aria-pressed={accent === option.value}
+                    onClick={() => setAccent(option.value)}
+                  >
+                    <span
+                      className={clsx('accent-picker__dot', `accent-picker__dot--${option.value}`)}
+                      aria-hidden="true"
+                    />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <p className="setting-note">
-              The theme is stored per browser. Dark is the reference palette; light is a derived
-              variant for bright rooms.
+              The theme and accent are stored per browser (<code className="mono">ajs.theme</code>,{' '}
+              <code className="mono">ajs.accent</code>) and are not sent to the daemon. Dark is the
+              reference palette; light is a derived variant for bright rooms.
             </p>
           </Card>
 
