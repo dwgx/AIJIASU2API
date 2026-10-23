@@ -516,6 +516,106 @@ func TestNodeControllerDrainUndrain(t *testing.T) {
 	}
 }
 
+// TestNodeDrainHTTPHookDrivesGate wires the API seam to the real controller:
+// POST drain must close the gate before the store reports DRAINING and POST
+// undrain must reopen it. Everything stays on loopback plus the fake session.
+func TestNodeDrainHTTPHookDrivesGate(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-http-drain")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         map[string]apifacade.Server{"s1": testServer("s1")},
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeController(t, st, logins, opener, rec)
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+	node := nodeByServer(t, st, acct.ID, "s1")
+
+	ts := httptest.NewServer(api.New(api.Config{
+		AllowInsecure: true,
+		NodeDrainHook: func(ctx context.Context, nodeID string, drain bool) error {
+			if drain {
+				return controller.DrainNode(ctx, nodeID)
+			}
+			return controller.UndrainNode(ctx, nodeID)
+		},
+	}, st, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(ts.Close)
+
+	post := func(action string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/nodes/"+node.ID+"/actions/"+action, nil)
+		if err != nil {
+			t.Fatalf("new %s request: %v", action, err)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", action, err)
+		}
+		return resp
+	}
+
+	resp := post("drain")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("drain status = %d, want 200 (body %s)", resp.StatusCode, body)
+	}
+	_ = resp.Body.Close()
+	drained, ok := st.Node(node.ID)
+	if !ok || drained.State != model.NodeDraining {
+		t.Fatalf("drained node = %+v, want DRAINING", drained)
+	}
+	code, _ := socks5Connect(t, node.GatePort)
+	if code != 0x05 {
+		t.Fatalf("draining gate reply = 0x%02x, want 0x05 refused", code)
+	}
+	t.Logf("http drain %s: state=%s gate reply=0x%02x", node.ID, drained.State, code)
+
+	resp = post("undrain")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("undrain status = %d, want 200 (body %s)", resp.StatusCode, body)
+	}
+	_ = resp.Body.Close()
+	undrained, ok := st.Node(node.ID)
+	if !ok || undrained.State != model.NodeLive {
+		t.Fatalf("undrained node = %+v, want LIVE", undrained)
+	}
+	code, conn := socks5Connect(t, node.GatePort)
+	if code != 0x00 {
+		t.Fatalf("undrained gate reply = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+	t.Logf("http undrain %s: state=%s gate reply=0x%02x", node.ID, undrained.State, code)
+
+	// A controller failure must abort the HTTP drain: after Stop the gate is
+	// closed, so the store must keep the node LIVE instead of DRAINING.
+	if err := controller.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	resp = post("drain")
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("drain after Stop status = %d, want 500 (body %s)", resp.StatusCode, body)
+	}
+	_ = resp.Body.Close()
+	kept, ok := st.Node(node.ID)
+	if !ok || kept.State != model.NodeLive {
+		t.Fatalf("node after the aborted drain = %+v, want LIVE", kept)
+	}
+	t.Logf("http drain after stop: 500 INTERNAL, node stayed %s", kept.State)
+}
+
 func TestNodeControllerStopClosesGates(t *testing.T) {
 	requirePort13000(t)
 	st := newNodeTestStore(t)

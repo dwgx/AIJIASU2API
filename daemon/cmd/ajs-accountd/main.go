@@ -124,6 +124,7 @@ func run() error {
 	var loginService api.LoginService
 	var loginHook func(context.Context, string) error
 	var accountDeleteHook func(context.Context, string) error
+	var nodeDrainHook func(context.Context, string, bool) error
 	if service, profile, err := startAccountLogin(st, logger); err != nil {
 		return err
 	} else if service != nil {
@@ -144,6 +145,12 @@ func run() error {
 		}()
 		loginHook = controller.SyncAccount
 		accountDeleteHook = controller.StopAccount
+		nodeDrainHook = func(ctx context.Context, nodeID string, drain bool) error {
+			if drain {
+				return controller.DrainNode(ctx, nodeID)
+			}
+			return controller.UndrainNode(ctx, nodeID)
+		}
 	}
 
 	server := api.New(api.Config{
@@ -154,6 +161,7 @@ func run() error {
 		LoginService:      loginService,
 		LoginHook:         loginHook,
 		AccountDeleteHook: accountDeleteHook,
+		NodeDrainHook:     nodeDrainHook,
 	}, st, logger)
 
 	httpServer := &http.Server{

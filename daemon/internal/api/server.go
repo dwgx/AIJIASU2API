@@ -82,6 +82,12 @@ type Config struct {
 	// sessions. Unlike LoginHook its error aborts the delete: removing the
 	// store nodes while their gates stay open is the B0 gap this seam closes.
 	AccountDeleteHook func(ctx context.Context, accountID string) error
+	// NodeDrainHook runs before a drain/undrain touches the store or the
+	// panel, so the node controller can stop or reopen the node's gate first.
+	// It is nil unless AJS_ACCOUNT_LOGIN=1 wired the controller. An error is
+	// logged and answers 500 INTERNAL with no state change; a node the store
+	// does not know is answered 404 without calling the hook.
+	NodeDrainHook func(ctx context.Context, nodeID string, drain bool) error
 }
 
 // Server wires the store to an http.Handler.

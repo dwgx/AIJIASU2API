@@ -1,9 +1,13 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/store"
 )
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -36,8 +40,46 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filtered[start:end])
 }
 
+// runNodeDrainHook hands a drain/undrain to the node controller before the
+// store or the panel is touched. A nil hook keeps the store-only behaviour of
+// a daemon without AJS_ACCOUNT_LOGIN=1.
+func (s *Server) runNodeDrainHook(ctx context.Context, nodeID string, drain bool) error {
+	if s.cfg.NodeDrainHook == nil {
+		return nil
+	}
+	return s.cfg.NodeDrainHook(ctx, nodeID, drain)
+}
+
+// writeNodeDrainHookError logs a controller hook failure and answers. A
+// controller error that is the store's own refusal (draining a DOWN node, a
+// node removed between the existence check and the hook) keeps the store
+// contract instead of becoming a 500; every other failure answers 500
+// INTERNAL and leaves the node as it was.
+func (s *Server) writeNodeDrainHookError(w http.ResponseWriter, nodeID string, err error) {
+	s.logger.Error("node_drain_hook_error", "node", nodeID, "error", err)
+	switch {
+	case errors.Is(err, store.ErrInvalid), errors.Is(err, store.ErrNotFound),
+		errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrUpstream):
+		s.writeStoreError(w, err)
+	default:
+		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
+	}
+}
+
 func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
+	if _, ok := s.store.Node(id); !ok {
+		// A node the store does not know never reaches the controller: the
+		// 404 contract is decided here, before any hook side effect.
+		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("node %q not found", id))
+		return
+	}
+	if err := s.runNodeDrainHook(r.Context(), id, true); err != nil {
+		// The controller must close admission before the store says DRAINING,
+		// so a hook failure leaves the node as it was.
+		s.writeNodeDrainHookError(w, id, err)
+		return
+	}
 	if s.cfg.Panel != nil {
 		node, err := s.cfg.Panel.DrainNode(r.Context(), id)
 		if err != nil {
@@ -57,6 +99,16 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUndrainNode(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
+	if _, ok := s.store.Node(id); !ok {
+		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("node %q not found", id))
+		return
+	}
+	if err := s.runNodeDrainHook(r.Context(), id, false); err != nil {
+		// Reopening admission failed, so the node stays DRAINING in the store
+		// rather than advertising a node whose gate still refuses flows.
+		s.writeNodeDrainHookError(w, id, err)
+		return
+	}
 	if s.cfg.Panel != nil {
 		node, err := s.cfg.Panel.UndrainNode(r.Context(), id)
 		if err != nil {

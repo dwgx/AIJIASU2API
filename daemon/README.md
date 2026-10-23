@@ -20,7 +20,10 @@ control API; without it the handler only refreshes the store, and no vendor
 host is contacted. With the same switch the node controller follows a
 successful login with `loginSync`, opens one authenticated FV session and one
 loopback SOCKS5 gate per usable vendor server (`127.0.0.1:13000` upward), writes
-the node, and reconciles Resin. There is still no SQLite: the JSON snapshot is
+the node, and reconciles Resin. It also makes `POST .../drain|undrain` call the
+controller before the store, so a running gate stops admitting (or reopens)
+before the node state changes; without the switch the handlers keep the
+store/Resin behavior. There is still no SQLite: the JSON snapshot is
 the v0.1 stopgap for the schema in `docs/PANEL.md` §6, and the node supervisor
 is implemented but not wired to the controller.
 
@@ -524,6 +527,12 @@ controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 api.Config{
     LoginHook:         controller.SyncAccount,
     AccountDeleteHook: controller.StopAccount, // gates close before the store cascade
+    NodeDrainHook: func(ctx context.Context, nodeID string, drain bool) error {
+        if drain {
+            return controller.DrainNode(ctx, nodeID)
+        }
+        return controller.UndrainNode(ctx, nodeID)
+    },
 }
 defer controller.Stop(stopCtx)
 ```
@@ -561,16 +570,22 @@ the account it returns `nil` without reconciling — and it aggregates close and
 reconcile failures; a failed close still drops the gate from the running set,
 so a retry cannot double-close it.
 
-The two API hooks have opposite failure policies. `LoginHook` is best-effort:
-it runs after the login is recorded, and a hook error is logged as
-`account_login_hook_error` without changing the 200 response.
+The three API hooks have deliberately different failure policies. `LoginHook`
+is best-effort: it runs after the login is recorded, and a hook error is logged
+as `account_login_hook_error` without changing the 200 response.
 `AccountDeleteHook` is a gate: `DELETE /v1/accounts/{id}` calls it before
 `store.DeleteAccount`, and an error is logged as `account_delete_hook_error`
 and answers 500 `INTERNAL` without deleting anything, so a deleted account
 cannot leave a listening gate or a live FV session behind. A missing account
-answers 404 without calling the hook. Both hooks are nil unless
-`AJS_ACCOUNT_LOGIN=1` wired the controller, so the default build keeps the
-store-only behaviour.
+answers 404 without calling the hook. `NodeDrainHook` is also a gate: drain and
+undrain call it before `Panel.DrainNode`/`store.DrainNode`, and an error is
+logged as `node_drain_hook_error` and answers 500 `INTERNAL` with the node
+unchanged, so the store never reports DRAINING while the gate still admits (or
+LIVE while it still refuses). A store refusal forwarded by the controller
+(draining a DOWN node, a node removed concurrently) keeps its 404/409/503
+status. A node the store does not know answers 404
+without calling the hook. All three hooks are nil unless `AJS_ACCOUNT_LOGIN=1`
+wired the controller, so the default build keeps the store-only behaviour.
 
 - Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
   skipping ports already used by a running gate or a store node. Each gate
@@ -597,10 +612,17 @@ unknown account do not reconcile), the aggregated close+reconcile error with a
 failed close still dropping the gate, partial failure leaving the working node
 LIVE and the failed node DOWN, no-node-started returning an aggregate error that
 names both nodes, no usable server, missing login/device preconditions, four
-concurrent syncs sharing one gate, an injected gate factory, and an end-to-end
+concurrent syncs sharing one gate, an injected gate factory, an end-to-end
 `DELETE /v1/accounts/{id}` through `api.New` with the real controller that
-proves the gates are refused and the store cascade then removes the nodes.
-`TestAccountLoginHook` and `TestAccountDeleteHook` pin the API seams.
+proves the gates are refused and the store cascade then removes the nodes, and
+an end-to-end `POST /v1/nodes/{id}/actions/drain|undrain` through `api.New`
+with `NodeDrainHook` wired to the real controller: drain answers 0x05 on a new
+SOCKS5 CONNECT, undrain answers 0x00, and a stopped controller makes the drain
+answer 500 while the node stays LIVE.
+`TestAccountLoginHook`, `TestAccountDeleteHook` and `TestNodeDrainHook` pin the
+API seams; the last one proves hook-before-store, hook-before-panel,
+abort-on-error, the missing-node 404 without a hook call, and the nil-hook
+store-only path.
 
 ## Supervisor (AJS-43)
 
@@ -851,14 +873,19 @@ resin_version}`: `nodes` maps node id → tag for the rendered `LIVE` nodes,
 
 With a panel configured, the four mutation handlers call `api.Panel` (an alias
 of `runtime.Panel`) instead of the store; the response bodies are unchanged.
-Without a panel they keep calling the store exactly as before.
+Without a panel they keep calling the store exactly as before. With
+`AJS_ACCOUNT_LOGIN=1` the two node mutations call `NodeDrainHook` before either
+path, so the controller closes or reopens the gate first; a runtime hook
+failure answers 500 `INTERNAL` and leaves the store and panel untouched, while
+a store refusal forwarded by the controller (e.g. draining a DOWN node) keeps
+its usual 404/409 status.
 
 | Route | Panel path | Store fallback (no panel) |
 |---|---|---|
 | POST `/v1/leases/{id}/actions/rotate` | read store lease → full tag `<subscription>/<tag>` from the last topology → `pub.Rotate(..., true)` → `GetLease` → `store.ApplyLeaseRotation` | next pool IP, expiry refreshed, requests +17 |
 | DELETE `/v1/leases/{id}` | `DeleteLease` (404 idempotent) → `store.ReleaseLease` | `store.ReleaseLease` |
-| POST `/v1/nodes/{id}/actions/drain` | `store.DrainNode` → `Reconcile` (publish the LIVE-only set) | `store.DrainNode` |
-| POST `/v1/nodes/{id}/actions/undrain` | `store.UndrainNode` → `Reconcile` | `store.UndrainNode` |
+| POST `/v1/nodes/{id}/actions/drain` | `NodeDrainHook` (gate close) → `store.DrainNode` → `Reconcile` (publish the LIVE-only set) | `NodeDrainHook` → `store.DrainNode` |
+| POST `/v1/nodes/{id}/actions/undrain` | `NodeDrainHook` (gate reopen) → `store.UndrainNode` → `Reconcile` | `NodeDrainHook` → `store.UndrainNode` |
 
 Rotation call order: `GET platform` (read filters) → `PATCH platform`
 (`regex_filters` + `!^<subscription>/<tag>$`) → `DELETE lease` → `PATCH platform`
@@ -869,9 +896,13 @@ same node. `ApplyLeaseRotation` records Resin's `egress_ip`/`expiry` and mirrors
 the IP onto the node, preserving id/account/user/node/TTL and the local request
 counter; the synthetic next-IP pool only runs in fallback mode.
 
-Drain/undrain transition the store first and then republish. When the publish
+Drain/undrain transition the store and then republish. When the publish
 fails the handler answers 503 but the store state stays DRAINING/LIVE, and the
-next `/v1/reconcile` converges Resin.
+next `/v1/reconcile` converges Resin. With the controller hook wired, the
+controller has already closed/reopened the gate and written the store before
+the panel step runs; if that hook fails the handler answers 500 `INTERNAL` and
+neither the store nor the panel changes, so the gate and the advertised state
+cannot diverge.
 
 Mutation errors reuse the panel contract:
 
@@ -974,8 +1005,8 @@ All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
-| POST | `/v1/nodes/{id}/actions/drain` | → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
-| POST | `/v1/nodes/{id}/actions/undrain` | → `LIVE` (DOWN → `READY`); republishes when configured |
+| POST | `/v1/nodes/{id}/actions/drain` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the gate first (hook failure → 500, node unchanged); → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
+| POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
 | POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
 | GET | `/v1/leases` | list; filter `user_id` |
 | POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17 |
@@ -1009,7 +1040,7 @@ Errors are always `{"error":{"code":"…","message":"…"}}`:
 | `QUOTA_EXCEEDED` | 429 | reserved; quotas are advisory in v1 |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
-| `INTERNAL` | 500 | unexpected store failure |
+| `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
 
 With `AJS_ACCOUNT_LOGIN=1`, the login handler maps the vendor outcome onto the
 same contract:
@@ -1851,6 +1882,85 @@ aggregate error naming both nodes; `TestAccountLoginHook` proves the hook runs
 after a successful login and its error is logged without changing the 200
 response. No live vendor login, FV authentication or Resin write was performed;
 live acceptance remains `[UNVERIFIED]`.
+
+### Drain hook (AJS-74)
+
+`NodeDrainHook` closes the remaining B0 drain gap: `POST
+/v1/nodes/{id}/actions/drain` and `undrain` call the node controller before the
+store or the panel, and a hook error answers 500 `INTERNAL` with the node
+unchanged. The daemon wires the hook only when `AJS_ACCOUNT_LOGIN=1`, alongside
+the login and account-delete hooks.
+
+Fresh HMC scratch (`/srv/dwgxhomecloud/scratch/ajs-74-drainhook`); no vendor
+host or Resin instance was contacted:
+
+```console
+$ go version
+go version go1.26.0 linux/amd64
+$ go test -race -count=1 ./... && go build ./... && go vet ./... && echo ALL_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.105s
+ok  	ajsaccountd/internal/api	1.200s
+ok  	ajsaccountd/internal/gate	1.570s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.062s
+ok  	ajsaccountd/internal/resin	1.356s
+ok  	ajsaccountd/internal/runtime	1.303s
+ok  	ajsaccountd/internal/secret	1.036s
+ok  	ajsaccountd/internal/store	1.516s
+ok  	ajsaccountd/internal/supervisor	7.719s
+ALL_OK
+```
+
+Hook + gate evidence (real `gate.NewServer` on `127.0.0.1:13000`, fake session
+opener, fake reconciler, loopback HTTP):
+
+```console
+$ go test -race -count=1 -v -run 'TestNodeDrainHTTPHookDrivesGate|TestNodeControllerDrainUndrain' ./internal/runtime
+=== RUN   TestNodeControllerDrainUndrain
+    nodes_test.go:483: drain acc-01:s1: state=DRAINING gate reply=0x05
+    nodes_test.go:497: undrain acc-01:s1: state=LIVE gate reply=0x00
+--- PASS: TestNodeControllerDrainUndrain (0.00s)
+=== RUN   TestNodeDrainHTTPHookDrivesGate
+    nodes_test.go:580: http drain acc-01:s1: state=DRAINING gate reply=0x05
+    nodes_test.go:598: http undrain acc-01:s1: state=LIVE gate reply=0x00
+    nodes_test.go:616: http drain after stop: 500 INTERNAL, node stayed LIVE
+--- PASS: TestNodeDrainHTTPHookDrivesGate (0.00s)
+PASS
+ok  	ajsaccountd/internal/runtime	1.019s
+$ go test -race -count=1 -v -run 'TestNodeDrainHook|TestNodeDrainUndrainProbe' ./internal/api
+=== RUN   TestNodeDrainHook
+=== RUN   TestNodeDrainHook/hook_runs_before_the_store_and_drain_succeeds
+=== RUN   TestNodeDrainHook/hook_runs_before_the_store_and_undrain_succeeds
+=== RUN   TestNodeDrainHook/hook_runs_before_the_panel
+=== RUN   TestNodeDrainHook/drain_hook_error_aborts_before_the_panel_and_the_store
+=== RUN   TestNodeDrainHook/store_refusal_from_the_hook_keeps_its_status
+=== RUN   TestNodeDrainHook/undrain_hook_error_aborts_before_the_panel_and_the_store
+=== RUN   TestNodeDrainHook/missing_node_skips_the_hook_and_the_panel
+=== RUN   TestNodeDrainHook/nil_hook_keeps_the_store-only_path
+--- PASS: TestNodeDrainHook (0.01s)
+    --- PASS: TestNodeDrainHook/hook_runs_before_the_store_and_drain_succeeds (0.00s)
+    --- PASS: TestNodeDrainHook/hook_runs_before_the_store_and_undrain_succeeds (0.00s)
+    --- PASS: TestNodeDrainHook/hook_runs_before_the_panel (0.00s)
+    --- PASS: TestNodeDrainHook/drain_hook_error_aborts_before_the_panel_and_the_store (0.00s)
+    --- PASS: TestNodeDrainHook/store_refusal_from_the_hook_keeps_its_status (0.00s)
+    --- PASS: TestNodeDrainHook/undrain_hook_error_aborts_before_the_panel_and_the_store (0.00s)
+    --- PASS: TestNodeDrainHook/missing_node_skips_the_hook_and_the_panel (0.00s)
+    --- PASS: TestNodeDrainHook/nil_hook_keeps_the_store-only_path (0.00s)
+=== RUN   TestNodeDrainUndrainProbe
+--- PASS: TestNodeDrainUndrainProbe (0.01s)
+PASS
+ok  	ajsaccountd/internal/api	1.029s
+```
+
+The runtime test drives `api.New` with `NodeDrainHook` wired to the real
+controller: drain answers `0x05` to a new SOCKS5 CONNECT, undrain answers
+`0x00` and relays, and after `controller.Stop` a drain answers 500 while the
+node stays LIVE. The API test proves hook-before-store and hook-before-panel,
+abort-on-error with no panel call and no state change, the missing-node 404
+without a hook call, the nil-hook store-only path, and the 409 status kept when
+the hook forwards the store's DOWN-node refusal. Live vendor drain remains
+`[UNVERIFIED]`.
 
 ### Delete gate (AJS-65)
 

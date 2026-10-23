@@ -16,6 +16,7 @@ import (
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
 )
 
@@ -610,6 +611,255 @@ func TestAccountDeleteHook(t *testing.T) {
 		requireErrorCode(t, body, CodeNotFound)
 		if called {
 			t.Fatal("hook ran for a missing account")
+		}
+	})
+}
+
+// drainPanel records whether the API hook had already run when a panel
+// mutation started. Only the two node mutations are implemented: any other
+// call panics on the embedded nil interface, which is the desired test failure.
+type drainPanel struct {
+	runtime.Panel
+	hookRan        bool
+	hookRanDrain   bool
+	hookRanUndrain bool
+	drainCalls     int
+	undrainCalls   int
+}
+
+func (p *drainPanel) DrainNode(_ context.Context, nodeID string) (model.ProxyNode, error) {
+	p.drainCalls++
+	p.hookRanDrain = p.hookRan
+	return model.ProxyNode{ID: nodeID, State: model.NodeDraining}, nil
+}
+
+func (p *drainPanel) UndrainNode(_ context.Context, nodeID string) (model.ProxyNode, error) {
+	p.undrainCalls++
+	p.hookRanUndrain = p.hookRan
+	return model.ProxyNode{ID: nodeID, State: model.NodeLive}, nil
+}
+
+func TestNodeDrainHook(t *testing.T) {
+	t.Run("hook runs before the store and drain succeeds", func(t *testing.T) {
+		st := store.New()
+		var hookNode string
+		var hookDrain bool
+		var stateAtHook model.NodeState
+		server := New(Config{
+			AdminToken: testToken,
+			NodeDrainHook: func(_ context.Context, nodeID string, drain bool) error {
+				hookNode = nodeID
+				hookDrain = drain
+				if node, ok := st.Node(nodeID); ok {
+					stateAtHook = node.State
+				}
+				return nil
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-01/actions/drain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		node := decodeBody[model.ProxyNode](t, body)
+		if node.State != model.NodeDraining {
+			t.Fatalf("drained state = %q, want DRAINING", node.State)
+		}
+		if hookNode != "node-01" || !hookDrain {
+			t.Fatalf("hook = %q drain=%v, want node-01/true", hookNode, hookDrain)
+		}
+		if stateAtHook != model.NodeLive {
+			t.Fatalf("hook saw state %q, want LIVE before the store changed", stateAtHook)
+		}
+	})
+
+	t.Run("hook runs before the store and undrain succeeds", func(t *testing.T) {
+		st := store.New()
+		var hookDrain bool
+		var stateAtHook model.NodeState
+		server := New(Config{
+			AdminToken: testToken,
+			NodeDrainHook: func(_ context.Context, nodeID string, drain bool) error {
+				hookDrain = drain
+				if node, ok := st.Node(nodeID); ok {
+					stateAtHook = node.State
+				}
+				return nil
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-08/actions/undrain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		node := decodeBody[model.ProxyNode](t, body)
+		if node.State != model.NodeLive {
+			t.Fatalf("undrained state = %q, want LIVE", node.State)
+		}
+		if hookDrain {
+			t.Fatal("undrain hook received drain=true")
+		}
+		if stateAtHook != model.NodeDraining {
+			t.Fatalf("hook saw state %q, want DRAINING before the store changed", stateAtHook)
+		}
+	})
+
+	t.Run("hook runs before the panel", func(t *testing.T) {
+		st := store.New()
+		panel := &drainPanel{}
+		server := New(Config{
+			AdminToken: testToken,
+			Panel:      panel,
+			NodeDrainHook: func(context.Context, string, bool) error {
+				panel.hookRan = true
+				return nil
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-01/actions/drain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		if node := decodeBody[model.ProxyNode](t, body); node.State != model.NodeDraining {
+			t.Fatalf("panel drain response state = %q, want DRAINING", node.State)
+		}
+		if !panel.hookRanDrain {
+			t.Fatal("panel.DrainNode ran before the node drain hook")
+		}
+
+		resp, body = apiCall(t, ts, http.MethodPost, "/v1/nodes/node-08/actions/undrain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		if node := decodeBody[model.ProxyNode](t, body); node.State != model.NodeLive {
+			t.Fatalf("panel undrain response state = %q, want LIVE", node.State)
+		}
+		if !panel.hookRanUndrain {
+			t.Fatal("panel.UndrainNode ran before the node drain hook")
+		}
+	})
+
+	t.Run("drain hook error aborts before the panel and the store", func(t *testing.T) {
+		var logs bytes.Buffer
+		st := store.New()
+		panel := &drainPanel{}
+		server := New(Config{
+			AdminToken: testToken,
+			Panel:      panel,
+			NodeDrainHook: func(context.Context, string, bool) error {
+				return errors.New("gate drain failed")
+			},
+		}, st, slog.New(slog.NewTextHandler(&logs, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-01/actions/drain", nil)
+		requireStatus(t, resp, http.StatusInternalServerError)
+		requireErrorCode(t, body, CodeInternal)
+		if panel.drainCalls != 0 {
+			t.Fatalf("panel.DrainNode calls = %d, want 0 after a hook failure", panel.drainCalls)
+		}
+		node, ok := st.Node("node-01")
+		if !ok || node.State != model.NodeLive {
+			t.Fatalf("node after the failed hook = %+v, want LIVE", node)
+		}
+		if !strings.Contains(logs.String(), "node_drain_hook_error") {
+			t.Fatalf("logs = %q, want node_drain_hook_error", logs.String())
+		}
+	})
+
+	t.Run("store refusal from the hook keeps its status", func(t *testing.T) {
+		st := store.New()
+		server := New(Config{
+			AdminToken: testToken,
+			NodeDrainHook: func(context.Context, string, bool) error {
+				// The wired controller forwards the store's refusal, so a DOWN
+				// node keeps the 409 contract instead of becoming a 500.
+				_, err := st.DrainNode("node-12")
+				return err
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-12/actions/drain", nil)
+		requireStatus(t, resp, http.StatusConflict)
+		requireErrorCode(t, body, CodeConflict)
+		if node, _ := st.Node("node-12"); node.State != model.NodeDown {
+			t.Fatalf("node state = %q, want DOWN", node.State)
+		}
+	})
+
+	t.Run("undrain hook error aborts before the panel and the store", func(t *testing.T) {
+		var logs bytes.Buffer
+		st := store.New()
+		panel := &drainPanel{}
+		server := New(Config{
+			AdminToken: testToken,
+			Panel:      panel,
+			NodeDrainHook: func(context.Context, string, bool) error {
+				return errors.New("gate undrain failed")
+			},
+		}, st, slog.New(slog.NewTextHandler(&logs, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-08/actions/undrain", nil)
+		requireStatus(t, resp, http.StatusInternalServerError)
+		requireErrorCode(t, body, CodeInternal)
+		if panel.undrainCalls != 0 {
+			t.Fatalf("panel.UndrainNode calls = %d, want 0 after a hook failure", panel.undrainCalls)
+		}
+		node, ok := st.Node("node-08")
+		if !ok || node.State != model.NodeDraining {
+			t.Fatalf("node after the failed hook = %+v, want DRAINING", node)
+		}
+		if !strings.Contains(logs.String(), "node_drain_hook_error") {
+			t.Fatalf("logs = %q, want node_drain_hook_error", logs.String())
+		}
+	})
+
+	t.Run("missing node skips the hook and the panel", func(t *testing.T) {
+		called := false
+		panel := &drainPanel{}
+		server := New(Config{
+			AdminToken: testToken,
+			Panel:      panel,
+			NodeDrainHook: func(context.Context, string, bool) error {
+				called = true
+				return nil
+			},
+		}, store.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		for _, action := range []string{"drain", "undrain"} {
+			resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/missing/actions/"+action, nil)
+			requireStatus(t, resp, http.StatusNotFound)
+			requireErrorCode(t, body, CodeNotFound)
+		}
+		if called {
+			t.Fatal("hook ran for a missing node")
+		}
+		if panel.drainCalls != 0 || panel.undrainCalls != 0 {
+			t.Fatalf("panel calls = %d/%d, want 0/0 for a missing node", panel.drainCalls, panel.undrainCalls)
+		}
+	})
+
+	t.Run("nil hook keeps the store-only path", func(t *testing.T) {
+		ts, st := newTestServer(t)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-01/actions/drain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		if node := decodeBody[model.ProxyNode](t, body); node.State != model.NodeDraining {
+			t.Fatalf("drained state = %q, want DRAINING", node.State)
+		}
+		if node, _ := st.Node("node-01"); node.State != model.NodeDraining {
+			t.Fatalf("store state = %q, want DRAINING", node.State)
+		}
+
+		resp, body = apiCall(t, ts, http.MethodPost, "/v1/nodes/node-01/actions/undrain", nil)
+		requireStatus(t, resp, http.StatusOK)
+		if node := decodeBody[model.ProxyNode](t, body); node.State != model.NodeLive {
+			t.Fatalf("undrained state = %q, want LIVE", node.State)
 		}
 	})
 }
