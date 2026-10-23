@@ -18,7 +18,7 @@ blocks them at the repository root. Nothing in this tree has contacted a live AJ
 ## Current status
 
 **Offline emulator, dashboard and daemon; the Resin M1 integration spike is PASS. No live vendor
-call, no gate, no persistence beyond sealed secrets.**
+call, no gate; panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
 
 As of 2026-10-23:
 
@@ -30,11 +30,11 @@ As of 2026-10-23:
   default; a live mode against `ajs-accountd` is opt-in at build time. 28 Vitest tests.
   HMC serves the mock build on `18081` and the live build on `18082`.
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
-  store, a Resin v1.3.0 admin client, publisher and runtime wiring (local subscription render,
-  platform create/update, lease rotate through platform filter exclusion, node drain/undrain,
-  probe-config patch), an AES-256-GCM sealed secret file, and the account-control plus FV
-  session-factory seams. 111 Go test functions, mostly `httptest` fakes; the tests use no Resin
-  process, no vendor account and no network.
+  store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
+  (local subscription render, platform create/update, lease rotate through platform filter
+  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, and the
+  account-control plus FV session-factory seams. 153 Go test functions, mostly `httptest` fakes;
+  the tests use no Resin process, no vendor account and no network.
 - Resin M1 — **PASS** on HMC against `ghcr.io/resinat/resin:1.3.0`
   (`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`): loopback SOCKS5 dial,
   IP-anchored sticky `(Platform, Account)` leases, rotation through platform filter exclusion,
@@ -52,8 +52,9 @@ As of 2026-10-23:
   CONNECT, admission, byte counters, drain/undrain) and `daemon/internal/supervisor` (per-node
   child start, readiness, events, stop) packages exist, but they are not wired together and
   there is no per-`(account, server)` node lifecycle yet.
-- **SQLite / full persistence.** The daemon store is in memory and reseeded on every start; only
-  sealed account secrets in `$AJS_STATE_DIR/secrets.json` survive a restart.
+- **SQLite / the full schema.** The daemon persists a versioned JSON snapshot (`AJS_STATE_FILE`,
+  every 30s + shutdown) including sealed secrets, but it is not the SQLite schema in
+  `docs/PANEL.md`; the snapshot is a v0.1 stopgap.
 - **Packaged deployment.** `dashboard/compose.yml` builds the mock image only; there is no compose
   for the daemon/Resin pair, and no macOS or Windows build.
 - **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;

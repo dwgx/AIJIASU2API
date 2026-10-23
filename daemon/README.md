@@ -1,8 +1,8 @@
 # ajs-accountd (skeleton)
 
-In-memory Go daemon that serves the JSON contract the dashboard's
-live client expects (standard library plus the in-repo `ajsproxy` module). The
-Resin admin client, the publisher, the
+Go daemon with an in-memory panel store and a JSON snapshot that serves the
+JSON contract the dashboard's live client expects (standard library plus the
+in-repo `ajsproxy` module). The Resin admin client, the publisher, the
 startup/topology/reconcile wiring and the runtime mutations are in place: when
 `AJS_RESIN_ADMIN_TOKEN` is set the daemon renders the store's `LIVE` nodes into
 the `ajs-live` local subscription before it starts listening,
@@ -11,17 +11,24 @@ rotate/release plus node drain/undrain write through Resin. Without the token it
 keeps the store-derived view and the in-memory mutation behavior, and logs
 `resin_disabled`. With `AJS_MASTER_KEY` set, created account passwords are
 sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
-validated and discarded. Vendor login is wired but default-off:
+validated and discarded. Every panel mutation is snapshotted to
+`$AJS_STATE_FILE` (default `$AJS_STATE_DIR/state.json`), loaded before the
+listener starts, saved every `AJS_SNAPSHOT_INTERVAL` (default 30 s) and once on
+shutdown, so the store survives a restart. Vendor login is wired but default-off:
 `AJS_ACCOUNT_LOGIN=1` makes `POST /v1/accounts/{id}/actions/login` call the
 control API; without it the handler only refreshes the store, and no vendor
-host is contacted. There is still no SQLite; the gate and the node supervisor
-are implemented but neither is wired to the session factory or to each other.
+host is contacted. There is still no SQLite: the JSON snapshot is the v0.1
+stopgap for the schema in `docs/PANEL.md` §6, and the gate and the node
+supervisor are implemented but neither is wired to the session factory or to
+each other.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
-- State: process memory, reseeded from the dashboard mock on every start, plus
-  sealed account secrets in `$AJS_STATE_DIR/secrets.json` when
-  `AJS_MASTER_KEY` is set
+- State: versioned JSON snapshot at `$AJS_STATE_FILE` (default
+  `$AJS_STATE_DIR/state.json`), loaded on startup and saved every
+  `AJS_SNAPSHOT_INTERVAL` and on shutdown; a missing file falls back to the
+  dashboard mock seed. Sealed account secrets are inside the snapshot and,
+  when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`
 - Wire contract: `dashboard/src/lib/types.ts` field names and
   `dashboard/src/lib/api.ts` paths/methods
 
@@ -33,6 +40,8 @@ cmd/ajs-accountd/main.go     flags/env, listener, graceful shutdown
 internal/model/model.go      wire structs, inputs and patches
 internal/store/              mutex-protected state + deterministic seed
 internal/store/seed.go       mock-compatible seed data and metrics series
+internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
+internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
 internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
 internal/publisher/          subscription render, coalesced publish, rotation
@@ -529,7 +538,9 @@ test binary as the child.
 | `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
 | `AJS_PLATFORM_NAME` | `-platform-name` | subscription name | Resin platform name |
 | `AJS_MASTER_KEY` | — | — | 32-byte secret-encryption key (64 hex characters or base64); set → seal account passwords, empty → `secrets_disabled` |
-| `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` (created `0700`) |
+| `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` and the default `state.json` (created `0700`) |
+| `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
+| `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
 
 ## Secret storage
 
@@ -553,9 +564,62 @@ the account is stored.
   fails. There is no HTTP endpoint for rotation.
 - Access: `store.AccountSecret(id)` opens a password for the account client. It
   is not exposed over HTTP and `model.Account` has no credential field.
-- Limitation: the rest of the store is still in-memory and reseeded on every
-  start, so accounts created at runtime disappear on restart while their sealed
-  blobs stay in `secrets.json`. SQLite (PANEL §6) is a later slice.
+- Limitation: the sealed blobs are duplicated in `secrets.json` (the sealer's
+  own file) and in the full snapshot. The snapshot is authoritative on load;
+  see Persistence below. SQLite (PANEL §6) is a later slice.
+
+## Persistence (AJS-45)
+
+The panel store is durable through a whole-store JSON snapshot. This is a
+deliberate v0.1 stopgap: `docs/PANEL.md` §6 describes the target SQLite schema,
+but this slice keeps the in-memory store and serialises it as one document.
+
+```
+$AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
+  version          1
+  accounts         []Account        nodes      []ProxyNode
+  leases           []Lease          users      []PanelUser
+  keys             []APIKey         requests   []RequestLog
+  audit            []AuditEvent     settings   PanelSettings
+  keyHashes        {keyId: sha256}  secrets    {accountId: base64(sealed)}
+  accountSeq userSeq keySeq mutationSeq auditSeq
+```
+
+- `Store.Snapshot()` copies every collection, counter, key hash and sealed
+  secret under one `RLock`, then marshals outside the lock. Plaintext
+  credentials never enter the document: `secrets` holds the AES-256-GCM
+  envelopes from `internal/secret`, and `keyHashes` holds only SHA-256 digests.
+- `Store.Save(path)` writes the document to a `0600` temporary file in the
+  target directory, fsyncs it, renames it over the target, then best-effort
+  fsyncs the directory. A reader sees the old or the new document, never a
+  partial one. The parent directory is created `0700` when missing.
+- `Store.Load(path)` reads the file and calls `Restore`. A missing file wraps
+  `os.ErrNotExist`, so `cmd/ajs-accountd` keeps the dashboard seed. Corrupt
+  JSON, empty data, an unknown `version` or duplicate ids are errors. `Restore`
+  decodes and validates into a local `Snapshot` before taking the write lock,
+  so a rejected file leaves the running store untouched.
+- `Restore` rebuilds the denormalised node counts and raises every counter to at
+  least the highest identifier already present (`acc-`, `u-`, `key-`,
+  `req-mut-`, `audit-`). A document with stale counters therefore cannot hand
+  out a colliding id after a create/delete cycle.
+- `cmd/ajs-accountd` loads the snapshot before building the Resin panel and
+  before the listener starts. It then saves every `AJS_SNAPSHOT_INTERVAL`
+  (default `30s`) and once more when `run` returns after a SIGINT/SIGTERM
+  shutdown. Logs are `state_loaded`, `state_missing`, `state_saved` and
+  `state_save_failed`; they carry the path and reason only, never a secret.
+- Duplication with `secrets.json`: the sealer still writes its own file on every
+  seal, so a sealed envelope can exist in both files. On startup the snapshot
+  replaces `store.secrets`, making it authoritative for which accounts have a
+  secret. A snapshot restored under a different `AJS_MASTER_KEY` keeps the
+  envelopes but `AccountSecret` cannot open them; the key is never stored.
+  Rotation is not wired to the panel store: `secret.Store.Rotate` re-seals only
+  its own file, so the snapshot's map keeps old-key blobs and would need the
+  same entries re-sealed before they can be opened again.
+- Limitations: the format is JSON rather than SQLite; every save rewrites the
+  whole document, so cost grows with request/audit history; a crash can lose up
+  to one snapshot interval of mutations; there is no schema migration beyond
+  rejecting unknown versions; and there is no multi-process writer lock. Keep
+  one daemon per state file.
 
 ## Resin integration
 
@@ -828,7 +892,16 @@ file starting empty, key-length rejection, and that the JSON file holds only
 base64 envelopes (no plaintext). `internal/store/secret_test.go` covers
 seal-on-create, `AccountSecret` per account, delete, the nil-sealer discard
 path, seeded accounts without a secret, no credential in the account JSON, and
-a failing sealer leaving the store unchanged.
+a failing sealer leaving the store unchanged. `internal/store/persist_test.go`
+covers a full roundtrip of every collection, settings, key hashes, sealed
+secrets and counters (including `AccountSecret` after restore with the same
+sealer), the `0600` file mode (asserted on non-Windows) with no temp-file
+leftovers, an atomic overwrite followed by a reload, a restore that replaces
+every seeded collection, a missing file returning `os.ErrNotExist` without
+mutating the store, corrupt JSON and unknown/empty versions leaving the store
+unchanged, no plaintext password or `password` field in the document, and
+create → delete → save/load plus a lost-counter restore that must not reuse an
+account, user, key, mutation or audit id.
 
 `internal/resin/client_test.go` runs against an `httptest` fake Resin and covers
 subscription create/unchanged/PATCH, platform create/update with only the
@@ -1290,9 +1363,110 @@ The child in every test is the test binary itself, started through
 `os.Executable()`; the supervisor tests bind loopback ports only and contact no
 vendor host.
 
+### Persistence (AJS-45)
+
+Both sibling trees and the capture fixtures were copied to a fresh scratch
+root, so no other worker's tree was touched:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-45-persistence \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-45-persistence'
+tar -czf - -C research/60-dynamic captures | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-45-persistence/research/60-dynamic \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-45-persistence/research/60-dynamic'
+```
+
+On HMC (`go1.25.14 linux/amd64`, `GOTOOLCHAIN=auto` selects `go1.26.0`):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-45-persistence/daemon && go test -count=1 ./... && go build ./... && echo BUILD_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.047s
+ok  	ajsaccountd/internal/api	0.039s
+ok  	ajsaccountd/internal/gate	0.472s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.017s
+ok  	ajsaccountd/internal/resin	0.216s
+ok  	ajsaccountd/internal/runtime	0.040s
+ok  	ajsaccountd/internal/secret	0.004s
+ok  	ajsaccountd/internal/store	0.015s
+ok  	ajsaccountd/internal/supervisor	0.616s
+BUILD_OK
+
+$ go vet ./... && echo VET_OK
+VET_OK
+
+$ go test -count=1 -v -run "TestSnapshot|TestSave|TestLoad|TestRestore|TestDeleteThenReload" ./internal/store
+=== RUN   TestSnapshotRoundtrip
+--- PASS: TestSnapshotRoundtrip (0.00s)
+=== RUN   TestSaveFileModeAndNoTempLeftovers
+--- PASS: TestSaveFileModeAndNoTempLeftovers (0.00s)
+=== RUN   TestSaveOverwritesAtomically
+--- PASS: TestSaveOverwritesAtomically (0.00s)
+=== RUN   TestLoadMissingFile
+--- PASS: TestLoadMissingFile (0.00s)
+=== RUN   TestLoadCorruptFileLeavesStoreUnchanged
+--- PASS: TestLoadCorruptFileLeavesStoreUnchanged (0.00s)
+=== RUN   TestRestoreRejectsWrongVersion
+--- PASS: TestRestoreRejectsWrongVersion (0.00s)
+=== RUN   TestRestoreRejectsEmptyData
+--- PASS: TestRestoreRejectsEmptyData (0.00s)
+=== RUN   TestRestoreReplacesEveryCollection
+--- PASS: TestRestoreReplacesEveryCollection (0.00s)
+=== RUN   TestSaveWritesNoPlaintextPassword
+--- PASS: TestSaveWritesNoPlaintextPassword (0.00s)
+=== RUN   TestDeleteThenReloadDoesNotReuseIDs
+--- PASS: TestDeleteThenReloadDoesNotReuseIDs (0.00s)
+=== RUN   TestRestoreRebuildsCountersFromIdentifiers
+--- PASS: TestRestoreRebuildsCountersFromIdentifiers (0.00s)
+PASS
+ok  	ajsaccountd/internal/store	0.009s
+
+$ cd ../emulator && go test -count=1 ./... && go build ./... && echo EMULATOR_OK
+?   	ajsproxy/apifacade	[no test files]
+?   	ajsproxy/cmd/ajsproxy	[no test files]
+?   	ajsproxy/fvfacade	[no test files]
+ok  	ajsproxy/internal/api	0.005s
+ok  	ajsproxy/internal/config	0.004s
+ok  	ajsproxy/internal/fv	0.078s
+ok  	ajsproxy/internal/proxy	0.005s
+EMULATOR_OK
+```
+
+A loopback restart smoke on HMC used `AJS_ALLOW_INSECURE=1`, no Resin token and
+no `AJS_ACCOUNT_LOGIN`, so no vendor host was contacted. It created one account,
+waited for an interval snapshot, sent SIGTERM, restarted against the same
+`AJS_STATE_DIR`, and read the account back:
+
+```console
+state_mode=600
+1                                   # smoke-persist present after restart
+… msg=state_missing path=/tmp/ajs45/state/state.json
+… msg=state_saved path=/tmp/ajs45/state/state.json reason=interval
+… msg=state_saved path=/tmp/ajs45/state/state.json reason=shutdown
+… msg=state_loaded path=/tmp/ajs45/state/state.json accounts=7 nodes=12 leases=8
+… msg=state_saved path=/tmp/ajs45/state/state.json reason=shutdown
+0                                   # plaintext password occurrences in state.json
+```
+
+The same binary refused to start with a corrupt file and with version 2, and
+the store was not served in either case:
+
+```console
+ERROR ajs-accountd failed error="load state: state file /tmp/ajs45/corrupt/state.json: decode state snapshot: invalid character 'n' looking for beginning of object key string"
+exit=1
+ERROR ajs-accountd failed error="load state: state file /tmp/ajs45/version/state.json: unsupported state snapshot version 2 (want 1)"
+exit=1
+```
+
 ## Limitations / next
 
-- State is lost on restart; there is no persistence, SQLite, or secret store.
+- State survives a restart through the JSON snapshot, but there is still no
+  SQLite: the snapshot rewrites the whole store, a crash loses up to
+  `AJS_SNAPSHOT_INTERVAL` of mutations, and there is no schema migration path.
+  Sealed secrets are file-backed only when `AJS_MASTER_KEY` is set.
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
   With it, login calls the control API, but neither the session factory nor the
   gate is wired to a supervisor: the `LoginResult` stays in process memory and

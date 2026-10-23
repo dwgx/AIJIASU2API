@@ -58,6 +58,52 @@ func run() error {
 		defer func() { _ = secrets.Close() }()
 	}
 
+	// The snapshot is the authoritative full state. It is loaded before the
+	// listener starts so a corrupt or future-version file fails startup
+	// instead of serving a half-restored panel.
+	statePath := stateFilePath()
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		return fmt.Errorf("state directory %s: %w", filepath.Dir(statePath), err)
+	}
+	if err := st.Load(statePath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("load state: %w", err)
+		}
+		logger.Info("state_missing", "path", statePath)
+	} else {
+		logger.Info("state_loaded", "path", statePath,
+			"accounts", len(st.Accounts()),
+			"nodes", len(st.Nodes()),
+			"leases", len(st.Leases()))
+	}
+
+	snapshotEvery, err := snapshotInterval()
+	if err != nil {
+		return err
+	}
+	stopSnapshots := make(chan struct{})
+	snapshotsDone := make(chan struct{})
+	go func() {
+		defer close(snapshotsDone)
+		ticker := time.NewTicker(snapshotEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				saveState(st, statePath, logger, "interval")
+			case <-stopSnapshots:
+				return
+			}
+		}
+	}()
+	// Runs after the HTTP server has stopped (and before secrets.Close, which
+	// was deferred earlier) so the last mutations reach disk.
+	defer func() {
+		close(stopSnapshots)
+		<-snapshotsDone
+		saveState(st, statePath, logger, "shutdown")
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -127,6 +173,47 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// defaultSnapshotInterval is the background save cadence when
+// AJS_SNAPSHOT_INTERVAL is unset.
+const defaultSnapshotInterval = 30 * time.Second
+
+// stateFilePath resolves AJS_STATE_FILE, defaulting to
+// $AJS_STATE_DIR/state.json next to the sealed-secret file.
+func stateFilePath() string {
+	if path := strings.TrimSpace(os.Getenv("AJS_STATE_FILE")); path != "" {
+		return path
+	}
+	return filepath.Join(envOr("AJS_STATE_DIR", "./data"), "state.json")
+}
+
+// snapshotInterval parses AJS_SNAPSHOT_INTERVAL. An invalid or non-positive
+// duration fails startup instead of silently disabling persistence.
+func snapshotInterval() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("AJS_SNAPSHOT_INTERVAL"))
+	if raw == "" {
+		return defaultSnapshotInterval, nil
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("AJS_SNAPSHOT_INTERVAL %q: %w", raw, err)
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("AJS_SNAPSHOT_INTERVAL %q must be positive", raw)
+	}
+	return interval, nil
+}
+
+// saveState writes the full snapshot and logs the outcome. Neither the log
+// line nor the error carries a credential: the document only holds sealed
+// envelopes and key hashes.
+func saveState(st *store.Store, path string, logger *slog.Logger, reason string) {
+	if err := st.Save(path); err != nil {
+		logger.Error("state_save_failed", "path", path, "reason", reason, "error", err)
+		return
+	}
+	logger.Info("state_saved", "path", path, "reason", reason)
 }
 
 // openStore builds the panel store. AJS_MASTER_KEY enables at-rest sealing of
