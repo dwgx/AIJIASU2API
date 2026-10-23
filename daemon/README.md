@@ -1003,13 +1003,15 @@ Two deviations, both deliberate:
 
 ## API
 
-All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
-`/healthz` is unauthenticated. List endpoints return bare JSON arrays, matching
-`api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper objects.
+All `/v1/*` routes and `GET /metrics` require `Authorization: Bearer
+$AJS_ADMIN_TOKEN`. `/healthz` is unauthenticated. List endpoints return bare
+JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper
+objects.
 
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/healthz` | process status + account-state counts |
+| GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
 | GET | `/v1/metrics?range=24h\|7d` | deterministic series, totals, account health |
 | GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
@@ -1081,6 +1083,9 @@ Other contract details:
   CORS preflight for the two configured origins.
 - Account passwords are validated and discarded unless `AJS_MASTER_KEY` seals
   them; the login token and connect password never leave memory.
+- `GET /metrics` exposes only aggregate Prometheus counters (accounts/nodes by
+  state, lease/user/key/request totals, build info, uptime); no usernames,
+  node ids, egress IPs, labels or secrets ever appear in the output.
 
 ## Seed
 
@@ -1105,7 +1110,11 @@ Mutations append `audit-0NN` events at the head of the audit list.
 drain/undrain/probe, lease rotate/release, user suspend/resume/allowlist and
 cascade delete, API-key show-once/revoke plus stored-hash checks, mutation log
 append, settings roundtrip, CORS preflight, 404/405, pagination, metrics,
-topology, the 1 MiB body limit, and token redaction in request logs.
+topology, the 1 MiB body limit, and token redaction in request logs. The
+Prometheus endpoint has its own coverage: bearer-auth 401 vs 200 with the text
+format content type, seeded counts compared against `store.Accounts`, `Nodes`,
+`Leases`, `Users`, `Keys` and `Requests`, zero states present, no id/label/IP
+or secret in the body, and `AllowInsecure` passthrough.
 
 `internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
 mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen

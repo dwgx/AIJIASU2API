@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1685,5 +1686,168 @@ func TestLoggingRedactsAuthorization(t *testing.T) {
 	}
 	if strings.Contains(logged, testToken) {
 		t.Fatalf("log leaked the bearer token: %q", logged)
+	}
+}
+
+func TestPrometheusMetricsAuth(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp, body := doRequest(t, ts, newRequest(t, http.MethodGet, ts.URL+"/metrics", nil))
+	requireStatus(t, resp, http.StatusUnauthorized)
+	requireErrorCode(t, body, CodeUnauthorized)
+
+	req := newRequest(t, http.MethodGet, ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	resp, body = doRequest(t, ts, req)
+	requireStatus(t, resp, http.StatusUnauthorized)
+	requireErrorCode(t, body, CodeUnauthorized)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("content type = %q, want Prometheus text format", ct)
+	}
+	if len(body) == 0 {
+		t.Fatal("/metrics body is empty")
+	}
+
+	// /healthz stays open while /metrics requires the bearer token.
+	resp, _ = doRequest(t, ts, newRequest(t, http.MethodGet, ts.URL+"/healthz", nil))
+	requireStatus(t, resp, http.StatusOK)
+}
+
+func TestPrometheusMetricsCounts(t *testing.T) {
+	ts, st := newTestServer(t)
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	wantAccounts := map[string]int{}
+	for _, account := range st.Accounts() {
+		wantAccounts[string(account.State)]++
+	}
+	wantNodes := map[string]int{}
+	for _, node := range st.Nodes() {
+		wantNodes[string(node.State)]++
+	}
+	lines := strings.Split(string(body), "\n")
+	if len(lines) == 0 || lines[len(lines)-1] != "" {
+		t.Fatalf("body must end with a newline: %q", body)
+	}
+	var sawBuild, sawUptime bool
+	for _, line := range lines {
+		if strings.HasPrefix(line, "ajs_build_info{version=") {
+			sawBuild = true
+			if line != `ajs_build_info{version="0.1.0"} 1` {
+				t.Fatalf("build info line = %q", line)
+			}
+		}
+		if strings.HasPrefix(line, "ajs_uptime_seconds ") {
+			sawUptime = true
+			fields := strings.Fields(line)
+			uptime, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+			if err != nil || uptime < 0 {
+				t.Fatalf("uptime line = %q: %v", line, err)
+			}
+		}
+		if value, ok := metricValue(t, line, "ajs_accounts{state="); ok {
+			state := metricLabel(t, line)
+			if value != wantAccounts[state] {
+				t.Fatalf("ajs_accounts{state=%q} = %d, want %d", state, value, wantAccounts[state])
+			}
+		}
+		if value, ok := metricValue(t, line, "ajs_nodes{state="); ok {
+			state := metricLabel(t, line)
+			if value != wantNodes[state] {
+				t.Fatalf("ajs_nodes{state=%q} = %d, want %d", state, value, wantNodes[state])
+			}
+		}
+	}
+	if !sawBuild || !sawUptime {
+		t.Fatalf("body lacks build info or uptime:\n%s", body)
+	}
+	for _, line := range []string{
+		`ajs_accounts{state="expired"} 0`,
+		`ajs_nodes{state="STARTING"} 0`,
+	} {
+		if !strings.Contains(string(body), line) {
+			t.Fatalf("body lacks zero-state line %q:\n%s", line, body)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{"ajs_leases_total", len(st.Leases())},
+		{"ajs_users_total", len(st.Users())},
+		{"ajs_api_keys_total", len(st.Keys())},
+		{"ajs_requests_total", len(st.Requests())},
+	} {
+		var got int
+		var found bool
+		for _, line := range lines {
+			if value, ok := metricValue(t, line, tc.name+" "); ok {
+				got = value
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("body lacks %s:\n%s", tc.name, body)
+		}
+		if got != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func metricValue(t *testing.T, line, prefix string) (int, bool) {
+	t.Helper()
+	if !strings.HasPrefix(line, prefix) {
+		return 0, false
+	}
+	fields := strings.Fields(line)
+	value, err := strconv.Atoi(fields[len(fields)-1])
+	if err != nil {
+		t.Fatalf("metric line %q: %v", line, err)
+	}
+	return value, true
+}
+
+func metricLabel(t *testing.T, line string) string {
+	t.Helper()
+	open := strings.Index(line, "{")
+	close := strings.Index(line, "}")
+	if open < 0 || close < open {
+		t.Fatalf("metric line %q has no labels", line)
+	}
+	value := strings.TrimPrefix(line[open+1:close], "state=")
+	return strings.Trim(value, `"`)
+}
+
+func TestPrometheusMetricsNoLeakage(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	for _, secret := range []string{
+		"username", "password", "egress", "node-", "acc-", "u-01", "lease-",
+		"203.0.113.", "198.51.100.", "192.0.2.", "demo-", "ada.ops",
+	} {
+		if strings.Contains(string(body), secret) {
+			t.Fatalf("/metrics leaked %q:\n%s", secret, body)
+		}
+	}
+}
+
+func TestPrometheusMetricsInsecureMode(t *testing.T) {
+	server := New(Config{AllowInsecure: true}, store.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	resp, body := doRequest(t, ts, newRequest(t, http.MethodGet, ts.URL+"/metrics", nil))
+	requireStatus(t, resp, http.StatusOK)
+	if !strings.Contains(string(body), "ajs_build_info") {
+		t.Fatal("/metrics body lacks ajs_build_info")
 	}
 }

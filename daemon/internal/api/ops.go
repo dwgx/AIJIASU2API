@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"ajsaccountd/internal/model"
@@ -47,6 +49,63 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, metrics)
+}
+
+// handlePrometheusMetrics serves GET /metrics in the Prometheus text
+// exposition format: aggregate counts only, with every state present including
+// zeros. No ids, labels, usernames, IPs or secrets appear in the output.
+func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	accounts := map[model.AccountState]int{
+		model.AccountActive:     0,
+		model.AccountPaused:     0,
+		model.AccountAuthFailed: 0,
+		model.AccountExpired:    0,
+	}
+	for _, account := range s.store.Accounts() {
+		accounts[account.State]++
+	}
+	nodes := map[model.NodeState]int{
+		model.NodeLive:     0,
+		model.NodeReady:    0,
+		model.NodeStarting: 0,
+		model.NodeDraining: 0,
+		model.NodeDown:     0,
+	}
+	for _, node := range s.store.Nodes() {
+		nodes[node.State]++
+	}
+	var b strings.Builder
+	b.WriteString("# HELP ajs_build_info Build version.\n")
+	b.WriteString("# TYPE ajs_build_info gauge\n")
+	fmt.Fprintf(&b, "ajs_build_info{version=%q} 1\n", s.cfg.Version)
+	b.WriteString("# HELP ajs_uptime_seconds Seconds since process start.\n")
+	b.WriteString("# TYPE ajs_uptime_seconds gauge\n")
+	fmt.Fprintf(&b, "ajs_uptime_seconds %g\n", time.Since(s.started).Seconds())
+	b.WriteString("# HELP ajs_accounts Accounts by state.\n")
+	b.WriteString("# TYPE ajs_accounts gauge\n")
+	for _, state := range []model.AccountState{model.AccountActive, model.AccountPaused, model.AccountAuthFailed, model.AccountExpired} {
+		fmt.Fprintf(&b, "ajs_accounts{state=%q} %d\n", state, accounts[state])
+	}
+	b.WriteString("# HELP ajs_nodes Nodes by state.\n")
+	b.WriteString("# TYPE ajs_nodes gauge\n")
+	for _, state := range []model.NodeState{model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown} {
+		fmt.Fprintf(&b, "ajs_nodes{state=%q} %d\n", state, nodes[state])
+	}
+	b.WriteString("# HELP ajs_leases_total Leases.\n")
+	b.WriteString("# TYPE ajs_leases_total gauge\n")
+	fmt.Fprintf(&b, "ajs_leases_total %d\n", len(s.store.Leases()))
+	b.WriteString("# HELP ajs_users_total Panel users.\n")
+	b.WriteString("# TYPE ajs_users_total gauge\n")
+	fmt.Fprintf(&b, "ajs_users_total %d\n", len(s.store.Users()))
+	b.WriteString("# HELP ajs_api_keys_total API keys.\n")
+	b.WriteString("# TYPE ajs_api_keys_total gauge\n")
+	fmt.Fprintf(&b, "ajs_api_keys_total %d\n", len(s.store.Keys()))
+	b.WriteString("# HELP ajs_requests_total Recorded requests.\n")
+	b.WriteString("# TYPE ajs_requests_total gauge\n")
+	fmt.Fprintf(&b, "ajs_requests_total %d\n", len(s.store.Requests()))
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(b.String()))
 }
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {

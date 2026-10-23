@@ -103,6 +103,7 @@ type Server struct {
 	store   *store.Store
 	logger  *slog.Logger
 	origins map[string]struct{}
+	started time.Time // set in New; backs ajs_uptime_seconds
 	handler http.Handler
 }
 
@@ -131,7 +132,7 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 			origins[origin] = struct{}{}
 		}
 	}
-	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins}
+	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, started: time.Now()}
 	s.handler = s.buildHandler()
 	return s
 }
@@ -154,6 +155,7 @@ func (s *Server) buildHandler() http.Handler {
 
 func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodGet, "/healthz", s.handleHealthz)
+	rt.handle(http.MethodGet, "/metrics", s.handlePrometheusMetrics)
 	rt.handle(http.MethodGet, "/v1/metrics", s.handleMetrics)
 
 	rt.handle(http.MethodGet, "/v1/accounts", s.handleListAccounts)
@@ -288,9 +290,11 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 	})
 }
 
+// auth protects the dashboard API and the Prometheus /metrics endpoint with
+// the same bearer token (or AllowInsecure); /healthz stays open.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+		if !strings.HasPrefix(r.URL.Path, "/v1/") && r.URL.Path != "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
