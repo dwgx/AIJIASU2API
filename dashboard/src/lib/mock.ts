@@ -364,4 +364,3 @@ export function syncAccountCounts(): void {
     account.liveNodeCount = nodes.filter((node) => node.state === 'LIVE').length
   }
 }
-

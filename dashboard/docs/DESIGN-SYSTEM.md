@@ -959,4 +959,3 @@ and the "New" discovery purple — none of them have a job in an operator consol
 
 Anything not listed here is settled by this document. If an implementation question is not
 answered by a row above, the answer is "use the token that already exists", not "add one".
-

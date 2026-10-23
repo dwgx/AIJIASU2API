@@ -795,4 +795,3 @@ Each page is done when all of these hold:
    shortcut sheet.
 6. Its endpoints are called exactly as listed, with the `[SPEC]`/`[PROPOSED]` status respected.
 7. axe-core reports zero violations at AA on the page in all three viewports.
-
