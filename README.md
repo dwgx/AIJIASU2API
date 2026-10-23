@@ -6,28 +6,60 @@ egress IP**.
 
 ## What this repository is
 
-A research corpus. It records what is known about the AJiaSu client — its installer payload,
-its Windows and Linux binaries, its `FV*` protocol stack, its login/node-selection flow — and
-the plan for a native reimplementation of that protocol.
+A research corpus plus the two artefacts built on it: an operator console (`dashboard/`) and a
+control-plane daemon skeleton (`daemon/`). It records what is known about the AJiaSu client — its
+installer payload, its Windows and Linux binaries, its `FV*` protocol stack, its
+login/node-selection flow — and implements the parts that do not require a vendor account.
 
-It is **not** a client, not a proxy, and not a distribution of vendor software. No vendor
+It is **not** a client, not a proxy service, and not a distribution of vendor software. No vendor
 binaries, drivers, installers, packet captures, or memory dumps are committed here; `.gitignore`
-blocks them at the repository root.
+blocks them at the repository root. Nothing in this tree has contacted a live AJiaSu endpoint.
 
 ## Current status
 
-**Offline emulator and design baseline; nothing here has touched the live service.**
+**Offline emulator, dashboard and daemon; the Resin M1 integration spike is PASS. No live vendor
+call, no gate, no persistence beyond sealed secrets.**
 
-As of 2026-10-23 the repository contains the campaign plan, the static-analysis baseline (OSINT,
-Windows static inventory, Linux static analysis, FV protocol specification), and `emulator/` — a
-Go implementation of the control API, FV crypto/frame, SOCKS5/HTTP front ends and the captured
-proxy carrier. The emulator builds and passes its offline conformance tests; it makes no live
-calls and holds no credentials.
+As of 2026-10-23:
 
-The product layer above the emulator — multi-account sessions, lease allocation, per-user access
-and the management panel — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md)
-for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the
-candidate analysis behind it.
+- `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
+  and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
+  live calls and holds no credentials.
+- `dashboard/` — operator console: React 19, Vite 6, TypeScript, 8 pages (Overview, Accounts,
+  Nodes, Leases, Users, Requests, Logs, Settings) in the Obsidian Mint design. Mock data is the
+  default; a live mode against `ajs-accountd` is opt-in at build time. 28 Vitest tests.
+  HMC serves the mock build on `18081` and the live build on `18082`.
+- `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
+  store, a Resin v1.3.0 admin client, publisher and runtime wiring (local subscription render,
+  platform create/update, lease rotate through platform filter exclusion, node drain/undrain,
+  probe-config patch), an AES-256-GCM sealed secret file, and the account-control plus FV
+  session-factory seams. 111 Go test functions, mostly `httptest` fakes; the tests use no Resin
+  process, no vendor account and no network.
+- Resin M1 — **PASS** on HMC against `ghcr.io/resinat/resin:1.3.0`
+  (`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`): loopback SOCKS5 dial,
+  IP-anchored sticky `(Platform, Account)` leases, rotation through platform filter exclusion,
+  automatic re-selection after a node kill (3 failed requests over 6.0 s, first successful
+  re-route at 12.6 s), and full state across a Resin restart. Measurements and caveats:
+  [`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
+
+**Not implemented — the status above must not be read as more than it is:**
+
+- **Live AJiaSu login and smoke test.** Blocked on an Owner-supplied account; the account-control
+  client and FV session factory have only run against local fakes, and no vendor host was
+  contacted.
+- **The gate and `ajsproxy` per-node supervision.** No gate listener and no per-`(account,
+  server)` process management exist.
+- **SQLite / full persistence.** The daemon store is in memory and reseeded on every start; only
+  sealed account secrets in `$AJS_STATE_DIR/secrets.json` survive a restart.
+- **Packaged deployment.** `dashboard/compose.yml` builds the mock image only; there is no compose
+  for the daemon/Resin pair, and no macOS or Windows build.
+- **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;
+  probes are bookkeeping canaries, not network probes.
+
+The product layer above the daemon — multi-account sessions, lease allocation, per-user access
+and the gate — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
+sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the candidate analysis
+behind it.
 
 ## Scope and tiers
 
@@ -38,6 +70,60 @@ candidate analysis behind it.
 
 The Windows kernel component shipped with the client is the stock OpenVPN TAP-Windows driver
 (`tap0901`); it is the system-wide TUN path only, and a SOCKS5/HTTP proxy API does not need it.
+
+## Quick start
+
+```bash
+# 1. Mock dashboard — deterministic in-browser data, no backend, no network
+cd dashboard && npm install && npm run dev        # http://127.0.0.1:5173
+
+# 2. Daemon, loopback only (from daemon/). go.mod replaces ajsproxy => ../emulator,
+#    so the two trees must be sibling directories in the same checkout.
+cd daemon
+AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd
+
+# 3. Live dashboard build and static serve (from dashboard/, in a second shell)
+VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 \
+  VITE_PANEL_TOKEN=local-test-token npm run build
+npx vite preview --host 127.0.0.1 --port 18082   # http://127.0.0.1:18082
+```
+
+`local-test-token` is a loopback placeholder, not a secret. `VITE_*` values are baked into `dist/`
+at build time, so the live token is readable by anyone who can fetch the bundle: keep
+`ajs-accountd` bound to `127.0.0.1` and terminate real authentication in a BFF or reverse proxy.
+
+The HMC build host serves three loopback-only endpoints: `18081` mock dashboard
+(`docker compose up -d` in `dashboard/`), `18082` live dashboard (`vite preview` over a live
+build), and `2261` `ajs-accountd`. Resin listens on `2260` when running. From Windows, forward
+the ports:
+
+```bash
+ssh -N -L 18081:127.0.0.1:18081 hmc
+ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
+```
+
+Tests: `cd dashboard && npm test` (28 Vitest tests), `cd daemon && go test ./...` (needs
+`../emulator`), `cd emulator && go test ./...`. All three suites run offline. The last recorded
+dashboard and daemon runs are on HMC, alongside the M1 spike; see the evidence sections of
+[`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
+[`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
+
+## Layout
+
+```
+README.md                  this file
+PLAN.md                    campaign plan, slices, acceptance criteria, risks
+LICENSE                    MIT
+docs/PANEL.md              control-plane design: ports, API, data model, phases
+dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
+daemon/                    ajs-accountd control-plane skeleton (Go 1.26); see daemon/README.md
+emulator/                  offline Tier-2 FV emulator (Go)
+scripts/m1/                M1 spike harness: loopback SOCKS5 nodes (dummy-socks)
+research/00-plan/          question tree, master index, ledger
+research/10-* .. 90-*      per-slice research output (later waves)
+research/70-panel/         panel research: candidate matrix, sources, validation script
+research/77-m1-spike/      Resin v1.3.0 M1 spike report (PASS) and measurements
+```
 
 ## Legal and terms-of-service caution
 
@@ -61,18 +147,9 @@ Live testing, when it happens, is performed with an Owner-supplied throwaway acc
 results are recorded as observations only; the credential itself is never written to disk in
 this tree.
 
-## Layout
-
-```
-README.md                  this file
-PLAN.md                    campaign plan, slices, acceptance criteria, risks
-LICENSE                    MIT
-docs/PANEL.md              panel and post-login architecture (implementation design)
-emulator/                  offline Tier-2 FV emulator (Go)
-research/00-plan/          question tree, master index, ledger
-research/10-* .. 90-*      per-slice research output (later waves)
-research/70-panel/         panel research: candidate matrix, sources, validation script
-```
+The `local-test-token` used in the commands above is a documented loopback placeholder, not a
+credential. The live dashboard token is a build-time value, and the daemon, the dashboard and
+Resin all stay bound to `127.0.0.1`.
 
 ## Reports
 
