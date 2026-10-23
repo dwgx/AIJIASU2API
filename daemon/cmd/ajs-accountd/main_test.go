@@ -4,7 +4,45 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"ajsaccountd/internal/account"
 )
+
+// TestLoginProfile pins the accepted AJS_ACCOUNT_PROFILE values: the default
+// stays the live-tested 4.2.3.0 profile, and linux-4.3.0.1 selects the new
+// static-only profile. An unknown value must fail with both names.
+func TestLoginProfile(t *testing.T) {
+	cases := []struct {
+		name string
+		want account.VersionProfile
+	}{
+		{name: "", want: account.Linux423Binary},
+		{name: "linux-4.2.3.0", want: account.Linux423Binary},
+		{name: account.Linux423Binary.Name, want: account.Linux423Binary},
+		{name: "linux-4.3.0.1", want: account.Linux430Binary},
+		{name: account.Linux430Binary.Name, want: account.Linux430Binary},
+		{name: "  linux-4.3.0.1  ", want: account.Linux430Binary},
+	}
+	for _, tc := range cases {
+		got, err := loginProfile(tc.name)
+		if err != nil {
+			t.Fatalf("loginProfile(%q): %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Fatalf("loginProfile(%q) = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+
+	_, err := loginProfile("linux-9.9.9.9")
+	if err == nil {
+		t.Fatal("loginProfile accepted an unknown profile")
+	}
+	for _, want := range []string{"linux-4.2.3.0", "linux-4.3.0.1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("loginProfile error = %q, want it to list %q", err, want)
+		}
+	}
+}
 
 // TestNodeLimitDefaultsToOne pins the live-safe default: the 2026-10-23 live
 // run proved the vendor allows one active FV data session per account (a

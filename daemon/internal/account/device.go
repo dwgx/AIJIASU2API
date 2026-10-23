@@ -8,11 +8,16 @@ import (
 	"ajsproxy/apifacade"
 )
 
-// Client versions of the two supported profiles. LinuxClientVersion is the
+// Client versions of the supported profiles. LinuxClientVersion is the
 // default: the daemon emulates the Linux client unless told otherwise.
 const (
 	// LinuxClientVersion is the _v value of the Linux 4.2.3.0 client.
 	LinuxClientVersion = apifacade.Linux423Version
+	// Linux430ClientVersion is the _v value of the Linux 4.3.0.1 client.
+	// The device descriptor did not change between the two Linux builds
+	// (research/84-ajs-496/LINUX.md §7), so it uses the captured Linux
+	// descriptor with this version claim.
+	Linux430ClientVersion = "4.3.0.1"
 	// OpenAJSClientVersion is the _v value of the OpenAJS Android client.
 	OpenAJSClientVersion = "4.11.10.0"
 )
@@ -20,7 +25,7 @@ const (
 // NewDevice returns a device descriptor with generated IDs for the given
 // client version. An empty version selects LinuxClientVersion.
 //
-// LinuxClientVersion builds the captured Linux 4.2.3.0 descriptor: linux /
+// Both Linux client versions build the captured Linux descriptor: linux /
 // x86_64, the captured _os_ver and _os_dim, a 20-hex _uid that doubles as cuid,
 // and cseid=linux. Any other version builds the OpenAJS/Android descriptor from
 // apifacade.DefaultDevice with a 22-character _uid and 16-hex _os_did.
@@ -28,8 +33,9 @@ func NewDevice(version string) (apifacade.Device, error) {
 	if version == "" {
 		version = LinuxClientVersion
 	}
-	if version == LinuxClientVersion {
+	if version == LinuxClientVersion || version == Linux430ClientVersion {
 		device := apifacade.Linux423Device()
+		device.Version = version
 		if err := device.EnsureLinuxIDs(); err != nil {
 			return apifacade.Device{}, err
 		}

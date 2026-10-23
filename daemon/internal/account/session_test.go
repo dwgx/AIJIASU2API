@@ -167,6 +167,60 @@ func TestLinux423BinaryProfile(t *testing.T) {
 	}
 }
 
+// TestLinux430BinaryProfile pins the 4.3.0.1 profile: the 4.3.0.1 version
+// claims on the same protocol-2 binary carrier, OAEP-SHA1 and unsigned
+// requests, because the 4.3.0.1 signer's canonical field order is [UNKNOWN]
+// and no live request has exercised it.
+func TestLinux430BinaryProfile(t *testing.T) {
+	p := Linux430Binary
+	if p.Name != "linux-4.3.0.1-binary" || p.ClientVersion != "4.3.0.1" || p.CoreVersion != "20260525-1" {
+		t.Fatalf("name/version claims = %q/%q/%q", p.Name, p.ClientVersion, p.CoreVersion)
+	}
+	if p.ProtocolVersion != 2 || p.OAEPHash != "SHA-1" || p.SigningMode != "none" ||
+		p.Transport != "httpupgrade" || p.RequestShape != apifacade.ShapeLinux423 {
+		t.Fatalf("profile = %+v", p)
+	}
+	if p == Linux423Binary {
+		t.Fatal("Linux430Binary equals Linux423Binary")
+	}
+
+	protocol, err := NewProtocolForProfile(p)
+	if err != nil {
+		t.Fatalf("NewProtocolForProfile: %v", err)
+	}
+	if !protocol.Available() || protocol.Transport.Name() != "httpupgrade" {
+		t.Fatalf("protocol = %+v", protocol)
+	}
+	if upgrade, ok := protocol.Transport.(*fvfacade.HTTPUpgrade); !ok || upgrade.ProtocolVersion != 2 {
+		t.Fatalf("transport = %#v, want *fvfacade.HTTPUpgrade with ProtocolVersion 2", protocol.Transport)
+	}
+
+	f := NewFactory(p, protocol.Transport, fvfacade.AuthOptions{})
+	if got := f.Profile(); got != p {
+		t.Fatalf("Profile() = %+v, want %+v", got, p)
+	}
+}
+
+// TestLinux430DeviceDescriptor pins the device a 4.3.0.1 login presents: the
+// Linux descriptor is unchanged from 4.2.3.0 (LINUX.md §7), only the _v claim
+// moves.
+func TestLinux430DeviceDescriptor(t *testing.T) {
+	device, err := NewDeviceForProfile(Linux430Binary)
+	if err != nil {
+		t.Fatalf("NewDeviceForProfile: %v", err)
+	}
+	if device.Version != Linux430ClientVersion || device.Platform != "linux" ||
+		device.OSDevice != "x86_64" || device.CSEID != "linux" || device.Lang != "en" {
+		t.Fatalf("device = %+v", device)
+	}
+	if len(device.UID) != 20 || device.CUID != device.UID {
+		t.Fatalf("UID/CUID = %q/%q, want a 20-hex uid", device.UID, device.CUID)
+	}
+	if len(device.DeviceID) != 16 {
+		t.Fatalf("DeviceID = %q, want 16 hex characters", device.DeviceID)
+	}
+}
+
 // mockFVConfig is what the mock server expects on the wire.
 type mockFVConfig struct {
 	reject   bool

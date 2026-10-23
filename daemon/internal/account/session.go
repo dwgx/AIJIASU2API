@@ -56,10 +56,27 @@ var Linux423Binary = VersionProfile{
 	Transport:       "httpupgrade",
 }
 
+// Linux430Binary is the Linux 4.3.0.1 profile. The static analysis
+// (research/84-ajs-496/LINUX.md §3, §4.4, §5) found the same protocolVersion=2
+// binary carrier, the same OAEP-SHA1 key wrap and the same control endpoint as
+// 4.2.3.0, with new version claims. 4.3.0.1 changed X-Sig to a 16-hex dual
+// hash, but the canonical field order is [UNKNOWN], so the profile sends
+// unsigned requests like Linux423Binary; live acceptance is [UNVERIFIED].
+var Linux430Binary = VersionProfile{
+	Name:            "linux-4.3.0.1-binary",
+	ClientVersion:   Linux430ClientVersion,
+	CoreVersion:     "20260525-1",
+	ProtocolVersion: 2,
+	OAEPHash:        "SHA-1",
+	SigningMode:     "none",
+	RequestShape:    apifacade.ShapeLinux423,
+	Transport:       "httpupgrade",
+}
+
 // OpenAJSAndroid is the OpenAJS 4.11.10.0 profile: the OpenAJS raw-TCP frame
 // carrier, OAEP-SHA1 and the OpenAJS signing secret. The daemon does not wire
-// it (AJS_ACCOUNT_PROFILE accepts only linux-4.2.3.0), but the factory and the
-// emulator keep it available as the separate Android profile.
+// it (AJS_ACCOUNT_PROFILE accepts only the Linux profiles), but the factory
+// and the emulator keep it available as the separate Android profile.
 var OpenAJSAndroid = VersionProfile{
 	Name:            "openajs-4.11.10.0-rawtcp",
 	ClientVersion:   OpenAJSClientVersion,

@@ -223,7 +223,8 @@ func (s *Store) UndrainNode(id string) (model.ProxyNode, error) {
 }
 
 // ProbeNode records a canary probe. There is no real upstream yet, so the
-// latency and egress IP are unchanged; only the probe timestamp moves.
+// latency and egress IP are unchanged; only the probe timestamp moves. The
+// audit line says exactly that instead of claiming a verified egress.
 func (s *Store) ProbeNode(id string) (model.ProxyNode, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,7 +239,7 @@ func (s *Store) ProbeNode(id string) (model.ProxyNode, error) {
 	}
 	node.LastProbeAt = iso(s.now())
 	s.addAuditLocked(model.SeverityInfo, "system", "node.probe", node.Label,
-		fmt.Sprintf("Canary ok · %d ms · egress verified", node.LatencyMs))
+		"Probe timestamp touched · no upstream probe performed")
 	return *node, nil
 }
 
@@ -261,7 +262,7 @@ func (s *Store) RotateLease(id string) (model.Lease, error) {
 		s.nodes[nodeIdx].EgressIP = lease.EgressIP
 	}
 	s.addAuditLocked(model.SeverityInfo, "operator", "lease.rotate", lease.UserName,
-		fmt.Sprintf("%s → %s", oldIP, lease.EgressIP))
+		fmt.Sprintf("synthetic rotation without Resin · %s → %s", oldIP, lease.EgressIP))
 	return *lease, nil
 }
 

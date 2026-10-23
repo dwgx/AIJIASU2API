@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
+	"ajsaccountd/internal/lablog"
 	"ajsaccountd/internal/publisher"
 	"ajsaccountd/internal/resin"
 	"ajsaccountd/internal/runtime"
@@ -38,6 +40,7 @@ func main() {
 }
 
 func run() error {
+	started := time.Now()
 	listen := flag.String("listen", envOr("AJS_LISTEN", "127.0.0.1:2261"), "listen address")
 	token := flag.String("token", os.Getenv("AJS_ADMIN_TOKEN"), "admin bearer token (env AJS_ADMIN_TOKEN)")
 	insecure := flag.Bool("insecure", os.Getenv("AJS_ALLOW_INSECURE") == "1", "disable bearer auth (env AJS_ALLOW_INSECURE=1)")
@@ -66,7 +69,12 @@ func run() error {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	// The Lab ring is a bounded, redacted copy of the same log stream. It is
+	// teed in front of the console handler so AJS_LOG_LEVEL still controls
+	// stdout while /v1/lab/logs can show recent lines on demand.
+	logRing := lablog.NewRing(lablog.DefaultCapacity)
+	logger := slog.New(logRing.Handler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
+	slog.SetDefault(logger)
 	st, secrets, err := openStore(logger)
 	if err != nil {
 		return err
@@ -138,16 +146,28 @@ func run() error {
 	}
 
 	var loginService api.LoginService
+	var loginResults runtime.LoginResults
 	var loginHook func(context.Context, string) error
 	var accountDeleteHook func(context.Context, string) error
 	var accountLogoutHook func(context.Context, string) error
 	var nodeDrainHook func(context.Context, string, bool) error
-	if service, profile, err := startAccountLogin(st, logger); err != nil {
+	var controller *runtime.NodeController
+	var profile account.VersionProfile
+	nodeLimitValue := 1
+	service, profile, err := startAccountLogin(st, logger)
+	if err != nil {
 		return err
-	} else if service != nil {
+	}
+	if service != nil {
 		defer service.Close()
 		loginService = service
-		controller, err := startNodeController(st, logger, panel, service, profile)
+		loginResults = service
+		limit, err := nodeLimit()
+		if err != nil {
+			return err
+		}
+		nodeLimitValue = limit
+		controller, err = startNodeController(st, logger, panel, service, profile, limit)
 		if err != nil {
 			return err
 		}
@@ -171,10 +191,51 @@ func run() error {
 		}
 	}
 
+	profileFlag := envOr("AJS_ACCOUNT_PROFILE", "linux-4.2.3.0")
+	nodeLimitFlag := envOr("AJS_NODE_LIMIT", "1")
+	if service != nil {
+		nodeLimitFlag = strconv.Itoa(nodeLimitValue)
+	}
+	labView := runtime.NewLabView(runtime.LabConfig{
+		Version:      api.DefaultVersion,
+		Commit:       buildCommit(),
+		Started:      started,
+		Store:        st,
+		Logins:       loginResults,
+		Controller:   controller,
+		LogRing:      logRing,
+		Profile:      profile,
+		NodeLimit:    nodeLimitValue,
+		AccountLogin: service != nil,
+		Resin:        panel != nil,
+		UpdateCheck:  *updateRepo != "",
+		Secrets:      secrets != nil,
+		CertPin:      pinState(),
+		StatePath:    statePath,
+		Flags: runtime.Flags(runtime.FlagValues{
+			Listen:            *listen,
+			LogLevel:          *logLevel,
+			AccountProfile:    profileFlag,
+			NodeLimit:         nodeLimitFlag,
+			SnapshotInterval:  snapshotEvery.String(),
+			ControlCertSHA256: strings.TrimSpace(os.Getenv("AJS_CONTROL_CERT_SHA256")),
+			UpdateRepo:        *updateRepo,
+			ResinURL:          *resinURL,
+			SubscriptionName:  *subscriptionName,
+			AdminToken:        *token,
+			MasterKey:         os.Getenv("AJS_MASTER_KEY"),
+			ResinAdminToken:   *resinToken,
+			AllowInsecure:     *insecure,
+			AccountLogin:      service != nil,
+			AllowPlaintext:    os.Getenv("AJS_ALLOW_PLAINTEXT") == "1",
+		}),
+	})
+
 	server := api.New(api.Config{
 		AdminToken:        *token,
 		AllowInsecure:     *insecure,
 		CORSOrigins:       splitList(*corsOrigins),
+		Version:           api.DefaultVersion,
 		Panel:             panel,
 		LoginService:      loginService,
 		LoginHook:         loginHook,
@@ -183,6 +244,7 @@ func run() error {
 		NodeDrainHook:     nodeDrainHook,
 		UpdateRepo:        *updateRepo,
 		UpdateAPIBase:     *updateAPIBase,
+		Lab:               labView,
 	}, st, logger)
 
 	httpServer := &http.Server{
@@ -543,15 +605,11 @@ func pinState() string {
 // step is skipped. AJS_NODE_LIMIT caps how many usable servers one account
 // starts (default 1, the vendor's one active data session per account; an
 // explicit 0 = all).
-func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile) (*runtime.NodeController, error) {
+func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
 	if panel != nil {
 		reconciler = panel
-	}
-	limit, err := nodeLimit()
-	if err != nil {
-		return nil, err
 	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 		Store:      st,
@@ -596,15 +654,19 @@ func nodeLimit() (int, error) {
 	return limit, nil
 }
 
-// loginProfile maps AJS_ACCOUNT_PROFILE to a version profile. Only the tested
-// Linux 4.2.3.0 profile is accepted; an unknown value fails startup instead of
-// silently logging in as a different client.
+// loginProfile maps AJS_ACCOUNT_PROFILE to a version profile. The default is
+// the live-tested Linux 4.2.3.0 profile; linux-4.3.0.1 selects the
+// static-only 4.3.0.1 profile, whose unsigned login is not live-tested. An
+// unknown value fails startup instead of silently logging in as a different
+// client.
 func loginProfile(name string) (account.VersionProfile, error) {
 	switch strings.TrimSpace(name) {
 	case "", "linux-4.2.3.0", account.Linux423Binary.Name:
 		return account.Linux423Binary, nil
+	case "linux-4.3.0.1", account.Linux430Binary.Name:
+		return account.Linux430Binary, nil
 	default:
-		return account.VersionProfile{}, fmt.Errorf("AJS_ACCOUNT_PROFILE %q is not supported (want linux-4.2.3.0)", name)
+		return account.VersionProfile{}, fmt.Errorf("AJS_ACCOUNT_PROFILE %q is not supported (want linux-4.2.3.0 or linux-4.3.0.1)", name)
 	}
 }
 
@@ -617,6 +679,21 @@ func splitList(value string) []string {
 		}
 	}
 	return items
+}
+
+// buildCommit reports the VCS revision embedded by the Go toolchain. It is
+// empty for a build without VCS metadata, which the Lab overview shows as "".
+func buildCommit() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			return setting.Value
+		}
+	}
+	return ""
 }
 
 func parseLevel(value string) slog.Level {

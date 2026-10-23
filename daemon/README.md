@@ -24,9 +24,12 @@ loopback SOCKS5 gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
 `127.0.0.1:13000` upward), writes the node, and reconciles Resin. It also makes
 `POST .../drain|undrain` call the controller before the store, so a running gate
 stops admitting (or reopens) before the node state changes; without the
-switch the handlers keep the store/Resin behavior. There is still no SQLite:
-the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md` §6,
-and the node supervisor is implemented but not wired to the controller.
+switch the handlers keep the store/Resin behavior. A Lab telemetry view
+(`/v1/lab/*`) reports the effective modes, flags, gate counters, session health, claimed egress,
+profiles, a bounded redacted log ring and diagnostics; its GETs are read-only and it contacts no
+vendor, and the single POST runs an explicit egress probe that writes nothing.
+There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md`
+§6, and the node supervisor is implemented but not wired to the controller.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -60,7 +63,14 @@ internal/account/tls.go         opt-in control-API certificate pin (PinnedHTTPCl
 internal/account/tls_test.go    pin match/mismatch/malformed/default-reject coverage
 internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
 internal/supervisor/          per-node child process: start, readiness, events, stop
+internal/lablog/              bounded, redacted in-memory log ring (allowlisted attrs)
+internal/model/lab.go        Lab wire structs (read-only reads + probe result; no credentials/raw ids)
+internal/runtime/lab.go      LabView: modes, flags, gates, sessions, egress, profiles, logs, diagnostics
+internal/runtime/egress_check.go  explicit egress probe: SOCKS5 dial + HTTPS echo, 5s cooldown
+internal/runtime/lab_test.go lab view coverage (redaction, disabled modes, logs, devices)
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
+internal/api/lab.go          Lab handlers (reads + explicit egress check) and account servers/device
+internal/api/lab_test.go     lab handlers: auth, disabled bodies, egress-check mapping, query validation, 404
 internal/api/update.go       GET /v1/system/update: read-only GitHub release check
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
@@ -205,6 +215,7 @@ uses the tested client without conversion and the facade adds no dependencies.
 | Profile | `_v` | Constructor | Request shape | Signing |
 |---|---|---|---|---|
 | Linux 4.2.3.0 (default) | `4.2.3.0` | `NewDevice("")` / `NewDeviceForProfile(Linux423Binary)` | `ShapeLinux423` | none (`SigningMode: "none"`; no `X-Sig`/`X-Timestamp`) |
+| Linux 4.3.0.1 (opt-in) | `4.3.0.1` | `NewDevice(Linux430ClientVersion)` / `NewDeviceForProfile(Linux430Binary)` | `ShapeLinux423` | none (`SigningMode: "none"`; 4.3.0.1 changed `X-Sig`, but the canonical field order is [UNKNOWN], so requests stay unsigned and live acceptance is [UNVERIFIED]) |
 | OpenAJS Android | `4.11.10.0` | `NewDevice(OpenAJSClientVersion)` | `ShapeOpenAJS` | `X-Timestamp` + `X-Sig` with the OpenAJS secret |
 
 `NewDevice` builds the Linux 4.2.3.0 descriptor from `apifacade.Linux423Device`
@@ -441,7 +452,7 @@ flow, err := sess.OpenFlow(ctx, "example.com", 443)
   actually speaks its wire format.
 - `OpenAJSAndroid`: `openajs-4.11.10.0-rawtcp`, `_v=4.11.10.0`,
   `cv=20260525-1`, `ShapeOpenAJS`, carrier `rawtcp`. The daemon does not wire
-  it (`AJS_ACCOUNT_PROFILE` accepts only `linux-4.2.3.0`); it exists so the
+  it (`AJS_ACCOUNT_PROFILE` accepts only the Linux profiles); it exists so the
   Android path stays available and testable.
 - Auth body mapping: `u=UserName`, `p=ConnectPassword.Reveal()`,
   `cuid=Device.CUID`, `cseid=Device.CSEID` (both fall back to
@@ -877,7 +888,7 @@ test binary as the child.
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
-| `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
+| `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile: `linux-4.2.3.0` (default, live-tested) or `linux-4.3.0.1` (static analysis only; unsigned live acceptance unverified); an unknown value fails startup when login is enabled |
 | `AJS_NODE_LIMIT` | — | `1` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; explicit `0` = all (catalog/probe research only, not live-safe). Negative or non-integer fails startup. Default `1` because the vendor allows **one active FV data session per account** (live 2026-10-23: with limit `3` the first two gates answered SOCKS5 `0x05` and the daemon logged `fv: data channel rejected ... fm=disconnected by another connection`, the third worked); with limit `1` the gate egress matched the original app (`222.186.57.63`). Keep `1` for live use — one node per account, not one per vendor server |
 | `AJS_CONTROL_CERT_SHA256` | — | — | SHA-256 fingerprint (64 hex chars, `AA:BB:…` or raw) of the control API leaf certificate; set → the login transport pins exactly that certificate instead of chain/hostname verification (see “Control certificate pin”), empty → default verification. Malformed → startup fails |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
@@ -1139,10 +1150,9 @@ Two deviations, both deliberate:
 
 ## API
 
-All `/v1/*` routes and `GET /metrics` require `Authorization: Bearer
-$AJS_ADMIN_TOKEN`. `/healthz` is unauthenticated. List endpoints return bare
-JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper
-objects.
+All `/v1/*` routes — including the Lab `/v1/lab/*` set below — and `GET /metrics` require
+`Authorization: Bearer $AJS_ADMIN_TOKEN`. `/healthz` is unauthenticated. List endpoints return bare
+JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper objects.
 
 | Method | Path | Behavior |
 |---|---|---|
@@ -1188,9 +1198,9 @@ Errors are always `{"error":{"code":"…","message":"…"}}`:
 |---|---|---|
 | `INVALID_ARGUMENT` | 400 (413 oversize) | malformed JSON, bad enum/range, unknown settings key |
 | `NOT_FOUND` | 404 | unknown id or route |
-| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node |
+| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel |
-| `QUOTA_EXCEEDED` | 429 | reserved; quotas are advisory in v1 |
+| `QUOTA_EXCEEDED` | 429 | repeat Lab egress check for the same node inside the 5 s cooldown; account quotas remain advisory |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
@@ -1224,6 +1234,41 @@ Other contract details:
 - `GET /metrics` exposes only aggregate Prometheus counters (accounts/nodes by
   state, lease/user/key/request totals, build info, uptime); no usernames,
   node ids, egress IPs, labels or secrets ever appear in the output.
+
+### Lab telemetry
+
+`runtime.LabView` (`internal/runtime/lab.go`, `internal/runtime/egress_check.go`) backs the Lab
+telemetry surface for the dashboard's `/lab` page. The GET routes read in-process state only — the
+store, the node controller snapshot, retained login results and the log ring — and make no vendor
+call. The single POST runs an explicit claimed-vs-verified egress probe through the node's own
+loopback gate and writes nothing to the store. All routes are under the same bearer auth as the
+rest of `/v1/*` (401 without the token; `/healthz` stays open).
+
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/v1/lab/overview` | version, commit, uptime, effective modes (login, Resin, update check, secrets, cert pin), aggregate counts and warnings |
+| GET | `/v1/lab/flags` | effective startup flags with provenance (`env`/`flag`/`default`); secret flags carry `set` + `redacted`, never a value |
+| GET | `/v1/lab/gates` | per-node gate listener, state and ingress/egress byte counters from the controller snapshot |
+| GET | `/v1/lab/sessions` | FV session health with a redacted SID (`a1b2…(32)`), age, last-flow time, claimed egress and keepalive support |
+| GET | `/v1/lab/egress` | the vendor's claimed exit address per running node (`source:"fv-claim"`); this GET never probes, so `verified` stays empty, `match` null and `checkedAt` null — a POST result is returned to its caller, not stored |
+| POST | `/v1/lab/egress-check` | body `{"nodeId":"…"}`; dials the node's running loopback SOCKS5 gate and `GET https://ifconfig.me/ip` over HTTPS (10 s total, environment proxy ignored), then answers `{nodeId,claimed,verified,match,latencyMs,checkedAt,source:"echo"}`. No store write and no vendor call. No running gate or no Lab reader → 409 `CONFLICT`; a second check for the same node within 5 s → 429 `QUOTA_EXCEEDED`; malformed, empty or unknown-field body → 400 `INVALID_ARGUMENT`; a probe failure is still 200 with `error` set, `verified` empty and `match` null |
+| GET | `/v1/lab/profiles` | supported version profiles plus the sample matrix (versions and carriers, no payloads) |
+| GET | `/v1/lab/logs?level=&component=&limit=&since=` | newest-first window over the bounded log ring; `limit` 1–2000 (default 200), `level` one of debug/info/warn/error, `since` RFC 3339; an invalid value answers 400 instead of silently widening the filter |
+| GET | `/v1/lab/diagnostics` | component health map, state-snapshot facts (basename path, last save, size), build facts (version, Go version, commit) and warnings |
+| GET | `/v1/accounts/{id}/servers` | vendor server catalog for one account from the retained `LoginResult`; without one it answers `stale:true`, an empty list and `no retained login result; log in to refresh the catalog`; unknown account → 404 |
+| GET | `/v1/accounts/{id}/device` | stable device identity as `sha256:`-prefixed 16-hex hashes plus non-secret claims; unknown account → 404 |
+
+A mode that is off is still HTTP 200 with `{"enabled":false,"reason":"…"}` naming the switch
+(`AJS_ACCOUNT_LOGIN is not 1`, `the runtime log ring is not configured`, or
+`lab telemetry is not configured` when no `LabReader` is wired), so the dashboard renders the
+reason instead of a 500 or an unexplained empty list. The one exception is
+`POST /v1/lab/egress-check`, which answers 409 `CONFLICT` when no `LabReader` is wired or the node
+has no running gate. Redaction is structural: the log ring stores
+only allowlisted attributes (`account_id`, `node_id`, `server_id`, `error_class`, `duration_ms`,
+`status`, `bytes`) with a bounded 2000-entry capacity, session IDs are truncated, and device
+identifiers are one-way hashes. No token, password, connect password, raw SID or raw device ID is
+serialized by any Lab route. The egress probe returns only the observed public address, latency
+and error text; it persists nothing.
 
 ## Seed
 
@@ -1352,6 +1397,22 @@ a duplicate node id, readiness timeout (`ErrNotReady` and `*ReadyError`), a
 child exiting before ready, stderr events plus the bounded ring, unknown
 `Stop`/`Signal`, `Signal` on a running node, and `Close` stopping two nodes,
 idempotency and `Start` after close.
+
+`internal/runtime/lab_test.go` pins the read-only contract: overview modes/counts and warnings,
+flags with provenance and secret presence only, gate counters joined to store nodes, redacted
+session SIDs (`fake…(8)` in the fixture), claimed-only egress, the profile catalog and sample
+matrix, the log ring window, diagnostics facts, per-account servers/device hashes, and the
+`enabled:false` reason for every dependency that is off. `internal/api/lab_test.go` covers the
+HTTP surface: bearer 401 vs 200, the disabled bodies for all eight Lab routes plus the two
+account reads, log query validation (bad `limit`/`level`/`since` → 400), unknown account → 404,
+and that no credential, raw SID or full device id appears in any response.
+`TestLabEgressCheckHandler`, `TestLabEgressCheckProbeFailureIsA200Record` and
+`TestLabEgressCheckWithoutReader` pin the POST: 401 unauthenticated, trimmed `nodeId`, the 200
+record, 400 for empty/blank/unknown-field/wrong-type bodies, 409 without a gate or reader, 429
+inside the cooldown, and a failed probe as a 200 record with `error`.
+`internal/lablog/ring_test.go` covers the bounded window, allowlist-only attributes, filters and
+handler forwarding; `internal/store/honesty_test.go`
+covers the audit labels behind the probe and synthetic-rotation rows the dashboard shows.
 
 ## Review fixes (AJS-53)
 
@@ -2437,7 +2498,17 @@ rerun; the evidence above is the 2026-10-23 live run.
   and on Windows a grandchild that outlives its parent is not group-killed.
 - Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
   and `/v1/nodes/{id}/flows` are out of this slice.
-- Quotas are advisory; `QUOTA_EXCEEDED` is defined but never emitted.
-- No TLS, rate limiting, multi-process coordination, or CSRF surface; keep it
-  loopback-only.
-- The dashboard was not modified; enabling live mode is a separate task.
+- Quotas are advisory; the only `QUOTA_EXCEEDED` is the Lab egress-check cooldown (429), a probe
+  rate limit rather than an account quota.
+- No TLS, request-wide rate limiting, multi-process coordination, or CSRF surface; the only rate
+  limit is the per-node Lab egress-check cooldown. The Lab endpoints inherit the same single
+  bearer token, so anyone who can reach `2261` and holds the token can read the
+  whole panel; the HMC deployment keeps bearer auth (no `AJS_ALLOW_INSECURE`) and restricts
+  `2261`/`18082` to the `192.168.11.0/24` segment, but the API is still plain HTTP — run it on a
+  trusted segment or put a TLS terminator in front.
+- The Lab view reads in-process state; its GETs neither mutate nor probe. The one POST
+  (`/v1/lab/egress-check`) dials the node's loopback gate and reads an HTTPS echo — a real
+  outbound request, though not a vendor call — and persists nothing. The GET egress panel is a
+  vendor claim until an operator runs that check.
+- The dashboard lives in a separate tree (`dashboard/`); the Lab page consumes the endpoints
+  above and needs no daemon write path.

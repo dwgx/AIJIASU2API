@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/gate"
@@ -70,6 +71,35 @@ type Gate interface {
 	Addr() net.Addr
 }
 
+// GateState is the optional counter view a Gate may expose. It is deliberately
+// separate from Gate so existing test fakes (and any future gate that only
+// needs the listener contract) keep compiling; Snapshot type-asserts.
+type GateState interface {
+	State() gate.State
+}
+
+// NodeRuntime is one running node as seen by the read-only Lab view: the
+// node's identity, its session summary and, when the gate exposes counters,
+// the gate state. It carries no credentials.
+type NodeRuntime struct {
+	NodeID    string
+	AccountID string
+	ServerID  string
+	Port      int
+	EgressIP  string
+	Draining  bool
+
+	SessionSID     string
+	SessionHealthy bool
+	SessionPresent bool
+	StartedAt      time.Time
+
+	// Gate is the counter snapshot. GateKnown is false for a gate that does
+	// not implement GateState.
+	Gate      gate.State
+	GateKnown bool
+}
+
 // GateFactory builds a gate. The zero value in NodeControllerConfig selects
 // gate.NewServer.
 type GateFactory func(cfg gate.Config, session gate.Session) (Gate, error)
@@ -114,6 +144,7 @@ type nodeGate struct {
 	port      int
 	egressIP  string
 	draining  bool
+	startedAt time.Time
 }
 
 // NodeController owns one SOCKS5 gate per usable vendor server. After a
@@ -296,6 +327,7 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 			serverID:  srv.id,
 			port:      port,
 			egressIP:  sessionEgress(session),
+			startedAt: time.Now(),
 		}
 		c.running[id] = running
 		if err := c.activateLocked(id, acct, srv, running); err != nil {
@@ -422,6 +454,40 @@ func (c *NodeController) StopAccount(_ context.Context, accountID string) error 
 		c.logger.Info("account_gates_stopped", "account_id", accountID, "node_id", id, "server_id", running.serverID)
 	}
 	return errors.Join(errs...)
+}
+
+// Snapshot returns a copy of the running nodes for the read-only Lab view.
+// It takes the controller lock while copying, so a login sync, drain or stop
+// cannot interleave; the returned values are safe to use after it returns.
+// A gate that does not implement GateState leaves GateKnown false.
+func (c *NodeController) Snapshot() []NodeRuntime {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]NodeRuntime, 0, len(c.running))
+	for id, running := range c.running {
+		node := NodeRuntime{
+			NodeID:    id,
+			AccountID: running.accountID,
+			ServerID:  running.serverID,
+			Port:      running.port,
+			EgressIP:  running.egressIP,
+			Draining:  running.draining,
+			StartedAt: running.startedAt,
+		}
+		if running.session != nil {
+			node.SessionPresent = true
+			node.SessionSID = running.session.SID()
+			node.SessionHealthy = running.session.Healthy()
+		}
+		if stateful, ok := running.gate.(GateState); ok {
+			node.Gate = stateful.State()
+			node.GateKnown = true
+		}
+		out = append(out, node)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
 }
 
 // activateLocked writes a running node. An operator drain survives a login

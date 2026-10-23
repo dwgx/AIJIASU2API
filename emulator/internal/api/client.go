@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -63,6 +64,57 @@ func NewClient(hosts []string, device Device) *Client {
 		UserAgent: DefaultUserAgent,
 		Now:       time.Now,
 	}
+}
+
+// HostList is the server-pushed host list (ApiUrls / FetchedUrlHosts in a
+// ClientApiLogin/Login response). The vendor sends it either as a JSON array
+// or as one string whose entries are separated by newlines and/or commas, so
+// both shapes decode into the same slice.
+//
+// A value of an unexpected JSON type decodes to nil rather than failing the
+// login: the list is advisory and must not make an otherwise valid login
+// unreadable.
+type HostList []string
+
+// UnmarshalJSON accepts a JSON array of strings, a single separator-delimited
+// string, or null.
+func (h *HostList) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*h = nil
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var value string
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			*h = nil
+			return nil
+		}
+		*h = splitHostList(value)
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		*h = nil
+		return nil
+	}
+	*h = list
+	return nil
+}
+
+// splitHostList splits one pushed string on newlines, carriage returns and
+// commas, dropping empty entries.
+func splitHostList(value string) HostList {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ','
+	})
+	out := make(HostList, 0, len(fields))
+	for _, field := range fields {
+		if host := strings.TrimSpace(field); host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
 }
 
 // LoginResult is the Login object of a ClientApiLogin/Login response.
@@ -391,6 +443,60 @@ func decodeBody(resp *http.Response) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
+// EffectiveHosts returns a copy of the hosts the next request will try, in
+// order: the configured hosts followed by any https hosts a successful login
+// or sync pushed. Mutating the returned slice does not change the client.
+func (c *Client) EffectiveHosts() []string {
+	return append([]string(nil), c.Hosts...)
+}
+
+// applyPushedHosts appends the server-pushed hosts to the client's list.
+// Configured hosts keep their order and precedence; duplicates (ignoring a
+// trailing slash and case) are dropped. Only absolute https URLs are accepted,
+// so a response cannot downgrade the control channel to cleartext or inject a
+// non-URL string.
+func (c *Client) applyPushedHosts(lists ...HostList) {
+	seen := make(map[string]struct{}, len(c.Hosts))
+	for _, host := range c.Hosts {
+		seen[hostKey(host)] = struct{}{}
+	}
+	for _, list := range lists {
+		for _, raw := range list {
+			host, ok := cleanPushedHost(raw)
+			if !ok {
+				continue
+			}
+			key := hostKey(host)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			c.Hosts = append(c.Hosts, host)
+		}
+	}
+}
+
+// cleanPushedHost validates one server-pushed entry. It returns the entry
+// trimmed, without a trailing slash, or ok=false when it is not an absolute
+// https URL with a host.
+func cleanPushedHost(raw string) (string, bool) {
+	host := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if host == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(host)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
+		return "", false
+	}
+	return host, true
+}
+
+// hostKey is the duplicate-detection key for a host: case-folded, without a
+// trailing slash.
+func hostKey(host string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(host), "/"))
+}
+
 // Login performs ClientApiLogin/Login and stores the session credentials on
 // success. A non-OK AuthResult is returned as a LoginResult, not as an error.
 //
@@ -411,7 +517,9 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 		return nil, err
 	}
 	var env struct {
-		Login *LoginResult `json:"Login"`
+		Login           *LoginResult `json:"Login"`
+		ApiUrls         HostList     `json:"ApiUrls"`
+		FetchedUrlHosts HostList     `json:"FetchedUrlHosts"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("api: login: invalid JSON: %w", err)
@@ -423,6 +531,7 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 		c.LoginToken = env.Login.LoginToken
 		c.UserName = env.Login.UserName
 		c.ConnectPassword = env.Login.ConnectPassword
+		c.applyPushedHosts(env.ApiUrls, env.FetchedUrlHosts)
 	}
 	return env.Login, nil
 }
@@ -445,8 +554,10 @@ func (c *Client) LoginSync(ctx context.Context) (map[string]Server, error) {
 		return nil, err
 	}
 	var env struct {
-		Login   *LoginResult      `json:"Login"`
-		Servers map[string]Server `json:"Servers"`
+		Login           *LoginResult      `json:"Login"`
+		Servers         map[string]Server `json:"Servers"`
+		ApiUrls         HostList          `json:"ApiUrls"`
+		FetchedUrlHosts HostList          `json:"FetchedUrlHosts"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("api: loginSync: invalid JSON: %w", err)
@@ -465,6 +576,10 @@ func (c *Client) LoginSync(ctx context.Context) (map[string]Server, error) {
 			c.UserName = env.Login.UserName
 		}
 	}
+	// A successful sync may extend the control host list; the 4.3.0.1 client
+	// merges the same field from this response (research/84-ajs-496/LINUX.md
+	// §4.2).
+	c.applyPushedHosts(env.ApiUrls, env.FetchedUrlHosts)
 	if env.Servers == nil {
 		env.Servers = map[string]Server{}
 	}

@@ -78,6 +78,9 @@ type LoginResult struct {
 	ExpireTime       int64
 	Expired          bool
 	Servers          map[string]apifacade.Server
+	// FetchedAt is when this result was retained. The Lab catalog uses it as
+	// the snapshot timestamp; it is not a credential.
+	FetchedAt time.Time
 }
 
 // AuthError reports a login response whose AuthResult is not "OK". It carries

@@ -38,6 +38,11 @@ const (
 
 const defaultMaxBodyBytes int64 = 1 << 20 // 1 MiB
 
+// DefaultVersion is the daemon version reported when Config.Version is empty.
+// main passes it explicitly so /healthz, the update check and the Lab overview
+// cannot disagree.
+const DefaultVersion = "0.1.0"
+
 // DefaultCORSOrigins are the dashboard dev and preview origins.
 var DefaultCORSOrigins = []string{
 	"http://127.0.0.1:18081",
@@ -110,6 +115,10 @@ type Config struct {
 	// UpdateHTTP is the client used for the update check. Nil builds a
 	// 10-second client per request.
 	UpdateHTTP *http.Client
+	// Lab is the read-only Lab telemetry view. Nil keeps every /v1/lab/*
+	// route registered but answers enabled:false with a reason, so a test
+	// server and a partially wired daemon degrade honestly.
+	Lab LabReader
 }
 
 // Server wires the store to an http.Handler.
@@ -138,7 +147,7 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	if cfg.Version == "" {
-		cfg.Version = "0.1.0"
+		cfg.Version = DefaultVersion
 	}
 	origins := make(map[string]struct{}, len(cfg.CORSOrigins))
 	for _, origin := range cfg.CORSOrigins {
@@ -180,6 +189,18 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodDelete, "/v1/accounts/{id}", s.handleDeleteAccount)
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/login", s.handleLoginAccount)
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/logout", s.handleLogoutAccount)
+	rt.handle(http.MethodGet, "/v1/accounts/{id}/servers", s.handleAccountServers)
+	rt.handle(http.MethodGet, "/v1/accounts/{id}/device", s.handleAccountDevice)
+
+	rt.handle(http.MethodGet, "/v1/lab/overview", s.handleLabOverview)
+	rt.handle(http.MethodGet, "/v1/lab/flags", s.handleLabFlags)
+	rt.handle(http.MethodGet, "/v1/lab/gates", s.handleLabGates)
+	rt.handle(http.MethodGet, "/v1/lab/sessions", s.handleLabSessions)
+	rt.handle(http.MethodGet, "/v1/lab/egress", s.handleLabEgress)
+	rt.handle(http.MethodPost, "/v1/lab/egress-check", s.handleLabEgressCheck)
+	rt.handle(http.MethodGet, "/v1/lab/profiles", s.handleLabProfiles)
+	rt.handle(http.MethodGet, "/v1/lab/logs", s.handleLabLogs)
+	rt.handle(http.MethodGet, "/v1/lab/diagnostics", s.handleLabDiagnostics)
 
 	rt.handle(http.MethodGet, "/v1/nodes", s.handleListNodes)
 	rt.handle(http.MethodPost, "/v1/nodes/{id}/actions/drain", s.handleDrainNode)

@@ -308,10 +308,16 @@ func (s *LoginService) remember(accountID string, control *Control, result Login
 	if len(result.Servers) == 0 {
 		if previous, ok := s.results[accountID]; ok && len(previous.Servers) > 0 {
 			result.Servers = cloneLoginResult(previous).Servers
+			if result.FetchedAt.IsZero() {
+				result.FetchedAt = previous.FetchedAt
+			}
 		}
 	}
 	previous := s.controls[accountID]
 	s.controls[accountID] = control
+	if result.FetchedAt.IsZero() {
+		result.FetchedAt = time.Now().UTC()
+	}
 	s.results[accountID] = cloneLoginResult(result)
 	s.mu.Unlock()
 
