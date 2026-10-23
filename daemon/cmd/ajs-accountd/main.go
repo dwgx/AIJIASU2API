@@ -102,6 +102,27 @@ func run() error {
 			"leases", len(st.Leases()))
 	}
 
+	// AJS_DROP_DEMO is the one-shot migration off the dashboard mock: remove
+	// exactly the seed rows from the loaded snapshot, log counts only, and
+	// persist the result through the normal atomic snapshot path. It runs
+	// before the listener and before the snapshot ticker so no request can
+	// observe the half-purged state.
+	if os.Getenv("AJS_DROP_DEMO") == "1" {
+		purged, err := st.PurgeDemo()
+		if err != nil {
+			return fmt.Errorf("purge demo data: %w", err)
+		}
+		logger.Info("demo_purged",
+			"accounts", purged.Accounts,
+			"nodes", purged.Nodes,
+			"leases", purged.Leases,
+			"users", purged.Users,
+			"keys", purged.Keys,
+			"requests", purged.Requests,
+			"audit", purged.Audit)
+		saveState(st, statePath, logger, "demo-purge")
+	}
+
 	snapshotEvery, err := snapshotInterval()
 	if err != nil {
 		return err
@@ -433,14 +454,15 @@ func saveState(st *store.Store, path string, logger *slog.Logger, reason string)
 	logger.Info("state_saved", "path", path, "reason", reason)
 }
 
-// openStore builds the panel store. AJS_MASTER_KEY enables at-rest sealing of
-// account passwords; without it the daemon keeps the skeleton behaviour and
-// discards them. The key itself is never logged.
+// openStore builds the panel store. The daemon starts from an empty store:
+// the dashboard mock seed is a test/mock fixture, never live data. AJS_MASTER_KEY
+// enables at-rest sealing of account passwords; without it the daemon keeps the
+// skeleton behaviour and discards them. The key itself is never logged.
 func openStore(logger *slog.Logger) (*store.Store, *secret.Store, error) {
 	raw := strings.TrimSpace(os.Getenv("AJS_MASTER_KEY"))
 	if raw == "" {
 		logger.Info("secrets_disabled", "reason", "AJS_MASTER_KEY is not set")
-		return store.New(), nil, nil
+		return store.NewEmpty(), nil, nil
 	}
 	key, err := parseMasterKey(raw)
 	if err != nil {
@@ -456,7 +478,7 @@ func openStore(logger *slog.Logger) (*store.Store, *secret.Store, error) {
 		return nil, nil, fmt.Errorf("secret store: %w", err)
 	}
 	logger.Info("secrets_enabled", "path", path)
-	return store.NewWithSealer(secrets), secrets, nil
+	return store.NewEmptyWithSealer(secrets), secrets, nil
 }
 
 // parseMasterKey accepts a 32-byte key as 64 hex characters or base64, padded

@@ -44,6 +44,7 @@ func TestLabRoutesRequireAuth(t *testing.T) {
 		"/v1/lab/overview",
 		"/v1/lab/flags",
 		"/v1/lab/gates",
+		"/v1/lab/flows",
 		"/v1/lab/sessions",
 		"/v1/lab/egress",
 		"/v1/lab/profiles",
@@ -69,6 +70,7 @@ func TestLabRoutesDisabledWithoutReader(t *testing.T) {
 		{"/v1/lab/overview", true},
 		{"/v1/lab/flags", true},
 		{"/v1/lab/gates", true},
+		{"/v1/lab/flows", true},
 		{"/v1/lab/sessions", true},
 		{"/v1/lab/egress", true},
 		{"/v1/lab/profiles", true},
@@ -145,7 +147,7 @@ func TestLabDisabledBodiesWithLoginOff(t *testing.T) {
 	st, acct, lab := newLabFixture(t)
 	ts := newLabTestServer(t, lab, st)
 
-	for _, route := range []string{"/v1/lab/gates", "/v1/lab/sessions", "/v1/lab/egress"} {
+	for _, route := range []string{"/v1/lab/gates", "/v1/lab/flows", "/v1/lab/sessions", "/v1/lab/egress"} {
 		status, body := labGET(t, ts, route, true)
 		if status != http.StatusOK {
 			t.Fatalf("%s = %d: %s", route, status, body)
@@ -424,6 +426,7 @@ func TestLabResponsesCarryNoSecretValues(t *testing.T) {
 		"/v1/lab/overview",
 		"/v1/lab/flags",
 		"/v1/lab/gates",
+		"/v1/lab/flows",
 		"/v1/lab/sessions",
 		"/v1/lab/egress",
 		"/v1/lab/profiles",

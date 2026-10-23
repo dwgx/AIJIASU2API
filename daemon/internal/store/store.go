@@ -104,42 +104,69 @@ type Store struct {
 	auditSeq    int
 }
 
-// New returns a store seeded with the dashboard mock dataset. Account
+// New returns a store seeded with the dashboard mock dataset. It exists for
+// tests and mock-mode comparisons; the daemon starts from NewEmpty. Account
 // passwords are validated and discarded.
 func New() *Store {
 	return newWithClock(time.Now, nil)
 }
 
-// NewWithSealer returns a store that seals every created account's password
-// through sealer instead of discarding it.
+// NewWithSealer returns a seeded store that seals every created account's
+// password through sealer instead of discarding it.
 func NewWithSealer(sealer Sealer) *Store {
 	return newWithClock(time.Now, sealer)
 }
 
-func newWithClock(now func() time.Time, sealer Sealer) *Store {
-	stamp := now()
-	users := buildUsers(stamp)
-	nodes := buildNodes(stamp)
-	s := &Store{
+// NewEmpty returns a store with no accounts, nodes, leases, users, keys,
+// request rows or audit events. Only the default settings are present. The
+// daemon uses it so a fresh install does not present the dashboard mock as
+// live data; every sequence starts at zero, so the first created account is
+// acc-01.
+func NewEmpty() *Store {
+	return newEmptyWithClock(time.Now, nil)
+}
+
+// NewEmptyWithSealer returns an empty store that seals every created account's
+// password through sealer instead of discarding it.
+func NewEmptyWithSealer(sealer Sealer) *Store {
+	return newEmptyWithClock(time.Now, sealer)
+}
+
+func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
+	return &Store{
 		now:           now,
-		accounts:      buildAccounts(stamp),
-		nodes:         nodes,
-		leases:        buildLeases(stamp),
-		users:         users,
-		keys:          buildKeys(stamp),
-		requests:      buildRequests(stamp, users, nodes),
-		audit:         buildAudit(stamp),
+		accounts:      []model.Account{},
+		nodes:         []model.ProxyNode{},
+		leases:        []model.Lease{},
+		users:         []model.PanelUser{},
+		keys:          []model.APIKey{},
+		requests:      []model.RequestLog{},
+		audit:         []model.AuditEvent{},
 		settings:      defaultSettings(),
 		keyHashes:     make(map[string]string),
 		sealer:        sealer,
 		secrets:       make(map[string][]byte),
 		devices:       make(map[string]DeviceIdentity),
 		pendingLabels: make(map[string]struct{}),
-		accountSeq:    6,
-		userSeq:       4,
-		keySeq:        6,
-		auditSeq:      seedAudit,
 	}
+}
+
+func newWithClock(now func() time.Time, sealer Sealer) *Store {
+	stamp := now()
+	users := buildUsers(stamp)
+	nodes := buildNodes(stamp)
+	s := newEmptyWithClock(now, sealer)
+	s.accounts = buildAccounts(stamp)
+	s.nodes = nodes
+	s.leases = buildLeases(stamp)
+	s.users = users
+	s.keys = buildKeys(stamp)
+	s.requests = buildRequests(stamp, users, nodes)
+	s.audit = buildAudit(stamp)
+	s.accountSeq = 6
+	s.userSeq = 4
+	s.keySeq = 6
+	s.auditSeq = seedAudit
 	s.syncAccountCountsLocked()
 	return s
 }

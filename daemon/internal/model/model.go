@@ -232,7 +232,11 @@ type Metrics struct {
 	Series        []TrafficPoint  `json:"series"`
 	Totals        MetricsTotals   `json:"totals"`
 	AccountHealth []AccountHealth `json:"accountHealth"`
-	GeneratedAt   string          `json:"generatedAt"`
+	// TelemetryAvailable reports whether Series and Totals come from a real
+	// traffic meter. The daemon has none yet, so both are empty/zero and the
+	// dashboard can label the chart instead of drawing a synthetic curve.
+	TelemetryAvailable bool   `json:"telemetryAvailable"`
+	GeneratedAt        string `json:"generatedAt"`
 }
 
 // PanelSettings mirrors the dashboard PanelSettings interface.

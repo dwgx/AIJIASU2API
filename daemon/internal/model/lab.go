@@ -72,6 +72,34 @@ type GateView struct {
 	StartedAt    string    `json:"startedAt"`
 }
 
+// FlowView is one finished gate flow joined to its node. TargetHost and
+// TargetPort are the only target fields: the gate records no URL, headers or
+// credentials, and SID is redacted to "first4…(len)".
+type FlowView struct {
+	ID         string `json:"id"`
+	NodeID     string `json:"nodeId"`
+	AccountID  string `json:"accountId"`
+	SID        string `json:"sid,omitempty"`
+	StartedAt  string `json:"startedAt"`
+	DurationMs int64  `json:"durationMs"`
+	Method     string `json:"method"`
+	TargetHost string `json:"targetHost"`
+	TargetPort int    `json:"targetPort"`
+	Status     string `json:"status"`
+	BytesIn    int64  `json:"bytesIn"`
+	BytesOut   int64  `json:"bytesOut"`
+	ErrorClass string `json:"errorClass,omitempty"`
+}
+
+// FlowsView is the GET /v1/lab/flows response. Dropped counts records evicted
+// from the bounded per-gate rings since process start.
+type FlowsView struct {
+	Enabled bool       `json:"enabled"`
+	Reason  string     `json:"reason,omitempty"`
+	Flows   []FlowView `json:"flows"`
+	Dropped uint64     `json:"dropped"`
+}
+
 // LabKeepalive reports the keepalive fields the daemon does not implement
 // yet. The object is present so the UI can state "not supported" instead of
 // silently omitting the capability.

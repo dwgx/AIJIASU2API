@@ -35,9 +35,11 @@ There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema i
 - Listen: `127.0.0.1:2261` by default
 - State: versioned JSON snapshot at `$AJS_STATE_FILE` (default
   `$AJS_STATE_DIR/state.json`), loaded on startup and saved every
-  `AJS_SNAPSHOT_INTERVAL` and on shutdown; a missing file falls back to the
-  dashboard mock seed. Sealed account secrets are inside the snapshot and,
-  when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`
+  `AJS_SNAPSHOT_INTERVAL` and on shutdown; a missing file starts an empty
+  store. The daemon does not seed the dashboard mock: `store.New()` is a
+  test/mock fixture, and `AJS_DROP_DEMO=1` removes the mock rows from an
+  existing snapshot once, before serving. Sealed account secrets are inside the
+  snapshot and, when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`
 - Wire contract: `dashboard/src/lib/types.ts` field names and
   `dashboard/src/lib/api.ts` paths/methods
 
@@ -47,8 +49,9 @@ There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema i
 go.mod
 cmd/ajs-accountd/main.go     flags/env, listener, graceful shutdown
 internal/model/model.go      wire structs, inputs and patches
-internal/store/              mutex-protected state + deterministic seed
-internal/store/seed.go       mock-compatible seed data and metrics series
+internal/store/              mutex-protected state + test/mock seed
+internal/store/seed.go       mock-compatible seed data and health derivation
+internal/store/demo.go       seed-row purge behind AJS_DROP_DEMO
 internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
 internal/store/device.go     stable per-account device identity (snapshot-backed)
 internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
@@ -61,16 +64,18 @@ internal/account/            FV protocol seam + account control client (Secret, 
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
 internal/account/tls.go         opt-in control-API certificate pin (PinnedHTTPClient)
 internal/account/tls_test.go    pin match/mismatch/malformed/default-reject coverage
-internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
+internal/gate/                per-node SOCKS5 gate (admission, byte counters, bounded flow ring, drain)
 internal/supervisor/          per-node child process: start, readiness, events, stop
 internal/lablog/              bounded, redacted in-memory log ring (allowlisted attrs)
 internal/model/lab.go        Lab wire structs (read-only reads + probe result; no credentials/raw ids)
 internal/runtime/lab.go      LabView: modes, flags, gates, sessions, egress, profiles, logs, diagnostics
 internal/runtime/egress_check.go  explicit egress probe: SOCKS5 dial + HTTPS echo, 5s cooldown
 internal/runtime/lab_test.go lab view coverage (redaction, disabled modes, logs, devices)
+internal/runtime/flows_test.go  flow window join: node/account ids, redacted SID, real gate end-to-end
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
 internal/api/lab.go          Lab handlers (reads + explicit egress check) and account servers/device
 internal/api/lab_test.go     lab handlers: auth, disabled bodies, egress-check mapping, query validation, 404
+internal/api/flows_test.go   /v1/lab/flows: auth, limit, shape, real-gate HTTP row
 internal/api/update.go       GET /v1/system/update: read-only GitHub release check
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
@@ -530,6 +535,13 @@ _ = srv.Undrain()                // back to service
   flows refused before relay (draining, admission timeout, malformed
   handshake, failed `OpenFlow`). Byte counters are updated live and exclude
   the handshake.
+- Flow ring: every finished flow, including a refusal, appends one
+  `FlowRecord` (`ID`, `StartedAt`, `DurationMs`, `Method`, `TargetHost`,
+  `TargetPort`, `Status`, `BytesIn`, `BytesOut`, `ErrorClass`) to a bounded
+  500-entry ring. Only host and port are recorded — never a URL, headers or a
+  credential. `Flows(limit)` returns the newest records first and `Dropped()`
+  counts evictions. The runtime joins the records with the node/account ids
+  and a redacted session SID for `GET /v1/lab/flows`.
 
 Wire contract (RFC 1928, no auth, CONNECT only):
 
@@ -899,6 +911,7 @@ test binary as the child.
 | `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` and the default `state.json` (created `0700`) |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
+| `AJS_DROP_DEMO` | — | `0` | `1` runs `Store.PurgeDemo` once after loading the snapshot and before the listener starts: removes exactly the `seed.go` mock rows (`acc-01`…`acc-06`, `node-01`…`node-12` plus any node of a removed seed account, `lease-01`…`lease-08`, `u-01`…`u-04`, `key-01`…`key-06`, `req-001`…`req-040`, `audit-001`…`audit-020`), preserves `acc-07`, its runtime node and every other live row, logs the per-collection counts, and saves the snapshot immediately. Destructive: the purge is written through the normal atomic snapshot and survives a restart, so copy the state file first if you need to undo it. Unset it after the first run; a second run is a no-op |
 | `AJS_UPDATE_REPO` | `-update-repo` | — | GitHub `owner/repo` checked by `GET /v1/system/update`; empty disables the check (the endpoint answers `enabled:false` and no network is made). Read-only: the daemon never executes an update — the host runs `deploy/update.sh` |
 | `AJS_UPDATE_API_BASE` | `-update-api-base` | `https://api.github.com` | GitHub API root for the update check; tests point it at an httptest server |
 
@@ -954,19 +967,29 @@ $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
   fsyncs the directory. A reader sees the old or the new document, never a
   partial one. The parent directory is created `0700` when missing.
 - `Store.Load(path)` reads the file and calls `Restore`. A missing file wraps
-  `os.ErrNotExist`, so `cmd/ajs-accountd` keeps the dashboard seed. Corrupt
-  JSON, empty data, an unknown `version` or duplicate ids are errors. `Restore`
-  decodes and validates into a local `Snapshot` before taking the write lock,
-  so a rejected file leaves the running store untouched.
+  `os.ErrNotExist`, so `cmd/ajs-accountd` keeps its empty startup store.
+  Corrupt JSON, empty data, an unknown `version` or duplicate ids are errors.
+  `Restore` decodes and validates into a local `Snapshot` before taking the
+  write lock, so a rejected file leaves the running store untouched.
 - `Restore` rebuilds the denormalised node counts and raises every counter to at
   least the highest identifier already present (`acc-`, `u-`, `key-`,
   `req-mut-`, `audit-`). A document with stale counters therefore cannot hand
   out a colliding id after a create/delete cycle.
+- Demo purge: `AJS_DROP_DEMO=1` makes `cmd/ajs-accountd` call
+  `Store.PurgeDemo` after `Load` and before the listener and snapshot ticker
+  start, then log `demo_purged` with per-collection counts and save the
+  snapshot (`reason=demo-purge`). It removes exactly the `seed.go` rows and
+  any node whose account is a removed seed account; `acc-07`, its runtime
+  node, created users/keys, mutation-lab requests and later audit events
+  survive. The call is idempotent and never logs ids or credentials. The
+  purge is destructive but goes through the normal atomic snapshot, so it
+  survives a restart; copy the state file first if you need to undo it.
 - `cmd/ajs-accountd` loads the snapshot before building the Resin panel and
   before the listener starts. It then saves every `AJS_SNAPSHOT_INTERVAL`
   (default `30s`) and once more when `run` returns after a SIGINT/SIGTERM
-  shutdown. Logs are `state_loaded`, `state_missing`, `state_saved` and
-  `state_save_failed`; they carry the path and reason only, never a secret.
+  shutdown. Logs are `state_loaded`, `state_missing`, `state_saved`,
+  `demo_purged` and `state_save_failed`; they carry the path, reason and
+  counts only, never a secret.
 - Duplication with `secrets.json`: the sealer still writes its own file on every
   seal, so a sealed envelope can exist in both files. On startup the snapshot
   replaces `store.secrets`, making it authoritative for which accounts have a
@@ -1158,7 +1181,7 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 |---|---|---|
 | GET | `/healthz` | process status + account-state counts |
 | GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
-| GET | `/v1/metrics?range=24h\|7d` | deterministic series, totals, account health |
+| GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); traffic series is empty and totals are zero with `telemetryAvailable:false` until a real traffic meter exists |
 | GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
 | GET | `/v1/accounts/{id}` | single account |
@@ -1249,6 +1272,7 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | GET | `/v1/lab/overview` | version, commit, uptime, effective modes (login, Resin, update check, secrets, cert pin), aggregate counts and warnings |
 | GET | `/v1/lab/flags` | effective startup flags with provenance (`env`/`flag`/`default`); secret flags carry `set` + `redacted`, never a value |
 | GET | `/v1/lab/gates` | per-node gate listener, state and ingress/egress byte counters from the controller snapshot |
+| GET | `/v1/lab/flows?limit=` | newest-first finished flows across every running gate, joined with node/account ids and a redacted SID; `limit` 1–500 (default 200), invalid → 400; the body is `{enabled,flows,dropped}` and a flow carries only `targetHost`/`targetPort` (no URL, headers or credential) |
 | GET | `/v1/lab/sessions` | FV session health with a redacted SID (`a1b2…(32)`), age, last-flow time, claimed egress and keepalive support |
 | GET | `/v1/lab/egress` | the vendor's claimed exit address per running node (`source:"fv-claim"`); this GET never probes, so `verified` stays empty, `match` null and `checkedAt` null — a POST result is returned to its caller, not stored |
 | POST | `/v1/lab/egress-check` | body `{"nodeId":"…"}`; dials the node's running loopback SOCKS5 gate and `GET https://ifconfig.me/ip` over HTTPS (10 s total, environment proxy ignored), then answers `{nodeId,claimed,verified,match,latencyMs,checkedAt,source:"echo"}`. No store write and no vendor call. No running gate or no Lab reader → 409 `CONFLICT`; a second check for the same node within 5 s → 429 `QUOTA_EXCEEDED`; malformed, empty or unknown-field body → 400 `INVALID_ARGUMENT`; a probe failure is still 200 with `error` set, `verified` empty and `match` null |
@@ -1272,6 +1296,11 @@ and error text; it persists nothing.
 
 ## Seed
 
+`store.New()` / `store.NewWithSealer()` build this deterministic dataset for
+tests and mock-mode comparisons. The daemon itself starts from
+`store.NewEmpty()`; it never serves these rows unless an old snapshot already
+contains them, and `AJS_DROP_DEMO=1` removes them once (see Persistence).
+
 Deterministic values match `dashboard/src/lib/mock.ts`:
 
 | Collection | Count |
@@ -1292,7 +1321,8 @@ Mutations append `audit-0NN` events at the head of the audit list.
 200, seed counts and exact field names, account create/409/delete, node
 drain/undrain/probe, lease rotate/release, user suspend/resume/allowlist and
 cascade delete, API-key show-once/revoke plus stored-hash checks, mutation log
-append, settings roundtrip, CORS preflight, 404/405, pagination, metrics,
+append, settings roundtrip, CORS preflight, 404/405, pagination, metrics
+(empty traffic with `telemetryAvailable:false`, state-derived health),
 topology, the 1 MiB body limit, and token redaction in request logs. The
 Prometheus endpoint has its own coverage: bearer-auth 401 vs 200 with the text
 format content type, seeded counts compared against `store.Accounts`, `Nodes`,
@@ -1315,7 +1345,12 @@ every seeded collection, a missing file returning `os.ErrNotExist` without
 mutating the store, corrupt JSON and unknown/empty versions leaving the store
 unchanged, no plaintext password or `password` field in the document, and
 create → delete → save/load plus a lost-counter restore that must not reuse an
-account, user, key, mutation or audit id.
+account, user, key, mutation or audit id. `internal/store/demo_test.go` covers
+the empty startup store and its sequences, `PurgeDemo` removing only seed rows
+while preserving `acc-07`, its runtime node, a created user/key, a
+mutation-lab request and later audit events, idempotency, and the real health
+formula (active+LIVE=100, active without LIVE=70, paused=40,
+auth_failed/expired=0) with empty traffic totals.
 
 `internal/resin/client_test.go` runs against an `httptest` fake Resin and covers
 subscription create/unchanged/PATCH, platform create/update with only the
@@ -1387,7 +1422,11 @@ auth/CMD/ATYP, RSV set, empty domain and a truncated request, an `OpenFlow`
 error answered `0x05`, the `State` snapshot, log fields with no
 credential-like keys, and `Close` stopping the listener, force-closing an
 active flow and cancelling a blocked `OpenFlow`. The accept loop and every
-handler are awaited, so a leaked goroutine fails the test.
+handler are awaited, so a leaked goroutine fails the test. `flow_test.go` pins
+the bounded 500-entry ring: capacity and drop count, newest-first `Flows`, a
+draining reject and an `OpenFlow` failure recorded with the host-only target,
+a handshake reject with no invented target, and a relayed flow's byte counts
+and `ok` status.
 
 `internal/supervisor/supervisor_test.go` re-executes the test binary as the
 managed child and binds ephemeral loopback ports only. It covers start →
@@ -1402,10 +1441,16 @@ idempotency and `Start` after close.
 flags with provenance and secret presence only, gate counters joined to store nodes, redacted
 session SIDs (`fake…(8)` in the fixture), claimed-only egress, the profile catalog and sample
 matrix, the log ring window, diagnostics facts, per-account servers/device hashes, and the
-`enabled:false` reason for every dependency that is off. `internal/api/lab_test.go` covers the
-HTTP surface: bearer 401 vs 200, the disabled bodies for all eight Lab routes plus the two
-account reads, log query validation (bad `limit`/`level`/`since` → 400), unknown account → 404,
-and that no credential, raw SID or full device id appears in any response.
+`enabled:false` reason for every dependency that is off. `flows_test.go` proves
+the cross-node join and ordering, the redacted SID, the aggregate `dropped`
+count, and one real `gate.Server` end to end. `internal/api/lab_test.go` covers
+the HTTP surface: bearer 401 vs 200, the disabled bodies for all nine Lab
+routes plus the two account reads, log query validation (bad
+`limit`/`level`/`since` → 400), unknown account → 404, and that no credential,
+raw SID or full device id appears in any response. `flows_test.go` pins
+`GET /v1/lab/flows`: 401, default/valid/invalid `limit`, the
+`{enabled,flows,dropped}` shape, and an authenticated HTTP row produced by a
+real gate.
 `TestLabEgressCheckHandler`, `TestLabEgressCheckProbeFailureIsA200Record` and
 `TestLabEgressCheckWithoutReader` pin the POST: 401 unauthenticated, trimmed `nodeId`, the 200
 record, 400 for empty/blank/unknown-field/wrong-type bodies, 409 without a gate or reader, 429
@@ -2438,6 +2483,65 @@ whitespace-only → `1`, explicit `0`/`1`/`3`/`" 2 "` → the parsed value, and
 `-1`/`-3`/`abc`/`1.5`/`1e2`/`0x2`/`1 2`/`two` → the `AJS_NODE_LIMIT` error with no
 value returned. No live call was made for this change and no login was
 rerun; the evidence above is the 2026-10-23 live run.
+
+### Flow ring (AJS-143)
+
+Both trees were copied to a fresh scratch root (only `daemon/` changed; the
+`emulator` sibling satisfies the module's `replace` directive):
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/ajs-143-flowring \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-143-flowring'
+```
+
+On HMC (`go1.26.0 linux/amd64`; no vendor host or Resin instance contacted):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-143-flowring/daemon
+$ go test -race -count=1 ./...
+ok  	ajsaccountd/cmd/ajs-accountd	1.012s
+ok  	ajsaccountd/internal/account	1.205s
+ok  	ajsaccountd/internal/api	1.290s
+ok  	ajsaccountd/internal/gate	1.593s
+ok  	ajsaccountd/internal/lablog	1.029s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.072s
+ok  	ajsaccountd/internal/resin	1.359s
+ok  	ajsaccountd/internal/runtime	1.506s
+ok  	ajsaccountd/internal/secret	1.038s
+ok  	ajsaccountd/internal/store	1.539s
+ok  	ajsaccountd/internal/supervisor	9.321s
+$ go build ./... && go vet ./... && test -z "$(gofmt -l .)" && echo HMC_ALL_OK
+HMC_ALL_OK
+
+$ go test -run "TestFlowRing" ./internal/gate ./internal/api -v -count=1
+=== RUN   TestFlowRingCapacityAndDrop
+--- PASS: TestFlowRingCapacityAndDrop (0.00s)
+=== RUN   TestFlowRingRecordsRejectedFlow
+--- PASS: TestFlowRingRecordsRejectedFlow (0.00s)
+=== RUN   TestFlowRingRecordsHandshakeReject
+--- PASS: TestFlowRingRecordsHandshakeReject (0.01s)
+=== RUN   TestFlowRingRecordsOpenFlowFailure
+--- PASS: TestFlowRingRecordsOpenFlowFailure (0.00s)
+=== RUN   TestFlowRingRecordsAcceptedFlow
+--- PASS: TestFlowRingRecordsAcceptedFlow (0.01s)
+PASS
+ok  	ajsaccountd/internal/gate	0.019s
+=== RUN   TestFlowRingAPIHandler
+--- PASS: TestFlowRingAPIHandler (0.00s)
+=== RUN   TestFlowRingHTTPServesRealGateRows
+--- PASS: TestFlowRingHTTPServesRealGateRows (0.00s)
+PASS
+ok  	ajsaccountd/internal/api	0.005s
+```
+
+`TestFlowRingHTTPServesRealGateRows` is the end-to-end acceptance check: a real
+`gate.Server` accepts a SOCKS5 CONNECT to `example.com:443`, relays four bytes
+through an in-memory vendor session, records the finished flow, `LabView.Flows`
+joins it to the node/account and redacts the SID, and the authenticated
+`GET /v1/lab/flows` returns the row with only `targetHost`/`targetPort` (no URL,
+header or credential). No live vendor call was made.
 
 ## Limitations / next
 

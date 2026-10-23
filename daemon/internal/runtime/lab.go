@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ajsaccountd/internal/account"
+	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/lablog"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
@@ -303,6 +304,76 @@ func (v *LabView) Gates() ([]model.GateView, string) {
 		out = append(out, view)
 	}
 	return out, ""
+}
+
+// labFlowMaxLimit is one gate's ring capacity: /v1/lab/flows never asks for
+// more than a single gate can retain.
+const labFlowMaxLimit = 500
+
+// Flows serves GET /v1/lab/flows: the newest finished flows across every
+// running gate, joined with the node and account identity. The session SID is
+// redacted, and a record never carries a URL, header or credential. The second
+// return value is the disabled reason; a non-empty reason means the caller
+// must answer enabled:false.
+func (v *LabView) Flows(limit int) (model.FlowsView, string) {
+	if v.cfg.Controller == nil {
+		return model.FlowsView{}, reasonLoginDisabled
+	}
+	if limit <= 0 || limit > labFlowMaxLimit {
+		limit = labFlowMaxLimit
+	}
+	type joinedFlow struct {
+		record    gate.FlowRecord
+		nodeID    string
+		accountID string
+		sid       string
+	}
+	joined := make([]joinedFlow, 0, limit)
+	var dropped uint64
+	for _, running := range v.snapshot() {
+		if running.FlowRing == nil {
+			continue
+		}
+		dropped += running.FlowRing.Dropped()
+		sid := redactSID(running.SessionSID)
+		for _, record := range running.FlowRing.Flows(limit) {
+			joined = append(joined, joinedFlow{
+				record:    record,
+				nodeID:    running.NodeID,
+				accountID: running.AccountID,
+				sid:       sid,
+			})
+		}
+	}
+	sort.SliceStable(joined, func(i, j int) bool {
+		if !joined[i].record.StartedAt.Equal(joined[j].record.StartedAt) {
+			return joined[i].record.StartedAt.After(joined[j].record.StartedAt)
+		}
+		return joined[i].record.ID > joined[j].record.ID
+	})
+	if len(joined) > limit {
+		joined = joined[:limit]
+	}
+	flows := make([]model.FlowView, 0, len(joined))
+	for _, row := range joined {
+		record := row.record
+		flows = append(flows, model.FlowView{
+			ID:         record.ID,
+			NodeID:     row.nodeID,
+			AccountID:  row.accountID,
+			SID:        row.sid,
+			StartedAt:  formatTime(record.StartedAt),
+			DurationMs: record.DurationMs,
+			Method:     record.Method,
+			TargetHost: record.TargetHost,
+			TargetPort: record.TargetPort,
+			Status:     record.Status,
+			BytesIn:    record.BytesIn,
+			BytesOut:   record.BytesOut,
+			ErrorClass: record.ErrorClass,
+		})
+	}
+	return model.FlowsView{Enabled: true, Flows: flows, Dropped: dropped}, ""
 }
 
 // Sessions serves GET /v1/lab/sessions. SID is a prefix plus length; the full

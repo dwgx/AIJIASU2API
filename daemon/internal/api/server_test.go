@@ -1589,32 +1589,45 @@ func TestMetricsContract(t *testing.T) {
 	if err := json.Unmarshal(body, &object); err != nil {
 		t.Fatalf("decode metrics object: %v", err)
 	}
-	assertKeys(t, "Metrics", object, "range", "series", "totals", "accountHealth", "generatedAt")
+	assertKeys(t, "Metrics", object, "range", "series", "totals", "accountHealth", "telemetryAvailable", "generatedAt")
+	if string(object["series"]) != "[]" {
+		t.Fatalf("series without telemetry = %s, want []", object["series"])
+	}
+	if string(object["telemetryAvailable"]) != "false" {
+		t.Fatalf("telemetryAvailable = %s, want false", object["telemetryAvailable"])
+	}
 
 	metrics := decodeBody[model.Metrics](t, body)
-	if metrics.Range != model.Range24h || len(metrics.Series) != 48 {
+	if metrics.Range != model.Range24h || len(metrics.Series) != 0 {
 		t.Fatalf("24h metrics: range=%q points=%d", metrics.Range, len(metrics.Series))
 	}
-	if metrics.Totals.P95LatencyMs != 284 || metrics.Totals.Requests <= 0 ||
-		metrics.Totals.EgressBytes <= 0 || metrics.Totals.IngressBytes <= 0 {
-		t.Fatalf("unexpected totals: %+v", metrics.Totals)
+	if metrics.TelemetryAvailable {
+		t.Fatal("telemetryAvailable = true without a traffic meter")
+	}
+	if metrics.Totals != (model.MetricsTotals{}) {
+		t.Fatalf("totals without telemetry = %+v, want zero", metrics.Totals)
 	}
 	if len(metrics.AccountHealth) != 6 || metrics.AccountHealth[0].AccountID != "acc-01" ||
-		metrics.AccountHealth[0].Score != 98 {
+		metrics.AccountHealth[0].Score != 100 {
 		t.Fatalf("unexpected account health: %+v", metrics.AccountHealth)
+	}
+	if metrics.AccountHealth[4].Score != 40 || metrics.AccountHealth[5].Score != 0 {
+		t.Fatalf("paused/auth_failed health = %d/%d, want 40/0",
+			metrics.AccountHealth[4].Score, metrics.AccountHealth[5].Score)
 	}
 	if _, err := time.Parse(time.RFC3339, metrics.GeneratedAt); err != nil {
 		t.Fatalf("generatedAt is not RFC3339: %v", err)
-	}
-	if metrics.Series[0].Ingress <= 0 || metrics.Series[0].Egress <= 0 {
-		t.Fatalf("unexpected first series point: %+v", metrics.Series[0])
 	}
 
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/metrics?range=7d", nil)
 	requireStatus(t, resp, http.StatusOK)
 	metrics = decodeBody[model.Metrics](t, body)
-	if metrics.Range != model.Range7d || len(metrics.Series) != 56 || metrics.Totals.P95LatencyMs != 311 {
-		t.Fatalf("7d metrics: range=%q points=%d p95=%d", metrics.Range, len(metrics.Series), metrics.Totals.P95LatencyMs)
+	if metrics.Range != model.Range7d || len(metrics.Series) != 0 || metrics.TelemetryAvailable {
+		t.Fatalf("7d metrics: range=%q points=%d telemetry=%v",
+			metrics.Range, len(metrics.Series), metrics.TelemetryAvailable)
+	}
+	if metrics.Totals != (model.MetricsTotals{}) {
+		t.Fatalf("7d totals = %+v, want zero", metrics.Totals)
 	}
 
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/metrics?range=30d", nil)

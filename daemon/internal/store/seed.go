@@ -274,61 +274,45 @@ func defaultSettings() model.PanelSettings {
 	}
 }
 
+// buildMetrics renders one metrics window. The store has no traffic meter, so
+// the series and totals stay empty/zero and TelemetryAvailable is false;
+// inventing a curve here would present mock traffic as live. Account health is
+// real: it comes from each account's state and live node count.
 func buildMetrics(window model.MetricRange, now time.Time, accounts []model.Account) model.Metrics {
-	points := 48
-	step := 30 * time.Minute
-	seed := uint32(7)
-	if window == model.Range7d {
-		points = 56
-		step = 3 * time.Hour
-		seed = 11
-	}
-	rand := mulberry32(seed)
-	start := now.Add(-time.Duration(points) * step)
-	series := make([]model.TrafficPoint, 0, points)
-	var ingressBytes, egressBytes int64
-	for index := range points {
-		wave := math.Sin(float64(index)/5)*0.35 + math.Sin(float64(index)/11)*0.2
-		ingress := int64(jsRound(180_000_000 + 120_000_000*(0.6+wave) + rand()*40_000_000))
-		egress := int64(jsRound(float64(ingress) * (0.72 + rand()*0.18)))
-		series = append(series, model.TrafficPoint{
-			T:       iso(start.Add(time.Duration(index) * step)),
-			Ingress: ingress,
-			Egress:  egress,
-		})
-		ingressBytes += ingress
-		egressBytes += egress
-	}
 	health := make([]model.AccountHealth, 0, len(accounts))
-	for index, account := range accounts {
-		score := 24
-		switch account.State {
-		case model.AccountActive:
-			score = 98 - index*3
-		case model.AccountPaused:
-			score = 62
-		}
+	for _, account := range accounts {
 		health = append(health, model.AccountHealth{
 			AccountID: account.ID,
 			Label:     account.Label,
-			Score:     score,
+			Score:     accountHealthScore(account),
 			State:     account.State,
 		})
 	}
-	p95 := 284
-	if window == model.Range7d {
-		p95 = 311
-	}
 	return model.Metrics{
-		Range:  window,
-		Series: series,
-		Totals: model.MetricsTotals{
-			Requests:     int64(jsRound(float64(egressBytes) / 480_000)),
-			EgressBytes:  egressBytes,
-			IngressBytes: ingressBytes,
-			P95LatencyMs: p95,
-		},
-		AccountHealth: health,
-		GeneratedAt:   iso(now),
+		Range:              window,
+		Series:             []model.TrafficPoint{},
+		Totals:             model.MetricsTotals{},
+		AccountHealth:      health,
+		TelemetryAvailable: false,
+		GeneratedAt:        iso(now),
+	}
+}
+
+// accountHealthScore maps an account's state and live node count to the
+// dashboard's 0-100 health score. An active account scores 100 when at least
+// one node is LIVE and 70 when the session is up but no node is serving. A
+// paused account scores 40; auth_failed and expired accounts cannot serve and
+// score 0.
+func accountHealthScore(account model.Account) int {
+	switch account.State {
+	case model.AccountActive:
+		if account.LiveNodeCount > 0 {
+			return 100
+		}
+		return 70
+	case model.AccountPaused:
+		return 40
+	default:
+		return 0
 	}
 }

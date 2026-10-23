@@ -156,6 +156,9 @@ type Server struct {
 
 	closeOnce sync.Once
 
+	flowRing *flowRing
+	flowSeq  atomic.Uint64
+
 	accepted atomic.Uint64
 	rejected atomic.Uint64
 	ingress  atomic.Uint64
@@ -196,6 +199,7 @@ func NewServer(cfg Config, session Session) (*Server, error) {
 		flows:     make(map[*flow]struct{}),
 		clients:   make(map[net.Conn]struct{}),
 		serveDone: make(chan struct{}),
+		flowRing:  newFlowRing(FlowRingCapacity),
 	}, nil
 }
 
@@ -410,6 +414,8 @@ func (s *Server) handle(client net.Conn) {
 	defer s.untrack(client)
 	defer client.Close()
 
+	started := s.cfg.Now()
+
 	// A connection queued in the accept backlog can be handed to a handler
 	// after Close took its client snapshot; refuse it here.
 	s.mu.Lock()
@@ -417,15 +423,16 @@ func (s *Server) handle(client net.Conn) {
 	s.mu.Unlock()
 	if closed {
 		s.rejected.Add(1)
+		s.recordReject(started, target{}, FlowErrorClosed)
 		return
 	}
 
-	started := s.cfg.Now()
 	_ = client.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	target, err := readRequest(client)
 	if err != nil {
 		s.rejected.Add(1)
+		s.recordReject(started, target, FlowErrorHandshake)
 		s.logger.Warn("gate handshake rejected", "node_id", s.cfg.NodeID, "error", err)
 		return
 	}
@@ -437,9 +444,15 @@ func (s *Server) handle(client net.Conn) {
 	if err := s.acquire(ctx); err != nil {
 		s.rejected.Add(1)
 		rep := byte(repConnectionRefused)
-		if errors.Is(err, errAdmissionTimeout) {
+		errorClass := FlowErrorClosed
+		switch {
+		case errors.Is(err, errAdmissionTimeout):
 			rep = repTTLExpired
+			errorClass = FlowErrorAdmissionTimeout
+		case errors.Is(err, errDraining):
+			errorClass = FlowErrorDraining
 		}
+		s.recordReject(started, target, errorClass)
 		_ = writeReply(client, rep)
 		s.logger.Warn("gate flow rejected",
 			"node_id", s.cfg.NodeID,
@@ -454,9 +467,16 @@ func (s *Server) handle(client net.Conn) {
 
 	f := &flow{client: client, cancel: cancel}
 	s.mu.Lock()
-	if s.closed || s.draining {
+	closed = s.closed
+	draining := s.draining
+	if closed || draining {
 		s.mu.Unlock()
 		s.rejected.Add(1)
+		errorClass := FlowErrorDraining
+		if closed {
+			errorClass = FlowErrorClosed
+		}
+		s.recordReject(started, target, errorClass)
 		_ = writeReply(client, repConnectionRefused)
 		return
 	}
@@ -468,6 +488,7 @@ func (s *Server) handle(client net.Conn) {
 	remote, err := s.session.OpenFlow(ctx, target.host, target.port)
 	if err != nil {
 		s.rejected.Add(1)
+		s.recordReject(started, target, FlowErrorOpenFlow)
 		_ = writeReply(client, repConnectionRefused)
 		s.logger.Warn("gate open flow failed",
 			"node_id", s.cfg.NodeID,
@@ -480,6 +501,7 @@ func (s *Server) handle(client net.Conn) {
 
 	if err := writeReply(client, repSucceeded); err != nil {
 		s.rejected.Add(1)
+		s.recordReject(started, target, FlowErrorReply)
 		s.logger.Warn("gate reply failed",
 			"node_id", s.cfg.NodeID,
 			"target", target.String(),
@@ -490,6 +512,15 @@ func (s *Server) handle(client net.Conn) {
 	s.accepted.Add(1)
 
 	in, out := relay(client, remote, &s.ingress, &s.egress)
+	s.recordFlow(FlowRecord{
+		StartedAt:  started,
+		Method:     "CONNECT",
+		TargetHost: target.host,
+		TargetPort: target.port,
+		Status:     FlowStatusOK,
+		BytesIn:    in,
+		BytesOut:   out,
+	})
 	s.logger.Info("gate flow closed",
 		"node_id", s.cfg.NodeID,
 		"target", target.String(),

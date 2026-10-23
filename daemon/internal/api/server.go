@@ -195,6 +195,7 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodGet, "/v1/lab/overview", s.handleLabOverview)
 	rt.handle(http.MethodGet, "/v1/lab/flags", s.handleLabFlags)
 	rt.handle(http.MethodGet, "/v1/lab/gates", s.handleLabGates)
+	rt.handle(http.MethodGet, "/v1/lab/flows", s.handleLabFlows)
 	rt.handle(http.MethodGet, "/v1/lab/sessions", s.handleLabSessions)
 	rt.handle(http.MethodGet, "/v1/lab/egress", s.handleLabEgress)
 	rt.handle(http.MethodPost, "/v1/lab/egress-check", s.handleLabEgressCheck)

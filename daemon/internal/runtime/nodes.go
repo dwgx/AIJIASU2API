@@ -78,9 +78,17 @@ type GateState interface {
 	State() gate.State
 }
 
+// GateFlows is the optional bounded flow-record view a Gate may expose. Like
+// GateState it is separate from Gate so listener-only fakes keep compiling.
+// Implementations must be safe for concurrent use.
+type GateFlows interface {
+	Flows(limit int) []gate.FlowRecord
+	Dropped() uint64
+}
+
 // NodeRuntime is one running node as seen by the read-only Lab view: the
-// node's identity, its session summary and, when the gate exposes counters,
-// the gate state. It carries no credentials.
+// node's identity, its session summary and, when the gate exposes them, the
+// counter snapshot and bounded flow window. It carries no credentials.
 type NodeRuntime struct {
 	NodeID    string
 	AccountID string
@@ -98,6 +106,11 @@ type NodeRuntime struct {
 	// not implement GateState.
 	Gate      gate.State
 	GateKnown bool
+
+	// FlowRing is the gate's bounded flow window, nil when the gate does not
+	// implement GateFlows. The runtime reads it only in Flows, so the other
+	// views never copy the ring.
+	FlowRing GateFlows
 }
 
 // GateFactory builds a gate. The zero value in NodeControllerConfig selects
@@ -483,6 +496,9 @@ func (c *NodeController) Snapshot() []NodeRuntime {
 		if stateful, ok := running.gate.(GateState); ok {
 			node.Gate = stateful.State()
 			node.GateKnown = true
+		}
+		if flows, ok := running.gate.(GateFlows); ok {
+			node.FlowRing = flows
 		}
 		out = append(out, node)
 	}

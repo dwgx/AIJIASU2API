@@ -1,11 +1,14 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"ajsaccountd/internal/account"
+	"ajsaccountd/internal/store"
 )
 
 // TestLoginProfile pins the accepted AJS_ACCOUNT_PROFILE values: the default
@@ -261,5 +264,46 @@ func TestValidateLoginHosts(t *testing.T) {
 	t.Setenv("AJS_ALLOW_PLAINTEXT", "1")
 	if err := validateLoginHosts([]string{"http://127.0.0.1:8081"}); err != nil {
 		t.Fatalf("AJS_ALLOW_PLAINTEXT=1: validateLoginHosts = %v, want nil", err)
+	}
+}
+
+// TestOpenStoreStartsEmpty locks the daemon wiring: both openStore paths build
+// an empty store, never the dashboard mock seed.
+func TestOpenStoreStartsEmpty(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Setenv("AJS_MASTER_KEY", "")
+	st, secrets, err := openStore(logger)
+	if err != nil {
+		t.Fatalf("openStore without a key: %v", err)
+	}
+	if secrets != nil {
+		t.Fatal("openStore without a key returned a secret store")
+	}
+	assertEmptyStore(t, st)
+
+	t.Setenv("AJS_MASTER_KEY", strings.Repeat("ab", 32))
+	t.Setenv("AJS_STATE_DIR", t.TempDir())
+	st, secrets, err = openStore(logger)
+	if err != nil {
+		t.Fatalf("openStore with a key: %v", err)
+	}
+	if secrets == nil {
+		t.Fatal("openStore with a key returned no secret store")
+	}
+	defer func() { _ = secrets.Close() }()
+	assertEmptyStore(t, st)
+}
+
+func assertEmptyStore(t *testing.T, st *store.Store) {
+	t.Helper()
+	if accounts := st.Accounts(); len(accounts) != 0 {
+		t.Fatalf("startup store accounts = %d, want 0", len(accounts))
+	}
+	if nodes := st.Nodes(); len(nodes) != 0 {
+		t.Fatalf("startup store nodes = %d, want 0", len(nodes))
+	}
+	if leases := st.Leases(); len(leases) != 0 {
+		t.Fatalf("startup store leases = %d, want 0", len(leases))
 	}
 }

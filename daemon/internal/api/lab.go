@@ -24,6 +24,7 @@ type LabReader interface {
 	Overview(ctx context.Context) model.LabOverview
 	Flags() model.FlagsView
 	Gates() ([]model.GateView, string)
+	Flows(limit int) (model.FlowsView, string)
 	Sessions() ([]model.SessionView, string)
 	Egress() ([]model.EgressView, string)
 	CheckEgress(ctx context.Context, nodeID string) (model.EgressCheckView, error)
@@ -38,6 +39,13 @@ type LabReader interface {
 const (
 	labLogDefaultLimit = 200
 	labLogMaxLimit     = 2000
+)
+
+// labFlowDefaultLimit and labFlowMaxLimit bound GET /v1/lab/flows. The max
+// matches one gate's ring capacity.
+const (
+	labFlowDefaultLimit = 200
+	labFlowMaxLimit     = 500
 )
 
 // labUnavailable is the reason every route uses when no LabReader is wired.
@@ -82,6 +90,50 @@ func (s *Server) handleLabGates(w http.ResponseWriter, r *http.Request) {
 		gates = []model.GateView{}
 	}
 	writeJSON(w, http.StatusOK, gates)
+}
+
+func (s *Server) handleLabFlows(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Lab == nil {
+		writeJSON(w, http.StatusOK, model.FlowsView{
+			Enabled: false,
+			Reason:  labUnavailable,
+			Flows:   []model.FlowView{},
+		})
+		return
+	}
+	limit, ok := parseLabFlowLimit(w, r)
+	if !ok {
+		return
+	}
+	view, reason := s.cfg.Lab.Flows(limit)
+	if reason != "" {
+		writeJSON(w, http.StatusOK, model.FlowsView{
+			Enabled: false,
+			Reason:  reason,
+			Flows:   []model.FlowView{},
+		})
+		return
+	}
+	if view.Flows == nil {
+		view.Flows = []model.FlowView{}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// parseLabFlowLimit validates ?limit=. An invalid value answers 400 instead
+// of silently widening the window, matching the logs endpoint.
+func parseLabFlowLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return labFlowDefaultLimit, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > labFlowMaxLimit {
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument,
+			fmt.Sprintf("limit must be an integer between 1 and %d", labFlowMaxLimit))
+		return 0, false
+	}
+	return limit, true
 }
 
 func (s *Server) handleLabSessions(w http.ResponseWriter, r *http.Request) {
