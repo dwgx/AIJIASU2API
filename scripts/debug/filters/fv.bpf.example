@@ -1,0 +1,7 @@
+# FV endpoint template. The endpoint is not static: it comes from the Servers
+# response as svr + par.fv.p (PROTOCOL.md §Endpoint). Copy this file, replace the
+# address and port with the values the daemon received, and pass the copy to
+# capture.sh --filter-file.
+#
+# One complete clause per line; lines are OR-ed.
+host 203.0.113.10 and tcp port 8443

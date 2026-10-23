@@ -1,0 +1,6 @@
+# Control API hosts (PROTOCOL.md §Hosts and failover; daemon/internal/account/login_service.go:26-31).
+# tcpdump resolves these names once, at filter-compile time. A DNS lookup is not
+# a vendor request; the capture itself starts before the daemon dials.
+# The fourth host is login.mbclubsh.com; login.mmegg.com:4443 is covered by the
+# host set plus port 4443.
+(tcp port 443 or tcp port 4443) and (host login.ajs-app.com or host login.mmegg.com or host login.mbclubsh.com)

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Build the daemon (or the account test binary) with optimizations disabled and
+# start Delve with a safe breakpoint set.
+#
+# Why two targets:
+#   * `daemon` is the shipping binary. At HEAD b75c1c3 the gate and the session
+#     factory are not wired into cmd/ajs-accountd, so the linker drops the FV
+#     symbols; only account.Control.Login resolves. run-dlv.sh says so instead
+#     of pretending the breakpoint exists.
+#   * `account-test` builds daemon/internal/account as a test binary, which
+#     links fv.Authenticate, fv.(*Session).OpenStreamContext and
+#     account.(*Factory).Open. This is the lab path for the FV exchange and the
+#     session key.
+#
+# Credentials never go on the command line. The daemon's `-token` flag is
+# refused; put AJS_ADMIN_TOKEN in the environment. Breakpoint commands print
+# only non-secret fields; the generated file repeats that rule.
+#
+# Usage:
+#   run-dlv.sh --build-only
+#   run-dlv.sh --dry-run
+#   run-dlv.sh                       # interactive dlv on the daemon
+#   run-dlv.sh --target account-test -- -test.run TestFactoryOpenAgainstMockFV -test.v
+#   run-dlv.sh --headless --listen 127.0.0.1:2345
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+LAB_ROOT=${AJS_LAB_ROOT:-/srv/dwgxhomecloud/scratch/ajs-51-debugger}
+SRC=${AJS_LAB_SRC:-$LAB_ROOT/src}
+OUT=${AJS_LAB_OUT:-$LAB_ROOT/out}
+TARGET=daemon
+DLV=${DLV:-$LAB_ROOT/bin/dlv}
+BUILD_ONLY=0
+DRY_RUN=0
+HEADLESS=0
+LISTEN=127.0.0.1:2345
+ARGS=()
+
+die() { printf 'run-dlv: %s\n' "$*" >&2; exit 2; }
+log() { printf 'run-dlv: %s\n' "$*" >&2; }
+
+usage() {
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+}
+
+while (($#)); do
+  case "$1" in
+    --target) TARGET=${2:?--target needs a value}; shift 2 ;;
+    --build-only) BUILD_ONLY=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --headless) HEADLESS=1; shift ;;
+    --listen) LISTEN=${2:?--listen needs a value}; shift 2 ;;
+    --) shift; ARGS=("$@"); break ;;
+    -h|--help) usage ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+case "$TARGET" in
+  daemon|account-test) ;;
+  *) die "--target must be daemon or account-test" ;;
+esac
+
+for arg in "${ARGS[@]}"; do
+  case "$arg" in
+    -token|-token=*|--token|--token=*|-resin-token|-resin-token=*|--resin-token|--resin-token=*)
+      die "refusing a credential on the command line; set AJS_ADMIN_TOKEN/AJS_RESIN_ADMIN_TOKEN in the environment"
+      ;;
+  esac
+done
+
+[[ -d $SRC/daemon ]] || die "source tree $SRC/daemon is missing"
+command -v go >/dev/null 2>&1 || die "go is not installed"
+
+if [[ $TARGET == daemon ]]; then
+  BIN=$OUT/ajs-accountd-debug
+  BUILD=(go build -gcflags='all=-N -l' -o "$BIN" ./cmd/ajs-accountd)
+  RUN_ARGS=("${ARGS[@]}")
+  BREAKPOINTS=(
+    "ajsaccountd/internal/account.(*Control).Login"
+  )
+  DROPPED=(
+    "ajsproxy/internal/fv.Authenticate"
+    "ajsproxy/internal/fv.(*Session).OpenStreamContext"
+    "ajsaccountd/internal/account.(*Factory).Open"
+  )
+else
+  BIN=$OUT/account.test
+  BUILD=(go test -c -gcflags='all=-N -l' -o "$BIN" ./internal/account)
+  if ((${#ARGS[@]})); then
+    RUN_ARGS=("${ARGS[@]}")
+  else
+    RUN_ARGS=(-test.run TestFactoryOpenAgainstMockFV -test.v)
+  fi
+  BREAKPOINTS=(
+    "ajsproxy/internal/fv.Authenticate"
+    "ajsproxy/internal/fv.(*Session).OpenStreamContext"
+    "ajsaccountd/internal/account.(*Factory).Open"
+    "ajsaccountd/internal/account.(*Control).Login"
+  )
+  DROPPED=()
+fi
+
+find_dlv() {
+  if [[ -x $DLV ]]; then
+    return 0
+  fi
+  if command -v dlv >/dev/null 2>&1; then
+    DLV=$(command -v dlv)
+    return 0
+  fi
+  return 1
+}
+
+if ! find_dlv; then
+  cat >&2 <<EOF
+run-dlv: dlv not found.
+Install the pinned debugger into the lab tree (no system package, no driver):
+  GOBIN=$LAB_ROOT/bin go install github.com/go-delve/delve/cmd/dlv@v1.27.2
+Then rerun this script. Delve must be >= 1.27 for a Go 1.26 toolchain.
+EOF
+  exit 3
+fi
+
+mkdir -p "$OUT"
+cd "$SRC/daemon"
+if ((DRY_RUN)); then
+  printf 'target=%s\n' "$TARGET"
+  printf 'source=%s\n' "$SRC/daemon"
+  printf 'binary=%s\n' "$BIN"
+  printf 'dlv=%s (%s)\n' "$DLV" "$("$DLV" version | awk 'NR==2 {print $2}')"
+  printf 'build:'
+  printf ' %q' "${BUILD[@]}"
+  printf '\n'
+  printf 'breakpoints:\n'
+  for bp in "${BREAKPOINTS[@]}"; do printf '  %s\n' "$bp"; done
+  if ((${#DROPPED[@]})); then
+    printf 'not linked in this target (expected; see header):\n'
+    for bp in "${DROPPED[@]}"; do printf '  %s\n' "$bp"; done
+  fi
+  printf 'run:'
+  printf ' %q' "$DLV" exec --init="$OUT/dlv-$TARGET.cmds"
+  if ((HEADLESS)); then
+    printf ' --headless --listen=%q --api-version=2 --accept-multiclient' "$LISTEN"
+  fi
+  printf ' %q' "$BIN"
+  if ((${#RUN_ARGS[@]})); then
+    printf ' --'
+    printf ' %q' "${RUN_ARGS[@]}"
+  fi
+  printf '\n'
+  exit 0
+fi
+
+log "building $TARGET with -N -l"
+GOTOOLCHAIN=auto "${BUILD[@]}"
+
+{
+  printf '# Generated by run-dlv.sh. Safe breakpoints only.\n'
+  printf '# Never print cfg, password, ConnectPassword, req, or any Secret value.\n'
+  for bp in "${BREAKPOINTS[@]}"; do printf 'break %s\n' "$bp"; done
+  printf '# On a hit: print s.SID, print %%x string(s.Key) (FV key), print req.Server.ID.\n'
+  printf 'continue\n'
+} > "$OUT/dlv-$TARGET.cmds"
+
+if ((BUILD_ONLY)); then
+  log "built $BIN"
+  log "init file $OUT/dlv-$TARGET.cmds"
+  exit 0
+fi
+
+if ((HEADLESS)); then
+  log "headless on $LISTEN; connect with: $DLV connect --init=$OUT/dlv-$TARGET.cmds $LISTEN"
+  exec "$DLV" exec --headless --listen="$LISTEN" --api-version=2 \
+    --accept-multiclient "$BIN" -- "${RUN_ARGS[@]}"
+fi
+
+exec "$DLV" exec --init="$OUT/dlv-$TARGET.cmds" "$BIN" -- "${RUN_ARGS[@]}"

@@ -1,0 +1,3 @@
+# Loopback dry run only: a local HTTP listener and a local TLS listener.
+# No vendor host, no external traffic.
+tcp port 18080 or tcp port 18443
