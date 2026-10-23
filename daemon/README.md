@@ -14,7 +14,8 @@ sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
 validated and discarded. Vendor login is wired but default-off:
 `AJS_ACCOUNT_LOGIN=1` makes `POST /v1/accounts/{id}/actions/login` call the
 control API; without it the handler only refreshes the store, and no vendor
-host is contacted. There is still no SQLite, session factory wiring or gate.
+host is contacted. There is still no SQLite; the gate package is implemented
+but not yet wired to the session factory or node supervisor.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -38,6 +39,7 @@ internal/publisher/          subscription render, coalesced publish, rotation
 internal/runtime/            startup wiring, panel topology/reconcile and mutations
 internal/account/            FV protocol seam + account control client (Secret, Device, Control, LoginService)
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
+internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
@@ -320,6 +322,98 @@ The only emulator change is on `fvfacade`: `NewCTR` (the streaming cipher the
 relay needs, since `AESCTR` resets its position) and the
 `SessionKeySize`/`IVSize`/`HeaderSize`/`OAEPBlockMagic` constants. No internal
 package is imported and no emulator test changed.
+
+## Gate (AJS-40)
+
+`internal/gate` is the per-node SOCKS5 front end Resin dials (`docs/PANEL.md`
+§1–§2). One `Server` owns one loopback listener for one node and injects the FV
+session through a one-method interface, so the gate knows nothing about the
+vendor protocol, credentials or the control API.
+
+```go
+srv, err := gate.NewServer(gate.Config{
+	NodeID:    "acc-01:srv-07",
+	AccountID: "acc-01",
+	Listen:    "127.0.0.1:13007", // default 127.0.0.1:0
+	Limit:     32,                // default 32
+}, sess)                          // sess: gate.Session; *account.FlowSession fits
+if err != nil {
+	return err
+}
+if err := srv.Start(ctx); err != nil { // cancelling ctx is Close
+	return err
+}
+defer srv.Close()
+
+fmt.Println(srv.Addr())          // bound loopback address
+fmt.Printf("%+v\n", srv.State()) // counters, active, draining
+_ = srv.Drain(ctx)               // reject new, wait up to DrainGrace
+_ = srv.Undrain()                // back to service
+```
+
+- `Session` is `OpenFlow(ctx, host, port) (net.Conn, error)`.
+  `account.FlowSession` is a superset (`SID`, `Fields`, `Healthy`, `Close` are
+  extra), so the existing session factory is injected without an adapter.
+  `server_test.go` pins the assignment with
+  `var _ gate.Session = account.FlowSession(nil)`.
+- `Config`: `NodeID`, `AccountID`, `Listen`, `Limit`, `AdmissionTimeout`,
+  `DrainGrace`, `Now`, `Logger`. Zero values select the defaults
+  (`127.0.0.1:0`, 32, 30s, 30s, `time.Now`, `slog.Default()`).
+- `State`: `NodeID`, `AccountID`, `Active`, `Limit`, `Draining`, `Accepted`,
+  `Rejected`, `IngressBytes`, `EgressBytes`, `StartedAt`. `Accepted` counts
+  flows that received the success reply and entered relay; `Rejected` counts
+  flows refused before relay (draining, admission timeout, malformed
+  handshake, failed `OpenFlow`). Byte counters are updated live and exclude
+  the handshake.
+
+Wire contract (RFC 1928, no auth, CONNECT only):
+
+| Step | Bytes | Gate behaviour |
+|---|---|---|
+| Greeting | `05 NMETHODS methods…` | requires method `00`; otherwise replies `05 FF` and closes. A wrong version closes without a reply. |
+| Request | `05 01 00 ATYP addr port` | only CONNECT; `ATYP 01` IPv4, `03` domain (1-byte length), `04` IPv6; RSV must be 0. |
+| Success | `05 00 00 01 00 00 00 00 00 00` | after `OpenFlow` succeeded; relay starts. |
+| Refused | `05 05 00 01 …` | draining, closed, or `OpenFlow` error. |
+| TTL expired | `05 06 00 01 …` | the admission semaphore stayed full for `AdmissionTimeout`. |
+| Command unsupported | `05 07 00 01 …` | `CMD != 1`. |
+| Address unsupported | `05 08 00 01 …` | `ATYP` not 1/3/4. |
+| Malformed | `05 01 00 01 …` | RSV non-zero or an empty domain name. |
+
+- Admission: a buffered channel of `Limit` slots. A flow waits at most
+  `AdmissionTimeout` (default 30s) and is answered `0x06` on expiry; the slot is
+  released exactly once after the relay ends. Drain closes the drain channel,
+  so waiting flows fail immediately with `0x05` and a flow that has not
+  registered yet cannot start after Drain.
+- Drain/Close: `Drain` sets `Draining`, rejects new flows and waits for
+  `Active` to reach zero or `DrainGrace` (default 30s); in-flight flows keep
+  relaying. `Undrain` resets the flag. `Close` stops the listener, waits the
+  same grace, then force-closes every tracked client and upstream connection,
+  including a half-open handshake or an `OpenFlow` blocked on its cancelled
+  context. Both are idempotent; `Drain`/`Undrain`/`Start` return `ErrClosed`
+  afterwards.
+- Relay: two `io.Copy` directions through counting writers. On EOF the
+  destination is half-closed when it supports `CloseWrite` and closed
+  otherwise; both sides are closed when the relay ends.
+- Logging: `gate listening`, one `gate flow closed` per relayed flow
+  (`node_id`, `target`, `ingress_bytes`, `egress_bytes`, `duration`) and warn
+  lines for rejections. The gate never receives a credential; only host:port is
+  logged.
+- Limitation: the package is not wired to the node supervisor, port allocator
+  or Resin. Nothing constructs it from a login session, publishes `State` or
+  serves the `GateController` HTTP surface yet; it binds loopback only and has
+  no per-user auth (P3).
+
+`server_test.go` runs only loopback and in-process fakes: a `net.Pipe` echo
+session for domain/IPv4/IPv6 CONNECT, relay and exact counters; limit 1 with a
+150ms admission timeout (`0x06`, then success after release); Drain rejecting a
+new flow while the active one completes, Undrain accepting again; Drain grace
+leaving the in-flight flow usable; malformed greeting, zero methods, wrong
+version, unsupported auth/CMD/ATYP, RSV set, empty domain and a truncated
+request; `OpenFlow` failure; `State`; log fields and redaction; `Close`
+stopping the listener, force-closing an active flow and cancelling a blocked
+`OpenFlow`. It also waits for the accept loop and every handler to finish, so a
+leak fails the test. The package passes `go test -race -count=3` on the dev
+host.
 
 ## Configuration
 
@@ -698,6 +792,19 @@ adds the API mapping test: the optional service answers 200, and wrapped
 map to 409/404/401/503/503; the existing nil-service test keeps the
 store-only fallback.
 
+`internal/gate/server_test.go` uses a `net.Pipe` echo session and a blocking
+session; apart from loopback it never touches the network. It covers CONNECT
+for domain/IPv4/IPv6 with the exact `OpenFlow` target, relay and exact
+ingress/egress counters, `Limit: 1` admission (`0x06` after the 150ms timeout,
+then success after release), Drain rejecting a new flow while the active one
+finishes and Undrain accepting again, Drain grace leaving the in-flight flow
+usable, malformed greeting, wrong version, zero methods, unsupported
+auth/CMD/ATYP, RSV set, empty domain and a truncated request, an `OpenFlow`
+error answered `0x05`, the `State` snapshot, log fields with no
+credential-like keys, and `Close` stopping the listener, force-closing an
+active flow and cancelling a blocked `OpenFlow`. The accept loop and every
+handler are awaited, so a leaked goroutine fails the test.
+
 ## HMC evidence
 
 Copy only `daemon/` to the HMC scratch path:
@@ -990,16 +1097,48 @@ $ cat /tmp/ajs-unauth.json
 The daemon logged `ajs-accountd shutting down`, `pgrep -x ajs-accountd`
 returned nothing, and port 2261 was free afterward. No process was left running.
 
+### Gate (AJS-40)
+
+Both trees were copied to a fresh scratch root because `daemon/go.mod` replaces
+`ajsproxy` with `../emulator`:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/ajs-40-gate \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-40-gate'
+```
+
+On HMC (`go1.26.0 linux/amd64`, selected by `GOTOOLCHAIN=auto` from the module
+cache):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-40-gate/daemon && go test -count=1 ./... && go build ./... && echo BUILD_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.053s
+ok  	ajsaccountd/internal/api	0.032s
+ok  	ajsaccountd/internal/gate	0.462s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.011s
+ok  	ajsaccountd/internal/resin	0.211s
+ok  	ajsaccountd/internal/runtime	0.030s
+ok  	ajsaccountd/internal/secret	0.003s
+ok  	ajsaccountd/internal/store	0.003s
+BUILD_OK
+```
+
+The gate tests bind ephemeral loopback ports only, and each server is closed by
+its test cleanup.
+
 ## Limitations / next
 
 - State is lost on restart; there is no persistence, SQLite, or secret store.
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
-  With it, login calls the control API, but the session factory and gate are
-  still not wired: the `LoginResult` stays in process memory and is lost on
-  restart. Lease rotate/release and node drain/undrain write through Resin when
-  a panel is configured; account, user, key and settings mutations remain
-  store-only, and `/v1/reconcile` is the only path that re-renders the whole
-  subscription on demand.
+  With it, login calls the control API, but neither the session factory nor the
+  gate is wired to a supervisor: the `LoginResult` stays in process memory and
+  is lost on restart. Lease rotate/release and node drain/undrain write through
+  Resin when a panel is configured; account, user, key and settings mutations
+  remain store-only, and `/v1/reconcile` is the only path that re-renders the
+  whole subscription on demand.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
   `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.
@@ -1013,7 +1152,12 @@ returned nothing, and port 2261 was free afterward. No process was left running.
 - There is no background reconciler: after startup, Resin drift (node circuits,
   an out-of-band subscription edit) is corrected only by `POST /v1/reconcile`.
 - Probe is a bookkeeping canary, not a network probe; `DOWN` nodes return 503.
-- Drain has no flow scheduler to drain yet; `inUse` is seed data.
+- The API's drain has no flow scheduler yet (`inUse` is seed data); the gate's
+  own `Drain` is implemented and tested but nothing calls it.
+- The gate is not wired to the node supervisor, the port allocator or Resin:
+  nothing constructs it from a login session, allocates `13000–13999`, publishes
+  its `State` or serves the `GateController` HTTP surface. It has no per-user
+  auth or quota (P3) and binds loopback only.
 - Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
   and `/v1/nodes/{id}/flows` are out of this slice.
 - Quotas are advisory; `QUOTA_EXCEEDED` is defined but never emitted.
