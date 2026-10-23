@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -918,6 +919,141 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	}
 	t.Logf("delete %s: gates %d/%d refused, sessions closed, nodes removed, reconciles=%d",
 		acct.ID, first.GatePort, second.GatePort, rec.callCount())
+}
+
+// TestAccountLogoutStopsGatesBeforeStoreDrain pins the B0 logout seam end to
+// end: POST /v1/accounts/{id}/actions/logout runs the controller's StopAccount
+// before store.LogoutAccount, so the gates and FV sessions are closed first and
+// the store then pauses the account and marks its nodes DRAINING. The other
+// account keeps its gate, session and LIVE node.
+func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	loggedOut := newNodeTestAccount(t, st, "node-logout")
+	kept := newNodeTestAccount(t, st, "node-logout-other")
+	logins := newFakeLoginResults()
+	logins.set(loggedOut.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers: map[string]apifacade.Server{
+			"s1": testServer("s1"),
+			"s2": testServer("s2"),
+		},
+	})
+	logins.set(kept.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         map[string]apifacade.Server{"t1": testServer("t1")},
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeController(t, st, logins, opener, rec)
+	for _, id := range []string{loggedOut.ID, kept.ID} {
+		if err := controller.SyncAccount(context.Background(), id); err != nil {
+			t.Fatalf("SyncAccount(%s): %v", id, err)
+		}
+	}
+	first := nodeByServer(t, st, loggedOut.ID, "s1")
+	second := nodeByServer(t, st, loggedOut.ID, "s2")
+	keptNode := nodeByServer(t, st, kept.ID, "t1")
+
+	ts := httptest.NewServer(api.New(api.Config{
+		AllowInsecure:     true,
+		AccountLogoutHook: controller.StopAccount,
+	}, st, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(ts.Close)
+
+	logout := func(want int) model.Account {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/accounts/"+loggedOut.ID+"/actions/logout", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("logout: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("logout status = %d, want %d", resp.StatusCode, want)
+		}
+		var out model.Account
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode logout body: %v", err)
+		}
+		return out
+	}
+
+	account := logout(http.StatusOK)
+	if account.State != model.AccountPaused || account.LiveNodeCount != 0 {
+		t.Fatalf("logout account = %+v, want paused with 0 live nodes", account)
+	}
+	if got := rec.callCount(); got != 3 {
+		t.Fatalf("reconciles = %d, want 3 (two syncs + logout stop)", got)
+	}
+	for _, port := range []int{first.GatePort, second.GatePort} {
+		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
+			_ = conn.Close()
+			t.Fatalf("logged-out account's gate %d still accepts connections", port)
+		}
+	}
+	for _, serverID := range []string{"s1", "s2"} {
+		if session := opener.session(serverID); session == nil || !session.isClosed() {
+			t.Fatalf("%s session is not closed after logout", serverID)
+		}
+	}
+	if session := opener.session("t1"); session == nil || session.isClosed() {
+		t.Fatal("logout closed the other account's session")
+	}
+
+	// The store transition happened after the gates closed: paused account,
+	// every node DRAINING, and the other account untouched.
+	stored, ok := st.Account(loggedOut.ID)
+	if !ok {
+		t.Fatal("logout removed the account from the store")
+	}
+	if stored.State != model.AccountPaused {
+		t.Fatalf("stored account state = %q, want paused", stored.State)
+	}
+	for _, node := range []model.ProxyNode{first, second} {
+		current, ok := st.Node(node.ID)
+		if !ok {
+			t.Fatalf("logout removed store node %s", node.ID)
+		}
+		if current.State != model.NodeDraining {
+			t.Fatalf("node %s state = %q after logout, want DRAINING", node.ID, current.State)
+		}
+	}
+	if other, ok := st.Account(kept.ID); !ok || other.State != model.AccountActive {
+		t.Fatalf("other account = %+v, want active", other)
+	}
+	if current, ok := st.Node(keptNode.ID); !ok || current.State != model.NodeLive {
+		t.Fatalf("other account's node = %+v, want LIVE", current)
+	}
+	code, conn := socks5Connect(t, keptNode.GatePort)
+	if code != 0x00 {
+		t.Fatalf("other account's gate reply = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+
+	// Idempotent: a second logout answers 200, runs no gate close and does
+	// not reconcile again.
+	account = logout(http.StatusOK)
+	if account.State != model.AccountPaused {
+		t.Fatalf("second logout state = %q, want paused", account.State)
+	}
+	if got := rec.callCount(); got != 3 {
+		t.Fatalf("reconciles after the idempotent logout = %d, want 3", got)
+	}
+	code, conn = socks5Connect(t, keptNode.GatePort)
+	if code != 0x00 {
+		t.Fatalf("kept gate reply after the idempotent logout = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+	t.Logf("logout %s: gates %d/%d refused, sessions closed, nodes DRAINING, %s kept port %d, reconciles=%d",
+		loggedOut.ID, first.GatePort, second.GatePort, keptNode.ID, keptNode.GatePort, rec.callCount())
 }
 
 func TestNodeControllerPerServerFailure(t *testing.T) {

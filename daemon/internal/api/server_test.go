@@ -615,6 +615,140 @@ func TestAccountDeleteHook(t *testing.T) {
 	})
 }
 
+// TestAccountLogoutHook pins the B0 logout seam at the API layer: the hook
+// runs while the account is still active and its nodes are not yet draining,
+// a hook error answers 500 without touching the store, and the nil hook keeps
+// the store-only logout of a daemon without AJS_ACCOUNT_LOGIN=1.
+func TestAccountLogoutHook(t *testing.T) {
+	t.Run("hook runs before the store logout", func(t *testing.T) {
+		st := store.New()
+		var hookID string
+		var stateAtHook model.AccountState
+		var nodesAtHook []model.ProxyNode
+		server := New(Config{
+			AdminToken: testToken,
+			AccountLogoutHook: func(_ context.Context, accountID string) error {
+				hookID = accountID
+				account, ok := st.Account(accountID)
+				if !ok {
+					t.Fatalf("hook ran for an account the store does not know")
+				}
+				stateAtHook = account.State
+				for _, node := range st.Nodes() {
+					if node.AccountID == accountID {
+						nodesAtHook = append(nodesAtHook, node)
+					}
+				}
+				return nil
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/logout", nil)
+		requireStatus(t, resp, http.StatusOK)
+		account := decodeBody[model.Account](t, body)
+		if hookID != "acc-01" {
+			t.Fatalf("hook account = %q, want acc-01", hookID)
+		}
+		if stateAtHook != model.AccountActive {
+			t.Fatalf("account state at hook = %q, want active (hook ran after the store logout)", stateAtHook)
+		}
+		if len(nodesAtHook) != 3 {
+			t.Fatalf("account nodes at hook = %d, want 3", len(nodesAtHook))
+		}
+		for _, node := range nodesAtHook {
+			if node.State == model.NodeDraining {
+				t.Fatalf("node %s was already DRAINING when the hook ran", node.ID)
+			}
+		}
+		if account.State != model.AccountPaused {
+			t.Fatalf("logout state = %q, want paused", account.State)
+		}
+	})
+
+	t.Run("hook error aborts the logout", func(t *testing.T) {
+		var logs bytes.Buffer
+		st := store.New()
+		var hookID string
+		hookErr := errors.New("stop gates failed")
+		server := New(Config{
+			AdminToken: testToken,
+			AccountLogoutHook: func(_ context.Context, accountID string) error {
+				hookID = accountID
+				return hookErr
+			},
+		}, st, slog.New(slog.NewTextHandler(&logs, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		before := st.Nodes()
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/logout", nil)
+		requireStatus(t, resp, http.StatusInternalServerError)
+		requireErrorCode(t, body, CodeInternal)
+		if hookID != "acc-01" {
+			t.Fatalf("hook account = %q, want acc-01", hookID)
+		}
+		account, ok := st.Account("acc-01")
+		if !ok {
+			t.Fatal("a failed hook removed the account")
+		}
+		if account.State != model.AccountActive {
+			t.Fatalf("account state after the failed hook = %q, want active", account.State)
+		}
+		nodes := st.Nodes()
+		if len(nodes) != len(before) {
+			t.Fatalf("nodes after the failed hook = %d, want %d", len(nodes), len(before))
+		}
+		for _, node := range nodes {
+			if node.AccountID != "acc-01" {
+				continue
+			}
+			if node.State == model.NodeDraining {
+				t.Fatalf("node %s became DRAINING despite the hook failure", node.ID)
+			}
+		}
+		if !strings.Contains(logs.String(), "account_logout_hook_error") {
+			t.Fatalf("logs = %q, want the hook failure", logs.String())
+		}
+	})
+
+	t.Run("nil hook keeps the store-only logout", func(t *testing.T) {
+		ts, st := newTestServer(t)
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/logout", nil)
+		requireStatus(t, resp, http.StatusOK)
+		account := decodeBody[model.Account](t, body)
+		if account.State != model.AccountPaused || account.LiveNodeCount != 0 {
+			t.Fatalf("logout account = %+v, want paused with 0 live nodes", account)
+		}
+		for _, node := range st.Nodes() {
+			if node.AccountID == "acc-01" && node.State != model.NodeDraining {
+				t.Fatalf("node %s state = %q, want DRAINING", node.ID, node.State)
+			}
+		}
+	})
+
+	t.Run("missing account skips the hook", func(t *testing.T) {
+		called := false
+		server := New(Config{
+			AdminToken: testToken,
+			AccountLogoutHook: func(context.Context, string) error {
+				called = true
+				return nil
+			},
+		}, store.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-missing/actions/logout", nil)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+		if called {
+			t.Fatal("hook ran for a missing account")
+		}
+	})
+}
+
 // drainPanel records whether the API hook had already run when a panel
 // mutation started. Only the two node mutations are implemented: any other
 // call panics on the embedded nil interface, which is the desired test failure.

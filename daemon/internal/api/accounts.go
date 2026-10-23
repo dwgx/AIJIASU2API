@@ -150,10 +150,35 @@ func (s *Server) writeLoginError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
-	account, err := s.store.LogoutAccount(pathParam(r, "id"))
+	id := pathParam(r, "id")
+	if _, ok := s.store.Account(id); !ok {
+		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("account %q not found", id))
+		return
+	}
+	if err := s.runAccountLogoutHook(r.Context(), id); err != nil {
+		// A hook failure is a runtime failure, not a store contract error, so
+		// it answers 500 instead of the mapped store status. The detail stays
+		// in the log; the account and its nodes are untouched.
+		s.logger.Error("account_logout_hook_error", "account", id, "error", err)
+		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+	account, err := s.store.LogoutAccount(id)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, account)
+}
+
+// runAccountLogoutHook stops the account's runtime gates before the store
+// pauses the account and drains its nodes. Unlike the login hook its error is
+// returned: the caller aborts the logout instead of leaving a listening gate
+// behind a paused account. A nil hook keeps the store-only behaviour of a
+// daemon without AJS_ACCOUNT_LOGIN=1.
+func (s *Server) runAccountLogoutHook(ctx context.Context, accountID string) error {
+	if s.cfg.AccountLogoutHook == nil {
+		return nil
+	}
+	return s.cfg.AccountLogoutHook(ctx, accountID)
 }

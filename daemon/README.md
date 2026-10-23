@@ -527,6 +527,7 @@ controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 api.Config{
     LoginHook:         controller.SyncAccount,
     AccountDeleteHook: controller.StopAccount, // gates close before the store cascade
+    AccountLogoutHook: controller.StopAccount, // gates close before the store pause
     NodeDrainHook: func(ctx context.Context, nodeID string, drain bool) error {
         if drain {
             return controller.DrainNode(ctx, nodeID)
@@ -561,30 +562,37 @@ and reconcile the panel, and a login refresh does not undo an operator drain.
 `Stop` closes every gate and session and reconciles once. Every mutation is
 serialized, so concurrent logins for one account share one gate.
 
-`StopAccount` is the account-delete seam. It closes every gate and session the
-controller runs for one account, removes them from the running set, leaves the
-other accounts untouched and reconciles the panel once. It deliberately does
-not touch store nodes: `store.DeleteAccount` owns that cascade, and the gates
-must be gone before the rows are. It is idempotent — with no running gate for
-the account it returns `nil` without reconciling — and it aggregates close and
-reconcile failures; a failed close still drops the gate from the running set,
-so a retry cannot double-close it.
+`StopAccount` is the account-delete and account-logout seam. It closes every
+gate and session the controller runs for one account, removes them from the
+running set, leaves the other accounts untouched and reconciles the panel once.
+It deliberately does not touch store nodes: `store.DeleteAccount` owns the
+cascade and `store.LogoutAccount` owns the pause/DRAINING transition, and the
+gates must be gone before either runs. It is idempotent — with no running gate
+for the account it returns `nil` without reconciling — and it aggregates close
+and reconcile failures; a failed close still drops the gate from the running
+set, so a retry cannot double-close it.
 
-The three API hooks have deliberately different failure policies. `LoginHook`
+The four API hooks have deliberately different failure policies. `LoginHook`
 is best-effort: it runs after the login is recorded, and a hook error is logged
 as `account_login_hook_error` without changing the 200 response.
 `AccountDeleteHook` is a gate: `DELETE /v1/accounts/{id}` calls it before
 `store.DeleteAccount`, and an error is logged as `account_delete_hook_error`
 and answers 500 `INTERNAL` without deleting anything, so a deleted account
 cannot leave a listening gate or a live FV session behind. A missing account
-answers 404 without calling the hook. `NodeDrainHook` is also a gate: drain and
+answers 404 without calling the hook. `AccountLogoutHook` is also a gate:
+`POST /v1/accounts/{id}/actions/logout` calls it before
+`store.LogoutAccount`, and an error is logged as `account_logout_hook_error`
+and answers 500 `INTERNAL` with the account still active and no node
+DRAINING, so a paused account cannot leave a listening gate or a live FV
+session behind; a missing account answers 404 without calling the hook.
+`NodeDrainHook` is also a gate: drain and
 undrain call it before `Panel.DrainNode`/`store.DrainNode`, and an error is
 logged as `node_drain_hook_error` and answers 500 `INTERNAL` with the node
 unchanged, so the store never reports DRAINING while the gate still admits (or
 LIVE while it still refuses). A store refusal forwarded by the controller
 (draining a DOWN node, a node removed concurrently) keeps its 404/409/503
 status. A node the store does not know answers 404
-without calling the hook. All three hooks are nil unless `AJS_ACCOUNT_LOGIN=1`
+without calling the hook. All four hooks are nil unless `AJS_ACCOUNT_LOGIN=1`
 wired the controller, so the default build keeps the store-only behaviour.
 
 - Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
@@ -614,15 +622,21 @@ LIVE and the failed node DOWN, no-node-started returning an aggregate error that
 names both nodes, no usable server, missing login/device preconditions, four
 concurrent syncs sharing one gate, an injected gate factory, an end-to-end
 `DELETE /v1/accounts/{id}` through `api.New` with the real controller that
-proves the gates are refused and the store cascade then removes the nodes, and
+proves the gates are refused and the store cascade then removes the nodes, an
+end-to-end `POST /v1/accounts/{id}/actions/logout` through `api.New` with
+`AccountLogoutHook` wired to the real controller: the logged-out account's
+gates are refused, its sessions are closed and its store nodes are DRAINING,
+the other account keeps its gate, session and LIVE node, and a second logout
+reconciles nothing, and
 an end-to-end `POST /v1/nodes/{id}/actions/drain|undrain` through `api.New`
 with `NodeDrainHook` wired to the real controller: drain answers 0x05 on a new
 SOCKS5 CONNECT, undrain answers 0x00, and a stopped controller makes the drain
 answer 500 while the node stays LIVE.
-`TestAccountLoginHook`, `TestAccountDeleteHook` and `TestNodeDrainHook` pin the
-API seams; the last one proves hook-before-store, hook-before-panel,
-abort-on-error, the missing-node 404 without a hook call, and the nil-hook
-store-only path.
+`TestAccountLoginHook`, `TestAccountDeleteHook`, `TestAccountLogoutHook` and
+`TestNodeDrainHook` pin the API seams; the last one proves hook-before-store,
+hook-before-panel, abort-on-error, the missing-node 404 without a hook call,
+and the nil-hook store-only path, and `TestAccountLogoutHook` proves the same
+hook-before-store and abort-on-error policy for logout.
 
 ## Supervisor (AJS-43)
 
@@ -1003,7 +1017,7 @@ All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
 | DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove account, its nodes, its leases and its sealed secret; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
-| POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
+| POST | `/v1/accounts/{id}/actions/logout` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the account's gates and sessions first (stop failure → 500, account active and nodes unchanged); then pause the account and mark its nodes `DRAINING` |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
 | POST | `/v1/nodes/{id}/actions/drain` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the gate first (hook failure → 500, node unchanged); → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
@@ -2037,6 +2051,89 @@ hook keeps the old behaviour, and that a missing account answers 404 without
 calling the hook. No live vendor login, FV authentication or Resin write was
 performed; live acceptance remains `[UNVERIFIED]`.
 
+### Logout hook (AJS-76)
+
+`AccountLogoutHook` closes the last B0 lifecycle gap: `POST
+/v1/accounts/{id}/actions/logout` runs `NodeController.StopAccount` before
+`store.LogoutAccount`, so the account's gates and FV sessions are gone before
+the account is paused and its nodes become `DRAINING`. A stop failure answers
+500 `INTERNAL` and leaves the account active and every node untouched. The
+daemon wires the hook only when `AJS_ACCOUNT_LOGIN=1`, alongside the login,
+account-delete and node-drain hooks; the default build keeps the store-only
+logout.
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-76-logouthook \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-76-logouthook'
+```
+
+On HMC (`go1.25.14 linux/amd64`; `GOTOOLCHAIN=auto` selects the cached
+`go1.26.0` toolchain the module requires); no vendor host or Resin instance was
+contacted:
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-76-logouthook/daemon
+$ go version
+go version go1.26.0 linux/amd64
+$ go test -race -count=1 ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.102s
+ok  	ajsaccountd/internal/api	1.192s
+ok  	ajsaccountd/internal/gate	1.555s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.057s
+ok  	ajsaccountd/internal/resin	1.345s
+ok  	ajsaccountd/internal/runtime	1.303s
+ok  	ajsaccountd/internal/secret	1.025s
+ok  	ajsaccountd/internal/store	1.506s
+ok  	ajsaccountd/internal/supervisor	7.713s
+$ go build ./... && echo BUILD_OK && go vet ./... && echo VET_OK && test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
+BUILD_OK
+VET_OK
+GOFMT_CLEAN
+```
+
+Logout + gate evidence (real `gate.NewServer` on `127.0.0.1:13000`, fake
+session opener, fake reconciler, real controller behind `api.New`):
+
+```console
+$ go test -race -count=1 -v -run 'TestAccountLogoutStopsGatesBeforeStoreDrain' ./internal/runtime
+=== RUN   TestAccountLogoutStopsGatesBeforeStoreDrain
+    nodes_test.go:1055: logout acc-01: gates 13000/13001 refused, sessions closed, nodes DRAINING, acc-02:t1 kept port 13002, reconciles=3
+--- PASS: TestAccountLogoutStopsGatesBeforeStoreDrain (0.00s)
+PASS
+ok  	ajsaccountd/internal/runtime	1.016s
+$ go test -race -count=1 -v -run 'TestAccountLogoutHook|TestAccountLoginLogout' ./internal/api
+=== RUN   TestAccountLoginLogout
+--- PASS: TestAccountLoginLogout (0.00s)
+=== RUN   TestAccountLogoutHook
+=== RUN   TestAccountLogoutHook/hook_runs_before_the_store_logout
+=== RUN   TestAccountLogoutHook/hook_error_aborts_the_logout
+=== RUN   TestAccountLogoutHook/nil_hook_keeps_the_store-only_logout
+=== RUN   TestAccountLogoutHook/missing_account_skips_the_hook
+--- PASS: TestAccountLogoutHook (0.01s)
+    --- PASS: TestAccountLogoutHook/hook_runs_before_the_store_logout (0.00s)
+    --- PASS: TestAccountLogoutHook/hook_error_aborts_the_logout (0.00s)
+    --- PASS: TestAccountLogoutHook/nil_hook_keeps_the_store-only_logout (0.00s)
+    --- PASS: TestAccountLogoutHook/missing_account_skips_the_hook (0.00s)
+PASS
+ok  	ajsaccountd/internal/api	1.021s
+```
+
+`TestAccountLogoutHook` proves the hook runs while the account is still active
+and no node is `DRAINING`, that a hook error answers 500 `INTERNAL` and leaves
+the account active with every node unchanged, that a nil hook keeps the
+store-only logout, and that a missing account answers 404 without calling the
+hook. `TestAccountLogoutStopsGatesBeforeStoreDrain` drives the HTTP logout with
+`AccountLogoutHook` wired to the real controller: both gates of the logged-out
+account refuse new connections, both sessions are closed, the store account is
+`paused` with its nodes `DRAINING`, the other account keeps its gate, session
+and `LIVE` node, and a second logout answers 200 without reconciling again.
+The pre-existing `TestAccountLoginLogout` still passes unchanged. No live
+vendor logout was performed; live acceptance remains `[UNVERIFIED]`.
+
 ## Limitations / next
 
 - State survives a restart through the JSON snapshot, but there is still no
@@ -2052,13 +2149,12 @@ performed; live acceptance remains `[UNVERIFIED]`.
   through Resin when a panel is configured; account, user, key and settings
   mutations remain store-only, and `/v1/reconcile` is the only path that
   re-renders the whole subscription on demand.
-- Deleting an account now stops its controller gates first: `DELETE
-  /v1/accounts/{id}` runs `AccountDeleteHook` (`NodeController.StopAccount`)
-  before the store cascade and aborts with 500 if the stop fails. Logout still
-  only changes the store: `POST .../actions/logout` pauses the account and
-  drains its nodes, so its gates and FV sessions stay open until the next
-  `Stop` or delete. The controller's own `DrainNode`/`UndrainNode` are not
-  wired to the HTTP drain path yet.
+- Account delete and logout now stop the controller's gates first: `DELETE
+  /v1/accounts/{id}` runs `AccountDeleteHook` and `POST
+  /v1/accounts/{id}/actions/logout` runs `AccountLogoutHook` (both
+  `NodeController.StopAccount`) before the store transition, and each aborts
+  with 500 if the stop fails. Logout then pauses the account and marks its
+  nodes DRAINING, while the other accounts keep their gates and sessions.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
   `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.
