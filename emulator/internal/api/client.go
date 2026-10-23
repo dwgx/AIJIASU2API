@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"compress/flate"
 	"compress/gzip"
 	"context"
@@ -82,6 +83,93 @@ type LoginResult struct {
 // OK reports whether AuthResult is exactly "OK" (case-sensitive, like
 // LoginResult.isOk in OpenAJS).
 func (l *LoginResult) OK() bool { return l != nil && l.AuthResult == "OK" }
+
+// expireTimeLayouts are the date/time layouts the vendor may send in
+// Login.ExpireTime. Layouts without an explicit zone are parsed in
+// time.Local; a zone or offset inside the value wins over the local zone.
+var expireTimeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+	"2006-01-02",
+}
+
+// expireTimeShapes lists the accepted ExpireTime shapes; unknown values echo
+// it so the operator can see what the decoder wants.
+const expireTimeShapes = `a JSON number of Unix milliseconds, a numeric ` +
+	`string, RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", ` +
+	`"2006-01-02", or empty`
+
+// UnmarshalJSON decodes the Login object, accepting both vendor shapes of
+// ExpireTime into the int64 field, which always holds Unix milliseconds:
+//
+//   - a JSON number is preserved verbatim (the offline fixtures carry
+//     milliseconds, e.g. 1767225600000);
+//   - a string holds either the same number as text ("1767225600000") or a
+//     date/time in one of expireTimeLayouts, converted with UnixMilli;
+//   - an empty string, null, or an absent field decodes to 0.
+//
+// Date strings without a zone are parsed in time.Local; RFC3339 values keep
+// their own offset. A value matching no shape returns an error naming only
+// the ExpireTime value and the accepted shapes, never the surrounding
+// response or the session credentials.
+func (l *LoginResult) UnmarshalJSON(data []byte) error {
+	// loginResult mirrors LoginResult without its methods, so decoding the
+	// other fields does not recurse into UnmarshalJSON.
+	type loginResult LoginResult
+	var aux struct {
+		loginResult
+		ExpireTime json.RawMessage `json:"ExpireTime"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*l = LoginResult(aux.loginResult)
+	ms, err := parseExpireTime(aux.ExpireTime)
+	if err != nil {
+		return err
+	}
+	l.ExpireTime = ms
+	return nil
+}
+
+// parseExpireTime converts one raw ExpireTime JSON value to Unix
+// milliseconds. A nil or null value means the field was absent or empty.
+func parseExpireTime(raw json.RawMessage) (int64, error) {
+	value := bytes.TrimSpace(raw)
+	if len(value) == 0 || string(value) == "null" {
+		return 0, nil
+	}
+	if value[0] == '"' {
+		var text string
+		if err := json.Unmarshal(value, &text); err != nil {
+			return 0, fmt.Errorf("api: Login.ExpireTime: %w", err)
+		}
+		return parseExpireTimeString(text)
+	}
+	var ms int64
+	if err := json.Unmarshal(value, &ms); err != nil {
+		return 0, fmt.Errorf("api: Login.ExpireTime: unsupported value %s: want %s", value, expireTimeShapes)
+	}
+	return ms, nil
+}
+
+// parseExpireTimeString converts one ExpireTime string: the millisecond
+// count as text, or a date/time layout (zoneless layouts in time.Local).
+func parseExpireTimeString(text string) (int64, error) {
+	if text == "" {
+		return 0, nil
+	}
+	if ms, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return ms, nil
+	}
+	for _, layout := range expireTimeLayouts {
+		if t, err := time.ParseInLocation(layout, text, time.Local); err == nil {
+			return t.UnixMilli(), nil
+		}
+	}
+	return 0, fmt.Errorf("api: Login.ExpireTime: unsupported value %q: want %s", text, expireTimeShapes)
+}
 
 // ServerFV is the par.fv object of a VpnServer.
 //

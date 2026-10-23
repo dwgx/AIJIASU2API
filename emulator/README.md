@@ -136,6 +136,22 @@ capture field for field (the uid and password are redacted in failure
 messages), asserts the absent Android fields and `User-Agent`, and asserts the
 trailing `&`. `TestOpenAJSRequestShapeUnchanged` pins the default shape.
 
+`Login.ExpireTime` keeps its public `int64` (Unix milliseconds) but decodes
+both shapes the vendor sends: the legacy JSON number (the offline fixtures
+carry milliseconds, e.g. `1767225600000`), or a string — either the same
+number as text (`"1767225600000"`) or a date/time in RFC3339Nano,
+`"2006-01-02 15:04:05"`, `"2006-01-02T15:04:05"`, or `"2006-01-02"`. A
+live login (AJS-95) discovered the string shape: the response carried
+`"ExpireTime":"2026-12-21 17:09:35"`, which the stock decoder rejected with
+`cannot unmarshal string into Go struct field ... of type int64`. Date
+strings without a zone parse in `time.Local`; values with an offset keep
+it. An empty string, `null`, or an absent field decodes to `0`. An
+unsupported value fails the decode with an error naming only the
+ExpireTime value and the accepted shapes — never the token, password, or
+the surrounding response. `TestLoginResultExpireTimeShapes`,
+`TestLoginResultExpireTimeErrors`, and `TestLoginDecodesStringExpireTime`
+pin these behaviours.
+
 The config contains a password: keep it outside the repository, never commit
 it, and do not put real credentials in issues or reports.
 
@@ -255,6 +271,9 @@ semantics, `s`/`n` generation, and first-packet placement remain `[INFERENCE]`.
 | `TestOpenAJSRequestShapeUnchanged` | The default shape keeps `_v`, the 22-char `_uid`, the Android fields, `trigger=login`, `okhttp/4.9.3` and no trailing separator |
 | `TestLinux423DeviceIdentity` | 20-hex `_uid`/`cuid`, `cseid=linux`, 16-hex `_os_did`, and `EnsureLinuxIDs` never regenerates |
 | `TestAuthIdentityCUIDCSEID` | Both auth-body builders: empty CUID/CSEID reproduce the OpenAJS device id twice; the Linux identity sends its 20-hex `cuid` with `cseid=linux` (also asserted against the decrypted `fvmock-1` capture) |
+| `TestLoginResultExpireTimeShapes` | Every accepted `ExpireTime` shape (number, numeric string, zoneless datetimes in `time.Local`, RFC3339 with offset, empty/null/absent → 0) decodes to int64 Unix milliseconds; the surrounding fields still decode |
+| `TestLoginResultExpireTimeErrors` | An unsupported value fails with an error naming only the ExpireTime value and the accepted shapes — never `LoginToken`/`ConnectPassword` |
+| `TestLoginDecodesStringExpireTime` | End-to-end `Login` against a fake server that returns the live-discovered date-string shape |
 
 Only the first eight are in the metric allowlist.
 
