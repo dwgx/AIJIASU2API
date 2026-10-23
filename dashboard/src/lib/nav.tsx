@@ -1,5 +1,6 @@
 import {
   Activity,
+  FlaskConical,
   KeyRound,
   LayoutDashboard,
   ScrollText,
@@ -43,6 +44,17 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     label: 'System',
     items: [{ to: '/settings', label: 'Settings', icon: Settings, keywords: 'transport health lease subscription theme reset' }],
+  },
+  {
+    label: 'Lab',
+    items: [
+      {
+        to: '/lab',
+        label: 'Lab',
+        icon: FlaskConical,
+        keywords: 'lab telemetry gates sessions servers protocol device logs diagnostics flags redaction',
+      },
+    ],
   },
 ]
 

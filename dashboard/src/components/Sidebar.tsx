@@ -2,15 +2,17 @@ import clsx from 'clsx'
 import { ChevronDown, Moon, Sun, Waypoints } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { isMockMode } from '../lib/api'
+import { isMockMode, api, apiEndpointLabel } from '../lib/api'
 import { NAV_SECTIONS } from '../lib/nav'
 import { useTheme } from '../lib/theme'
+import { useAsync } from '../lib/useAsync'
 import { IconButton, StatusDot } from './primitives'
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { theme, toggle } = useTheme()
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const workspaceRef = useRef<HTMLDivElement>(null)
+  const runtime = useAsync(() => api.getLabOverview(), [])
 
   useEffect(() => {
     if (!workspaceOpen) return
@@ -90,11 +92,13 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           <StatusDot tone="success" pulse />
           <div className="daemon__text">
             <span className="daemon__name">ajs-accountd</span>
-            <span className="daemon__addr">127.0.0.1:2261</span>
+            <span className="daemon__addr">{apiEndpointLabel()}</span>
           </div>
         </div>
         <div className="sidebar__meta">
-          <span className="sidebar__version">v0.1.0 · {isMockMode() ? 'mock' : 'live'}</span>
+          <span className="sidebar__version">
+            v{runtime.data?.version || '0.1.0'} · {isMockMode() ? 'mock' : 'live'}
+          </span>
           <IconButton
             label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             icon={theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}

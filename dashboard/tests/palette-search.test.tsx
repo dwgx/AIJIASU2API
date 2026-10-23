@@ -83,7 +83,7 @@ describe('command palette data search', () => {
         .getAllByRole('option')
         .map((option) => within(option).getByText(/^(Navigate|Action|Account|Node)$/).textContent)
 
-    expect(within(dialog).getAllByRole('option').length).toBe(11)
+    expect(within(dialog).getAllByRole('option').length).toBe(12)
     expect(new Set(sections())).toEqual(new Set(['Navigate', 'Action']))
 
     await user.type(input, 'c')

@@ -1,14 +1,15 @@
 # AJiaSu Proxy Console
 
-Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, request telemetry and the
-audit trail in one Obsidian Mint surface. **Mock-first:** the default build runs on deterministic
-in-memory data and never contacts AJiaSu, a vendor binary or a live daemon. A live mode against the
-local `ajs-accountd` skeleton is also built and verified; it is opt-in through build-time
-environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
+Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, request telemetry, the
+audit trail and a read-only Lab instrument in one Obsidian Mint surface. **Mock-first:** the
+default build runs on deterministic in-memory data and never contacts AJiaSu, a vendor binary or a
+live daemon. A live mode against the local `ajs-accountd` skeleton is also built and verified; it
+is opt-in through build-time environment variables (see [Modes](#modes) and
+[Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 71 tests.
+- Tests: Vitest + React Testing Library + jsdom, 97 tests in 13 files.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
 
@@ -19,10 +20,11 @@ The mode is fixed at build time; there is no runtime switch.
 | Mode | Build trigger | Data source | Reset |
 |---|---|---|---|
 | Mock (default) | `VITE_USE_MOCK` unset or `true` | deterministic in-browser store (`src/lib/mock.ts`), seeded on page load | **Settings → Reset dataset**, or a full reload |
-| Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE` and `VITE_PANEL_TOKEN` | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
+| Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` optional (otherwise the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
 
 The shell reports the active mode: the topbar pill reads `mock data` or `live API`, and the sidebar
-version reads `v0.1.0 · mock` or `v0.1.0 · live`. The Lab workspace entry is mock-only.
+version reads `v0.1.0 · mock` or `v0.1.0 · live`. The Lab page works in both modes: deterministic
+fixtures in mock, `/v1/lab/*` in live; a live 401 opens the runtime token gate described below.
 
 ## Quick start
 
@@ -31,7 +33,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 71 tests
+npm test           # Vitest, 97 tests in 13 files
 npm run typecheck  # tsc -b
 ```
 
@@ -70,7 +72,47 @@ bind) and leaves the daemon without bearer auth. For a real token, generate one 
 `openssl rand -hex 32` — startup refuses documented placeholders and anything shorter than 32
 characters — and pass the same value as `AJS_ADMIN_TOKEN` and `VITE_PANEL_TOKEN`. Every `VITE_*`
 value is readable in the shipped bundle, so production must terminate auth in a BFF or reverse
-proxy and keep `ajs-accountd` bound to `127.0.0.1`.
+proxy and keep `ajs-accountd` bound to `127.0.0.1`. The LAN build below takes the other route: it
+bakes no token and collects one per tab through the runtime token gate.
+
+## Lab page
+
+`/lab` is the Lab instrument over the daemon's telemetry. Every panel reads an endpoint; the only
+non-GET action is the guarded egress check, which dials the selected node's own loopback gate. No
+vendor call and no vendor credential is used.
+
+| Tab | Reads | Shows |
+|---|---|---|
+| Overview | `/v1/lab/overview`, `/v1/lab/flags` | count tiles, daemon posture (version, commit, uptime, effective modes), warnings, and effective flags with provenance (`env`/`flag`/`default`); secret flags expose `set` and `redacted` only |
+| Gates & sessions | `/v1/lab/gates`, `/v1/lab/sessions` | gate listener/state/byte counters per node and FV session health with a redacted SID and the vendor's claimed egress |
+| Egress | `GET /v1/lab/egress`, `POST /v1/lab/egress-check` | claimed-vs-verified rows plus a guarded check for the selected node with a running gate: verified/claimed, match, latency, checkedAt, source `echo`, and the probe error. 409 without a running gate, 429 inside the 5 s per-node quota |
+| Servers | `GET /v1/accounts/{id}/servers` | the vendor catalog for the selected account; `stale` with an empty list and a reason when the daemon holds no in-memory login result (e.g. after a restart) |
+| Protocol | `GET /v1/lab/profiles` | supported version profiles and the sample matrix (platforms, versions, cores, carriers) |
+| Device | `GET /v1/accounts/{id}/device` | the stable identity as `sha256:`-prefixed truncated hashes plus non-secret claims |
+| Logs | `GET /v1/lab/logs?level=&component=&limit=&since=` | bounded in-memory log ring, newest first (default 200 lines, max 2000); invalid filters answer 400 rather than silently widening |
+| Diagnostics | `GET /v1/lab/diagnostics` | component health map, state-snapshot facts (basename path, last save, size), build facts (version, Go version, commit) and warnings |
+
+Behaviour:
+
+- **Honest disabled states.** A mode that is off answers HTTP 200 with `enabled:false` and the
+  switch that is off (`AJS_ACCOUNT_LOGIN is not 1`, `lab telemetry is not configured`), so the page
+  shows a reason instead of an error or a silently empty table.
+- **Read-only page, one probe route.** The page never mutates daemon state.
+  The daemon's only non-GET Lab route is `POST /v1/lab/egress-check` — an explicit
+  claimed-vs-verified probe through the node's own gate (5 s per-node cooldown; 409 without a
+  running gate) — whose result is returned, not stored; the GET egress panel stays claim-only.
+  The UI disables the button for the same 5 s window and surfaces the daemon's 409/429 message.
+- **Redaction.** Sessions expose `a1b2…(32)`-style SIDs, device identifiers are truncated
+  `sha256:` hashes, and secret flags never carry a value.
+- **Mock parity.** In mock mode the same tabs render deterministic fixtures (`src/lib/lab.ts`,
+  `src/lib/mock.ts`) and contact no backend; the mock egress check mirrors the 409/429 guards and
+  returns the seeded exit without storing it.
+- **Runtime token gate.** A live build without `VITE_PANEL_TOKEN` still works. `http()` dispatches
+  `ajs:unauthorized` on a 401 (except a vendor login rejection on `/actions/login`), and
+  `TokenGate` asks for the admin token; the Settings **Daemon** card dispatches
+  `ajs:token-required` from **Set token** / **Replace token** for the same dialog. The value is
+  kept in `sessionStorage["ajs.panelToken"]` for that tab only, never rendered back, and a submit
+  retries every mounted loader with the bearer header. **Clear session token** in Settings drops it.
 
 ## Polling and stale data
 
@@ -150,15 +192,20 @@ the typed-query preservation on unrelated param changes.
 
 ## HMC layout
 
-The HMC build host serves three loopback-only endpoints:
+The HMC build host serves three endpoints; the live pair is also published on the LAN:
 
-| HMC endpoint | Role | How it runs |
+| Endpoint | Role | How it runs |
 |---|---|---|
 | `127.0.0.1:18081` | mock dashboard | `docker compose up -d` in `dashboard/`; nginx image built from the default (mock) source, rebuilt after the live/mock copy fixes |
-| `127.0.0.1:18082` | live dashboard | `npx vite preview` over a `dist/` built with the live environment |
-| `127.0.0.1:2261` | `ajs-accountd` | `go build -o ajs-accountd ./cmd/ajs-accountd` then `./ajs-accountd` with the env above; JSON snapshot store (`AJS_STATE_FILE`) |
+| `127.0.0.1:18082` · `http://192.168.11.4:18082` | live dashboard | `npx vite preview --host 0.0.0.0 --port 18082` over a `dist/` built with `VITE_USE_MOCK=false` and `VITE_API_BASE=http://192.168.11.4:2261`, **without** `VITE_PANEL_TOKEN` |
+| `127.0.0.1:2261` · `http://192.168.11.4:2261` | `ajs-accountd` | `go build -o ajs-accountd ./cmd/ajs-accountd` then `./ajs-accountd` with `AJS_LISTEN=0.0.0.0:2261` and the LAN origin in `AJS_CORS_ORIGINS`; JSON snapshot store (`AJS_STATE_FILE`) |
 
-Nothing is exposed beyond HMC loopback. From Windows, forward the ports:
+The mock build stays loopback-only. The LAN pair is reachable from the `192.168.11.0/24`
+segment: `AJS_ALLOW_INSECURE` is not set (and startup refuses it off loopback), so every `/v1/*`
+call needs the bearer token and a token-less request answers 401. Because the LAN bundle bakes no
+token, the runtime token gate asks for the admin token on the first 401 and keeps it in that
+tab's `sessionStorage`; the API is plain HTTP, so the segment must be trusted. From Windows the
+LAN URLs work directly, and the tunnels below still serve the loopback-only mock build:
 
 ```bash
 ssh -N -L 18081:127.0.0.1:18081 hmc
@@ -317,7 +364,8 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 71 Vitest tests in 11 files (65 before this slice; see [Verification](#verification-recorded-2026-10-23)).
+- 97 Vitest tests in 13 files (65 at the 2026-10-23 record; see
+  [Verification](#verification-recorded-2026-10-23)).
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
@@ -345,7 +393,19 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   update-available state with tag/date, copying the exact deploy command
   (`cd deploy && ./update.sh --tag v0.2.0`), the release-notes link target, the up-to-date
   badge and the error state (alert, no badge, cleared by a later successful check).
-- Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
+  `tests/lab.test.tsx` covers the Lab page: overview posture badges and effective flags (a secret
+  value never reaches the DOM), gate counters plus redacted session SIDs, the `enabled:false`
+  bodies for gates/sessions and egress, servers/protocol/device tabs, log pause/resume and
+  diagnostics. Its Egress block checks the selected live node, renders match/mismatch and a
+  probe error with `verified=""`/`match=null`, disables the action when no gate is running and
+  surfaces a 409 without persisting the result into the claim-only table. Its `honesty fixes`
+  block also pins the simulated Requests label, the probe relabel, rotation disabled without
+  Resin, and the logout/pause copy.
+  `tests/token-gate.test.tsx` covers the runtime token gate: a live 401 opens **Panel token
+  required**, submitting stores `ajs.panelToken` in `sessionStorage` and retries with the bearer
+  header.
+- Route sweep on the mock build (2026-10-23, before the Lab page): all 8 routes at 1440×900 and
+  390×844.
 
 | Viewport | Routes checked | `scrollWidth` | Console/page errors |
 |---|---|---|---|
@@ -378,7 +438,8 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | request log, status/method/source filters, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, audit table, export placeholder |
-| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, **Updates** check card, reset |
+| `/lab` | Lab | tabs: Overview, Gates & sessions, Egress (guarded check), Servers, Protocol, Device, Logs, Diagnostics; environment badges; account picker for Servers/Device |
+| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, **Updates** check card, daemon/token card, reset |
 
 `*` redirects to `/`.
 
@@ -386,12 +447,13 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 ```text
 src/
-  App.tsx                 lazy routes for all 8 pages
+  App.tsx                 lazy routes for all 9 pages
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
-    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics
+    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows
+    lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
     format.ts             bytes, dates, TTL, proxy URL helpers
     labels.ts             account/node/severity tone maps
@@ -400,11 +462,15 @@ src/
     useAsync.ts           load/poll/dedupe/stale state, global refresh event
     useFocusTrap.ts       Esc + Tab trap for palette/drawer/modal
   components/
-    AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton
+    AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton, TokenGate
     DataTable, Overlay (Drawer/Modal/ConfirmDialog), primitives
-  pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Settings
+    lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
+  pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Lab, Settings
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
+  lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
+  token-gate.test.tsx     401 → runtime token dialog → sessionStorage token + retry
+  update-card.test.tsx    Settings Updates card states and deploy command
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
@@ -453,10 +519,10 @@ grid, and the responsive CSS contract.
 | `VITE_API_BASE` | empty (same origin) | Base URL for `ajs-accountd` |
 | `VITE_PANEL_TOKEN` | unset | Optional bearer token for the live client |
 
-**Security note:** a Vite `VITE_*` value is embedded in the client bundle. The live build above
-embeds whatever `VITE_PANEL_TOKEN` was set to at build time; do not ship a real admin token this
-way. Production should terminate auth in a BFF or reverse proxy and keep `ajs-accountd`
-loopback-only. The default build remains mock-only and embeds no token.
+**Security note:** a Vite `VITE_*` value is embedded in the client bundle. A live build that sets
+`VITE_PANEL_TOKEN` embeds it; do not ship a real admin token that way. The LAN build embeds no
+token and relies on the runtime token gate instead, and production should still terminate auth in
+a BFF or reverse proxy. The default build remains mock-only and embeds no token.
 
 Live paths implemented by the client (`[SPEC]` = in `docs/PANEL.md`, `[PROPOSED]` = dashboard
 contract only):
@@ -474,6 +540,9 @@ contract only):
 | Audit | `GET /v1/audit?limit=` | `[SPEC]` |
 | Metrics | `GET /v1/metrics?range=24h\|7d` | `[PROPOSED]` |
 | Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab telemetry (read-only) | `GET /v1/lab/{overview,flags,gates,sessions,egress,profiles,logs,diagnostics}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab account reads | `GET /v1/accounts/{id}/{servers,device}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
 Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
 as a versioned JSON snapshot); `[SPEC]` / `[PROPOSED]` describe where the contract is defined,
@@ -596,8 +665,14 @@ and reports healthy on `/healthz`.
 - Live mode is verified against the local daemon; the tests use fakes and contact no vendor
   endpoint.
 - The live build hides the mock reset action entirely — the daemon has no reset endpoint.
-- `VITE_PANEL_TOKEN` is build-time and readable from the bundle. There is no per-operator auth,
-  role model or session; production needs a BFF or reverse proxy.
+- `VITE_PANEL_TOKEN` is build-time and readable from the bundle. The runtime token gate avoids
+  baking one (it keeps the value in `sessionStorage` per tab), but the token is still one shared
+  admin bearer over plain HTTP; there is no per-operator auth, role model or server-side session,
+  so production needs a BFF or reverse proxy.
+- The Lab page only reads daemon state; the daemon's one POST (`/v1/lab/egress-check`) runs an
+  explicit egress probe through the node's gate and returns the result without storing it. Mock
+  fixtures are deterministic, not gate telemetry, and an `enabled:false` body means the
+  corresponding mode is off — the page shows the reason rather than fabricating rows.
 - Mock state is in memory; refreshing the tab discards edits (Settings → Reset dataset does the same
   explicitly).
 - Log export is a placeholder; SSE, pagination above 500 rows and server-side sorting are not

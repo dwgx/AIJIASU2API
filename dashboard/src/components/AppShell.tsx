@@ -5,6 +5,7 @@ import { useLocation } from 'react-router-dom'
 import { NAV_ITEMS } from '../lib/nav'
 import { CommandPalette } from './CommandPalette'
 import { Sidebar } from './Sidebar'
+import { TokenGate } from './TokenGate'
 import { Topbar } from './Topbar'
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -54,6 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <TokenGate />
     </div>
   )
 }

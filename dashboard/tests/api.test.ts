@@ -108,3 +108,88 @@ describe('mock api', () => {
     expect(await api.getSettings()).toMatchObject({ healthIntervalSec: 90 })
   })
 })
+
+describe('lab fixtures', () => {
+  it('derives counts and gate/session rows from the same mock database', async () => {
+    const overview = await api.getLabOverview()
+    expect(overview.counts).toMatchObject({ accounts: 6, nodes: 12, liveNodes: 8, gates: 9, leases: 8 })
+
+    const gates = await api.listLabGates()
+    const sessions = await api.listLabSessions()
+    expect(Array.isArray(gates)).toBe(true)
+    expect(Array.isArray(sessions)).toBe(true)
+    if (!Array.isArray(gates) || !Array.isArray(sessions)) throw new Error('mock must return arrays')
+    expect(gates).toHaveLength(9)
+    expect(sessions).toHaveLength(9)
+    expect(sessions.every((session) => /…\(32\)$/.test(session.sid))).toBe(true)
+    expect(sessions.every((session) => session.keepalive.supported === false)).toBe(true)
+  })
+
+  it('checks egress through the mock gate and enforces the 409/429 guards', async () => {
+    const result = await api.checkLabEgress('node-01')
+    expect(result).toMatchObject({
+      nodeId: 'node-01',
+      claimed: '203.0.113.11',
+      verified: '203.0.113.11',
+      match: true,
+      source: 'echo',
+    })
+    expect(result.latencyMs).toBe(42)
+
+    const rows = await api.listLabEgress()
+    if (!Array.isArray(rows)) throw new Error('mock must return egress rows')
+    expect(rows.find((row) => row.nodeId === 'node-01')).toMatchObject({
+      verified: '',
+      match: null,
+      source: 'fv-claim',
+    })
+
+    await expect(api.checkLabEgress('node-01')).rejects.toMatchObject({ status: 429, code: 'QUOTA_EXCEEDED' })
+    await expect(api.checkLabEgress('node-03')).rejects.toMatchObject({ status: 409, code: 'CONFLICT' })
+  })
+
+  it('never serialises a secret flag value', async () => {
+    const flags = await api.getLabFlags()
+    const secrets = flags.flags.filter((flag) => flag.secret)
+    expect(secrets.length).toBeGreaterThan(0)
+    for (const flag of secrets) {
+      expect(flag.value).toBeUndefined()
+      expect(flag.redacted).toBe(true)
+    }
+    expect(JSON.stringify(flags)).not.toMatch(/supersecret/i)
+  })
+
+  it('returns hashed device identities and a per-account catalog', async () => {
+    const device = await api.getAccountDevice('acc-01')
+    expect(device.present).toBe(true)
+    expect(Object.values(device.hashes).every((value) => /^sha256:[0-9a-f]{64}$/.test(value))).toBe(true)
+    expect(device.rawAvailable).toBe(false)
+
+    const catalog = await api.getAccountServers('acc-01')
+    expect(catalog.servers).toHaveLength(3)
+    expect(catalog.servers.every((server) => !('pingSecret' in server))).toBe(true)
+  })
+
+  it('filters the runtime log ring server-side', async () => {
+    const logs = await api.getLabLogs({ level: 'ERROR', limit: 20 })
+    expect(logs.entries.length).toBeGreaterThan(0)
+    expect(logs.entries.every((entry) => entry.level === 'ERROR')).toBe(true)
+  })
+
+  it('touches the probe timestamp without inventing latency or egress', async () => {
+    const before = (await api.listNodes()).find((node) => node.id === 'node-01')
+    expect(before).toBeDefined()
+    const after = await api.probeNode('node-01')
+    expect(after.latencyMs).toBe(before?.latencyMs)
+    expect(after.egressIp).toBe(before?.egressIp)
+    expect(after.lastProbeAt).not.toBe(before?.lastProbeAt)
+  })
+
+  it('drains nodes and drops leases on logout instead of only pausing', async () => {
+    await api.logoutAccount('acc-01')
+    const nodes = await api.listNodes()
+    expect(nodes.filter((node) => node.accountId === 'acc-01').every((node) => node.state === 'READY')).toBe(true)
+    expect((await api.listLeases()).some((lease) => lease.accountId === 'acc-01')).toBe(false)
+    expect((await api.listAccounts()).find((account) => account.id === 'acc-01')?.state).toBe('paused')
+  })
+})

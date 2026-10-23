@@ -1,18 +1,42 @@
 import {
   DEFAULT_SETTINGS,
+  buildAccountServers,
+  buildLabDevice,
+  buildLabDiagnostics,
+  buildLabEgress,
+  buildLabEgressCheck,
+  buildLabFlags,
+  buildLabGates,
+  buildLabLogs,
+  buildLabOverview,
+  buildLabProfiles,
+  buildLabSessions,
   buildMetrics,
   getDb,
   resetMockDb,
   syncAccountCounts,
 } from './mock'
+import { ApiError, UnauthorizedError } from './errors'
 import type {
   Account,
+  AccountServers,
   AccountState,
   ApiKey,
   AuditEvent,
   CreateAccountInput,
   CreateKeyInput,
   CreateKeyResult,
+  DeviceView,
+  DiagnosticsView,
+  EgressCheckResult,
+  EgressView,
+  GateView,
+  LabFlags,
+  LabDisabled,
+  LabLogQuery,
+  LabLogs,
+  LabOverview,
+  LabProfiles,
   Lease,
   Metrics,
   MetricRange,
@@ -22,6 +46,7 @@ import type {
   PanelUser,
   ProxyNode,
   RequestLog,
+  SessionView,
   UpdateInfo,
 } from './types'
 
@@ -30,8 +55,18 @@ const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '')
 const MOCK_DELAY = import.meta.env.MODE === 'test' ? 0 : 220
 const SETTINGS_KEY = 'ajs.settings'
 const THEME_KEY = 'ajs.theme'
+const TOKEN_KEY = 'ajs.panelToken'
 
-let panelToken: string | null = import.meta.env.VITE_PANEL_TOKEN ?? null
+function readSessionToken(): string | null {
+  try {
+    if (typeof sessionStorage === 'undefined') return null
+    return sessionStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+let panelToken: string | null = import.meta.env.VITE_PANEL_TOKEN ?? readSessionToken()
 let accountSeq = 0
 
 /** Deterministic simulated release for the mock-mode update check. */
@@ -44,8 +79,29 @@ export function isMockMode(): boolean {
   return USE_MOCK
 }
 
+/** Stores the panel token for this tab only; never renders or logs the value. */
 export function setPanelToken(token: string | null): void {
-  panelToken = token
+  const value = token?.trim() ? token.trim() : null
+  panelToken = value
+  try {
+    if (typeof sessionStorage === 'undefined') return
+    if (value) sessionStorage.setItem(TOKEN_KEY, value)
+    else sessionStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // Private mode or a quota error still leaves the in-memory token usable.
+  }
+}
+
+export function hasPanelToken(): boolean {
+  return panelToken !== null && panelToken.length > 0
+}
+
+/** Human-readable daemon endpoint for read-only labels. Never includes the token. */
+export function apiEndpointLabel(): string {
+  if (USE_MOCK) return 'in-browser mock'
+  if (API_BASE) return API_BASE.replace(/^https?:\/\//, '')
+  if (typeof window !== 'undefined') return window.location.origin.replace(/^https?:\/\//, '')
+  return 'same origin'
 }
 
 async function wait(): Promise<void> {
@@ -62,11 +118,35 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (panelToken) headers.set('Authorization', `Bearer ${panelToken}`)
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(`${response.status} ${response.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ''}`)
+    const raw = await response.text().catch(() => '')
+    const { code, detail } = parseErrorBody(raw)
+    const suffix = detail ? ` — ${detail.slice(0, 200)}` : ''
+    if (response.status === 401) {
+      // A vendor credential rejection on the account login action is also a
+      // 401; it must surface as a failed login, not as an admin token gate.
+      if (typeof window !== 'undefined' && !path.includes('/actions/login')) {
+        window.dispatchEvent(new Event('ajs:unauthorized'))
+      }
+      throw new UnauthorizedError(`401 Unauthorized${suffix}`)
+    }
+    throw new ApiError(response.status, `${response.status} ${response.statusText}${suffix}`, code)
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
+}
+
+/** Reads `{error:{code,message}}`; a non-JSON body stays the detail text. */
+function parseErrorBody(raw: string): { code: string | null; detail: string } {
+  if (!raw) return { code: null, detail: '' }
+  try {
+    const parsed = JSON.parse(raw) as { error?: { code?: unknown; message?: unknown } }
+    return {
+      code: typeof parsed.error?.code === 'string' ? parsed.error.code : null,
+      detail: typeof parsed.error?.message === 'string' ? parsed.error.message : raw,
+    }
+  } catch {
+    return { code: null, detail: raw }
+  }
 }
 
 function clone<T>(value: T): T {
@@ -138,6 +218,25 @@ export const api = {
     return clone(account)
   },
 
+  /**
+   * Logout is the only account action that drains nodes and drops the vendor
+   * session. Pause is store-only and leaves gates running.
+   */
+  async logoutAccount(id: string): Promise<Account> {
+    if (!USE_MOCK) return http<Account>(`/v1/accounts/${id}/actions/logout`, { method: 'POST' })
+    await wait()
+    const db = getDb()
+    const account = db.accounts.find((item) => item.id === id)
+    if (!account) throw new Error('Account not found')
+    account.state = 'paused'
+    for (const node of db.nodes) {
+      if (node.accountId === id && node.state !== 'DOWN') node.state = 'READY'
+    }
+    db.leases = db.leases.filter((lease) => lease.accountId !== id)
+    syncAccountCounts()
+    return clone(account)
+  },
+
   async setAccountState(id: string, state: AccountState): Promise<Account> {
     if (!USE_MOCK) {
       return http<Account>(`/v1/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ state }) })
@@ -188,8 +287,9 @@ export const api = {
     await wait()
     const node = getDb().nodes.find((item) => item.id === id)
     if (!node) throw new Error('Node not found')
+    // Matches the daemon's store action: touch the timestamp only. Latency and
+    // egress are unchanged because nothing is dialed.
     node.lastProbeAt = new Date().toISOString()
-    node.latencyMs = Math.max(18, node.latencyMs + Math.round((Math.random() - 0.5) * 24))
     return clone(node)
   },
 
@@ -367,6 +467,90 @@ export const api = {
     if (!USE_MOCK) return http<UpdateInfo>('/v1/system/update')
     await wait()
     return clone(MOCK_UPDATE)
+  },
+
+  async getLabOverview(): Promise<LabOverview> {
+    if (!USE_MOCK) return http<LabOverview>('/v1/lab/overview')
+    await wait()
+    return buildLabOverview(getDb())
+  },
+
+  async listLabGates(): Promise<GateView[] | LabDisabled> {
+    if (!USE_MOCK) return http<GateView[] | LabDisabled>('/v1/lab/gates')
+    await wait()
+    return clone(buildLabGates(getDb()))
+  },
+
+  async listLabSessions(): Promise<SessionView[] | LabDisabled> {
+    if (!USE_MOCK) return http<SessionView[] | LabDisabled>('/v1/lab/sessions')
+    await wait()
+    return clone(buildLabSessions(getDb()))
+  },
+
+  async listLabEgress(): Promise<EgressView[] | LabDisabled> {
+    if (!USE_MOCK) return http<EgressView[] | LabDisabled>('/v1/lab/egress')
+    await wait()
+    return clone(buildLabEgress(getDb()))
+  },
+
+  /**
+   * Guarded observation: the daemon dials the node's loopback SOCKS5 gate and
+   * reads https://ifconfig.me/ip. 409 means no running gate, 429 means the
+   * per-node 5 s quota is exhausted. Mock mode mirrors both guards.
+   */
+  async checkLabEgress(nodeId: string): Promise<EgressCheckResult> {
+    if (!USE_MOCK) {
+      return http<EgressCheckResult>('/v1/lab/egress-check', {
+        method: 'POST',
+        body: JSON.stringify({ nodeId }),
+      })
+    }
+    await wait()
+    return clone(buildLabEgressCheck(getDb(), nodeId))
+  },
+
+  async getLabProfiles(): Promise<LabProfiles> {
+    if (!USE_MOCK) return http<LabProfiles>('/v1/lab/profiles')
+    await wait()
+    return clone(buildLabProfiles())
+  },
+
+  async getLabFlags(): Promise<LabFlags> {
+    if (!USE_MOCK) return http<LabFlags>('/v1/lab/flags')
+    await wait()
+    return clone(buildLabFlags())
+  },
+
+  async getLabLogs(query: LabLogQuery = {}): Promise<LabLogs> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.level && query.level !== 'all') params.set('level', query.level)
+      if (query.component && query.component !== 'all') params.set('component', query.component)
+      if (query.limit) params.set('limit', String(query.limit))
+      if (query.since) params.set('since', query.since)
+      const suffix = params.toString()
+      return http<LabLogs>(`/v1/lab/logs${suffix ? `?${suffix}` : ''}`)
+    }
+    await wait()
+    return clone(buildLabLogs(Date.now(), query))
+  },
+
+  async getLabDiagnostics(): Promise<DiagnosticsView> {
+    if (!USE_MOCK) return http<DiagnosticsView>('/v1/lab/diagnostics')
+    await wait()
+    return clone(buildLabDiagnostics(getDb()))
+  },
+
+  async getAccountDevice(id: string): Promise<DeviceView> {
+    if (!USE_MOCK) return http<DeviceView>(`/v1/accounts/${id}/device`)
+    await wait()
+    return clone(buildLabDevice(getDb(), id))
+  },
+
+  async getAccountServers(id: string): Promise<AccountServers> {
+    if (!USE_MOCK) return http<AccountServers>(`/v1/accounts/${id}/servers`)
+    await wait()
+    return clone(buildAccountServers(getDb(), id))
   },
 
   async resetMock(): Promise<void> {

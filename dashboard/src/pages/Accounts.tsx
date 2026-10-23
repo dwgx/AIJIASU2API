@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { LayoutGrid, Pause, Play, Rows3, Search, Trash2 } from 'lucide-react'
+import { LayoutGrid, LogOut, Pause, Play, Rows3, Search, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -113,10 +113,11 @@ interface AccountCardProps {
   onToggleSelected: (id: string) => void
   onTest: (account: Account) => void
   onTogglePause: (account: Account) => void
+  onLogout: (account: Account) => void
   onDelete: (id: string) => void
 }
 
-function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePause, onDelete }: AccountCardProps) {
+function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePause, onLogout, onDelete }: AccountCardProps) {
   const state = ACCOUNT_STATE[account.state]
   const capacity = account.nodeCount > 0 ? Math.min(1, Math.max(0, account.liveNodeCount / account.nodeCount)) : 0
   const capacityPct = Math.round(capacity * 100)
@@ -197,6 +198,11 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
             onClick={() => onTogglePause(account)}
           />
           <IconButton
+            label={`Logout ${account.label}`}
+            icon={<LogOut size={14} />}
+            onClick={() => onLogout(account)}
+          />
+          <IconButton
             label={`Delete ${account.label}`}
             icon={<Trash2 size={14} />}
             variant="ghost"
@@ -215,6 +221,7 @@ function AccountCards({
   onToggleSelected,
   onTest,
   onTogglePause,
+  onLogout,
   onDelete,
 }: {
   accounts: Account[]
@@ -223,6 +230,7 @@ function AccountCards({
   onToggleSelected: (id: string) => void
   onTest: (account: Account) => void
   onTogglePause: (account: Account) => void
+  onLogout: (account: Account) => void
   onDelete: (id: string) => void
 }) {
   if (accounts.length === 0) {
@@ -239,6 +247,7 @@ function AccountCards({
           onToggleSelected={onToggleSelected}
           onTest={onTest}
           onTogglePause={onTogglePause}
+          onLogout={onLogout}
           onDelete={onDelete}
         />
       ))}
@@ -275,6 +284,8 @@ export default function Accounts() {
   const [selected, setSelected] = useState<string[]>([])
   const [deleteIds, setDeleteIds] = useState<string[]>([])
   const [deleting, setDeleting] = useState(false)
+  const [logoutId, setLogoutId] = useState<string | null>(null)
+  const [loggingOut, setLoggingOut] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState('')
@@ -366,6 +377,22 @@ export default function Accounts() {
       push(cause instanceof Error ? cause.message : 'Delete failed', 'danger')
     } finally {
       setDeleting(false)
+    }
+  }
+
+  const confirmLogout = async () => {
+    if (!logoutId) return
+    const account = accounts.data?.find((item) => item.id === logoutId)
+    setLoggingOut(true)
+    try {
+      await api.logoutAccount(logoutId)
+      accounts.reload()
+      push(`${account?.label ?? logoutId} logged out · nodes drained`, 'success')
+      setLogoutId(null)
+    } catch (cause) {
+      push(cause instanceof Error ? cause.message : 'Logout failed', 'danger')
+    } finally {
+      setLoggingOut(false)
     }
   }
 
@@ -494,7 +521,7 @@ export default function Accounts() {
       key: 'actions',
       label: '',
       align: 'right',
-      width: '124px',
+      width: '164px',
       render: (account) => (
         <span className="row-actions">
           <IconButton
@@ -506,6 +533,11 @@ export default function Accounts() {
             label={`${account.state === 'paused' ? 'Resume' : 'Pause'} ${account.label}`}
             icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => void togglePause(account)}
+          />
+          <IconButton
+            label={`Logout ${account.label}`}
+            icon={<LogOut size={14} />}
+            onClick={() => setLogoutId(account.id)}
           />
           <IconButton
             label={`Delete ${account.label}`}
@@ -544,6 +576,20 @@ export default function Accounts() {
         subtitle="Vendor logins, concurrency ceilings and entitlement windows."
         refresh={summarizeRefresh([accounts])}
       />
+
+      <div className="callout callout--warning" role="note">
+        <span className="callout__icon">
+          <Pause size={18} aria-hidden="true" />
+        </span>
+        <div>
+          <p className="callout__title">Pause does not stop gates or the vendor session</p>
+          <p className="callout__text">
+            Pause only changes the stored account state; LIVE nodes, gates and the FV session stay up.
+            Use <strong>Logout</strong> to drain the account's nodes and end its session. Pausing an
+            account that still owns LIVE nodes leaves the two states contradictory.
+          </p>
+        </div>
+      </div>
 
       <Card bodyClassName="card__body--flush">
         <div className="toolbar">
@@ -623,6 +669,7 @@ export default function Accounts() {
             onToggleSelected={toggleSelected}
             onTest={(account) => void runTest(account)}
             onTogglePause={(account) => void togglePause(account)}
+            onLogout={(account) => setLogoutId(account.id)}
             onDelete={(id) => setDeleteIds([id])}
           />
         ) : (
@@ -741,6 +788,21 @@ export default function Accounts() {
         busy={deleting}
         onConfirm={() => void confirmDelete()}
         onCancel={() => setDeleteIds([])}
+      />
+
+      <ConfirmDialog
+        open={logoutId !== null}
+        title="Logout account?"
+        description={
+          logoutId
+            ? `${accounts.data?.find((account) => account.id === logoutId)?.label ?? logoutId} will be paused, its LIVE nodes drained and its vendor session ended. This is the action that stops gates; Pause does not.`
+            : ''
+        }
+        confirmLabel="Logout and drain"
+        tone="primary"
+        busy={loggingOut}
+        onConfirm={() => void confirmLogout()}
+        onCancel={() => setLogoutId(null)}
       />
     </div>
   )

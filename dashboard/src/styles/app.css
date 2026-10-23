@@ -3516,3 +3516,122 @@ svg {
     animation: none;
   }
 }
+
+/* ==========================================================================
+   Lab
+   ========================================================================== */
+.lab-env-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.lab-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lab-warnings__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.lab-warnings__message {
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.lab-warnings__code {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.inline-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.lab-health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lab-health {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-sunken);
+}
+
+.lab-health__name {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.lab-span-2 {
+  grid-column: 1 / -1;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mint-strong);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .lab-health-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .lab-health-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.lab-tab-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lab-tab-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.lab-tab-subtitle {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.lab-tab-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

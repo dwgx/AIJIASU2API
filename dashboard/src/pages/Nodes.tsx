@@ -90,9 +90,12 @@ export default function Nodes() {
 
   const probe = async (node: ProxyNode) => {
     try {
-      const updated = await api.probeNode(node.id)
+      await api.probeNode(node.id)
       nodes.reload()
-      push(`Probe ok · ${node.label} · ${updated.latencyMs} ms`, 'success')
+      push(
+        `Probe timestamp touched · ${node.label} · latency and egress unchanged, no verification`,
+        'default',
+      )
     } catch (cause) {
       push(cause instanceof Error ? cause.message : 'Probe failed', 'danger')
     }
@@ -305,7 +308,7 @@ export default function Nodes() {
                 icon={<ShieldCheck size={14} />}
                 onClick={() => void probe(selected)}
               >
-                Probe now
+                Touch probe timestamp
               </Button>
             </>
           ) : null
@@ -365,7 +368,7 @@ export default function Nodes() {
                 </dd>
               </div>
               <div>
-                <dt>Last probe</dt>
+                <dt>Last probe touch</dt>
                 <dd title={formatDateTime(selected.lastProbeAt)}>{formatRelative(selected.lastProbeAt)}</dd>
               </div>
             </dl>
@@ -380,6 +383,12 @@ export default function Nodes() {
                 {selected.state === 'LIVE' ? 'Drain node' : selected.state === 'DRAINING' ? 'Undrain node' : 'Activate node'}
               </Button>
             </div>
+
+            <p className="callout callout--warning" role="note">
+              <strong>Touch probe timestamp</strong> only updates <code className="mono">lastProbeAt</code>.
+              It does not dial the node, measure latency or verify egress; the real check is a phase-2
+              guarded action.
+            </p>
 
             <p className="callout callout--muted">
               Node tags are rendered as <code className="mono">ajs-live/{selected.region}</code> in the local

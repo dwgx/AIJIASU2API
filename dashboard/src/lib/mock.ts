@@ -1,15 +1,32 @@
 import type {
   Account,
+  AccountServers,
   ApiKey,
   AuditEvent,
+  DeviceView,
+  DiagnosticsView,
+  EgressCheckResult,
+  EgressView,
+  FlagView,
+  GateView,
+  LabFlags,
+  LabLogQuery,
+  LabLogs,
+  LabOverview,
+  LabProfiles,
   Lease,
+  LogEntry,
   Metrics,
   PanelSettings,
   PanelUser,
+  ProfileView,
   ProxyNode,
   RequestLog,
+  ServerView,
+  SessionView,
   TrafficPoint,
 } from './types'
+import { ApiError } from './errors'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -46,6 +63,8 @@ export interface MockDb {
   keySeq: number
   leaseSeq: number
   mutationSeq: number
+  /** Epoch ms of the last guarded egress check per nodeId; reset with the dataset. */
+  egressCheckedAt: Record<string, number>
 }
 
 const REGION_NAMES: Record<string, string> = {
@@ -343,6 +362,7 @@ export function createDb(now = Date.now()): MockDb {
     keySeq: 6,
     leaseSeq: 8,
     mutationSeq: 0,
+    egressCheckedAt: {},
   }
 }
 
@@ -362,5 +382,325 @@ export function syncAccountCounts(): void {
     const nodes = db.nodes.filter((node) => node.accountId === account.id)
     account.nodeCount = nodes.length
     account.liveNodeCount = nodes.filter((node) => node.state === 'LIVE').length
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Lab fixtures — deterministic, derived from the same mock database so the
+ * counters, sessions and catalog stay consistent with the other pages.
+ * ------------------------------------------------------------------------ */
+
+function hashHex(seed: string, length = 64): string {
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  const parts: string[] = []
+  for (let index = 0; index < length / 8; index += 1) {
+    const code = seed.charCodeAt(index % Math.max(seed.length, 1)) ^ index
+    h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ (code + index), 0x85ebca6b) >>> 0
+    parts.push(((h1 ^ h2) >>> 0).toString(16).padStart(8, '0'))
+  }
+  return parts.join('').slice(0, length)
+}
+
+function redactedSid(nodeId: string): string {
+  return `${hashHex(nodeId, 8)}…(32)`
+}
+
+export function buildLabOverview(db: MockDb, now = Date.now()): LabOverview {
+  const liveNodes = db.nodes.filter((node) => node.state === 'LIVE')
+  const gates = db.nodes.filter((node) => node.state === 'LIVE' || node.state === 'DRAINING')
+  const warnings: LabOverview['warnings'] = []
+
+  const pausedWithLive = db.accounts.filter(
+    (account) =>
+      account.state === 'paused' && db.nodes.some((node) => node.accountId === account.id && node.state === 'LIVE'),
+  )
+  if (pausedWithLive.length > 0) {
+    warnings.push({
+      code: 'paused_account_live_nodes',
+      severity: 'warn',
+      message: `${pausedWithLive.map((account) => account.label).join(', ')} paused but still owns LIVE nodes — pause does not stop gates.`,
+    })
+  }
+  const authFailed = db.accounts.filter((account) => account.state === 'auth_failed')
+  if (authFailed.length > 0) {
+    warnings.push({
+      code: 'account_auth_failed',
+      severity: 'error',
+      message: `${authFailed.map((account) => account.label).join(', ')} cannot authenticate; its nodes stay DOWN.`,
+    })
+  }
+
+  return {
+    enabled: true,
+    generatedAt: iso(now),
+    version: '0.1.0',
+    commit: '',
+    uptimeSec: 3 * 3600 + 17 * 60,
+    modes: { accountLogin: true, resin: true, updateCheck: false, secrets: true, certPin: 'pinned' },
+    counts: {
+      accounts: db.accounts.length,
+      nodes: db.nodes.length,
+      liveNodes: liveNodes.length,
+      sessions: gates.length,
+      gates: gates.length,
+      leases: db.leases.length,
+    },
+    warnings,
+  }
+}
+
+export function buildLabGates(db: MockDb, now = Date.now()): GateView[] {
+  return db.nodes
+    .filter((node) => node.state === 'LIVE' || node.state === 'DRAINING')
+    .map((node, index) => ({
+      nodeId: node.id,
+      accountId: node.accountId,
+      state: node.state,
+      port: node.gatePort,
+      active: node.inUse,
+      limit: node.capacity,
+      accepted: 37 * (index + 1) + node.inUse,
+      rejected: index % 4,
+      ingressBytes: 12_400_000 * (index + 1),
+      egressBytes: 9_800_000 * (index + 1),
+      draining: node.state === 'DRAINING',
+      startedAt: iso(now - (index + 1) * 40 * MINUTE),
+    }))
+}
+
+export function buildLabSessions(db: MockDb, now = Date.now()): SessionView[] {
+  return db.nodes
+    .filter((node) => node.state === 'LIVE' || node.state === 'DRAINING')
+    .map((node, index) => ({
+      nodeId: node.id,
+      accountId: node.accountId,
+      serverId: node.label,
+      sid: redactedSid(node.id),
+      healthy: node.state === 'LIVE',
+      ageSec: (index + 1) * 420,
+      lastFlowAt: iso(now - (index + 1) * 37_000),
+      egressClaimed: node.egressIp,
+      keepalive: { supported: false, ka: null, kat: null, kapf: null },
+      errorClass: null,
+    }))
+}
+
+export function buildLabEgress(db: MockDb): EgressView[] {
+  return db.nodes.map((node) => ({
+    nodeId: node.id,
+    claimed: node.egressIp,
+    verified: '',
+    match: null,
+    source: 'fv-claim',
+    checkedAt: null,
+  }))
+}
+
+const EGRESS_CHECK_COOLDOWN_MS = 5_000
+
+/**
+ * Mock parity for POST /v1/lab/egress-check: only a node with a running gate
+ * (LIVE or DRAINING) may be dialed, a repeat inside 5 s answers 429, and the
+ * observed IP is the seeded exit. The result is returned, not stored, so the
+ * GET egress panel stays claim-only. The shell labels the build as mock, so
+ * this fixture demonstrates the flow without pretending to contact the network.
+ */
+export function buildLabEgressCheck(db: MockDb, nodeId: string, now = Date.now()): EgressCheckResult {
+  const node = db.nodes.find((item) => item.id === nodeId)
+  if (!node) {
+    throw new ApiError(404, '404 Not Found — node not found', 'NOT_FOUND')
+  }
+  if (node.state !== 'LIVE' && node.state !== 'DRAINING') {
+    throw new ApiError(409, '409 Conflict — node has no running gate', 'CONFLICT')
+  }
+  const previous = db.egressCheckedAt[nodeId]
+  if (previous !== undefined && now - previous < EGRESS_CHECK_COOLDOWN_MS) {
+    throw new ApiError(
+      429,
+      '429 Too Many Requests — one egress check per node every 5 seconds',
+      'QUOTA_EXCEEDED',
+    )
+  }
+  db.egressCheckedAt[nodeId] = now
+  return {
+    nodeId,
+    claimed: node.egressIp,
+    verified: node.egressIp,
+    match: true,
+    latencyMs: node.latencyMs > 0 ? node.latencyMs : 40,
+    checkedAt: iso(now),
+    source: 'echo',
+  }
+}
+
+export function buildLabProfiles(): LabProfiles {
+  const active: ProfileView = {
+    name: 'linux-4.2.3.0-binary',
+    clientVersion: '4.2.3.0',
+    coreVersion: '20241105-1',
+    protocolVersion: 2,
+    oaepHash: 'SHA-1',
+    signingMode: 'none',
+    requestShape: 'linux423',
+    transport: 'httpupgrade',
+  }
+  return {
+    enabled: true,
+    active: active.name,
+    supported: [active],
+    samples: [
+      { platform: 'windows', version: '4.9.6.0', core: '20250708-1', source: 'research/40-protocol/PROTOCOL.md:532-542' },
+      { platform: 'linux', version: '4.3.0.1', core: '20260525-1', source: 'research/30-linux-static/REPORT.md' },
+      { platform: 'linux', version: '4.2.3.0', core: '20241105-1', source: 'research/40-protocol/PROTOCOL.md:532-542' },
+      { platform: 'android', version: '4.12.2.0', core: '20260525-1', source: 'apktool.yml versionName; TRIAGE.md:362-395' },
+      { platform: 'macos', version: '4.9.6', core: '20250708-1', source: 'Info.plist; TRIAGE.md:362-395' },
+    ],
+  }
+}
+
+export function buildLabDevice(db: MockDb, accountId: string, now = Date.now()): DeviceView {
+  const account = db.accounts.find((item) => item.id === accountId)
+  if (!account) {
+    return {
+      enabled: true,
+      accountId,
+      present: false,
+      hashes: {},
+      claims: {},
+      stable: false,
+      firstSeenAt: null,
+      rawAvailable: false,
+    }
+  }
+  return {
+    enabled: true,
+    accountId,
+    present: true,
+    hashes: {
+      uid: `sha256:${hashHex(`${accountId}:uid`)}`,
+      osdid: `sha256:${hashHex(`${accountId}:osdid`)}`,
+      cuid: `sha256:${hashHex(`${accountId}:cuid`)}`,
+    },
+    claims: {
+      cseid: 'linux',
+      osp: 'linux',
+      osd: 'x86_64',
+      osv: 'Linux 6.8.0-45-generic',
+      dim: `lid=${hashHex(`${accountId}:lid`, 16)}`,
+    },
+    stable: account.state !== 'auth_failed',
+    firstSeenAt: iso(now - 96 * DAY),
+    rawAvailable: false,
+  }
+}
+
+export function buildLabFlags(): LabFlags {
+  const flags: FlagView[] = [
+    { key: 'AJS_ACCOUNT_LOGIN', value: '1', source: 'env', secret: false, restartRequired: true },
+    { key: 'AJS_NODE_LIMIT', value: '1', source: 'default', secret: false, restartRequired: true },
+    { key: 'AJS_LOG_LEVEL', value: 'info', source: 'default', secret: false, restartRequired: true },
+    { key: 'AJS_CERT_PIN', value: 'pinned', source: 'env', secret: false, restartRequired: true },
+    { key: 'AJS_UPDATE_REPO', set: false, source: 'env', secret: false, restartRequired: true },
+    { key: 'AJS_ADMIN_TOKEN', set: true, source: 'env', secret: true, redacted: true, restartRequired: true },
+    { key: 'AJS_MASTER_KEY', set: true, source: 'env', secret: true, redacted: true, restartRequired: true },
+    { key: 'AJS_RESIN_ADMIN_TOKEN', set: true, source: 'env', secret: true, redacted: true, restartRequired: true },
+  ]
+  return { enabled: true, flags }
+}
+
+const LOG_COMPONENTS = ['api', 'gate', 'runtime', 'store', 'login', 'publisher'] as const
+
+export function buildLabLogs(now = Date.now(), query: LabLogQuery = {}): LabLogs {
+  const messages = [
+    'gate flow accepted',
+    'gate flow rejected: vendor auth',
+    'node session established',
+    'node drain requested',
+    'subscription publish coalesced',
+    'login round-trip ok',
+    'state snapshot saved',
+    'audit event recorded',
+    'lease allocated',
+    'lease released',
+  ]
+  const levels = ['INFO', 'INFO', 'INFO', 'WARN', 'INFO', 'INFO', 'DEBUG', 'ERROR'] as const
+  const entries: LogEntry[] = Array.from({ length: 60 }, (_, index) => ({
+    ts: iso(now - index * 19_000),
+    level: levels[index % levels.length],
+    component: LOG_COMPONENTS[index % LOG_COMPONENTS.length],
+    msg: messages[index % messages.length],
+    accountId: index % 3 === 0 ? 'acc-01' : undefined,
+    nodeId: index % 4 === 0 ? 'node-01' : undefined,
+    errorClass: index % 8 === 7 ? 'vendor_rejected' : undefined,
+  }))
+
+  const level = query.level?.toUpperCase()
+  const filtered = entries.filter((entry) => {
+    if (level && level !== 'ALL' && entry.level !== level) return false
+    if (query.component && query.component !== 'all' && entry.component !== query.component) return false
+    return true
+  })
+  const limit = Math.max(1, Math.min(query.limit ?? 200, 2000))
+  return { enabled: true, entries: filtered.slice(0, limit), dropped: 0 }
+}
+
+export function buildLabDiagnostics(db: MockDb, now = Date.now()): DiagnosticsView {
+  return {
+    enabled: true,
+    health: {
+      api: 'ok',
+      store: 'ok',
+      secrets: 'ok',
+      certPin: 'pinned',
+      resin: 'ok',
+      update: 'disabled',
+      controller: 'running',
+      logRing: 'ok',
+      pcap: 'unavailable',
+    },
+    state: { path: 'state.json', lastSavedAt: iso(now - 5 * MINUTE), sizeBytes: 148_912 },
+    build: { version: '0.1.0', goVersion: 'go1.26.0', commit: '' },
+    warnings: [
+      {
+        code: 'pcap_unavailable',
+        severity: 'info',
+        message: 'PCAP capture is a phase-2 host action; the daemon exposes no capture endpoint.',
+      },
+      ...buildLabOverview(db, now).warnings,
+    ],
+  }
+}
+
+export function buildAccountServers(db: MockDb, accountId: string, now = Date.now()): AccountServers {
+  const account = db.accounts.find((item) => item.id === accountId)
+  const nodes = db.nodes.filter((node) => node.accountId === accountId)
+  if (!account) {
+    return { enabled: true, accountId, fetchedAt: null, stale: true, servers: [] }
+  }
+  const servers: ServerView[] = nodes.map((node, index) => ({
+    id: node.label,
+    title: `${regionName(node.region)} #${index + 1}`,
+    region: node.region,
+    host: `${node.label}.edge.example.net`,
+    port: 8443,
+    status: node.state === 'DOWN' ? 'offline' : 'ok',
+    nodeId: node.id,
+    nodeState: node.state,
+    selected: node.state === 'LIVE' || node.state === 'DRAINING',
+    skippedByLimit: node.state === 'READY',
+    memberOnly: null,
+    fullLoad: index % 4 === 0,
+    blockingMarks: [],
+    hasPingSecret: true,
+    latencyMs: node.latencyMs > 0 ? node.latencyMs : null,
+  }))
+  return {
+    enabled: true,
+    accountId,
+    fetchedAt: account.state === 'auth_failed' ? null : iso(now - 10 * MINUTE),
+    stale: account.state === 'auth_failed' || account.state === 'paused',
+    servers,
   }
 }

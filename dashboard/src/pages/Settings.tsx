@@ -1,7 +1,7 @@
 import clsx from 'clsx'
 import { Database, ExternalLink, Moon, RefreshCw, Save, Sun } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { api, isMockMode } from '../lib/api'
+import { api, apiEndpointLabel, hasPanelToken, isMockMode, setPanelToken } from '../lib/api'
 import { CopyButton } from '../components/CopyButton'
 import { useTheme } from '../lib/theme'
 import type { AccentName } from '../lib/theme'
@@ -33,6 +33,7 @@ const ACCENTS: ReadonlyArray<{ value: AccentName; label: string }> = [
 export default function Settings() {
   const mock = isMockMode()
   const settings = useAsync(() => api.getSettings(), [])
+  const overview = useAsync(() => api.getLabOverview(), [], { intervalMs: 30_000 })
   const { push } = useToast()
   const { theme, setTheme, accent, setAccent } = useTheme()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
@@ -42,6 +43,7 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
+  const [tokenSet, setTokenSet] = useState(hasPanelToken())
   const themeRef = useRef(theme)
   themeRef.current = theme
 
@@ -109,6 +111,20 @@ export default function Settings() {
       setUpdateChecking(false)
     }
   }
+
+  useEffect(() => {
+    const syncToken = () => setTokenSet(hasPanelToken())
+    window.addEventListener('ajs:refresh', syncToken)
+    return () => window.removeEventListener('ajs:refresh', syncToken)
+  }, [])
+
+  const clearToken = () => {
+    setPanelToken(null)
+    setTokenSet(false)
+    push('Session token cleared', 'default')
+  }
+
+  const daemonVersion = overview.data?.version || '0.1.0'
 
   const deployCommand = (tag: string) => `cd deploy && ./update.sh --tag ${tag}`
 
@@ -265,11 +281,21 @@ export default function Settings() {
             </p>
           </Card>
 
-          <Card title="Daemon" subtitle="Read-only connection facts.">
+          <Card
+            title="Daemon"
+            subtitle="Connection facts reported by the running process."
+            actions={
+              !mock ? (
+                <Button size="sm" variant="secondary" onClick={() => window.dispatchEvent(new Event('ajs:token-required'))}>
+                  {tokenSet ? 'Replace token' : 'Set token'}
+                </Button>
+              ) : null
+            }
+          >
             <dl className="facts facts--compact">
               <div>
                 <dt>Endpoint</dt>
-                <dd className="mono">127.0.0.1:2261</dd>
+                <dd className="mono">{apiEndpointLabel()}</dd>
               </div>
               <div>
                 <dt>Mode</dt>
@@ -281,11 +307,23 @@ export default function Settings() {
               </div>
               <div>
                 <dt>Version</dt>
-                <dd className="mono">0.1.0</dd>
+                <dd className="mono">{daemonVersion}</dd>
+              </div>
+              <div>
+                <dt>Commit</dt>
+                <dd className="mono">{overview.data?.commit || 'not embedded'}</dd>
               </div>
               <div>
                 <dt>Transport</dt>
                 <dd className="mono">{draft.transport}</dd>
+              </div>
+              <div>
+                <dt>Token</dt>
+                <dd>
+                  <Badge tone={mock ? 'neutral' : tokenSet ? 'success' : 'warning'}>
+                    {mock ? 'not required' : tokenSet ? 'set (session)' : 'not set'}
+                  </Badge>
+                </dd>
               </div>
             </dl>
             <p className="setting-note">
@@ -298,8 +336,17 @@ export default function Settings() {
                 </>
               ) : (
                 <>
-                  The panel talks to ajs-accountd at this endpoint; the panel token is supplied at build
-                  time and never rendered here.
+                  The panel talks to ajs-accountd at this endpoint. The token comes from{' '}
+                  <code className="mono">VITE_PANEL_TOKEN</code> or the runtime gate, is kept in this tab's
+                  sessionStorage, and is never rendered here.
+                  {tokenSet ? (
+                    <>
+                      {' '}
+                      <button type="button" className="link-button" onClick={clearToken}>
+                        Clear session token
+                      </button>
+                    </>
+                  ) : null}
                 </>
               )}
             </p>
@@ -309,7 +356,7 @@ export default function Settings() {
             <dl className="facts facts--compact">
               <div>
                 <dt>Current</dt>
-                <dd className="mono">0.1.0</dd>
+                <dd className="mono">{daemonVersion}</dd>
               </div>
             </dl>
             <div className="update-card__row">

@@ -20,6 +20,9 @@ async function openSettings() {
   window.history.pushState({}, '', '/settings')
   render(<App />)
   await screen.findByRole('heading', { name: 'Settings', level: 1 })
+  // The update card renders after the settings draft resolves; waiting here
+  // keeps every test from racing the extra runtime-label fetch.
+  await screen.findByRole('button', { name: 'Check' })
 }
 
 beforeEach(async () => {

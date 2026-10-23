@@ -1,4 +1,4 @@
-import { Pin, RotateCw, ShieldCheck, Ticket, Trash2 } from 'lucide-react'
+import { Pin, RotateCw, ShieldAlert, ShieldCheck, Ticket, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../lib/api'
 import { formatDate, formatNumber, formatTtl, proxyUrl } from '../lib/format'
@@ -21,14 +21,24 @@ import {
 
 export default function Leases() {
   const leases = useAsync(() => api.listLeases(), [], { intervalMs: 15_000 })
+  const lab = useAsync(() => api.getLabOverview(), [], { intervalMs: 30_000 })
   const { push } = useToast()
   const [releaseId, setReleaseId] = useState<string | null>(null)
   const [releasing, setReleasing] = useState(false)
 
   const releaseTarget = leases.data?.find((lease) => lease.id === releaseId) ?? null
   const stickyCount = leases.data?.filter((lease) => lease.sticky).length ?? 0
+  // Rotation is only real when the daemon has a Resin admin token. Without it
+  // the store rewrites the recorded IP and adds 17 synthetic requests. A
+  // disabled lab overview also leaves the posture unknown, so treat it as off.
+  const rotateDisabled =
+    lab.data !== undefined && (lab.data.enabled === false || !lab.data.modes?.resin)
 
   const rotate = async (lease: Lease) => {
+    if (rotateDisabled) {
+      push('Rotate is disabled: Resin is not configured on the daemon', 'danger')
+      return
+    }
     try {
       const updated = await api.rotateLease(lease.id)
       leases.reload()
@@ -135,8 +145,13 @@ export default function Leases() {
             withLabel
           />
           <IconButton
-            label={`Rotate lease for ${lease.userName}`}
+            label={
+              rotateDisabled
+                ? 'Rotate disabled: Resin is not configured on the daemon'
+                : `Rotate lease for ${lease.userName}`
+            }
             icon={<RotateCw size={14} />}
+            disabled={rotateDisabled}
             onClick={() => void rotate(lease)}
           />
           <IconButton
@@ -170,6 +185,23 @@ export default function Leases() {
           </p>
         </div>
       </div>
+
+      {rotateDisabled ? (
+        <div className="callout callout--warning" role="status">
+          <span className="callout__icon">
+            <ShieldAlert size={18} aria-hidden="true" />
+          </span>
+          <div>
+            <p className="callout__title">Rotate is disabled — Resin is not configured</p>
+            <p className="callout__text">
+              Without <code className="mono">AJS_RESIN_ADMIN_TOKEN</code> the daemon has no way to
+              change the real egress. The store would only rewrite the recorded IP and add 17
+              synthetic requests, so the button is disabled instead of reporting a rotation that did
+              not happen.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <Card bodyClassName="card__body--flush">
         {leases.status === 'error' ? (

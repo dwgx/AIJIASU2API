@@ -153,7 +153,7 @@ export default function Requests() {
         request.source === 'mutation-lab' ? (
           <Badge tone="mint">mutation lab</Badge>
         ) : (
-          <Badge tone="neutral">proxy</Badge>
+          <Badge tone="warning">seeded</Badge>
         ),
     },
   ]
@@ -162,14 +162,32 @@ export default function Requests() {
     <div className="stack-lg">
       <PageHeader
         title="Requests"
-        subtitle="Per-request telemetry from the gate and the mutation lab."
+        subtitle="Seeded and simulated rows — not gate telemetry. Real per-flow capture is a later slice."
         refresh={summarizeRefresh([requests])}
         actions={
-          <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={requests.reload}>
-            Refresh
-          </Button>
+          <>
+            <Badge tone="warning">simulated dataset</Badge>
+            <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={requests.reload}>
+              Refresh
+            </Button>
+          </>
         }
       />
+
+      <div className="callout callout--warning" role="note">
+        <span className="callout__icon">
+          <FlaskConical size={18} aria-hidden="true" />
+        </span>
+        <div>
+          <p className="callout__title">This table does not observe the gate</p>
+          <p className="callout__text">
+            Rows are seeded or produced by the mutation lab. The gate logs accepted and rejected flows
+            but does not write them to this table yet, so no row here proves that a request left this
+            machine. Gate counters live on the <strong>Lab → Gates &amp; sessions</strong> tab.
+          </p>
+        </div>
+      </div>
+
 
       <Card className="lab-card">
         <div className="lab-card__inner">
@@ -230,7 +248,7 @@ export default function Requests() {
             onChange={(event) => setSourceFilter(event.target.value)}
           >
             <option value="all">All sources</option>
-            <option value="proxy">Proxy</option>
+            <option value="proxy">Seeded</option>
             <option value="mutation-lab">Mutation lab</option>
           </Select>
           <span className="toolbar__count">
