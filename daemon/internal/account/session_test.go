@@ -233,7 +233,7 @@ func mockServer(m *mockFV) apifacade.Server {
 		ID:  "srv-1",
 		Svr: host,
 		Sts: "ok",
-		Par: apifacade.ServerPar{FV: apifacade.ServerFV{P: port}},
+		Par: apifacade.ServerPar{FV: apifacade.ServerFV{P: apifacade.FlexInt(port)}},
 	}
 }
 

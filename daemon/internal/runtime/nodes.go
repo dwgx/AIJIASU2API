@@ -95,6 +95,11 @@ type NodeControllerConfig struct {
 	// Profile is the FV profile of the sessions; the zero value selects
 	// account.Linux423Binary, matching the login service default.
 	Profile account.VersionProfile
+	// MaxServers caps how many usable servers one account starts: after the
+	// deterministic sort only the first MaxServers server IDs get a session
+	// and a gate. Zero starts every usable server (a live login can expose
+	// 100+); negative is invalid.
+	MaxServers int
 	Logger  *slog.Logger
 	// PortBase is the first port tried; zero selects DefaultGatePortBase.
 	PortBase int
@@ -130,6 +135,7 @@ type NodeController struct {
 	profile    account.VersionProfile
 	logger     *slog.Logger
 	portBase   int
+	maxServers int
 
 	// ctx is the gate lifetime. Stop cancels it and closes every gate.
 	ctx    context.Context
@@ -152,6 +158,9 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 	}
 	if cfg.Sessions == nil {
 		return nil, errors.New("runtime: node controller requires a session opener")
+	}
+	if cfg.MaxServers < 0 {
+		return nil, fmt.Errorf("runtime: node controller MaxServers %d is negative", cfg.MaxServers)
 	}
 	gates := cfg.Gates
 	if gates == nil {
@@ -185,6 +194,7 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		cancel:     cancel,
 		running:    make(map[string]*nodeGate),
 		nextPort:   portBase,
+		maxServers: cfg.MaxServers,
 	}, nil
 }
 
@@ -197,6 +207,11 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 // the remaining servers; the aggregate error is returned only when no node
 // started at all. A reconcile failure is always returned because Resin may now
 // disagree with the store.
+//
+// When MaxServers is positive only the first MaxServers server IDs of the
+// deterministic sort are desired: the rest are skipped, and on a later sync
+// with a lower cap their gates close and their nodes are deleted like any
+// server the login no longer lists.
 func (c *NodeController) SyncAccount(ctx context.Context, accountID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -222,6 +237,11 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	}
 
 	servers := usableServers(result.Servers)
+	if c.maxServers > 0 && len(servers) > c.maxServers {
+		skipped := len(servers) - c.maxServers
+		servers = servers[:c.maxServers]
+		c.logger.Info("node_limit_skipped", "account_id", accountID, "limit", c.maxServers, "skipped", skipped)
+	}
 	desired := make(map[string]struct{}, len(servers))
 	for _, srv := range servers {
 		desired[nodeID(accountID, srv.id)] = struct{}{}

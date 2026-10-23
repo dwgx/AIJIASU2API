@@ -572,8 +572,8 @@ controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
     Sessions:   factory,      // Open(ctx, SessionRequest)
     Reconciler: panel,        // nil when Resin is disabled
     Profile:    account.Linux423Binary,
+    MaxServers: 3, // 0 = all; AJS_NODE_LIMIT
     Logger:     logger,
-})
 // ...
 api.Config{
     LoginHook:         controller.SyncAccount,
@@ -594,9 +594,11 @@ service has already sent `loginSync`):
 
 1. read the retained `LoginResult` and the account's stored device identity
    (`account.DeviceForIdentity`); a missing result or identity is an error;
-2. keep only servers whose `sts` is `ok`; the node id is
-   `<accountID>:<serverID>` and the label (also the Resin tag) is
-   `<cc>-<account>-<server>` in the lowercase tag alphabet;
+2. keep only servers whose `sts` is `ok`, sort the server IDs deterministically
+   and (when `MaxServers` > 0) keep only the first `MaxServers` of them — a
+   `node_limit_skipped` log names the account, limit and skipped count, never a
+   credential; the node id is `<accountID>:<serverID>` and the label (also the
+   Resin tag) is `<cc>-<account>-<server>` in the lowercase tag alphabet;
 3. reuse the gate of a server that already has one, so a repeated login never
    re-authenticates or re-binds;
 4. otherwise open one FV session (`account.Factory`) and start one SOCKS5 gate
@@ -607,11 +609,12 @@ service has already sent `loginSync`):
    failure writes it `DOWN` with no gate port and the batch continues;
 6. reconcile Resin once (skipped without a panel).
 
-A server that disappears from the login has its gate and session closed and its
-node deleted. `DrainNode`/`UndrainNode` drive the gate and the store together
+A server skipped by the cap is not desired either: lowering `AJS_NODE_LIMIT`
+and resyncing closes the out-of-cap gates, closes their sessions and deletes
+their nodes, exactly like a server that disappeared from the login. A server
+that disappears from the login has its gate and session closed and its node
+deleted. `DrainNode`/`UndrainNode` drive the gate and the store together
 and reconcile the panel, and a login refresh does not undo an operator drain.
-`Stop` closes every gate and session and reconciles once. Every mutation is
-serialized, so concurrent logins for one account share one gate.
 
 `StopAccount` is the account-delete and account-logout seam. It closes every
 gate and session the controller runs for one account, removes them from the
@@ -655,6 +658,11 @@ wired the controller, so the default build keeps the store-only behaviour.
   region, state and port) and preserves the probe/lease fields `InUse`,
   `SuccessRate` and `LastProbeAt`; `Store.DeleteNode` removes the node and every
   lease that pointed at it.
+- Node cap (AJS-99): `MaxServers` / `AJS_NODE_LIMIT` (default `0` = all)
+  bounds how many usable servers one account starts; a negative config or env
+  value fails startup. The daemon logs `max_servers` (or `all`) with
+  `node_controller_enabled`, and a capped sync logs `node_limit_skipped` with
+  the account, limit and skipped count — never a credential.
 - Live status: `[UNVERIFIED]`. No vendor host was contacted and no live Resin
   subscription was changed. The tests use a fake session opener, a real
   `gate.NewServer` on `127.0.0.1:13000` and a fake reconciler; the first live
@@ -663,7 +671,12 @@ wired the controller, so the default build keeps the store-only behaviour.
 `internal/runtime/nodes_test.go` covers: sync creating two gates on 13000/13001
 with the session's egress IP, a SOCKS5 CONNECT relayed through the fake session,
 a second sync reusing both ports without new sessions, server removal closing
-its gate and deleting its node, drain rejecting a flow with `0x05` and undrain
+its gate and deleting its node, the node cap (five fake servers with a limit of
+2 starting exactly the first two sorted IDs `s1`/`s2` with no session, gate or
+node for `s3`–`s5`, limit `0` starting all five, a negative `MaxServers`
+rejected at construction, and lowering the cap on a resync closing the
+out-of-cap gates, closing their sessions and deleting their nodes while the
+in-cap node keeps serving), drain rejecting a flow with `0x05` and undrain
 accepting again, an operator drain surviving a refresh, stop closing every gate
 and session, stop-account closing only one account's gates while the other
 account keeps serving, reconciling once and staying idempotent (a repeat and an
@@ -688,6 +701,21 @@ answer 500 while the node stays LIVE.
 hook-before-panel, abort-on-error, the missing-node 404 without a hook call,
 and the nil-hook store-only path, and `TestAccountLogoutHook` proves the same
 hook-before-store and abort-on-error policy for logout.
+
+### Node cap (AJS-99)
+
+`NodeControllerConfig.MaxServers` is the seam and `AJS_NODE_LIMIT` is its only
+production knob (`cmd/ajs-accountd`: parsed with the `snapshotInterval` policy —
+unset means `0`, anything but a non-negative integer fails startup). `SyncAccount`
+sorts the usable server IDs deterministically (`usableServers`) and, when the
+cap is positive, truncates to the first `MaxServers` before the desired set is
+built, so `removeUndesiredLocked` treats the skipped servers exactly like
+removed ones: their gates close, their sessions close, their nodes are
+deleted, and a later cap increase starts them on the next login. A truncated
+sync logs `node_limit_skipped` (`account_id`, `limit`, `skipped`) — no server
+details, no credentials. Live behaviour with 100+ real servers remains
+`[UNVERIFIED]`: no live login was rerun for this change; the cap is proven with
+the fake opener fixtures above.
 
 ## Supervisor (AJS-43)
 
@@ -816,6 +844,7 @@ test binary as the child.
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
+| `AJS_NODE_LIMIT` | — | `0` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; `0` = all. Negative or non-integer fails startup. **Warning:** a live account can expose 100+ usable servers, so one login would otherwise open 100+ sessions and gates (~165 listeners observed); a small cap (e.g. `3`) is recommended |
 | `AJS_CONTROL_CERT_SHA256` | — | — | SHA-256 fingerprint (64 hex chars, `AA:BB:…` or raw) of the control API leaf certificate; set → the login transport pins exactly that certificate instead of chain/hostname verification (see “Control certificate pin”), empty → default verification. Malformed → startup fails |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
 | `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
@@ -2278,7 +2307,9 @@ of this test failed on `strconv.Atoi("1981371\n")` — the pid file written by
   Sealed secrets are file-backed only when `AJS_MASTER_KEY` is set.
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
   With it, login calls the control API, follows it with `loginSync`, and the
-  node controller opens one gate per usable server. The `LoginResult` and the
+  node controller opens one gate per usable server, bounded by
+  `AJS_NODE_LIMIT` (default `0` = all; a live account can expose 100+ usable
+  servers, so a small cap such as `3` is recommended). The `LoginResult` and the
   controller's gate map still live in process memory: a restart keeps the
   persisted nodes but no gate is bound until the next login, and the node
   supervisor is not wired. Lease rotate/release and node drain/undrain write

@@ -71,8 +71,8 @@ func testServer(id string) apifacade.Server {
 		Ctry: "CN",
 		Sts:  "ok",
 		Ord:  "1",
-		Par:  apifacade.ServerPar{FV: apifacade.ServerFV{P: 443}},
-		Loc:  []apifacade.ServerLoc{{C: "CN", N: "Shanghai", O: 1}},
+		Par:  apifacade.ServerPar{FV: apifacade.ServerFV{P: apifacade.FlexInt(443)}},
+		Loc:  []apifacade.ServerLoc{{C: "CN", N: "Shanghai", O: apifacade.FlexInt(1)}},
 	}
 }
 
@@ -1240,6 +1240,217 @@ func TestNodeControllerConcurrentSync(t *testing.T) {
 	if got := rec.callCount(); got != 4 {
 		t.Fatalf("reconciles = %d, want one per sync", got)
 	}
+}
+
+// newNodeControllerWithLimit is newNodeController with a MaxServers cap.
+func newNodeControllerWithLimit(t *testing.T, st *store.Store, logins runtime.LoginResults, opener runtime.SessionOpener, rec runtime.Reconciler, maxServers int) *runtime.NodeController {
+	t.Helper()
+	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		Store:      st,
+		Logins:     logins,
+		Sessions:   opener,
+		Reconciler: rec,
+		MaxServers: maxServers,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewNodeController: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = controller.Stop(stopCtx)
+	})
+	return controller
+}
+
+// fiveServers is a five-server login fixture with deliberately unsorted keys,
+// so the deterministic sort decides which servers survive a cap.
+func fiveServers() map[string]apifacade.Server {
+	servers := make(map[string]apifacade.Server, 5)
+	for _, id := range []string{"s5", "s1", "s3", "s2", "s4"} {
+		servers[id] = testServer(id)
+	}
+	return servers
+}
+
+func TestNodeControllerMaxServersTruncates(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-limit")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         fiveServers(),
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 2)
+
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+
+	if got := opener.callCount(); got != 2 {
+		t.Fatalf("session opens = %d, want 2", got)
+	}
+	nodes := st.Nodes()
+	if len(nodes) != 2 {
+		t.Fatalf("nodes = %d, want 2", len(nodes))
+	}
+	// The deterministic sort keeps the first two server IDs: s1 and s2.
+	first := nodeByServer(t, st, acct.ID, "s1")
+	second := nodeByServer(t, st, acct.ID, "s2")
+	if first.GatePort != 13000 || second.GatePort != 13001 {
+		t.Fatalf("gate ports = %d/%d, want 13000/13001", first.GatePort, second.GatePort)
+	}
+	for _, id := range []string{"s3", "s4", "s5"} {
+		if _, ok := st.Node(acct.ID + ":" + id); ok {
+			t.Fatalf("node for capped-out server %s exists", id)
+		}
+		if requests := opener.requestsFor(id); len(requests) != 0 {
+			t.Fatalf("capped-out server %s got %d session requests, want 0", id, len(requests))
+		}
+	}
+	// A second sync stays capped: no new session for the skipped servers.
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("second SyncAccount: %v", err)
+	}
+	if got := opener.callCount(); got != 2 {
+		t.Fatalf("session opens after resync = %d, want 2", got)
+	}
+	t.Logf("limit 2 of 5 usable servers: started %s port=%d and %s port=%d, skipped s3/s4/s5",
+		first.ID, first.GatePort, second.ID, second.GatePort)
+}
+
+func TestNodeControllerMaxServersZeroStartsAll(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-limit-zero")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         fiveServers(),
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 0)
+
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+	if got := opener.callCount(); got != 5 {
+		t.Fatalf("session opens = %d, want 5 (limit 0 means all)", got)
+	}
+	if nodes := st.Nodes(); len(nodes) != 5 {
+		t.Fatalf("nodes = %d, want 5", len(nodes))
+	}
+	t.Logf("limit 0 of 5 usable servers: all 5 started")
+}
+
+func TestNodeControllerMaxServersNegativeRejected(t *testing.T) {
+	st := newNodeTestStore(t)
+	logins := newFakeLoginResults()
+	_, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		Store:      st,
+		Logins:     logins,
+		Sessions:   newFakeSessionOpener(),
+		MaxServers: -1,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err == nil {
+		t.Fatal("NewNodeController accepted MaxServers -1")
+	}
+	if !strings.Contains(err.Error(), "MaxServers") {
+		t.Fatalf("error = %v, want a MaxServers rejection", err)
+	}
+	t.Logf("negative MaxServers rejected: %v", err)
+}
+
+func TestNodeControllerMaxServersLowerLimitRemovesGates(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-limit-lower")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         fiveServers(),
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+
+	// One controller with all servers running, then the same daemon restarts
+	// with a lower cap: the old controller is stopped (its gates close) and a
+	// fresh controller over the same store removes the out-of-cap nodes on
+	// the next sync, which is what a resync after a cap change looks like to
+	// the store.
+	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 3)
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+	if got := opener.callCount(); got != 3 {
+		t.Fatalf("session opens = %d, want 3", got)
+	}
+	_, okS1 := st.Node(acct.ID + ":s1")
+	_, okS2 := st.Node(acct.ID + ":s2")
+	s3 := nodeByServer(t, st, acct.ID, "s3")
+	s3Port := s3.GatePort
+	if !okS1 || !okS2 {
+		t.Fatal("in-cap node s1 or s2 is missing before the resync")
+	}
+	for _, id := range []string{"s4", "s5"} {
+		if _, ok := st.Node(acct.ID + ":" + id); ok {
+			t.Fatalf("node for capped-out server %s exists", id)
+		}
+	}
+
+	// The old daemon's gates are gone before the new daemon syncs; the store
+	// keeps the three nodes for the resync to prune.
+	if err := controller.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// A resync with a lower cap keeps the in-cap gates and removes the rest:
+	// the out-of-cap gate must be closed and its node deleted.
+	capped := newNodeControllerWithLimit(t, st, logins, opener, rec, 1)
+	if err := capped.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("capped SyncAccount: %v", err)
+	}
+	// s1 is the only in-cap server: it stays LIVE and serving (the port may
+	// move, since the old gate closed and the new one skips the ports the
+	// stale store nodes still hold — the pre-existing restart rebind).
+	kept := nodeByServer(t, st, acct.ID, "s1")
+	if kept.State != model.NodeLive {
+		t.Fatalf("kept server s1 state = %s, want LIVE", kept.State)
+	}
+	for _, id := range []string{"s2", "s3", "s4", "s5"} {
+		if _, ok := st.Node(acct.ID + ":" + id); ok {
+			t.Fatalf("node for out-of-cap server %s survived the resync", id)
+		}
+	}
+	if session := opener.session("s2"); session == nil || !session.isClosed() {
+		t.Fatal("out-of-cap server s2 session is not closed")
+	}
+	if session := opener.session("s3"); session == nil || !session.isClosed() {
+		t.Fatal("out-of-cap server s3 session is not closed")
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(s3Port)), 500*time.Millisecond); err == nil {
+		_ = conn.Close()
+		t.Fatalf("out-of-cap server s3 gate on port %d still accepts connections", s3Port)
+	}
+	code, conn := socks5Connect(t, kept.GatePort)
+	if code != 0x00 {
+		t.Fatalf("kept gate reply = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+	t.Logf("cap 3 -> 1: s1 stayed LIVE on port %d; s2/s3 gates closed, nodes deleted, port %d refused",
+		kept.GatePort, s3Port)
 }
 
 // Ensure the fake session keeps satisfying the production interfaces.

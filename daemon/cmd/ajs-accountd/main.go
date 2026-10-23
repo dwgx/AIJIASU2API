@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -415,12 +416,17 @@ func pinState() string {
 // that turns a successful login into one loopback gate per usable server.
 // Construction performs no I/O: gates bind only when SyncAccount runs after a
 // login. A nil panel (Resin disabled) still creates nodes; only the reconcile
-// step is skipped.
+// step is skipped. AJS_NODE_LIMIT caps how many usable servers one account
+// starts (default 0 = all).
 func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
 	if panel != nil {
 		reconciler = panel
+	}
+	limit, err := nodeLimit()
+	if err != nil {
+		return nil, err
 	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 		Store:      st,
@@ -428,13 +434,36 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 		Sessions:   factory,
 		Reconciler: reconciler,
 		Profile:    profile,
+		MaxServers: limit,
 		Logger:     logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("node controller: %w", err)
 	}
-	logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil)
+	if limit > 0 {
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", limit)
+	} else {
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all")
+	}
 	return controller, nil
+}
+
+// nodeLimit parses AJS_NODE_LIMIT, the per-account cap on usable servers the
+// node controller starts. The default 0 keeps every usable server; a negative
+// or non-integer value fails startup instead of silently lifting the cap.
+func nodeLimit() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("AJS_NODE_LIMIT"))
+	if raw == "" {
+		return 0, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("AJS_NODE_LIMIT %q must be a non-negative integer", raw)
+	}
+	if limit < 0 {
+		return 0, fmt.Errorf("AJS_NODE_LIMIT %q must be a non-negative integer", raw)
+	}
+	return limit, nil
 }
 
 // loginProfile maps AJS_ACCOUNT_PROFILE to a version profile. Only the tested

@@ -28,6 +28,10 @@ type (
 	Server = api.Server
 	// ServerFV is the par.fv object of a VpnServer.
 	ServerFV = api.ServerFV
+	// FlexInt is the numeric type the vendor sends as either a bare JSON
+	// number or a decimal string (vsid, par.fv.u/p, loc.o); re-exported so
+	// daemon tests can build literals against the aliased server structs.
+	FlexInt = api.FlexInt
 	// ServerPar is the par object of a VpnServer.
 	ServerPar = api.ServerPar
 	// ServerLoc is one entry of VpnServer.loc.
