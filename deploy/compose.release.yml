@@ -1,0 +1,21 @@
+# Release override for compose.yml: swap the locally built images for the
+# GHCR images built by .github/workflows/release.yml.
+#
+#   cd deploy
+#   ./update.sh --tag v0.1.0     # or: docker compose -f compose.yml -f compose.release.yml up -d
+#
+# Only the image field (plus the !reset that drops the base build: block,
+# Compose v2.24+) is overridden; ports, volumes, health checks and the
+# dashboard's depends_on come from compose.yml.
+#
+# AJS_GHCR_OWNER defaults to dwgx (the GHCR namespace this repo publishes
+# to) and AJS_IMAGE_TAG defaults to latest; both live in .env so update.sh
+# can pin a release tag without editing this file.
+services:
+  accountd:
+    build: !reset null
+    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-accountd:${AJS_IMAGE_TAG:-latest}
+
+  dashboard:
+    build: !reset null
+    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-dashboard:${AJS_IMAGE_TAG:-latest}

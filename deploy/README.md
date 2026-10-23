@@ -1,16 +1,18 @@
 # Control-plane deployment (`deploy/`)
 
-A reproducible Docker Compose stack for the parts of this project that exist today:
-`ajs-accountd` (the panel API) and the operator dashboard, with Resin as an optional profile.
-It is a **control plane**, not a working proxy: the gate and `ajsproxy` per-node supervision are
-not wired into node lifecycle, no vendor host is contacted, and no credential ships in this tree.
+A deployment of the parts of this project that run on a host: `ajs-accountd` (the panel API
+and node controller), the operator dashboard, and Resin as an optional profile. The control
+plane is live-verified: a single vendor account logs in through the pinned control API and
+egresses through one gate, with `AJS_NODE_LIMIT=1` keeping one active FV session per account
+(the vendor's own limit — see [`research/82-live-20261023/REPORT.md`](../research/82-live-20261023/REPORT.md)).
+No credential ships in this tree: everything secret lives in `.env` (gitignored).
 
 `compose.yml` runs:
 
 | Service | Image | Network | Endpoint | Role |
 |---|---|---|---|---|
-| `accountd` | built from `../daemon/Dockerfile` (`ajs-accountd:local`) | host | `127.0.0.1:2261` | panel JSON API, JSON-snapshot persistence in the `accountd-data` volume |
-| `dashboard` | built from `../dashboard/Dockerfile` (`ajs-dashboard:local`) | bridge | `127.0.0.1:18081` | nginx serving the SPA; mock data by default, live mode opt-in at build time |
+| `accountd` | built from `../daemon/Dockerfile` (`ajs-accountd:local`), or `ghcr.io/<owner>/ajs-accountd:<tag>` via `compose.release.yml` | host | `127.0.0.1:2261` | panel JSON API, JSON-snapshot persistence in the `accountd-data` volume, live node controller when `AJS_ACCOUNT_LOGIN=1` |
+| `dashboard` | built from `../dashboard/Dockerfile` (`ajs-dashboard:local`), or `ghcr.io/<owner>/ajs-dashboard:<tag>` via `compose.release.yml` | bridge | `127.0.0.1:18081` | nginx serving the SPA; mock data by default, live mode opt-in at build time |
 | `resin` | `ghcr.io/resinat/resin:1.3.0` | host | `127.0.0.1:2260` | Resin v1.3.0 admin API + SOCKS5 listener, only with `--profile resin` |
 
 `accountd` and Resin use host networking because both must reach host loopback: Resin's admin API
@@ -65,9 +67,51 @@ Then edit `.env`:
 - `VITE_PANEL_TOKEN` — the token the dashboard sends to the daemon in live mode. It is baked into
   the JavaScript bundle at image build time, so treat it as public within loopback.
 - `RESIN_ADMIN_TOKEN` / `RESIN_PROXY_TOKEN` — Resin admin and SOCKS5 credentials, resin profile only.
+- `AJS_GHCR_OWNER` / `AJS_IMAGE_TAG` — the GHCR namespace and tag `compose.release.yml` deploys
+  from (`ghcr.io/<owner>/ajs-<service>:<tag>`). Defaults: `dwgx` / `latest`. Only used when the
+  release override is layered on; `update.sh --tag` sets the tag for one run.
 
 `.env` is listed in the repository `.gitignore`. `.env.example` holds placeholders only and no real
 credentials belong in either file in version control.
+
+## Release flow (GHCR)
+
+Pushing a `v*` tag to GitHub runs [`.github/workflows/release.yml`](../.github/workflows/release.yml):
+it builds both images, pushes them to GHCR, and attaches the `ajs-accountd-linux-amd64` binary
+and `dashboard-dist.tar.gz` to a GitHub Release. Nothing is hard-coded — the images land at
+`ghcr.io/<repository_owner>/ajs-accountd:<tag>` and `ghcr.io/<repository_owner>/ajs-dashboard:<tag>`
+(plus `:latest`), and the release body lists the image tags and the update command.
+
+The release images use the same `VITE_*` build defaults as the local build, so the dashboard
+image ships in **mock mode** unless the workflow is edited to pass live args. A locally built
+`ajs-dashboard:local` (live mode, from `docker compose build dashboard`) remains the way to run
+the dashboard against the real API.
+
+## One-command update and rollback (`update.sh`)
+
+`compose.release.yml` overrides only the two image fields; ports, volumes and health checks
+still come from `compose.yml`. With it layered on, `docker compose up` pulls instead of building.
+
+```bash
+cd deploy
+./update.sh --tag v0.1.0   # or: ./update.sh  (uses AJS_IMAGE_TAG, default latest)
+```
+
+`update.sh` sources `.env` (never printing its values), records the currently deployed image IDs
+to `update-state.json`, then `pull`s and `up -d --no-build`s, and waits with bounded retries for
+`/healthz` on `2261` and the dashboard on `18081` to answer `200`. On failure it exits non-zero
+with the step that failed.
+
+Rollback restores the previous image IDs by re-tagging them over the current references:
+
+```bash
+./update.sh --rollback    # refuses if update-state.json is missing or empty
+```
+
+The state file records `updated_at`, `tag`, and the two image IDs that were deployed *before* the
+update — it is written before pulling, so it exists even if the update fails midway. Each update
+overwrites it, so rollback is exactly one step: after a rollback you are on the pre-update
+images; run `./update.sh --tag <older>` to go further back (the GHCR tags still exist upstream).
 
 ## Start
 
@@ -81,6 +125,13 @@ docker compose build dashboard && docker compose up -d dashboard
 ```
 
 The `dashboard` service waits for `accountd` to report healthy. Both restart unless stopped.
+
+To run the released GHCR images instead of the local builds, use the release override — see
+[Release flow (GHCR)](#release-flow-ghcr) and [`update.sh`](#one-command-update-and-rollback-update.sh):
+
+```bash
+docker compose -f compose.yml -f compose.release.yml up -d --no-build
+```
 
 Optional Resin:
 
@@ -165,11 +216,22 @@ cannot be opened. The snapshot is not SQLite and has no migration path yet; see
 
 ## Limitations
 
-- **Control plane only.** The gate (`daemon/internal/gate`) and per-node supervisor
-  (`daemon/internal/supervisor`) are not wired into node lifecycle. Nothing in this stack proxies
-  traffic; Resin leases exist but no node process is started for them.
-- **No live vendor.** The login path is behind `AJS_ACCOUNT_LOGIN=1` and has only run against local
-  fakes. No vendor host is contacted by this deployment, and no account is supplied here.
+- **Live, one account, one session.** With `AJS_ACCOUNT_LOGIN=1` the daemon logs in through the
+  pinned control API and runs the node controller: one loopback SOCKS5 gate per account, bounded
+  by `AJS_NODE_LIMIT` (default `1`). The vendor allows exactly one active FV data session per
+  account — the 2026-10-23 live run verified egress parity (`222.186.57.63` through
+  `vvn-2076-264`) with the limit at `1`, and saw the second session rejected with
+  `fm=disconnected by another connection` at limit `3`. Keep `1` for live use; `0` (all servers)
+  is research-only. See
+  [`../research/82-live-20261023/REPORT.md`](../research/82-live-20261023/REPORT.md).
+- **Login is opt-in and pinned.** Nothing contacts a vendor host unless `AJS_ACCOUNT_LOGIN=1`.
+  The control hosts present a self-signed `CN=localhost` certificate, so `AJS_CONTROL_CERT_SHA256`
+  must pin that leaf cert or default TLS verification rejects the connection — that is how the
+  live run connected. No account is supplied by this deployment: credentials enter through the
+  panel API and are sealed under `AJS_MASTER_KEY`.
+- **No per-node supervisor.** The node controller (`login → session factory → per-node gate`, with
+  drain/undrain/delete/logout hooks) is wired; the separate `daemon/internal/supervisor` package
+  remains an unused seam.
 - **JSON snapshot, not SQLite.** State survives restarts as `state.json` (version 1), written every
   30 s and on shutdown. A crash loses the window since the last save, and there is no schema
   migration beyond the version check.
@@ -196,6 +258,26 @@ docker compose --env-file .env.example config          # exit 0
 docker compose config --quiet                          # exit 0, after cp .env.example .env
 docker compose --profile resin config --quiet          # exit 0, resin + its volumes present
 ```
+
+### Release pipeline (recorded 2026-10-23, HMC, no pull/up/push)
+
+```bash
+cd deploy                                                # from the repo root
+sh -n update.sh                                          # exit 0
+docker compose -f compose.yml -f compose.release.yml config >/dev/null   # exit 0
+python3 -c 'import yaml; yaml.safe_load(open("../.github/workflows/release.yml"))'  # exit 0
+```
+
+The merged config resolves `ghcr.io/dwgx/ajs-accountd:latest` /
+`ghcr.io/dwgx/ajs-dashboard:latest` with `.env.example`, and
+`AJS_GHCR_OWNER=MyOrg AJS_IMAGE_TAG=v9.9.9` renders
+`ghcr.io/MyOrg/ajs-accountd:v9.9.9`. The base `build:` blocks are dropped by the override's
+`!reset` (Compose v2.24+), ports/volumes/health checks come from `compose.yml`, and the resin
+profile is untouched. `update.sh` was exercised end-to-end on HMC against a fake `docker`
+shim (no pull, no up): update records the previous image IDs to `update-state.json`, calls
+`compose pull` + `up -d --no-build`, and waits on `/healthz`; rollback re-tags the recorded IDs
+over the current refs and refuses when the state file is missing or holds `none`. The
+`--rollback`/`--tag`/bad-arg guards exit 1/2/2 as documented.
 
 `docker compose --env-file .env.example config` exits 0 on a checkout with no `.env`: the service
 `env_file` entries are `required: false`, and all build args carry defaults. With `.env` present,
