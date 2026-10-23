@@ -417,7 +417,8 @@ func pinState() string {
 // Construction performs no I/O: gates bind only when SyncAccount runs after a
 // login. A nil panel (Resin disabled) still creates nodes; only the reconcile
 // step is skipped. AJS_NODE_LIMIT caps how many usable servers one account
-// starts (default 0 = all).
+// starts (default 1, the vendor's one active data session per account; an
+// explicit 0 = all).
 func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
@@ -449,12 +450,17 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 }
 
 // nodeLimit parses AJS_NODE_LIMIT, the per-account cap on usable servers the
-// node controller starts. The default 0 keeps every usable server; a negative
-// or non-integer value fails startup instead of silently lifting the cap.
+// node controller starts. The default 1 keeps a single FV session per
+// account: the live 2026-10-23 run proved the vendor allows exactly one
+// active data session, so a second session's gate answers SOCKS5 0x05 with
+// "fv: data channel rejected ... fm=disconnected by another connection".
+// An explicit 0 keeps every usable server for catalog/probe research and is
+// not live-safe; a negative or non-integer value fails startup instead of
+// silently lifting the cap.
 func nodeLimit() (int, error) {
 	raw := strings.TrimSpace(os.Getenv("AJS_NODE_LIMIT"))
 	if raw == "" {
-		return 0, nil
+		return 1, nil
 	}
 	limit, err := strconv.Atoi(raw)
 	if err != nil {

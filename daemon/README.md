@@ -19,13 +19,14 @@ shutdown, so the store survives a restart. Vendor login is wired but default-off
 control API; without it the handler only refreshes the store, and no vendor
 host is contacted. With the same switch the node controller follows a
 successful login with `loginSync`, opens one authenticated FV session and one
-loopback SOCKS5 gate per usable vendor server (`127.0.0.1:13000` upward), writes
-the node, and reconciles Resin. It also makes `POST .../drain|undrain` call the
-controller before the store, so a running gate stops admitting (or reopens)
-before the node state changes; without the switch the handlers keep the
-store/Resin behavior. There is still no SQLite: the JSON snapshot is
-the v0.1 stopgap for the schema in `docs/PANEL.md` §6, and the node supervisor
-is implemented but not wired to the controller.
+loopback SOCKS5 gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
+(default `1`, the vendor's one active data session per account;
+`127.0.0.1:13000` upward), writes the node, and reconciles Resin. It also makes
+`POST .../drain|undrain` call the controller before the store, so a running gate
+stops admitting (or reopens) before the node state changes; without the
+switch the handlers keep the store/Resin behavior. There is still no SQLite:
+the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md` §6,
+and the node supervisor is implemented but not wired to the controller.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -572,7 +573,7 @@ controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
     Sessions:   factory,      // Open(ctx, SessionRequest)
     Reconciler: panel,        // nil when Resin is disabled
     Profile:    account.Linux423Binary,
-    MaxServers: 3, // 0 = all; AJS_NODE_LIMIT
+    MaxServers: 1, // default; AJS_NODE_LIMIT (explicit 0 = all, not live-safe)
     Logger:     logger,
 // ...
 api.Config{
@@ -658,15 +659,20 @@ wired the controller, so the default build keeps the store-only behaviour.
   region, state and port) and preserves the probe/lease fields `InUse`,
   `SuccessRate` and `LastProbeAt`; `Store.DeleteNode` removes the node and every
   lease that pointed at it.
-- Node cap (AJS-99): `MaxServers` / `AJS_NODE_LIMIT` (default `0` = all)
+- Node cap (AJS-99/AJS-101): `MaxServers` / `AJS_NODE_LIMIT` (default `1`)
   bounds how many usable servers one account starts; a negative config or env
   value fails startup. The daemon logs `max_servers` (or `all`) with
   `node_controller_enabled`, and a capped sync logs `node_limit_skipped` with
-  the account, limit and skipped count — never a credential.
-- Live status: `[UNVERIFIED]`. No vendor host was contacted and no live Resin
-  subscription was changed. The tests use a fake session opener, a real
-  `gate.NewServer` on `127.0.0.1:13000` and a fake reconciler; the first live
-  login still depends on B1/B2 in `research/81-protocol-gaps/REPORT.md`.
+  the account, limit and skipped count — never a credential. The default is
+  one active node per account (the vendor's live one-session-per-account
+  limit, verified 2026-10-23); multi-account means one node per account, not
+  one node per vendor server.
+- Live status: B1 (Linux request shape), B3 (FV auth response layering) and
+  B4 (data-channel reply/relay keystream) are live-verified for one account
+  on 2026-10-23 — see “Default node limit 1 (AJS-101)”. Multi-account and
+  Resin remain `[UNVERIFIED]`. The tests use a fake session opener, a real
+  `gate.NewServer` on `127.0.0.1:13000` and a fake reconciler; no vendor
+  host was contacted for them.
 
 `internal/runtime/nodes_test.go` covers: sync creating two gates on 13000/13001
 with the session's egress IP, a SOCKS5 CONNECT relayed through the fake session,
@@ -702,20 +708,25 @@ hook-before-panel, abort-on-error, the missing-node 404 without a hook call,
 and the nil-hook store-only path, and `TestAccountLogoutHook` proves the same
 hook-before-store and abort-on-error policy for logout.
 
-### Node cap (AJS-99)
+### Node cap (AJS-99 / AJS-101)
 
 `NodeControllerConfig.MaxServers` is the seam and `AJS_NODE_LIMIT` is its only
-production knob (`cmd/ajs-accountd`: parsed with the `snapshotInterval` policy —
-unset means `0`, anything but a non-negative integer fails startup). `SyncAccount`
-sorts the usable server IDs deterministically (`usableServers`) and, when the
-cap is positive, truncates to the first `MaxServers` before the desired set is
-built, so `removeUndesiredLocked` treats the skipped servers exactly like
+production knob (`cmd/ajs-accountd`: parsed with the `snapshotInterval`
+policy — unset means `1`, an explicit `0` means all, anything but a
+non-negative integer fails startup). `SyncAccount` sorts the usable server
+IDs deterministically (`usableServers`) and, when the cap is positive,
+truncates to the first `MaxServers` before the desired set is built, so
+`removeUndesiredLocked` treats the skipped servers exactly like
 removed ones: their gates close, their sessions close, their nodes are
 deleted, and a later cap increase starts them on the next login. A truncated
 sync logs `node_limit_skipped` (`account_id`, `limit`, `skipped`) — no server
-details, no credentials. Live behaviour with 100+ real servers remains
-`[UNVERIFIED]`: no live login was rerun for this change; the cap is proven with
-the fake opener fixtures above.
+details, no credentials.
+
+The default `1` (AJS-101) is live evidence, not a guess: see
+“Default node limit 1 (AJS-101)”. Explicit `0` = all is kept for
+catalog/probe research over the 100+ servers a live account exposes
+(~165 listeners observed without a cap); it is not live-safe, because the
+vendor disconnects every FV data session after the first per account.
 
 ## Supervisor (AJS-43)
 
@@ -844,7 +855,7 @@ test binary as the child.
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
-| `AJS_NODE_LIMIT` | — | `0` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; `0` = all. Negative or non-integer fails startup. **Warning:** a live account can expose 100+ usable servers, so one login would otherwise open 100+ sessions and gates (~165 listeners observed); a small cap (e.g. `3`) is recommended |
+| `AJS_NODE_LIMIT` | — | `1` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; explicit `0` = all (catalog/probe research only, not live-safe). Negative or non-integer fails startup. Default `1` because the vendor allows **one active FV data session per account** (live 2026-10-23: with limit `3` the first two gates answered SOCKS5 `0x05` and the daemon logged `fv: data channel rejected ... fm=disconnected by another connection`, the third worked); with limit `1` the gate egress matched the original app (`222.186.57.63`). Keep `1` for live use — one node per account, not one per vendor server |
 | `AJS_CONTROL_CERT_SHA256` | — | — | SHA-256 fingerprint (64 hex chars, `AA:BB:…` or raw) of the control API leaf certificate; set → the login transport pins exactly that certificate instead of chain/hostname verification (see “Control certificate pin”), empty → default verification. Malformed → startup fails |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
 | `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
@@ -2299,6 +2310,38 @@ of this test failed on `strconv.Atoi("1981371\n")` — the pid file written by
 `strings.TrimSpace`; the orphaned pair that run left behind was killed by hand
 (`kill -9 -<pgid>`) before the passing runs above.
 
+### Default node limit 1 (AJS-101)
+
+`AJS_NODE_LIMIT` now defaults to `1` instead of `0`. The reason is live
+evidence, observed 2026-10-23 on HMC with a single live account (see the
+live-run brief's flow logs; the raw redacted log stayed in the HMC
+scratch, not in this tree):
+
+- With `AJS_NODE_LIMIT=3` the first two gates answered SOCKS5 `0x05` and the
+  daemon logged `fv: data channel rejected ... fm=disconnected by another
+  connection` — the vendor disconnects every FV data session after the first
+  per account. The third gate (the only active session) worked.
+- With `AJS_NODE_LIMIT=1` the single gate's egress matched the original
+  Linux app: `222.186.57.63` from both ifconfig.me and ipinfo.io, with flow
+  logs `ifconfig.me:80` ingress 77/egress 164 and `ipinfo.io:443` ingress
+  1878/egress 6555.
+
+So one account carries exactly one active FV data session, and the safe
+default is one node per account. Multi-account scale-out is one node per
+account, not one node per vendor server: each additional account adds one
+gate on its first usable server. The same live run verified B1 (Linux request
+shape), B3 (FV auth response layering) and B4 (data-channel reply/relay
+keystream) for one account; B2 signing was not exercised (the profile sends
+unsigned requests), and multi-account behaviour plus the Resin wiring stay
+`[UNVERIFIED]`. An explicit `AJS_NODE_LIMIT=0` (all servers) remains
+available for catalog/probe research and is not live-safe.
+
+`cmd/ajs-accountd/main_test.go` pins the policy with `t.Setenv`: unset and
+whitespace-only → `1`, explicit `0`/`1`/`3`/`" 2 "` → the parsed value, and
+`-1`/`-3`/`abc`/`1.5`/`1e2`/`0x2`/`1 2`/`two` → the `AJS_NODE_LIMIT` error with no
+value returned. No live call was made for this change and no login was
+rerun; the evidence above is the 2026-10-23 live run.
+
 ## Limitations / next
 
 - State survives a restart through the JSON snapshot, but there is still no
@@ -2308,8 +2351,10 @@ of this test failed on `strconv.Atoi("1981371\n")` — the pid file written by
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
   With it, login calls the control API, follows it with `loginSync`, and the
   node controller opens one gate per usable server, bounded by
-  `AJS_NODE_LIMIT` (default `0` = all; a live account can expose 100+ usable
-  servers, so a small cap such as `3` is recommended). The `LoginResult` and the
+  `AJS_NODE_LIMIT` (default `1` — the vendor's live
+  one-active-FV-session-per-account limit, verified 2026-10-23; an explicit
+  `0` = all serves catalog/probe research only, and a live account can
+  expose 100+ usable servers, ~165 listeners observed). The `LoginResult` and the
   controller's gate map still live in process memory: a restart keeps the
   persisted nodes but no gate is bound until the next login, and the node
   supervisor is not wired. Lease rotate/release and node drain/undrain write
