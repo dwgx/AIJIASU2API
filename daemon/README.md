@@ -75,16 +75,27 @@ go test ./...
 go test -race ./...
 go build ./...
 go vet ./...
-AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd
+AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 go run ./cmd/ajs-accountd
 ```
 
 ```bash
 curl -s http://127.0.0.1:2261/healthz
-curl -s -H 'Authorization: Bearer local-test-token' http://127.0.0.1:2261/v1/accounts
+curl -s http://127.0.0.1:2261/v1/accounts          # insecure mode: no bearer token
+curl -s -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:2261/v1/accounts
 ```
 
-`local-test-token` is a local placeholder, not a credential. Without a token the
-process refuses to start unless `AJS_ALLOW_INSECURE=1` is set.
+`AJS_ALLOW_INSECURE=1` disables bearer auth and is refused unless `AJS_LISTEN` is
+loopback, so it is only for throwaway local runs. Without a token or insecure
+mode the process refuses to start. The placeholders the repo ships or prints
+(`change-me`, `admin`, `test`, `password`, `secret`, `local-test-token`,
+`replace-me-with-openssl-rand-hex-32`) and any token shorter than 32 characters
+are refused even when set: generate a real one with `openssl rand -hex 32`.
+
+The default `AJS_STATE_DIR` is `./data`, inside the tree. It holds `state.json`
+(account usernames, device identities, audit) and `secrets.json` (sealed
+passwords), so that directory is gitignored and excluded from the Docker build
+context; point `AJS_STATE_DIR` outside the tree for anything that is not a throwaway
+local run.
 
 ## FV protocol seam
 
@@ -621,13 +632,17 @@ and reconcile the panel, and a login refresh does not undo an operator drain.
 
 `StopAccount` is the account-delete and account-logout seam. It closes every
 gate and session the controller runs for one account, removes them from the
-running set, leaves the other accounts untouched and reconciles the panel once.
-It deliberately does not touch store nodes: `store.DeleteAccount` owns the
-cascade and `store.LogoutAccount` owns the pause/DRAINING transition, and the
-gates must be gone before either runs. It is idempotent — with no running gate
-for the account it returns `nil` without reconciling — and it aggregates close
-and reconcile failures; a failed close still drops the gate from the running
-set, so a retry cannot double-close it.
+running set, leaves the other accounts untouched, and does not reconcile the
+panel. It deliberately does not touch store nodes either: `store.DeleteAccount`
+owns the cascade and `store.LogoutAccount` owns the pause/DRAINING transition,
+and the gates must be gone before either runs. A reconcile inside the hook would
+republish gates that were just closed, because the account's nodes are still
+`LIVE` at that moment; the API handler reconciles after the store mutation
+instead (`reconcileAccountMutation`, best-effort and logged on failure), while
+`DrainNode`/`UndrainNode` still reconcile directly. It is idempotent — with no
+running gate for the account it returns `nil` — and it aggregates close
+failures; a failed close still drops the gate from the running set, so a retry
+cannot double-close it.
 
 The four API hooks have deliberately different failure policies. `LoginHook`
 is best-effort: it runs after the login is recorded, and a hook error is logged
@@ -649,8 +664,12 @@ unchanged, so the store never reports DRAINING while the gate still admits (or
 LIVE while it still refuses). A store refusal forwarded by the controller
 (draining a DOWN node, a node removed concurrently) keeps its 404/409/503
 status. A node the store does not know answers 404
-without calling the hook. All four hooks are nil unless `AJS_ACCOUNT_LOGIN=1`
-wired the controller, so the default build keeps the store-only behaviour.
+without calling the hook. Delete and logout also republish the panel once after
+the store mutation commits (`reconcileAccountMutation`, best-effort and logged
+as `account_reconcile_failed`); the pre-mutation hooks never reconcile. All four
+hooks are nil unless `AJS_ACCOUNT_LOGIN=1` wired the controller, so the default
+build stops no gates, though delete and logout still republish a configured
+panel after the mutation.
 
 - Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
   skipping ports already used by a running gate or a store node. Each gate
@@ -687,19 +706,20 @@ out-of-cap gates, closing their sessions and deleting their nodes while the
 in-cap node keeps serving), drain rejecting a flow with `0x05` and undrain
 accepting again, an operator drain surviving a refresh, stop closing every gate
 and session, stop-account closing only one account's gates while the other
-account keeps serving, reconciling once and staying idempotent (a repeat and an
-unknown account do not reconcile), the aggregated close+reconcile error with a
-failed close still dropping the gate, partial failure leaving the working node
-LIVE and the failed node DOWN, no-node-started returning an aggregate error that
-names both nodes, no usable server, missing login/device preconditions, four
-concurrent syncs sharing one gate, an injected gate factory, an end-to-end
-`DELETE /v1/accounts/{id}` through `api.New` with the real controller that
-proves the gates are refused and the store cascade then removes the nodes, an
-end-to-end `POST /v1/accounts/{id}/actions/logout` through `api.New` with
+account keeps serving, stop-account not reconciling and staying idempotent (a
+repeat and an unknown account return nil without closing or publishing), the
+aggregated close error with a failed close still dropping the gate, partial
+failure leaving the working node LIVE and the failed node DOWN, no-node-started
+returning an aggregate error that names both nodes, no usable server, missing
+login/device preconditions, four concurrent syncs sharing one gate, an injected
+gate factory, an end-to-end `DELETE /v1/accounts/{id}` through `api.New` with the
+real controller that proves the gates are refused, the store cascade then
+removes the nodes, and the handler reconciles once after it with zero LIVE nodes,
+an end-to-end `POST /v1/accounts/{id}/actions/logout` through `api.New` with
 `AccountLogoutHook` wired to the real controller: the logged-out account's
 gates are refused, its sessions are closed and its store nodes are DRAINING,
 the other account keeps its gate, session and LIVE node, and a second logout
-reconciles nothing, and
+closes nothing but still publishes once after the store mutation, and
 an end-to-end `POST /v1/nodes/{id}/actions/drain|undrain` through `api.New`
 with `NodeDrainHook` wired to the real controller: drain answers 0x05 on a new
 SOCKS5 CONNECT, undrain answers 0x00, and a stopped controller makes the drain
@@ -850,12 +870,13 @@ test binary as the child.
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
 | `AJS_LISTEN` | `-listen` | `127.0.0.1:2261` | admin API address |
-| `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token |
-| `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth (loopback only) |
+| `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token unless `AJS_ALLOW_INSECURE=1`; at least 32 characters; the placeholders the repo ships or prints (`change-me`, `changeme`, `change_me`, `admin`, `test`, `password`, `secret`, `local-test-token`, `replace-me-with-openssl-rand-hex-32`) are refused at startup |
+| `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth; refused unless `AJS_LISTEN` is loopback (`127.0.0.1`, `::1` or `localhost`) |
+| `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
-| `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
+| `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
 | `AJS_NODE_LIMIT` | — | `1` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; explicit `0` = all (catalog/probe research only, not live-safe). Negative or non-integer fails startup. Default `1` because the vendor allows **one active FV data session per account** (live 2026-10-23: with limit `3` the first two gates answered SOCKS5 `0x05` and the daemon logged `fv: data channel rejected ... fm=disconnected by another connection`, the third worked); with limit `1` the gate egress matched the original app (`222.186.57.63`). Keep `1` for live use — one node per account, not one per vendor server |
 | `AJS_CONTROL_CERT_SHA256` | — | — | SHA-256 fingerprint (64 hex chars, `AA:BB:…` or raw) of the control API leaf certificate; set → the login transport pins exactly that certificate instead of chain/hostname verification (see “Control certificate pin”), empty → default verification. Malformed → startup fails |
@@ -1526,11 +1547,13 @@ VET_OK
 ```
 
 Startup proves the switch and the no-contact boundary: with an unreachable
-`AJS_API_HOSTS` the daemon still starts and logs the enabled state, and without
-the switch it logs the disabled state:
+`AJS_API_HOSTS` the daemon still starts and logs the enabled state (the lab mock
+is `http://`, which startup only accepts with `AJS_ALLOW_PLAINTEXT=1`), and
+without the switch it logs the disabled state:
 
 ```console
-$ AJS_ALLOW_INSECURE=1 AJS_ACCOUNT_LOGIN=1 AJS_API_HOSTS=http://127.0.0.1:1 \
+$ AJS_ALLOW_INSECURE=1 AJS_ACCOUNT_LOGIN=1 AJS_ALLOW_PLAINTEXT=1 \
+    AJS_API_HOSTS=http://127.0.0.1:1 \
     AJS_LISTEN=127.0.0.1:22692 timeout 2s /tmp/ajs-accountd-login
 level=INFO msg=account_login_enabled hosts=1 profile=linux-4.2.3.0-binary
 level=INFO msg="ajs-accountd listening" addr=127.0.0.1:22692 auth=insecure
@@ -1566,10 +1589,15 @@ profile is still `[UNVERIFIED]`.
 
 The process-level wiring was also exercised on the dev host against a
 throwaway fake admin API (stdlib `net/http`, not in the repo) so no live Resin
-or vendor call is involved:
+or vendor call is involved. The transcripts below record the 2026-10-23 runs,
+which used a local placeholder token; the startup guard now refuses documented
+placeholders and tokens under 32 characters, so the commands show
+`AJS_ADMIN_TOKEN` from the environment
+(`export AJS_ADMIN_TOKEN=$(openssl rand -hex 32)`, or `AJS_ALLOW_INSECURE=1` on
+loopback):
 
 ```console
-$ AJS_LISTEN=127.0.0.1:12261 AJS_ADMIN_TOKEN=local-test-token \
+$ AJS_LISTEN=127.0.0.1:12261 AJS_ADMIN_TOKEN="$AJS_ADMIN_TOKEN" \
   AJS_RESIN_URL=http://127.0.0.1:12260 AJS_RESIN_ADMIN_TOKEN=local-resin-placeholder \
   ./ajs-accountd.exe
 time=2026-10-23T12:28:03.712+09:00 level=INFO msg=resin_connected subscription_id=sub-smoke platform_id=plat-smoke
@@ -1595,13 +1623,13 @@ GET /api/v1/system/info
 
 ```console
 $ curl -s -o top.json -w 'GET /v1/topology HTTP %{http_code}\n' \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/topology
 GET /v1/topology HTTP 200
 $ python -c "import json;d=json.load(open('top.json'));print('subscription_id=%s platform_id=%s nodes=%d content_lines=%d last_good_lines=%d resin_version=%s' % (d['subscription_id'],d['platform_id'],len(d['nodes']),d['content'].count(chr(10)),d['last_good'].count(chr(10)),d['resin_version']))"
 subscription_id=sub-smoke platform_id=plat-smoke nodes=8 content_lines=8 last_good_lines=8 resin_version=v1.3.0
 
 $ curl -s -o rec.json -w 'POST /v1/reconcile HTTP %{http_code}\n' -X POST \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/reconcile
 POST /v1/reconcile HTTP 200
 $ python -c "import json;d=json.load(open('rec.json'));print('reconcile nodes=%d same_content=%s' % (len(d['nodes']), d['content']==json.load(open('top.json'))['content']))"
 reconcile nodes=8 same_content=True
@@ -1613,12 +1641,12 @@ view:
 ```console
 time=2026-10-23T12:27:09.483+09:00 level=INFO msg=resin_disabled reason="AJS_RESIN_ADMIN_TOKEN is not set"
 $ curl -s -o top-off.json -w 'topology HTTP %{http_code}\n' \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/topology
 topology HTTP 200
 $ python -c "import json;d=json.load(open('top-off.json'));print('subscription=',d['subscription'],'nodes=',len(d['nodes']),'platforms=',len(d['platforms']))"
 subscription= ajs-live nodes= 12 platforms= 4
 $ curl -s -w '\nreconcile HTTP %{http_code}\n' -X POST \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/reconcile
 {"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin is not configured; set AJS_RESIN_ADMIN_TOKEN"}}
 reconcile HTTP 503
 ```
@@ -1628,26 +1656,27 @@ With a token but an unreachable Resin, startup degrades instead of exiting:
 ```console
 time=2026-10-23T12:27:18.547+09:00 level=WARN msg=resin_start_failed error="runtime: ensure probe config: publisher: set max_latency_test_interval: resin: PATCH /api/v1/system/config: Patch \"http://127.0.0.1:12262/api/v1/system/config\": dial tcp 127.0.0.1:12262: connectex: No connection could be made because the target machine actively refused it."
 $ curl -s -w '\ntopology HTTP %{http_code}\n' \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/topology
 {"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin topology unavailable"}}
 topology HTTP 503
 $ curl -s -w '\nreconcile HTTP %{http_code}\n' -X POST \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:12261/v1/reconcile
 {"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin reconcile failed"}}
 reconcile HTTP 503
 ```
 
-Smoke run on `127.0.0.1:2261` with the placeholder token:
+Smoke run on `127.0.0.1:2261` (recorded with a local placeholder before the
+startup guard; shown with a generated `AJS_ADMIN_TOKEN`):
 
 ```console
-$ AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd &
+$ AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN="$AJS_ADMIN_TOKEN" go run ./cmd/ajs-accountd &
 $ curl -s -o /tmp/ajs-health.json -w 'HTTP %{http_code}\n' http://127.0.0.1:2261/healthz
 HTTP 200
 $ cat /tmp/ajs-health.json
 {"status":"ok","service":"ajs-accountd","version":"0.1.0","time":"2026-10-23T03:05:57.153798762Z","accounts":{"active":4,"auth_failed":1,"expired":0,"paused":1}}
 
 $ curl -s -o /tmp/ajs-accounts.json -w 'HTTP %{http_code}\n' \
-    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:2261/v1/accounts
+    -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:2261/v1/accounts
 HTTP 200
 $ jq length /tmp/ajs-accounts.json
 6
@@ -2256,7 +2285,8 @@ hook. `TestAccountLogoutStopsGatesBeforeStoreDrain` drives the HTTP logout with
 `AccountLogoutHook` wired to the real controller: both gates of the logged-out
 account refuse new connections, both sessions are closed, the store account is
 `paused` with its nodes `DRAINING`, the other account keeps its gate, session
-and `LIVE` node, and a second logout answers 200 without reconciling again.
+and `LIVE` node, and a second logout answers 200 without closing a gate; the
+current handler still publishes once after the store mutation.
 The pre-existing `TestAccountLoginLogout` still passes unchanged. No live
 vendor logout was performed; live acceptance remains `[UNVERIFIED]`.
 
@@ -2372,7 +2402,8 @@ rerun; the evidence above is the 2026-10-23 live run.
   /v1/accounts/{id}/actions/logout` runs `AccountLogoutHook` (both
   `NodeController.StopAccount`) before the store transition, and each aborts
   with 500 if the stop fails. Logout then pauses the account and marks its
-  nodes DRAINING, while the other accounts keep their gates and sessions.
+  nodes DRAINING, the handler republishes the panel once after the store
+  mutation, and the other accounts keep their gates and sessions.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
   `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`. The

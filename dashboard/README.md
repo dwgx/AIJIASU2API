@@ -46,13 +46,15 @@ daemon URL and token are baked into `dist/`.
 ```bash
 # 1. daemon, loopback only (from the repo root; leave it running)
 cd daemon
-AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token \
+AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 \
   AJS_CORS_ORIGINS=http://127.0.0.1:18082,http://127.0.0.1:18081 \
   go run ./cmd/ajs-accountd
 
-# 2. live build (from dashboard/, in a second shell)
-VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 \
-  VITE_PANEL_TOKEN=local-test-token npm run build
+# 2. live build (from dashboard/, in a second shell). No VITE_PANEL_TOKEN:
+#    the insecure daemon ignores the bearer header. For a real token,
+#    export AJS_ADMIN_TOKEN=$(openssl rand -hex 32) and build with
+#    VITE_PANEL_TOKEN="$AJS_ADMIN_TOKEN".
+VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 npm run build
 
 # 3. serve the static build
 npx vite preview --host 127.0.0.1 --port 18082
@@ -63,7 +65,10 @@ Open `http://127.0.0.1:18082`. `vite preview` defaults to port 4173 in `vite.con
 calls the daemon directly, so the daemon must allow the preview origin in `AJS_CORS_ORIGINS` (the
 verified run used `http://127.0.0.1:18082,http://127.0.0.1:18081`).
 
-**Token:** `local-test-token` is a loopback placeholder, not a production secret. Every `VITE_*`
+**Token:** `AJS_ALLOW_INSECURE=1` is a loopback-only lab switch (startup refuses it on any other
+bind) and leaves the daemon without bearer auth. For a real token, generate one with
+`openssl rand -hex 32` — startup refuses documented placeholders and anything shorter than 32
+characters — and pass the same value as `AJS_ADMIN_TOKEN` and `VITE_PANEL_TOKEN`. Every `VITE_*`
 value is readable in the shipped bundle, so production must terminate auth in a BFF or reverse
 proxy and keep `ajs-accountd` bound to `127.0.0.1`.
 
@@ -183,7 +188,7 @@ On 2026-10-23 the live build at `127.0.0.1:18082` was driven against the daemon 
 | Settings save | `PATCH /v1/settings` accepted; `GET /v1/settings` returns the saved values |
 | Request mutation lab | request appended to the Requests list |
 
-Backend check with `curl -H 'Authorization: Bearer local-test-token'` confirmed the same state:
+Backend check with `curl -H "Authorization: Bearer $AJS_ADMIN_TOKEN"` confirmed the same state:
 `GET /v1/accounts` returned 7 accounts and `GET /v1/requests` returned 41 rows, including the rows
 created from the dashboard. `GET /healthz` returned
 `{"status":"ok","service":"ajs-accountd","version":"0.1.0"}`.
@@ -212,7 +217,7 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | Build | Command | Result |
 |---|---|---|
 | Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.58s`, `dist-mock/assets/index-DmnOxSn9.js` |
-| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
+| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=$AJS_ADMIN_TOKEN npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
 `npm test` — exit 0, `Test Files 10 passed (10)`, `Tests 65 passed (65)` (palette data search
@@ -449,7 +454,7 @@ grid, and the responsive CSS contract.
 | `VITE_PANEL_TOKEN` | unset | Optional bearer token for the live client |
 
 **Security note:** a Vite `VITE_*` value is embedded in the client bundle. The live build above
-embeds `local-test-token`, which is only a loopback placeholder; do not ship a real admin token this
+embeds whatever `VITE_PANEL_TOKEN` was set to at build time; do not ship a real admin token this
 way. Production should terminate auth in a BFF or reverse proxy and keep `ajs-accountd`
 loopback-only. The default build remains mock-only and embeds no token.
 
