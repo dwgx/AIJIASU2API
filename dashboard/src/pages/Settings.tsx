@@ -1,11 +1,13 @@
 import clsx from 'clsx'
-import { Database, Moon, RefreshCw, Save, Sun } from 'lucide-react'
+import { Database, ExternalLink, Moon, RefreshCw, Save, Sun } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, isMockMode } from '../lib/api'
+import { CopyButton } from '../components/CopyButton'
 import { useTheme } from '../lib/theme'
 import type { AccentName } from '../lib/theme'
-import type { PanelSettings } from '../lib/types'
+import type { PanelSettings, UpdateInfo } from '../lib/types'
 import { useAsync } from '../lib/useAsync'
+import { formatDateTime } from '../lib/format'
 import { ConfirmDialog } from '../components/Overlay'
 import { useToast } from '../components/Toast'
 import {
@@ -33,6 +35,9 @@ export default function Settings() {
   const settings = useAsync(() => api.getSettings(), [])
   const { push } = useToast()
   const { theme, setTheme, accent, setAccent } = useTheme()
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [updateError, setUpdateError] = useState<string | null>(null)
   const [draft, setDraft] = useState<PanelSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
@@ -92,6 +97,21 @@ export default function Settings() {
       setResetting(false)
     }
   }
+
+  const checkUpdate = async () => {
+    setUpdateChecking(true)
+    setUpdateError(null)
+    try {
+      setUpdateInfo(await api.getUpdate())
+    } catch (cause) {
+      setUpdateError(cause instanceof Error ? cause.message : 'Update check failed')
+    } finally {
+      setUpdateChecking(false)
+    }
+  }
+
+  const deployCommand = (tag: string) => `cd deploy && ./update.sh --tag ${tag}`
+
 
   return (
     <div className="stack-lg">
@@ -283,6 +303,80 @@ export default function Settings() {
                 </>
               )}
             </p>
+          </Card>
+
+          <Card title="Updates" subtitle="Read-only GitHub release check.">
+            <dl className="facts facts--compact">
+              <div>
+                <dt>Current</dt>
+                <dd className="mono">0.1.0</dd>
+              </div>
+            </dl>
+            <div className="update-card__row">
+              <Button
+                variant="secondary"
+                icon={<RefreshCw size={14} />}
+                onClick={() => void checkUpdate()}
+                loading={updateChecking}
+              >
+                Check
+              </Button>
+              {updateInfo && updateInfo.enabled && updateInfo.latest ? (
+                <Badge tone={updateInfo.updateAvailable ? 'warning' : 'success'}>
+                  {updateInfo.updateAvailable ? 'Update available' : 'Up to date'}
+                </Badge>
+              ) : null}
+            </div>
+            {updateError ? (
+              <p className="setting-note" role="alert">
+                Update check failed: {updateError}
+              </p>
+            ) : null}
+            {!updateChecking && !updateError && updateInfo && !updateInfo.enabled ? (
+              <p className="setting-note">
+                Update checks are disabled: <code className="mono">AJS_UPDATE_REPO</code> is not
+                configured on the daemon. The daemon never updates itself; the host runs{' '}
+                <code className="mono">deploy/update.sh</code>.
+              </p>
+            ) : null}
+            {updateInfo && updateInfo.enabled && updateInfo.latest ? (
+              <dl className="facts facts--compact">
+                <div>
+                  <dt>Latest</dt>
+                  <dd className="mono">{updateInfo.latest}</dd>
+                </div>
+                {updateInfo.publishedAt ? (
+                  <div>
+                    <dt>Published</dt>
+                    <dd>{formatDateTime(updateInfo.publishedAt)}</dd>
+                  </div>
+                ) : null}
+              </dl>
+            ) : null}
+            {updateInfo && updateInfo.enabled && updateInfo.latest ? (
+              <div className="update-card__command">
+                <code className="mono">{deployCommand(updateInfo.latest)}</code>
+                <CopyButton
+                  value={deployCommand(updateInfo.latest)}
+                  label="Copy deploy command"
+                  toastMessage="Deploy command copied"
+                  withLabel
+                />
+                {updateInfo.url ? (
+                  <a
+                    className="update-card__link"
+                    href={updateInfo.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    <ExternalLink size={12} aria-hidden="true" /> Release notes
+                  </a>
+                ) : null}
+              </div>
+            ) : null}
+            {updateInfo?.checkedAt ? (
+              <p className="setting-note">Checked {formatDateTime(updateInfo.checkedAt)}</p>
+            ) : null}
           </Card>
         </div>
       )}

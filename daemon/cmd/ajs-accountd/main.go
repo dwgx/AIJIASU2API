@@ -45,6 +45,8 @@ func run() error {
 	resinToken := flag.String("resin-token", os.Getenv(resin.EnvAdminToken), "Resin admin bearer token (env AJS_RESIN_ADMIN_TOKEN); empty disables the integration")
 	subscriptionName := flag.String("subscription-name", envOr("AJS_SUBSCRIPTION_NAME", runtime.DefaultSubscriptionName), "Resin local subscription name (env AJS_SUBSCRIPTION_NAME)")
 	platformName := flag.String("platform-name", os.Getenv("AJS_PLATFORM_NAME"), "Resin platform name (env AJS_PLATFORM_NAME; default: the subscription name)")
+	updateRepo := flag.String("update-repo", os.Getenv("AJS_UPDATE_REPO"), "GitHub owner/repo for the update check (env AJS_UPDATE_REPO); empty disables the check")
+	updateAPIBase := flag.String("update-api-base", envOr("AJS_UPDATE_API_BASE", api.DefaultUpdateAPIBase), "GitHub API base URL for the update check (env AJS_UPDATE_API_BASE)")
 	flag.Parse()
 
 	if *token == "" && !*insecure {
@@ -166,6 +168,8 @@ func run() error {
 		AccountDeleteHook: accountDeleteHook,
 		AccountLogoutHook: accountLogoutHook,
 		NodeDrainHook:     nodeDrainHook,
+		UpdateRepo:        *updateRepo,
+		UpdateAPIBase:     *updateAPIBase,
 	}, st, logger)
 
 	httpServer := &http.Server{

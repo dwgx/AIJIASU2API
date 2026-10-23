@@ -173,3 +173,14 @@ export interface MutationLabInput {
   nodeId: string
   body: string
 }
+
+export interface UpdateInfo {
+  enabled: boolean
+  current: string
+  latest?: string
+  updateAvailable?: boolean
+  url?: string
+  name?: string
+  publishedAt?: string
+  checkedAt?: string
+}

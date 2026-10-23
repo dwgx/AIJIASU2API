@@ -95,6 +95,17 @@ type Config struct {
 	// logged and answers 500 INTERNAL with no state change; a node the store
 	// does not know is answered 404 without calling the hook.
 	NodeDrainHook func(ctx context.Context, nodeID string, drain bool) error
+	// UpdateRepo is the GitHub "owner/repo" checked by GET
+	// /v1/system/update. Empty keeps the endpoint enabled:false and the
+	// daemon makes no network call at all.
+	UpdateRepo string
+	// UpdateAPIBase overrides the GitHub API root for the update check
+	// (default https://api.github.com). Tests point it at an httptest
+	// server instead of the real API.
+	UpdateAPIBase string
+	// UpdateHTTP is the client used for the update check. Nil builds a
+	// 10-second client per request.
+	UpdateHTTP *http.Client
 }
 
 // Server wires the store to an http.Handler.
@@ -194,6 +205,7 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodGet, "/v1/settings", s.handleGetSettings)
 	rt.handle(http.MethodPatch, "/v1/settings", s.handlePatchSettings)
 	rt.handle(http.MethodGet, "/v1/topology", s.handleTopologyView)
+	rt.handle(http.MethodGet, "/v1/system/update", s.handleSystemUpdate)
 	rt.handle(http.MethodPost, "/v1/reconcile", s.handleReconcile)
 }
 

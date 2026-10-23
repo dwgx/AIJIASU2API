@@ -61,8 +61,10 @@ internal/account/tls_test.go    pin match/mismatch/malformed/default-reject cove
 internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
 internal/supervisor/          per-node child process: start, readiness, events, stop
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
+internal/api/update.go       GET /v1/system/update: read-only GitHub release check
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
+internal/api/update_test.go  update check: disabled/no-network, newer/same/older, prerelease/draft, 500/transport/malformed, auth, semver table
 ```
 
 ## Build, test, run
@@ -865,6 +867,8 @@ test binary as the child.
 | `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` and the default `state.json` (created `0700`) |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
+| `AJS_UPDATE_REPO` | `-update-repo` | — | GitHub `owner/repo` checked by `GET /v1/system/update`; empty disables the check (the endpoint answers `enabled:false` and no network is made). Read-only: the daemon never executes an update — the host runs `deploy/update.sh` |
+| `AJS_UPDATE_API_BASE` | `-update-api-base` | `https://api.github.com` | GitHub API root for the update check; tests point it at an httptest server |
 
 ## Secret storage
 
@@ -1155,6 +1159,7 @@ objects.
 | PATCH | `/v1/settings` | partial; unknown keys → 400 |
 | GET | `/v1/topology` | store `ajs-live` map when Resin is disabled; live panel view when enabled |
 | POST | `/v1/reconcile` | re-render + PATCH + refresh; 503 without a panel |
+| GET | `/v1/system/update` | read-only GitHub release check. `AJS_UPDATE_REPO` unset → `{"enabled":false,"current":…}` with no network. Otherwise `GET <AJS_UPDATE_API_BASE>/repos/<repo>/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: ajs-accountd` (10 s client) → `{enabled:true,current,latest,updateAvailable,url,name,publishedAt,checkedAt}`. `updateAvailable` uses a simple semver compare (`v` optional, numeric dot segments): a draft or pre-release tag is **not** newer unless the running version is itself a pre-release. GitHub non-200/transport/parse failure → 502 `UPSTREAM_UNAVAILABLE`; no token is used or echoed. Never executes an update — the host runs `deploy/update.sh` |
 
 Errors are always `{"error":{"code":"…","message":"…"}}`:
 
@@ -1168,6 +1173,7 @@ Errors are always `{"error":{"code":"…","message":"…"}}`:
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
+| `UPSTREAM_UNAVAILABLE` | 502 | update check failure: GitHub unreachable, non-200, malformed response (message is generic; the detail stays in the log) |
 
 With `AJS_ACCOUNT_LOGIN=1`, the login handler maps the vendor outcome onto the
 same contract:

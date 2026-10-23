@@ -8,7 +8,7 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 65 tests.
+- Tests: Vitest + React Testing Library + jsdom, 71 tests.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 65 tests
+npm test           # Vitest, 71 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -286,9 +286,33 @@ and clicking it navigated to `/accounts?q=Northwind%20Ops` with the table filter
 matching row — captured as `screenshots/palette-data-search.png` (palette open, 1440×900) and
 `screenshots/palette-data-search-accounts.png` (filtered Accounts page, 1440×900).
 
+## Update check (Settings → Updates)
+
+The Settings page carries a read-only **Updates** card. It shows the running version and a
+**Check** button — nothing is fetched on page load; the daemon is contacted only when the operator
+clicks **Check** (`GET /v1/system/update`, one request, no polling).
+
+| State | What the card shows |
+|---|---|
+| Before a check | current version + **Check** button |
+| `enabled: false` | explanation that `AJS_UPDATE_REPO` is not configured on the daemon |
+| `updateAvailable: true` | **Update available** badge, latest tag, published date, release-notes link, and a **Copy** button for the exact deploy command |
+| `updateAvailable: false` | **Up to date** badge, latest tag, published date, release-notes link, deploy command |
+| Request failure | an inline alert with the error; the previous result (if any) is not cleared |
+
+The deploy command is exactly:
+
+```bash
+cd deploy && ./update.sh --tag <latest>
+```
+
+The dashboard never executes an update — `update.sh` is the host's job. Mock mode returns
+`{enabled: false, current: "0.1.0"}`, so the mock build renders the disabled state; tests mock
+`api.getUpdate` for the other states.
+
 ## Tests and QA
 
-- 65 Vitest tests in 10 files (see [Verification](#verification-recorded-2026-10-23)).
+- 71 Vitest tests in 11 files (65 before this slice; see [Verification](#verification-recorded-2026-10-23)).
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
@@ -311,6 +335,11 @@ matching row — captured as `screenshots/palette-data-search.png` (palette open
   data entries out; both list APIs rejecting leaves pages and actions intact; and the `?q=`
   prefill updates a mounted Accounts/Nodes page without clobbering a typed query on unrelated
   param changes.
+  `tests/update-card.test.tsx` covers the Settings **Updates** card: no fetch on page load
+  (check runs only on **Check**), the disabled state explaining `AJS_UPDATE_REPO`, the
+  update-available state with tag/date, copying the exact deploy command
+  (`cd deploy && ./update.sh --tag v0.2.0`), the release-notes link target, the up-to-date
+  badge and the error state (alert, no badge, cleared by a later successful check).
 - Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
 
 | Viewport | Routes checked | `scrollWidth` | Console/page errors |
@@ -344,7 +373,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | request log, status/method/source filters, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, audit table, export placeholder |
-| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, reset |
+| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, **Updates** check card, reset |
 
 `*` redirects to `/`.
 

@@ -113,6 +113,10 @@ update — it is written before pulling, so it exists even if the update fails m
 overwrites it, so rollback is exactly one step: after a rollback you are on the pre-update
 images; run `./update.sh --tag <older>` to go further back (the GHCR tags still exist upstream).
 
+The dashboard's **Settings → Updates** card surfaces the latest GitHub release and this exact
+command (read-only check; the daemon never updates itself). See
+[`../dashboard/README.md`](../dashboard/README.md#update-check-settings--updates).
+
 ## Start
 
 ```bash

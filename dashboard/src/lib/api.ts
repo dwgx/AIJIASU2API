@@ -22,6 +22,7 @@ import type {
   PanelUser,
   ProxyNode,
   RequestLog,
+  UpdateInfo,
 } from './types'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
@@ -32,6 +33,12 @@ const THEME_KEY = 'ajs.theme'
 
 let panelToken: string | null = import.meta.env.VITE_PANEL_TOKEN ?? null
 let accountSeq = 0
+
+/** Deterministic simulated release for the mock-mode update check. */
+const MOCK_UPDATE: UpdateInfo = {
+  enabled: false,
+  current: '0.1.0',
+}
 
 export function isMockMode(): boolean {
   return USE_MOCK
@@ -354,6 +361,12 @@ export const api = {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
     localStorage.setItem(THEME_KEY, settings.theme)
     return { ...settings }
+  },
+
+  async getUpdate(): Promise<UpdateInfo> {
+    if (!USE_MOCK) return http<UpdateInfo>('/v1/system/update')
+    await wait()
+    return clone(MOCK_UPDATE)
   },
 
   async resetMock(): Promise<void> {
