@@ -14,8 +14,8 @@ sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
 validated and discarded. Vendor login is wired but default-off:
 `AJS_ACCOUNT_LOGIN=1` makes `POST /v1/accounts/{id}/actions/login` call the
 control API; without it the handler only refreshes the store, and no vendor
-host is contacted. There is still no SQLite; the gate package is implemented
-but not yet wired to the session factory or node supervisor.
+host is contacted. There is still no SQLite; the gate and the node supervisor
+are implemented but neither is wired to the session factory or to each other.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -40,6 +40,7 @@ internal/runtime/            startup wiring, panel topology/reconcile and mutati
 internal/account/            FV protocol seam + account control client (Secret, Device, Control, LoginService)
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
 internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
+internal/supervisor/          per-node child process: start, readiness, events, stop
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
@@ -414,6 +415,102 @@ stopping the listener, force-closing an active flow and cancelling a blocked
 `OpenFlow`. It also waits for the accept loop and every handler to finish, so a
 leak fails the test. The package passes `go test -race -count=3` on the dev
 host.
+
+## Supervisor (AJS-43)
+
+`internal/supervisor` owns the per-node child processes (`docs/PANEL.md` §2,
+§8): one process per `(account, server)`, started from an argument array,
+ready when it accepts TCP on its node port, stopped with a grace period. It
+never goes through a shell, never expands or joins arguments, and never logs an
+environment value.
+
+```go
+sup := supervisor.New(logger) // nil → slog.Default()
+defer sup.Close(context.Background())
+
+h, err := sup.Start(ctx, supervisor.Spec{
+	NodeID:       "acc-01:srv-07",
+	AccountID:    "acc-01",
+	Binary:       "/opt/ajsproxy/ajsproxy",
+	Args:         []string{"-listen", "127.0.0.1:12007"},
+	Env:          []string{"AJS_NODE=acc-01:srv-07"}, // appended to os.Environ()
+	ReadyAddr:    "127.0.0.1:12007",
+	ReadyTimeout: 20 * time.Second, // default 10s
+	StopGrace:    30 * time.Second, // default 5s
+	StderrLines:  100,              // default 100
+})
+if err != nil {
+	return err // *supervisor.ReadyError when readiness timed out
+}
+fmt.Println(h.NodeID, h.PID, h.StartedAt)
+err = h.Wait() // process exit error; nil on a zero exit
+<-h.Done()     // already closed once Wait returns
+
+for {
+	select {
+	case ev := <-sup.Events():
+		// ev.Kind: started | ready | exited | stderr
+		_ = ev
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+```
+
+- `Spec`: `NodeID`, `AccountID`, `Binary`, `Args`, `Env`, `ReadyAddr`,
+  `ReadyTimeout`, `StopGrace`, `StderrLines`. `Start` rejects an empty node id,
+  binary or ready address, and a ready address that is not `host:port`
+  (`ErrInvalidSpec`). Defaults are applied to a copy, so the caller's Spec is
+  untouched.
+- `Handle`: `NodeID`, `PID`, `StartedAt`, `Wait() error`, `Done() <-chan
+  struct{}`, plus `Stderr() []string` for the retained ring. Handles are
+  copyable values; the internal process state is shared.
+- `Event`: `NodeID`, `Kind` (`started`, `ready`, `exited`, `stderr`), `At`,
+  `Err`, `Line`. The channel is buffered (64) and never closed, so a slow
+  consumer loses events with a warning instead of blocking a child monitor.
+- Start: duplicate protection reserves the node id before `exec`, so two
+  concurrent `Start` calls cannot race past the check (`ErrDuplicate`). The
+  child is `exec.CommandContext` with the args array and
+  `os.Environ()+Spec.Env`. `started` is emitted after `cmd.Start`, then
+  `ReadyAddr` is dialed every 50 ms with a 200 ms dial timeout until
+  `ReadyTimeout`; success emits `ready`. A child that exits early fails the
+  wait with its exit error, and a timeout returns `*ReadyError` wrapping
+  `ErrNotReady`; both kill the child and remove it from the map before
+  returning.
+- Monitor: one goroutine per node calls `Wait`, drains stderr, records the exit
+  error, removes the node from the running set, emits `exited` and closes
+  `Done`. stderr is scanned line by line into a bounded ring (`StderrLines`,
+  oldest dropped) and emitted as `stderr` events.
+- Stop: sends `os.Interrupt` (falling back to `Kill` when the platform cannot
+  deliver it, as on Windows), waits up to the caller's grace or `StopGrace`,
+  then `Kill`s and waits for exit. Repeating `Stop` for a node this supervisor
+  started is a no-op; an id that was never started is `ErrNotFound`.
+- Signal: forwards any `os.Signal` to the process; unknown ids and calls after
+  `Close` are `ErrNotFound`/`ErrClosed`.
+- `Get`/`List` return only running nodes; `Close` stops every node concurrently
+  with its own `StopGrace`, is idempotent, and makes `Start` return `ErrClosed`
+  afterwards. The supervisor itself is safe for concurrent use.
+- Logging: `supervisor node starting` carries `node_id`, `account_id`, `pid`,
+  `binary`, the argument count, the environment variable *names* only, and
+  `ready_addr`; `ready`, `exited`, a stderr-read warning and the stop-grace
+  kill warning follow. No argument value, environment value or credential is
+  logged.
+
+`supervisor_test.go` re-executes the test binary as the child
+(`os.Executable()` plus `-test.run=TestSupervisorHelper` and
+`GO_WANT_SUPERVISOR_HELPER=1`); the helper listens on the passed loopback port,
+prints `READY` and exits on SIGINT/SIGTERM. Coverage: start/ready/stop with
+`PID`/`Get`/`List`/port-closed checks and event order, environment-value
+redaction in the log, missing binary, four invalid specs, duplicate node,
+readiness timeout (`ErrNotReady` plus `*ReadyError` and cleanup), a child that
+exits before ready, stderr events and the bounded ring, unknown `Stop`/`Signal`,
+`Signal` on a running node, and `Close` stopping two nodes, idempotency and
+`Start` after close. Every test is loopback-only and in-process; no vendor host
+or external binary is involved.
+
+Limitation: the package is not wired to the runtime, the gate, the port
+allocator or Resin. Nothing starts an `ajsproxy` child yet; the tests use the
+test binary as the child.
 
 ## Configuration
 
@@ -805,6 +902,15 @@ credential-like keys, and `Close` stopping the listener, force-closing an
 active flow and cancelling a blocked `OpenFlow`. The accept loop and every
 handler are awaited, so a leaked goroutine fails the test.
 
+`internal/supervisor/supervisor_test.go` re-executes the test binary as the
+managed child and binds ephemeral loopback ports only. It covers start →
+`started`/`ready` → stop → `exited` with `PID`/`Get`/`List` and port-closed
+checks, environment-value redaction in logs, a missing binary, invalid specs,
+a duplicate node id, readiness timeout (`ErrNotReady` and `*ReadyError`), a
+child exiting before ready, stderr events plus the bounded ring, unknown
+`Stop`/`Signal`, `Signal` on a running node, and `Close` stopping two nodes,
+idempotency and `Start` after close.
+
 ## HMC evidence
 
 Copy only `daemon/` to the HMC scratch path:
@@ -1129,6 +1235,61 @@ BUILD_OK
 The gate tests bind ephemeral loopback ports only, and each server is closed by
 its test cleanup.
 
+### Supervisor (AJS-43)
+
+Both trees were copied to a fresh scratch root because `daemon/go.mod` replaces
+`ajsproxy` with `../emulator`:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/ajs-43-supervisor \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-43-supervisor'
+```
+
+On HMC (`go1.25.14 linux/amd64`, `GOTOOLCHAIN=auto` selects `go1.26.0`):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-43-supervisor/daemon && go test -count=1 ./... && go build ./... && echo BUILD_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.043s
+ok  	ajsaccountd/internal/api	0.040s
+ok  	ajsaccountd/internal/gate	0.477s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.013s
+ok  	ajsaccountd/internal/resin	0.213s
+ok  	ajsaccountd/internal/runtime	0.036s
+ok  	ajsaccountd/internal/secret	0.005s
+ok  	ajsaccountd/internal/store	0.008s
+ok  	ajsaccountd/internal/supervisor	0.614s
+BUILD_OK
+
+$ go test -count=1 -v ./internal/supervisor
+--- PASS: TestSupervisorHelper (0.00s)
+--- PASS: TestStartReadyStop (0.05s)
+--- PASS: TestStartBadBinary (0.00s)
+--- PASS: TestStartInvalidSpec (0.00s)
+    --- PASS: TestStartInvalidSpec/empty_node_id (0.00s)
+    --- PASS: TestStartInvalidSpec/empty_binary (0.00s)
+    --- PASS: TestStartInvalidSpec/empty_ready_addr (0.00s)
+    --- PASS: TestStartInvalidSpec/malformed_ready_addr (0.00s)
+--- PASS: TestStartDuplicate (0.05s)
+--- PASS: TestStartReadinessTimeout (0.30s)
+--- PASS: TestStartExitsBeforeReady (0.00s)
+--- PASS: TestStderrCapture (0.05s)
+--- PASS: TestStopAndSignalUnknown (0.00s)
+--- PASS: TestSignalRunning (0.05s)
+--- PASS: TestCloseStopsAll (0.10s)
+PASS
+ok  	ajsaccountd/internal/supervisor	0.613s
+
+$ go vet ./... && echo VET_OK
+VET_OK
+```
+
+The child in every test is the test binary itself, started through
+`os.Executable()`; the supervisor tests bind loopback ports only and contact no
+vendor host.
+
 ## Limitations / next
 
 - State is lost on restart; there is no persistence, SQLite, or secret store.
@@ -1158,6 +1319,10 @@ its test cleanup.
   nothing constructs it from a login session, allocates `13000–13999`, publishes
   its `State` or serves the `GateController` HTTP surface. It has no per-user
   auth or quota (P3) and binds loopback only.
+- The supervisor is not wired to the runtime: nothing starts an `ajsproxy`
+  child, allocates its `12000–12999` port or reacts to its events. Readiness is
+  a TCP dial on `ReadyAddr`, not an FV auth check, and a crashed child is
+  reported through `exited` but never restarted; the caller owns retry policy.
 - Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
   and `/v1/nodes/{id}/flows` are out of this slice.
 - Quotas are advisory; `QUOTA_EXCEEDED` is defined but never emitted.

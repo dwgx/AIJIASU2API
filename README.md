@@ -48,9 +48,10 @@ As of 2026-10-23:
   (`POST /v1/accounts/{id}/actions/login` calls the vendor control API), but it has only run
   against local fakes. A live login and smoke test are `[UNVERIFIED]` and remain blocked on an
   Owner-supplied account: no vendor host has been contacted from this tree.
-- **The gate and `ajsproxy` per-node supervision.** A standalone gate package exists
-  (`daemon/internal/gate`: SOCKS5 CONNECT, admission, byte counters, drain/undrain), but it is
-  not yet wired to a node supervisor; no per-`(account, server)` process management exists.
+- **The gate and `ajsproxy` per-node supervision.** Standalone `daemon/internal/gate` (SOCKS5
+  CONNECT, admission, byte counters, drain/undrain) and `daemon/internal/supervisor` (per-node
+  child start, readiness, events, stop) packages exist, but they are not wired together and
+  there is no per-`(account, server)` node lifecycle yet.
 - **SQLite / full persistence.** The daemon store is in memory and reseeded on every start; only
   sealed account secrets in `$AJS_STATE_DIR/secrets.json` survive a restart.
 - **Packaged deployment.** `dashboard/compose.yml` builds the mock image only; there is no compose
