@@ -35,11 +35,12 @@ As of 2026-10-23:
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
-  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, and the
-  account control, FV session factory, node controller, SOCKS5 gate and process supervisor seams.
+  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, a
+  Prometheus `/metrics` endpoint, and the account control, FV session factory, node controller,
+  SOCKS5 gate and process supervisor seams.
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and remains
-  `[UNVERIFIED]` live. 226 Go test functions, mostly `httptest` fakes; the tests use no Resin
+  `[UNVERIFIED]` live. 230 Go test functions, mostly `httptest` fakes; the tests use no Resin
   process, no vendor account and no network. The Linux 4.2.3.0 request
   shape (B1), stable per-account device identity (B5) and binary-carrier mapping (C3) are covered
   by offline conformance tests; live acceptance remains `[UNVERIFIED]`.
