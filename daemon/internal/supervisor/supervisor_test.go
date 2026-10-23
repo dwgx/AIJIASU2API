@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,12 @@ func TestSupervisorHelper(t *testing.T) {
 		// Deliberately never listens, so Start's readiness poll expires.
 		time.Sleep(5 * time.Second)
 		os.Exit(0)
+	case "grandchild":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "helper: grandchild mode needs an address and a pid file")
+			os.Exit(2)
+		}
+		grandchildHelper(args[1], args[2])
 	case "exit":
 		os.Exit(3)
 	default:
@@ -101,6 +108,40 @@ func helperArgs() []string {
 		}
 	}
 	return nil
+}
+
+// grandchildHelper is the "grandchild" mode body: spawn a grandchild that
+// ignores TERM/INT and holds our stderr open, write its pid to the file the
+// parent test passed, then listen and ignore SIGINT ourselves so only the
+// supervisor's process-group kill can stop the tree. The mode is only started
+// by the Unix-only grandchild test, but the body stays portable to compile.
+func grandchildHelper(addr, pidFile string) {
+	gc := exec.Command("sh", "-c",
+		`echo $$ > "$1"; trap '' TERM INT; while :; do sleep 5; done`,
+		"sh", pidFile)
+	gc.Stdout = os.Stdout
+	gc.Stderr = os.Stderr // the grandchild now holds the supervisor pipe open
+	if err := gc.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: grandchild start:", err)
+		os.Exit(2)
+	}
+	for range 200 {
+		if _, err := os.Stat(pidFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ln, err := net.Listen("tcp", addr)
+	defer ln.Close()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper listen:", err)
+		os.Exit(2)
+	}
+	fmt.Println("READY")
+	signal.Ignore(os.Interrupt, syscall.SIGTERM)
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 // helperSpec builds a Spec that re-executes the test binary in the given
@@ -459,5 +500,27 @@ func TestCloseStopsAll(t *testing.T) {
 	}
 	if _, err := sup.Start(ctx, helperSpec("acc-test:c", "listen", freeAddr(t))); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Start after Close err = %v, want ErrClosed", err)
+	}
+}
+
+// TestStartSetsWaitDelay asserts the wait-hang bound directly: a child whose
+// grandchild keeps the stderr pipe open cannot block Wait forever.
+func TestStartSetsWaitDelay(t *testing.T) {
+	sup := New(nil)
+	spec := helperSpec("acc-test:srv-wd", "listen", freeAddr(t))
+	h, err := sup.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := h.node.cmd.WaitDelay; got != waitDelay {
+		t.Fatalf("cmd.WaitDelay = %v, want %v", got, waitDelay)
+	}
+	if err := sup.Stop(context.Background(), "acc-test:srv-wd", time.Second); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("node did not exit after Stop")
 	}
 }

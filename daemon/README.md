@@ -693,7 +693,10 @@ for {
 - Start: duplicate protection reserves the node id before `exec`, so two
   concurrent `Start` calls cannot race past the check (`ErrDuplicate`). The
   child is `exec.CommandContext` with the args array and
-  `os.Environ()+Spec.Env`. `started` is emitted after `cmd.Start`, then
+  `os.Environ()+Spec.Env`. `cmd.WaitDelay` is set to a named 2 s bound so a
+  child (or a grandchild) that dies while holding a pipe open cannot block
+  `Wait` forever; on non-Windows the child is also placed in its own process
+  group (`Setpgid`). `started` is emitted after `cmd.Start`, then
   `ReadyAddr` is dialed every 50 ms with a 200 ms dial timeout until
   `ReadyTimeout`; success emits `ready`. A child that exits early fails the
   wait with its exit error, and a timeout returns `*ReadyError` wrapping
@@ -703,10 +706,17 @@ for {
   error, removes the node from the running set, emits `exited` and closes
   `Done`. stderr is scanned line by line into a bounded ring (`StderrLines`,
   oldest dropped) and emitted as `stderr` events.
-- Stop: sends `os.Interrupt` (falling back to `Kill` when the platform cannot
-  deliver it, as on Windows), waits up to the caller's grace or `StopGrace`,
-  then `Kill`s and waits for exit. Repeating `Stop` for a node this supervisor
-  started is a no-op; an id that was never started is `ErrNotFound`.
+- Stop: sends `os.Interrupt` (falling back to the group kill when the platform
+  cannot deliver it, as on Windows), waits up to the caller's grace or
+  `StopGrace`, then kills and waits for exit. Every kill path (the Close race
+  in `Start`, `killAndWait` after a readiness failure, and both force-kill
+  points in `Stop`) signals the whole process group on non-Windows
+  (`kill -pid`, SIGKILL), so a grandchild that ignores its parent's exit dies
+  with the tree instead of being orphaned; on Windows, where there is no POSIX
+  process group, the kill falls back to a single-process `Kill` (the
+  `WaitDelay` bound still applies). The graceful interrupt stays a
+  single-process signal. Repeating `Stop` for a node this supervisor started
+  is a no-op; an id that was never started is `ErrNotFound`.
 - Signal: forwards any `os.Signal` to the process; unknown ids and calls after
   `Close` are `ErrNotFound`/`ErrClosed`.
 - `Get`/`List` return only running nodes; `Close` stops every node concurrently
@@ -717,6 +727,10 @@ for {
   `ready_addr`; `ready`, `exited`, a stderr-read warning and the stop-grace
   kill warning follow. No argument value, environment value or credential is
   logged.
+- Platform split: `proc_unix.go` (`//go:build !windows`) owns `Setpgid` and
+  `kill -pid`; `proc_windows.go` (`//go:build windows`) provides the no-op
+  group setup and the single-process `Kill` fallback. `supervisor.go` itself
+  contains no `syscall` and no CGO; the package API is unchanged.
 
 `supervisor_test.go` re-executes the test binary as the child
 (`os.Executable()` plus `-test.run=TestSupervisorHelper` and
@@ -727,8 +741,13 @@ redaction in the log, missing binary, four invalid specs, duplicate node,
 readiness timeout (`ErrNotReady` plus `*ReadyError` and cleanup), a child that
 exits before ready, stderr events and the bounded ring, unknown `Stop`/`Signal`,
 `Signal` on a running node, and `Close` stopping two nodes, idempotency and
-`Start` after close. Every test is loopback-only and in-process; no vendor host
-or external binary is involved.
+`Start` after close. `TestStartSetsWaitDelay` asserts `cmd.WaitDelay` on a
+started child. On non-Windows, `grandchild_unix_test.go`
+(`TestStopKillsGrandchild`) runs a child that spawns `sh -c` ignoring TERM/INT
+and holding the stderr pipe open, writes the grandchild pid to a temp file, and
+proves that `Stop` leaves both the child and the grandchild dead (`kill -0`
+fails) — no orphan survives the group kill. Every test is loopback-only and
+in-process; no vendor host or external binary is involved.
 
 Limitation: the package is not wired to the runtime, the gate, the port
 allocator or Resin. Nothing starts an `ajsproxy` child yet; the tests use the
@@ -2143,6 +2162,62 @@ and `LIVE` node, and a second logout answers 200 without reconciling again.
 The pre-existing `TestAccountLoginLogout` still passes unchanged. No live
 vendor logout was performed; live acceptance remains `[UNVERIFIED]`.
 
+### Supervisor hardening (AJS-90)
+
+Both trees were copied to a fresh scratch root, as for AJS-43:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/ajs-90-suphardening \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-90-suphardening'
+```
+
+On HMC (`go1.26.0 linux/amd64`; no vendor host or Resin instance contacted):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-90-suphardening/daemon
+$ go test -race -count=1 ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.100s
+ok  	ajsaccountd/internal/api	1.204s
+ok  	ajsaccountd/internal/gate	1.547s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.049s
+ok  	ajsaccountd/internal/resin	1.348s
+ok  	ajsaccountd/internal/runtime	1.301s
+ok  	ajsaccountd/internal/secret	1.021s
+ok  	ajsaccountd/internal/store	1.495s
+ok  	ajsaccountd/internal/supervisor	9.309s
+$ go build ./... && echo BUILD_OK && go vet ./... && echo VET_OK && GOOS=windows go build ./... && echo WIN_BUILD_OK && test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
+BUILD_OK
+VET_OK
+WIN_BUILD_OK
+GOFMT_CLEAN
+
+$ go test -race -count=1 -v -run "TestStopKillsGrandchild|TestStartSetsWaitDelay" ./internal/supervisor
+=== RUN   TestStopKillsGrandchild
+    grandchild_unix_test.go:66: child 1989622 and grandchild 1989630 are both dead
+--- PASS: TestStopKillsGrandchild (0.55s)
+=== RUN   TestStartSetsWaitDelay
+--- PASS: TestStartSetsWaitDelay (1.05s)
+PASS
+ok  	ajsaccountd/internal/supervisor	2.618s
+```
+
+`TestStopKillsGrandchild` is the orphan proof: the child (the test binary in
+`grandchild` mode) ignores SIGINT and SIGTERM, spawns `sh -c 'echo $$ >
+"$1"; trap "" TERM INT; while :; do sleep 5; done'` as a grandchild that
+inherits the stderr pipe, and `Stop` with a 500 ms grace must leave both the
+child and the grandchild dead (`kill -0` returns ESRCH for both, asserted in a
+poll for up to 3 s). A leftover-process scan after the suite
+(`ps -eo pid,pgid,cmd | grep -E "supervisor.test|sleep 5"`) found nothing, and
+`grep syscall internal/supervisor/supervisor.go` is empty: the portable file
+has five `killProcessGroup` call sites but no syscall import. The first HMC run
+of this test failed on `strconv.Atoi("1981371\n")` — the pid file written by
+`echo $$` carries a trailing newline — and was fixed with
+`strings.TrimSpace`; the orphaned pair that run left behind was killed by hand
+(`kill -9 -<pgid>`) before the passing runs above.
+
 ## Limitations / next
 
 - State survives a restart through the JSON snapshot, but there is still no
@@ -2189,6 +2264,9 @@ vendor logout was performed; live acceptance remains `[UNVERIFIED]`.
   child, allocates its `12000–12999` port or reacts to its events. Readiness is
   a TCP dial on `ReadyAddr`, not an FV auth check, and a crashed child is
   reported through `exited` but never restarted; the caller owns retry policy.
+  Stop is hardened (process-group kill on Unix, `WaitDelay` bound, Windows
+  single-process fallback), but it is still a seam with no production caller,
+  and on Windows a grandchild that outlives its parent is not group-killed.
 - Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
   and `/v1/nodes/{id}/flows` are out of this slice.
 - Quotas are advisory; `QUOTA_EXCEEDED` is defined but never emitted.

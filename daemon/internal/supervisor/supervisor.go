@@ -37,6 +37,11 @@ const (
 	readyPollInterval = 50 * time.Millisecond
 	readyDialTimeout  = 200 * time.Millisecond
 	eventBuffer       = 64
+
+	// waitDelay bounds cmd.Wait after the child has exited but a pipe is
+	// still held open (e.g. by a grandchild). It is deliberately short and
+	// independent of StopGrace: it is a wait-hang bound, not a stop policy.
+	waitDelay = 2 * time.Second
 )
 
 var (
@@ -276,6 +281,11 @@ func (s *Supervisor) Start(ctx context.Context, spec Spec) (*Handle, error) {
 
 	cmd := exec.CommandContext(ctx, spec.Binary, spec.Args...)
 	cmd.Env = childEnv(spec.Env)
+	// WaitDelay bounds Wait when a child (or a grandchild holding the other
+	// pipe end) keeps a pipe open after dying: once the process is gone, Wait
+	// returns after this delay instead of blocking forever.
+	cmd.WaitDelay = waitDelay
+	setProcessGroup(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		s.release(spec.NodeID)
@@ -301,7 +311,7 @@ func (s *Supervisor) Start(ctx context.Context, spec Spec) (*Handle, error) {
 	delete(s.reserved, spec.NodeID)
 	if s.closed {
 		s.mu.Unlock()
-		_ = cmd.Process.Kill()
+		killProcessGroup(h.node.cmd.Process)
 		_ = cmd.Wait()
 		return nil, ErrClosed
 	}
@@ -375,7 +385,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, h *Handle) error {
 // killAndWait kills a child that failed to start correctly and waits briefly
 // for the monitor to reap it.
 func (s *Supervisor) killAndWait(h *Handle) {
-	_ = h.node.cmd.Process.Kill()
+	killProcessGroup(h.node.cmd.Process)
 	select {
 	case <-h.node.done:
 	case <-time.After(2 * time.Second):
@@ -470,7 +480,7 @@ func (s *Supervisor) stopHandle(ctx context.Context, h *Handle, grace time.Durat
 	if err := h.node.cmd.Process.Signal(os.Interrupt); err != nil {
 		// Platforms without a catchable interrupt (Windows) go straight to
 		// the kill path.
-		_ = h.node.cmd.Process.Kill()
+		killProcessGroup(h.node.cmd.Process)
 	}
 
 	timer := time.NewTimer(grace)
@@ -479,13 +489,13 @@ func (s *Supervisor) stopHandle(ctx context.Context, h *Handle, grace time.Durat
 	case <-h.node.done:
 		return nil
 	case <-ctx.Done():
-		_ = h.node.cmd.Process.Kill()
+		killProcessGroup(h.node.cmd.Process)
 		return ctx.Err()
 	case <-timer.C:
 	}
 
 	s.logger.Warn("supervisor node stop grace elapsed; killing", "node_id", h.NodeID, "pid", h.PID, "grace", grace)
-	_ = h.node.cmd.Process.Kill()
+	killProcessGroup(h.node.cmd.Process)
 	select {
 	case <-h.node.done:
 		return nil
