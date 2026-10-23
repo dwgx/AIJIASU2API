@@ -350,10 +350,10 @@ func TestNoFailoverOnHTTPError(t *testing.T) {
 
 	_, err := control.Login(context.Background(), "user@example.com", Secret(testPassword))
 	if err == nil {
-		t.Fatal("Login with an HTTP 500 first host = nil error, want a protocol error")
+		t.Fatal("Login with an HTTP 500 first host = nil error, want a status error")
 	}
-	if !strings.Contains(err.Error(), "invalid JSON") {
-		t.Fatalf("Login error = %v, want an invalid JSON error", err)
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("Login error = %v, want an HTTP 500 error", err)
 	}
 	select {
 	case request := <-liveRequests:

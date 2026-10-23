@@ -22,6 +22,14 @@ research/**/pseudocode/
 *.key
 *.pem
 
+# Credential/PII files the documented dev runs write inside the tree (S1):
+# daemon/data/state.json (account usernames, device identities, audit) and
+# daemon/data/secrets.json (sealed passwords), plus the emulator's config.json.
+data/
+state.json
+secrets.json
+config.json
+
 # Python caches
 __pycache__/
 .pytest_cache/

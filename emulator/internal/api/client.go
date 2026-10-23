@@ -286,8 +286,8 @@ func (s Server) OK() bool { return s.Sts == "ok" }
 
 // Post sends one signed /client.php request. auth adds _client_login and
 // username as callAuth does. Failover to the next host happens only on a
-// transport error, matching AjsClient.call; an HTTP error status or invalid
-// JSON is returned to the caller.
+// transport error, matching AjsClient.call; a non-2xx HTTP status or invalid
+// JSON is returned to the caller as an error.
 func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, auth bool) ([]byte, error) {
 	if len(c.Hosts) == 0 {
 		return nil, errors.New("api: no hosts configured")
@@ -345,6 +345,13 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 		if err != nil {
 			lastErr = err
 			continue
+		}
+		// A non-2xx status is a failed call even when the body parses: vendor
+		// and WAF error pages reuse the JSON envelope, so decoding first would
+		// turn a 500 into a "successful" login or an account with no servers.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return nil, fmt.Errorf("api: %s: HTTP %d", url, resp.StatusCode)
 		}
 		data, readErr := decodeBody(resp)
 		resp.Body.Close()
@@ -423,6 +430,10 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 // LoginSync refreshes ConnectPassword and returns the Servers map, using the
 // stored login token. The Servers map is empty when the field is absent.
 //
+// A non-OK AuthResult is returned as an error: an error envelope carries no
+// Servers map, and treating it as an empty one makes the caller believe the
+// account has no servers.
+//
 // Only Login has a Linux 4.2.3.0 capture, so LoginSync keeps the OpenAJS
 // trigger/_client_login fields under every request shape; the Linux form of
 // this command is [UNVERIFIED].
@@ -441,6 +452,12 @@ func (c *Client) LoginSync(ctx context.Context) (map[string]Server, error) {
 		return nil, fmt.Errorf("api: loginSync: invalid JSON: %w", err)
 	}
 	if env.Login != nil {
+		if result := env.Login.AuthResult; result != "" && !env.Login.OK() {
+			if message := strings.TrimSpace(env.Login.AuthMessage); message != "" {
+				return nil, fmt.Errorf("api: loginSync: vendor result %q: %s", result, message)
+			}
+			return nil, fmt.Errorf("api: loginSync: vendor result %q", result)
+		}
 		if env.Login.ConnectPassword != "" {
 			c.ConnectPassword = env.Login.ConnectPassword
 		}

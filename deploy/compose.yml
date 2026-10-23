@@ -61,14 +61,27 @@ services:
     image: ghcr.io/resinat/resin:1.3.0
     container_name: ajs-resin
     network_mode: host
-    env_file:
-      - path: .env
-        required: false
+    # Least privilege (S6): this is a third-party image. It gets only its own
+    # two credentials — not the shared .env, which also holds AJS_MASTER_KEY
+    # (the AES-256 key that decrypts every account password) and the panel
+    # admin token. .env stays accountd/dashboard-only.
     environment:
       # Host networking means Resin would otherwise bind 0.0.0.0; keep the
       # admin API and SOCKS5 listener on loopback.
       RESIN_LISTEN_ADDRESS: ${RESIN_LISTEN_ADDRESS:-127.0.0.1}
       RESIN_PORT: ${RESIN_PORT:-2260}
+      # Non-secret knobs from the documented minimum (docs/PANEL.md §7). The
+      # previous env_file: .env passed whatever the operator set; these keep
+      # that reachable without handing over AJS_MASTER_KEY or the panel token.
+      # RESIN_PROXY_BYPASS lists target hosts dialed directly instead of
+      # through a pool node; empty means Resin's own default (no bypass).
+      RESIN_PROXY_BYPASS: ${RESIN_PROXY_BYPASS:-}
+      # The volumes below mount these paths; change both together.
+      RESIN_STATE_DIR: ${RESIN_STATE_DIR:-/var/lib/resin}
+      RESIN_CACHE_DIR: ${RESIN_CACHE_DIR:-/var/cache/resin}
+      RESIN_LOG_DIR: ${RESIN_LOG_DIR:-/var/log/resin}
+      RESIN_ADMIN_TOKEN: ${RESIN_ADMIN_TOKEN:-}
+      RESIN_PROXY_TOKEN: ${RESIN_PROXY_TOKEN:-}
     volumes:
       - resin-state:/var/lib/resin
       - resin-cache:/var/cache/resin

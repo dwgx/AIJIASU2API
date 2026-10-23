@@ -81,6 +81,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	// The hook only stopped gates; the nodes were still LIVE when it ran, so
+	// the reconcile that drops the account's tags must happen after the store
+	// cascade removed them.
+	s.reconcileAccountMutation(r.Context(), id, "delete")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -168,6 +172,9 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	// store.LogoutAccount paused the account and drained its nodes; publish
+	// that state now, because the pre-mutation hook did not reconcile.
+	s.reconcileAccountMutation(r.Context(), id, "logout")
 	writeJSON(w, http.StatusOK, account)
 }
 
@@ -181,4 +188,22 @@ func (s *Server) runAccountLogoutHook(ctx context.Context, accountID string) err
 		return nil
 	}
 	return s.cfg.AccountLogoutHook(ctx, accountID)
+}
+
+// reconcileAccountMutation republishes the panel after store.DeleteAccount or
+// store.LogoutAccount committed. The pre-mutation hooks only stop gates: the
+// account's nodes are still LIVE at that moment, so a reconcile there would
+// re-advertise gates that no longer accept flows. This runs once the store has
+// removed or drained the nodes, which is what removes their Resin tags.
+//
+// It is best-effort: the mutation already happened and the response is earned,
+// so a panel failure is logged instead of turning a successful mutation into
+// an error. Without a panel there is nothing to publish.
+func (s *Server) reconcileAccountMutation(ctx context.Context, accountID, action string) {
+	if s.cfg.Panel == nil {
+		return
+	}
+	if _, err := s.cfg.Panel.Reconcile(ctx); err != nil {
+		s.logger.Warn("account_reconcile_failed", "account", accountID, "action", action, "error", err)
+	}
 }

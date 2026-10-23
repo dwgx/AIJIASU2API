@@ -48,7 +48,10 @@ cp .env.example .env
 
 Then edit `.env`:
 
-- `AJS_ADMIN_TOKEN` — bearer token for every `/v1/*` call. Replace `change-me`.
+- `AJS_ADMIN_TOKEN` — bearer token for every `/v1/*` call. Generate one with
+  `openssl rand -hex 32` (the minimum is 32 characters); the daemon refuses the
+  placeholder this file ships (and `change-me`, `admin`, `test`, …) at startup
+  unless `AJS_ALLOW_INSECURE=1`.
 - `AJS_MASTER_KEY` — 32-byte AES-256-GCM key for account-password sealing, 64 hex characters:
 
   ```bash
@@ -144,8 +147,10 @@ docker compose --profile resin up -d
 ```
 
 Resin binds `127.0.0.1:2260` (both the admin API and the SOCKS5 listener). The compose file sets
-`RESIN_LISTEN_ADDRESS=127.0.0.1` and `RESIN_PORT=2260`; override them in `.env` only if you know
-why. The daemon's `AJS_RESIN_URL` must keep pointing at that address.
+`RESIN_LISTEN_ADDRESS=127.0.0.1` and `RESIN_PORT=2260`, and passes the non-secret
+`RESIN_PROXY_BYPASS` (target hosts dialed directly instead of through a pool node) plus the
+state/cache/log paths the volumes are mounted at; override them in `.env` only if you know why.
+The daemon's `AJS_RESIN_URL` must keep pointing at that address.
 
 ## Health and logs
 
@@ -211,9 +216,11 @@ cannot be opened. The snapshot is not SQLite and has no migration path yet; see
   that terminates real authentication.
 - `AJS_MASTER_KEY` and the tokens are the only secrets. They live in `.env` (gitignored) and in the
   container environment; never commit them, never paste them into reports.
-- Both `accountd` and `resin` read the same `.env`, so each container's environment contains every
-  key in the file. That is acceptable for a single-host loopback stack; split the file if you ever
-  move a service off the host.
+- `accountd` reads `.env`; `resin` does not. The Resin service gets only its two credentials plus
+  the non-secret knobs (`RESIN_LISTEN_ADDRESS`, `RESIN_PORT`, `RESIN_PROXY_BYPASS`,
+  `RESIN_STATE_DIR`, `RESIN_CACHE_DIR`, `RESIN_LOG_DIR`) through explicit `environment:` entries,
+  so the third-party image never sees `AJS_MASTER_KEY` (the AES-256 key that decrypts every
+  account password) or the panel admin token.
 - The named volumes contain sealed password envelopes and key hashes. Protect them like the master
   key: anyone with the volume and the key can read the sealed values.
 - Docker daemon access is root-equivalent; this stack does not change that boundary.
@@ -267,7 +274,7 @@ docker compose --profile resin config --quiet          # exit 0, resin + its vol
 
 ```bash
 cd deploy                                                # from the repo root
-sh -n update.sh                                          # exit 0
+bash -n update.sh                                        # exit 0 (bash, not dash)
 docker compose -f compose.yml -f compose.release.yml config >/dev/null   # exit 0
 python3 -c 'import yaml; yaml.safe_load(open("../.github/workflows/release.yml"))'  # exit 0
 ```
@@ -288,7 +295,10 @@ over the current refs and refuses when the state file is missing or holds `none`
 the rendered accountd environment includes `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, `AJS_RESIN_URL`,
 `AJS_CORS_ORIGINS`, `AJS_RESIN_ADMIN_TOKEN` and the Resin tokens from that file. The rendered
 config shows `AJS_LISTEN: 127.0.0.1:2261`, `network_mode: host`, the `accountd-data` volume,
-dashboard `ports: 127.0.0.1:18081:80`, and the three Resin volumes under the `resin` profile.
+dashboard `ports: 127.0.0.1:18081:80`, and the three Resin volumes under the `resin` profile. The
+rendered resin environment holds only `RESIN_LISTEN_ADDRESS`, `RESIN_PORT`,
+`RESIN_PROXY_BYPASS`, `RESIN_STATE_DIR`, `RESIN_CACHE_DIR`, `RESIN_LOG_DIR`, `RESIN_ADMIN_TOKEN`
+and `RESIN_PROXY_TOKEN`: no `AJS_*` key reaches that container.
 
 ```bash
 cd /srv/dwgxhomecloud/scratch/loveplus-deploy

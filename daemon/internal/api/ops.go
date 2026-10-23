@@ -108,9 +108,15 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	w.Write([]byte(b.String()))
 }
 
+// defaultRequestsPageSize bounds GET /v1/requests when the caller omits
+// ?limit. The request log is the largest list in the API (149.8 kB for the 40
+// seeded rows, BENCH.md §6.5) because every row is a full record, so an
+// unbounded default is the one outlier. An explicit ?limit= still wins.
+const defaultRequestsPageSize = 200
+
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	requests := s.store.Requests()
-	start, end, ok := paginate(w, r, len(requests))
+	start, end, ok := paginateWithLimit(w, r, len(requests), defaultRequestsPageSize)
 	if !ok {
 		return
 	}

@@ -1,0 +1,60 @@
+# Build context for `docker build -f daemon/Dockerfile .` (the context is the
+# repository root, so everything below is inside it).
+#
+# S1: the documented dev run writes credential/PII files inside the tree —
+# daemon/data/state.json (account usernames, device identities, audit) and
+# daemon/data/secrets.json (sealed passwords) — plus the emulator's
+# config.json (which holds a password). None of them may reach the build
+# stage or a remote builder cache.
+#
+# daemon/ and emulator/ stay included: daemon/go.mod replaces ajsproxy with
+# ../emulator, so the accountd build needs both module trees.
+
+# S1: a filled deploy/.env holds AJS_MASTER_KEY (the AES-256 key for every
+# account password) and the panel admin token; it must never enter the build
+# stage or a remote builder cache. The example file is inert and stays, so
+# `docker compose config` and the documented copy step keep working.
+**/.env
+**/.env.*
+!**/.env.example
+
+**/data/
+**/state.json
+**/secrets.json
+**/config.json
+
+# Reports, scratch material and lab captures are never part of an image.
+research/
+results.tsv
+docs/
+scripts/
+.github/
+.autoresearch/
+autoresearch.json
+PLAN.md
+
+# Node build output and dependencies.
+**/node_modules/
+**/dashboard/dist/
+**/dashboard/dist*/
+**/dashboard/coverage/
+
+# Local git and editor scratch.
+.git/
+.gitignore
+*.swp
+*~
+
+# Binary/vendor payloads and captures.
+*.pcap
+*.pcapng
+*.dmp
+*.log
+*.tar.gz
+*.zip
+*.7z
+*.bin
+*.exe
+*.dll
+*.sys
+*.cat

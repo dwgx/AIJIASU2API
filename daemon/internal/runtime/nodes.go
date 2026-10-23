@@ -100,7 +100,7 @@ type NodeControllerConfig struct {
 	// and a gate. Zero starts every usable server (a live login can expose
 	// 100+); negative is invalid.
 	MaxServers int
-	Logger  *slog.Logger
+	Logger     *slog.Logger
 	// PortBase is the first port tried; zero selects DefaultGatePortBase.
 	PortBase int
 }
@@ -394,23 +394,24 @@ func (c *NodeController) Stop(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// StopAccount closes every gate this controller runs for one account and
-// reconciles the panel once. It is the account-delete seam: the store cascade
-// removes the nodes and leases, so the gates and their authenticated FV
-// sessions must be gone before that cascade runs or a deleted account would
-// keep listening and relaying. Gates of other accounts are untouched, and the
-// store nodes are deliberately left to the caller (store.DeleteAccount owns
-// them).
+// StopAccount closes every gate this controller runs for one account. It is
+// the account-delete/logout seam: the store cascade removes the nodes and
+// leases, so the gates and their authenticated FV sessions must be gone before
+// that cascade runs or a deleted account would keep listening and relaying.
+// Gates of other accounts are untouched, and the store nodes are deliberately
+// left to the caller (store.DeleteAccount owns them).
+//
+// It does not reconcile the panel. At this point the account's nodes are still
+// LIVE in the store, so a reconcile here would republish the gates that were
+// just closed; the API handler reconciles after the store mutation instead.
 //
 // It is idempotent: with no running gate for the account nothing changed, so
-// it returns nil without reconciling. Close and reconcile failures are
-// aggregated; a failed close still removes the gate from the running set, so a
-// retry cannot double-close it.
-func (c *NodeController) StopAccount(ctx context.Context, accountID string) error {
+// it returns nil. Close failures are aggregated; a failed close still removes
+// the gate from the running set, so a retry cannot double-close it.
+func (c *NodeController) StopAccount(_ context.Context, accountID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	closed := 0
 	var errs []error
 	for id, running := range c.running {
 		if running.accountID != accountID {
@@ -418,14 +419,7 @@ func (c *NodeController) StopAccount(ctx context.Context, accountID string) erro
 		}
 		errs = append(errs, c.closeGateLocked(id, running)...)
 		delete(c.running, id)
-		closed++
 		c.logger.Info("account_gates_stopped", "account_id", accountID, "node_id", id, "server_id", running.serverID)
-	}
-	if closed == 0 {
-		return nil
-	}
-	if err := c.reconcileLocked(ctx); err != nil {
-		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

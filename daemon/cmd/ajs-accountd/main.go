@@ -9,7 +9,9 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -49,8 +51,19 @@ func run() error {
 	updateAPIBase := flag.String("update-api-base", envOr("AJS_UPDATE_API_BASE", api.DefaultUpdateAPIBase), "GitHub API base URL for the update check (env AJS_UPDATE_API_BASE)")
 	flag.Parse()
 
-	if *token == "" && !*insecure {
-		return errors.New("AJS_ADMIN_TOKEN is required unless AJS_ALLOW_INSECURE=1")
+	// S4: AJS_ALLOW_INSECURE=1 must stay on loopback. Without this guard a
+	// single env var turns the loopback control plane into an unauthenticated
+	// network service (state-changing POSTs are CSRF-able there).
+	if *insecure {
+		if err := requireLoopback(*listen); err != nil {
+			return err
+		}
+	}
+	// S2: a placeholder token is a working admin API whose value is printed in
+	// the repository — including the one .env.example ships — so startup
+	// refuses those values. The insecure lab mode is the explicit opt-out.
+	if err := validateAdminToken(*token, *insecure); err != nil {
+		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
@@ -216,6 +229,99 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// placeholderAdminTokens are the values the repository itself ships or prints
+// as examples — deploy/.env.example included. Accepting any of them yields a
+// working admin API whose secret is public (S2), so startup refuses them.
+var placeholderAdminTokens = map[string]struct{}{
+	"change-me": {},
+	"changeme":  {},
+	"change_me": {},
+	"admin":     {},
+	"test":      {},
+	"password":  {},
+	"secret":    {},
+	// The literal the READMEs used as a loopback placeholder: printed in the
+	// repository, so accepting it is the same exposure as `change-me`.
+	"local-test-token": {},
+	// The literal .env.example ships: it is an instruction, not a token.
+	"replace-me-with-openssl-rand-hex-32": {},
+}
+
+// minAdminTokenLen is the shortest accepted panel token (S2). The token is the
+// only authentication on the admin API and is compared byte-for-byte, so a
+// short value is guessable no matter which characters it uses. 32 characters
+// is what `openssl rand -hex 32` emits.
+const minAdminTokenLen = 32
+
+// validateAdminToken is the startup guard for the panel bearer token (S2).
+// The insecure mode keeps the old behaviour: it exists for local lab runs,
+// where requireLoopback has already proved the listener is not routable.
+// The token value never reaches the error text.
+func validateAdminToken(token string, insecure bool) error {
+	if insecure {
+		return nil
+	}
+	// Trim only for the checks: the listener still compares the exact value
+	// the operator configured. Padding a short token to the minimum length
+	// must not pass, because the padding carries no entropy.
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return errors.New("AJS_ADMIN_TOKEN is required unless AJS_ALLOW_INSECURE=1")
+	}
+	if _, bad := placeholderAdminTokens[strings.ToLower(trimmed)]; bad {
+		return errors.New("AJS_ADMIN_TOKEN is a documented placeholder; generate a random one (openssl rand -hex 32) or set AJS_ALLOW_INSECURE=1 for a local lab run")
+	}
+	if len(trimmed) < minAdminTokenLen {
+		return fmt.Errorf("AJS_ADMIN_TOKEN is %d characters, below the %d-character minimum; generate one with openssl rand -hex 32 or set AJS_ALLOW_INSECURE=1 for a local lab run", len(trimmed), minAdminTokenLen)
+	}
+	return nil
+}
+
+// requireLoopback is the bind-address guard for AJS_ALLOW_INSECURE=1 (S4).
+// Insecure mode disables bearer auth entirely, so the loopback bind is the
+// only boundary left; without this check one env var publishes an open admin
+// API on every interface.
+func requireLoopback(listen string) error {
+	host := listen
+	if parsed, _, err := net.SplitHostPort(listen); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback AJS_LISTEN, got %q (an empty host binds every interface)", listen)
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback AJS_LISTEN (127.0.0.1, ::1 or localhost), got %q", listen)
+}
+
+// validateLoginHosts is the scheme allowlist for AJS_API_HOSTS (S11). The
+// login body carries the account password form-encoded, so an http:// host
+// would send it in cleartext and leave nothing for AJS_CONTROL_CERT_SHA256 to
+// pin. A local lab mock — the only reason to allow plaintext — opts in with
+// AJS_ALLOW_PLAINTEXT=1.
+func validateLoginHosts(hosts []string) error {
+	if os.Getenv("AJS_ALLOW_PLAINTEXT") == "1" {
+		return nil
+	}
+	for _, host := range hosts {
+		u, err := url.Parse(host)
+		if err != nil {
+			return fmt.Errorf("AJS_API_HOSTS %q: %w", host, err)
+		}
+		if u.Scheme == "" || strings.EqualFold(u.Scheme, "https") {
+			continue
+		}
+		return fmt.Errorf("AJS_API_HOSTS %q is not https: the login would send the account password in cleartext; use https or set AJS_ALLOW_PLAINTEXT=1 for a local lab mock", host)
+	}
+	return nil
+}
+
 // defaultSnapshotInterval is the background save cadence when
 // AJS_SNAPSHOT_INTERVAL is unset.
 const defaultSnapshotInterval = 30 * time.Second
@@ -229,8 +335,10 @@ func stateFilePath() string {
 	return filepath.Join(envOr("AJS_STATE_DIR", "./data"), "state.json")
 }
 
-// snapshotInterval parses AJS_SNAPSHOT_INTERVAL. An invalid or non-positive
-// duration fails startup instead of silently disabling persistence.
+// snapshotInterval parses AJS_SNAPSHOT_INTERVAL. A bare integer means seconds
+// (the bench run showed "3600" is the obvious way to write an hour); any Go
+// duration keeps its meaning. An invalid or non-positive duration fails
+// startup instead of silently disabling persistence.
 func snapshotInterval() (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv("AJS_SNAPSHOT_INTERVAL"))
 	if raw == "" {
@@ -238,7 +346,13 @@ func snapshotInterval() (time.Duration, error) {
 	}
 	interval, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("AJS_SNAPSHOT_INTERVAL %q: %w", raw, err)
+		// ParseDuration("3600s") also catches integer overflow for us.
+		if _, intErr := strconv.ParseInt(raw, 10, 64); intErr == nil {
+			interval, err = time.ParseDuration(raw + "s")
+		}
+		if err != nil {
+			return 0, fmt.Errorf("AJS_SNAPSHOT_INTERVAL %q: %w (use a Go duration such as 30s, or a bare integer number of seconds)", raw, err)
+		}
 	}
 	if interval <= 0 {
 		return 0, fmt.Errorf("AJS_SNAPSHOT_INTERVAL %q must be positive", raw)
@@ -366,6 +480,12 @@ func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginServ
 	hosts := splitList(os.Getenv("AJS_API_HOSTS"))
 	if len(hosts) == 0 {
 		hosts = append([]string(nil), account.DefaultLoginHosts...)
+	}
+	// S11: an http:// host sends the account password in cleartext and leaves
+	// nothing for the certificate pin, so startup refuses it (opt out with
+	// AJS_ALLOW_PLAINTEXT=1 for a local lab mock).
+	if err := validateLoginHosts(hosts); err != nil {
+		return nil, account.VersionProfile{}, err
 	}
 	httpClient, err := controlHTTPClient(logger)
 	if err != nil {

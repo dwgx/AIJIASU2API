@@ -206,9 +206,14 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	// follows it with loginSync to fetch the server list, and the node
 	// controller needs that list to open one gate per server. A sync failure
 	// does not fail the login: the account is already marked active and the
-	// next login retries the sync.
+	// next login retries the sync. A failed or empty sync is "unknown", not
+	// "the account has no servers"; remember keeps the previously retained
+	// list, because replacing it with an empty map would make the node
+	// controller tear down every gate and node of the account.
 	if synced, syncErr := control.LoginSync(ctx); syncErr != nil {
 		s.logger.Warn("account_login_sync_failed", "account", accountID, "error", syncErr)
+	} else if len(synced.Servers) == 0 {
+		s.logger.Warn("account_login_sync_empty", "account", accountID)
 	} else {
 		if synced.UserName != "" {
 			result.UserName = synced.UserName
@@ -289,11 +294,21 @@ func (s *LoginService) isClosed() bool {
 
 // remember stores the login result and its control for the future session
 // factory. It reports false when Close won the race.
+//
+// An empty server list never replaces a retained non-empty one: a failed or
+// empty loginSync means "unknown", and the node controller treats an empty
+// list as "delete every node". Enforcing that here also closes the race
+// between two concurrent logins for the same account.
 func (s *LoginService) remember(accountID string, control *Control, result LoginResult) bool {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return false
+	}
+	if len(result.Servers) == 0 {
+		if previous, ok := s.results[accountID]; ok && len(previous.Servers) > 0 {
+			result.Servers = cloneLoginResult(previous).Servers
+		}
 	}
 	previous := s.controls[accountID]
 	s.controls[accountID] = control

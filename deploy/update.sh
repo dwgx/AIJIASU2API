@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # One-command release update/rollback for the control plane.
 #
 #   ./update.sh                 # deploy AJS_IMAGE_TAG from .env (default latest)

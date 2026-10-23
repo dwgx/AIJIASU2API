@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestNodeLimitDefaultsToOne pins the live-safe default: the 2026-10-23 live
@@ -74,5 +75,153 @@ func TestNodeLimitRejectsInvalidValues(t *testing.T) {
 		if !strings.HasPrefix(err.Error(), "AJS_NODE_LIMIT ") {
 			t.Fatalf("AJS_NODE_LIMIT=%q: error %q, want an AJS_NODE_LIMIT error", value, err)
 		}
+	}
+}
+
+// TestValidateAdminTokenRejectsPlaceholders pins the S2 guard: a documented
+// placeholder is a working admin API whose secret is printed in the
+// repository, so startup must refuse it. The value never reaches the error.
+func TestValidateAdminTokenRejectsPlaceholders(t *testing.T) {
+	for _, value := range []string{"change-me", "CHANGE-ME", "changeme", "change_me", "admin", "test", "password", "secret", " test ", "local-test-token", "LOCAL-TEST-TOKEN", "replace-me-with-openssl-rand-hex-32"} {
+		if _, bad := placeholderAdminTokens[strings.TrimSpace(strings.ToLower(value))]; bad {
+			continue
+		}
+		t.Errorf("%q: not covered by the placeholder denylist", value)
+	}
+	for _, value := range []string{"change-me", "CHANGE-ME", "admin", "changeme", "change_me", "Secret", "local-test-token"} {
+		if err := validateAdminToken(value, false); err == nil {
+			t.Fatalf("AJS_ADMIN_TOKEN=%q: validateAdminToken = nil, want an error", value)
+		}
+	}
+	if err := validateAdminToken("", false); err == nil {
+		t.Fatal("empty token with secure mode: want an error")
+	}
+	if err := validateAdminToken("a-random-64-hex-char-token-value", false); err != nil {
+		t.Fatalf("real token: validateAdminToken = %v, want nil", err)
+	}
+	// The insecure lab mode keeps the old behaviour; requireLoopback is the
+	// guard that applies there.
+	if err := validateAdminToken("", true); err != nil {
+		t.Fatalf("insecure mode with no token: validateAdminToken = %v, want nil", err)
+	}
+}
+
+// TestValidateAdminTokenMinLength pins the other half of the S2 guard: the
+// token is the only authentication on the admin API, so anything shorter than
+// minAdminTokenLen is refused even when it is not a known placeholder. The
+// checks measure the trimmed value, so padding a short token with spaces does
+// not lift it over the minimum.
+func TestValidateAdminTokenMinLength(t *testing.T) {
+	short := strings.Repeat("a", minAdminTokenLen-1)
+	if err := validateAdminToken(short, false); err == nil {
+		t.Fatalf("%d-character token: validateAdminToken = nil, want an error", len(short))
+	}
+	padded := short + strings.Repeat(" ", minAdminTokenLen-len(short))
+	if err := validateAdminToken(padded, false); err == nil {
+		t.Fatal("space-padded short token: validateAdminToken = nil, want an error")
+	}
+	if err := validateAdminToken(strings.Repeat("a", minAdminTokenLen), false); err != nil {
+		t.Fatalf("%d-character token: validateAdminToken = %v, want nil", minAdminTokenLen, err)
+	}
+	// 32 hex characters are the documented generator output and must pass.
+	if err := validateAdminToken(strings.Repeat("0f", minAdminTokenLen/2), false); err != nil {
+		t.Fatalf("openssl rand -hex 32 output: validateAdminToken = %v, want nil", err)
+	}
+	// The insecure lab mode skips the length rule; requireLoopback is the
+	// guard that applies there.
+	if err := validateAdminToken(short, true); err != nil {
+		t.Fatalf("insecure mode with a short token: validateAdminToken = %v, want nil", err)
+	}
+}
+
+// TestRequireLoopback pins the S4 guard: AJS_ALLOW_INSECURE=1 disables bearer
+// auth entirely, so a non-loopback bind must fail startup.
+func TestRequireLoopback(t *testing.T) {
+	for _, listen := range []string{
+		"127.0.0.1:2261", "127.0.0.2:2261", "[::1]:2261", "localhost:2261",
+		"api.localhost:2261", "127.0.0.1", "localhost",
+	} {
+		if err := requireLoopback(listen); err != nil {
+			t.Fatalf("AJS_LISTEN=%q: requireLoopback = %v, want nil", listen, err)
+		}
+	}
+	for _, listen := range []string{"0.0.0.0:2261", ":2261", "192.168.1.10:2261", "[::]:2261", "10.0.0.5:2261", ""} {
+		if err := requireLoopback(listen); err == nil {
+			t.Fatalf("AJS_LISTEN=%q: requireLoopback = nil, want an error", listen)
+		}
+	}
+}
+
+// TestSnapshotIntervalBareSeconds is the bench regression: BENCH.md §9.9
+// showed AJS_SNAPSHOT_INTERVAL=3600 refused startup ("missing unit in
+// duration"). A bare integer now means seconds, while every valid duration
+// keeps its meaning.
+func TestSnapshotIntervalBareSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{value: "", want: defaultSnapshotInterval},
+		{value: "3600", want: 3600 * time.Second},
+		{value: " 30 ", want: 30 * time.Second},
+		{value: "3600s", want: 3600 * time.Second},
+		{value: "1h", want: time.Hour},
+		{value: "1m30s", want: 90 * time.Second},
+	} {
+		t.Setenv("AJS_SNAPSHOT_INTERVAL", tc.value)
+		got, err := snapshotInterval()
+		if err != nil {
+			t.Fatalf("AJS_SNAPSHOT_INTERVAL=%q: snapshotInterval: %v", tc.value, err)
+		}
+		if got != tc.want {
+			t.Fatalf("AJS_SNAPSHOT_INTERVAL=%q: snapshotInterval() = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestSnapshotIntervalRejectsInvalid keeps the startup guard: a value with no
+// unit and no integer meaning, or a non-positive duration, still fails with a
+// unit hint.
+func TestSnapshotIntervalRejectsInvalid(t *testing.T) {
+	for _, value := range []string{"-5", "-5s", "0", "0s", "abc", "1.5", "1 2", "1e3"} {
+		t.Setenv("AJS_SNAPSHOT_INTERVAL", value)
+		got, err := snapshotInterval()
+		if err == nil {
+			t.Fatalf("AJS_SNAPSHOT_INTERVAL=%q: snapshotInterval() = %v, want an error", value, got)
+		}
+		if got != 0 {
+			t.Fatalf("AJS_SNAPSHOT_INTERVAL=%q: interval = %v, want 0 with the error", value, got)
+		}
+		if !strings.Contains(err.Error(), "AJS_SNAPSHOT_INTERVAL") {
+			t.Fatalf("AJS_SNAPSHOT_INTERVAL=%q: error %q, want an AJS_SNAPSHOT_INTERVAL error", value, err)
+		}
+	}
+}
+
+// TestValidateLoginHosts pins the S11 guard: the login body carries the
+// account password, so a non-https host is refused unless the lab opts in.
+func TestValidateLoginHosts(t *testing.T) {
+	https := []string{
+		"https://login.ajs-app.com",
+		"https://login.mmegg.com:4443",
+		"login.mmegg.com", // bare host: the client prefixes https://
+	}
+	t.Setenv("AJS_ALLOW_PLAINTEXT", "")
+	if err := validateLoginHosts(https); err != nil {
+		t.Fatalf("https hosts: validateLoginHosts = %v, want nil", err)
+	}
+	for _, hosts := range [][]string{
+		{"http://login.mmegg.com"},
+		{"https://login.mmegg.com", "http://login.mmegg.com:4443"},
+		{"ftp://login.mmegg.com"},
+	} {
+		if err := validateLoginHosts(hosts); err == nil {
+			t.Fatalf("hosts %v: validateLoginHosts = nil, want an error", hosts)
+		}
+	}
+	// The explicit lab opt-out restores the lab mock path.
+	t.Setenv("AJS_ALLOW_PLAINTEXT", "1")
+	if err := validateLoginHosts([]string{"http://127.0.0.1:8081"}); err != nil {
+		t.Fatalf("AJS_ALLOW_PLAINTEXT=1: validateLoginHosts = %v, want nil", err)
 	}
 }

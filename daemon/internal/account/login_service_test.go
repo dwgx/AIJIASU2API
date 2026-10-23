@@ -155,6 +155,66 @@ func TestLoginServiceRetainsServers(t *testing.T) {
 	}
 }
 
+// TestLoginServiceKeepsRetainedServersOnSyncFailure is the P1-2 regression: a
+// failed or empty follow-up loginSync is not evidence that the account has no
+// servers. Before the fix, the empty result replaced the retained list and the
+// node controller deleted every node on the next SyncAccount.
+func TestLoginServiceKeepsRetainedServersOnSyncFailure(t *testing.T) {
+	const (
+		vendorErrorReply = `{"Login":{"AuthResult":"ERR","AuthMessage":"system busy"}}`
+		emptySyncReply   = `{"Login":{"ConnectPassword":"cp-3"}}`
+	)
+	for _, tc := range []struct {
+		name       string
+		secondSync string
+	}{
+		{name: "vendor error envelope", secondSync: vendorErrorReply},
+		{name: "empty server list", secondSync: emptySyncReply},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := store.NewWithSealer(plainSealer{})
+			account := newLoginAccount(t, st)
+			syncs := 0
+			server, _ := newFake(t, func(request capturedRequest) (int, string) {
+				if request.form.Get("_client_login") == "" {
+					return http.StatusOK, loginReply
+				}
+				syncs++
+				if syncs == 1 {
+					return http.StatusOK, syncReply
+				}
+				return http.StatusOK, tc.secondSync
+			})
+			service := newTestLoginService(t, st, server.URL, nil)
+			ctx := context.Background()
+
+			if _, err := service.Login(ctx, account.ID); err != nil {
+				t.Fatalf("first Login: %v", err)
+			}
+			before, ok := service.Result(account.ID)
+			if !ok || len(before.Servers) != 1 {
+				t.Fatalf("after the good sync: servers = %d, want 1", len(before.Servers))
+			}
+
+			if _, err := service.Login(ctx, account.ID); err != nil {
+				t.Fatalf("second Login: %v", err)
+			}
+			after, ok := service.Result(account.ID)
+			if !ok {
+				t.Fatal("second Login dropped the retained result")
+			}
+			if len(after.Servers) != 1 {
+				t.Fatalf("after the failed sync: servers = %d (%v), want the retained s1",
+					len(after.Servers), after.Servers)
+			}
+			entry, ok := after.Servers["s1"]
+			if !ok || entry.ID != "s1" || !entry.OK() {
+				t.Fatalf("retained Servers = %+v, want the usable s1 entry", after.Servers)
+			}
+		})
+	}
+}
+
 func TestLoginServiceExpiredMembership(t *testing.T) {
 	const expiredReply = `{"Login":{"AuthResult":"OK","LoginToken":"tok-1|user","UserName":"user",` +
 		`"ConnectPassword":"cp-1","MembershipStatus":"basic","ExpireTime":1767225600000,"Expired":true}}`

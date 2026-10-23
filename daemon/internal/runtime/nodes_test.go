@@ -221,6 +221,39 @@ func (f *fakeReconciler) Reconcile(context.Context) (runtime.Topology, error) {
 
 func (f *fakeReconciler) callCount() int { return int(f.calls.Load()) }
 
+// mutationPanel records the store state at every Reconcile. It embeds the rest
+// of runtime.Panel as a nil interface: the account handlers must call only
+// Reconcile, so any other panel call panics and fails the test.
+type mutationPanel struct {
+	runtime.Panel
+	st        *store.Store
+	accountID string
+
+	calls     int
+	liveAt    []int
+	accountAt []bool
+	stateAt   []model.AccountState
+}
+
+func (p *mutationPanel) Reconcile(context.Context) (runtime.Topology, error) {
+	p.calls++
+	live := 0
+	for _, node := range p.st.Nodes() {
+		if node.AccountID == p.accountID && node.State == model.NodeLive {
+			live++
+		}
+	}
+	p.liveAt = append(p.liveAt, live)
+	account, ok := p.st.Account(p.accountID)
+	p.accountAt = append(p.accountAt, ok)
+	state := model.AccountState("")
+	if ok {
+		state = account.State
+	}
+	p.stateAt = append(p.stateAt, state)
+	return runtime.Topology{}, nil
+}
+
 func newNodeController(t *testing.T, st *store.Store, logins runtime.LoginResults, opener runtime.SessionOpener, rec runtime.Reconciler) *runtime.NodeController {
 	t.Helper()
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
@@ -710,8 +743,10 @@ func TestNodeControllerStopAccount(t *testing.T) {
 	if err := controller.StopAccount(context.Background(), first.ID); err != nil {
 		t.Fatalf("StopAccount: %v", err)
 	}
-	if got := rec.callCount(); got != 3 {
-		t.Fatalf("reconciles after StopAccount = %d, want 3", got)
+	// StopAccount stops gates only: the API handler reconciles after the store
+	// mutation, so no reconcile happens here.
+	if got := rec.callCount(); got != 2 {
+		t.Fatalf("reconciles after StopAccount = %d, want 2 (the syncs only)", got)
 	}
 	for _, port := range []int{firstNode.GatePort, secondNode.GatePort} {
 		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
@@ -742,15 +777,15 @@ func TestNodeControllerStopAccount(t *testing.T) {
 	}
 
 	// Idempotent: a second call and an unknown account change nothing and do
-	// not reconcile again.
+	// not reconcile.
 	if err := controller.StopAccount(context.Background(), first.ID); err != nil {
 		t.Fatalf("second StopAccount: %v", err)
 	}
 	if err := controller.StopAccount(context.Background(), "acc-does-not-exist"); err != nil {
 		t.Fatalf("StopAccount for an unknown account: %v", err)
 	}
-	if got := rec.callCount(); got != 3 {
-		t.Fatalf("reconciles after idempotent calls = %d, want 3", got)
+	if got := rec.callCount(); got != 2 {
+		t.Fatalf("reconciles after idempotent calls = %d, want 2", got)
 	}
 	code, conn = socks5Connect(t, keptNode.GatePort)
 	if code != 0x00 {
@@ -812,8 +847,10 @@ func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("StopAccount error = %v, want the close failure", err)
 	}
-	if !errors.Is(err, reconcileErr) {
-		t.Fatalf("StopAccount error = %v, want the reconcile failure", err)
+	// StopAccount no longer reconciles, so the reconciler's error is not part
+	// of its result; it is reported by SyncAccount above.
+	if errors.Is(err, reconcileErr) {
+		t.Fatalf("StopAccount error = %v, want only the close failure", err)
 	}
 	stopErr := err
 	for i, g := range gates {
@@ -836,7 +873,8 @@ func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
 // TestAccountDeleteStopsGatesBeforeStoreCascade pins the B0 delete seam end to
 // end: DELETE runs the controller's StopAccount before store.DeleteAccount, so
 // the gates and sessions are closed and the store cascade then removes the
-// account and its nodes.
+// account and its nodes. The handler reconciles the panel only after that
+// cascade, so the publish sees zero LIVE nodes and no account.
 func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	requirePort13000(t)
 	st := newNodeTestStore(t)
@@ -852,7 +890,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 		},
 	})
 	opener := newFakeSessionOpener()
-	rec := &fakeReconciler{}
+	rec := &mutationPanel{st: st, accountID: acct.ID}
 	controller := newNodeController(t, st, logins, opener, rec)
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount: %v", err)
@@ -862,6 +900,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 
 	ts := httptest.NewServer(api.New(api.Config{
 		AllowInsecure:     true,
+		Panel:             rec,
 		AccountDeleteHook: controller.StopAccount,
 	}, st, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(ts.Close)
@@ -879,8 +918,14 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 		t.Fatalf("DELETE status = %d, want 204", resp.StatusCode)
 	}
 
-	if got := rec.callCount(); got != 2 {
-		t.Fatalf("reconciles = %d, want 2 (sync + delete stop)", got)
+	if got := rec.calls; got != 2 {
+		t.Fatalf("reconciles = %d, want 2 (sync + post-delete)", got)
+	}
+	if got := rec.liveAt[1]; got != 0 {
+		t.Fatalf("LIVE nodes at the post-delete reconcile = %d, want 0", got)
+	}
+	if rec.accountAt[1] {
+		t.Fatal("the post-delete reconcile ran before store.DeleteAccount removed the account")
 	}
 	for _, port := range []int{first.GatePort, second.GatePort} {
 		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
@@ -914,18 +959,19 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("second DELETE status = %d, want 404", resp.StatusCode)
 	}
-	if got := rec.callCount(); got != 2 {
+	if got := rec.calls; got != 2 {
 		t.Fatalf("reconciles after the 404 = %d, want 2", got)
 	}
 	t.Logf("delete %s: gates %d/%d refused, sessions closed, nodes removed, reconciles=%d",
-		acct.ID, first.GatePort, second.GatePort, rec.callCount())
+		acct.ID, first.GatePort, second.GatePort, rec.calls)
 }
 
 // TestAccountLogoutStopsGatesBeforeStoreDrain pins the B0 logout seam end to
 // end: POST /v1/accounts/{id}/actions/logout runs the controller's StopAccount
 // before store.LogoutAccount, so the gates and FV sessions are closed first and
-// the store then pauses the account and marks its nodes DRAINING. The other
-// account keeps its gate, session and LIVE node.
+// the store then pauses the account and marks its nodes DRAINING. The handler
+// reconciles the panel only after that store mutation, so the publish sees zero
+// LIVE nodes. The other account keeps its gate, session and LIVE node.
 func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	requirePort13000(t)
 	st := newNodeTestStore(t)
@@ -948,7 +994,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 		Servers:         map[string]apifacade.Server{"t1": testServer("t1")},
 	})
 	opener := newFakeSessionOpener()
-	rec := &fakeReconciler{}
+	rec := &mutationPanel{st: st, accountID: loggedOut.ID}
 	controller := newNodeController(t, st, logins, opener, rec)
 	for _, id := range []string{loggedOut.ID, kept.ID} {
 		if err := controller.SyncAccount(context.Background(), id); err != nil {
@@ -961,6 +1007,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 
 	ts := httptest.NewServer(api.New(api.Config{
 		AllowInsecure:     true,
+		Panel:             rec,
 		AccountLogoutHook: controller.StopAccount,
 	}, st, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(ts.Close)
@@ -990,8 +1037,15 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	if account.State != model.AccountPaused || account.LiveNodeCount != 0 {
 		t.Fatalf("logout account = %+v, want paused with 0 live nodes", account)
 	}
-	if got := rec.callCount(); got != 3 {
-		t.Fatalf("reconciles = %d, want 3 (two syncs + logout stop)", got)
+	if got := rec.calls; got != 3 {
+		t.Fatalf("reconciles = %d, want 3 (two syncs + post-logout)", got)
+	}
+	if got := rec.liveAt[2]; got != 0 {
+		t.Fatalf("LIVE nodes at the post-logout reconcile = %d, want 0", got)
+	}
+	if !rec.accountAt[2] || rec.stateAt[2] != model.AccountPaused {
+		t.Fatalf("state at the post-logout reconcile = (present %v, %q), want (true, paused)",
+			rec.accountAt[2], rec.stateAt[2])
 	}
 	for _, port := range []int{first.GatePort, second.GatePort} {
 		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
@@ -1038,14 +1092,18 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	}
 	echoOnce(t, conn)
 
-	// Idempotent: a second logout answers 200, runs no gate close and does
-	// not reconcile again.
+	// Idempotent at the gate/store layer: a second logout answers 200 and runs
+	// no gate close. The handler still reconciles after the store mutation, so
+	// the panel gets one more idempotent publish.
 	account = logout(http.StatusOK)
 	if account.State != model.AccountPaused {
 		t.Fatalf("second logout state = %q, want paused", account.State)
 	}
-	if got := rec.callCount(); got != 3 {
-		t.Fatalf("reconciles after the idempotent logout = %d, want 3", got)
+	if got := rec.calls; got != 4 {
+		t.Fatalf("reconciles after the idempotent logout = %d, want 4", got)
+	}
+	if got := rec.liveAt[3]; got != 0 {
+		t.Fatalf("LIVE nodes at the second post-logout reconcile = %d, want 0", got)
 	}
 	code, conn = socks5Connect(t, keptNode.GatePort)
 	if code != 0x00 {
@@ -1053,7 +1111,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	}
 	echoOnce(t, conn)
 	t.Logf("logout %s: gates %d/%d refused, sessions closed, nodes DRAINING, %s kept port %d, reconciles=%d",
-		loggedOut.ID, first.GatePort, second.GatePort, keptNode.ID, keptNode.GatePort, rec.callCount())
+		loggedOut.ID, first.GatePort, second.GatePort, keptNode.ID, keptNode.GatePort, rec.calls)
 }
 
 func TestNodeControllerPerServerFailure(t *testing.T) {

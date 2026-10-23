@@ -66,6 +66,7 @@ type Config struct {
 	Version       string
 	// Panel is set when AJS_RESIN_ADMIN_TOKEN is configured; it makes
 	// /v1/topology report the live Resin view and enables /v1/reconcile.
+	// Account delete/logout also reconcile it after the store mutation.
 	Panel Panel
 	// LoginService is set when AJS_ACCOUNT_LOGIN=1; POST
 	// /v1/accounts/{id}/actions/login then performs a vendor login instead
@@ -81,13 +82,16 @@ type Config struct {
 	// node controller, which uses it to stop the account's gates and FV
 	// sessions. Unlike LoginHook its error aborts the delete: removing the
 	// store nodes while their gates stay open is the B0 gap this seam closes.
+	// After the store delete succeeds the handler reconciles Panel, because
+	// the nodes were still LIVE when the hook ran.
 	AccountDeleteHook func(ctx context.Context, accountID string) error
 	// AccountLogoutHook runs before POST /v1/accounts/{id}/actions/logout
 	// pauses the account and drains its nodes. It is nil unless
 	// AJS_ACCOUNT_LOGIN=1 wired the node controller, which uses it to close
 	// the account's gates and FV sessions. Like AccountDeleteHook its error
 	// aborts the logout: pausing the account while its gates keep listening
-	// is the B0 logout gap this seam closes.
+	// is the B0 logout gap this seam closes. The handler reconciles Panel
+	// after store.LogoutAccount drained the nodes.
 	AccountLogoutHook func(ctx context.Context, accountID string) error
 	// NodeDrainHook runs before a drain/undrain touches the store or the
 	// panel, so the node controller can stop or reopen the node's gate first.
@@ -514,7 +518,14 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 // total-offset cannot go negative and offset+limit cannot overflow however
 // large the query values are.
 func paginate(w http.ResponseWriter, r *http.Request, total int) (int, int, bool) {
-	limit, offset := 0, 0
+	return paginateWithLimit(w, r, total, 0)
+}
+
+// paginateWithLimit is paginate with a default page size for requests that
+// carry no ?limit. An explicit ?limit= still wins, and ?limit=0 keeps meaning
+// "every row".
+func paginateWithLimit(w http.ResponseWriter, r *http.Request, total, defaultLimit int) (int, int, bool) {
+	limit, offset := defaultLimit, 0
 	query := r.URL.Query()
 	if raw := query.Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
