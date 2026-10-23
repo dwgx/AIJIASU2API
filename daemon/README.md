@@ -17,10 +17,12 @@ listener starts, saved every `AJS_SNAPSHOT_INTERVAL` (default 30 s) and once on
 shutdown, so the store survives a restart. Vendor login is wired but default-off:
 `AJS_ACCOUNT_LOGIN=1` makes `POST /v1/accounts/{id}/actions/login` call the
 control API; without it the handler only refreshes the store, and no vendor
-host is contacted. There is still no SQLite: the JSON snapshot is the v0.1
-stopgap for the schema in `docs/PANEL.md` §6, and the gate and the node
-supervisor are implemented but neither is wired to the session factory or to
-each other.
+host is contacted. With the same switch the node controller follows a
+successful login with `loginSync`, opens one authenticated FV session and one
+loopback SOCKS5 gate per usable vendor server (`127.0.0.1:13000` upward), writes
+the node, and reconciles Resin. There is still no SQLite: the JSON snapshot is
+the v0.1 stopgap for the schema in `docs/PANEL.md` §6, and the node supervisor
+is implemented but not wired to the controller.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -47,6 +49,7 @@ internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
 internal/publisher/          subscription render, coalesced publish, rotation
 internal/runtime/            startup wiring, panel topology/reconcile and mutations
+internal/runtime/nodes.go    login -> per-server FV session + loopback gate + node store
 internal/account/            FV protocol seam + account control client (Secret, Device, Control, LoginService)
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
 internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
@@ -61,7 +64,9 @@ internal/api/server_test.go  httptest coverage
 ```bash
 cd daemon
 go test ./...
+go test -race ./...
 go build ./...
+go vet ./...
 AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd
 ```
 
@@ -219,7 +224,9 @@ servers, err := control.Servers(ctx)                  // map[string]apifacade.Se
   `okhttp/4.9.3`, the OpenAJS shape, signing and `time.Now`.
 - `LoginResult`: `AuthResult`, `AuthMessage`, `Token`, `UserName`,
   `ConnectPassword`, `MembershipStatus`, `ExpireTime`, `Expired`, `Servers`.
-  `Token` and `ConnectPassword` are `Secret`; `Servers` stays nil on `Login`.
+  `Token` and `ConnectPassword` are `Secret`; `Control.Login` leaves `Servers`
+  nil, and `LoginService.Login` follows the login with `LoginSync` so the
+  retained result carries the server map the node controller needs.
 - A non-OK `AuthResult` is an `*AuthError` carrying the code and server message
   (no credentials); the parsed result is returned with it. Transport and
   protocol failures are returned as-is.
@@ -302,7 +309,7 @@ service, err := account.NewLoginService(st, account.LoginConfig{
 defer service.Close()
 
 updated, err := service.Login(ctx, "acc-01")
-result, ok := service.Result("acc-01") // in memory, for the future session factory
+result, ok := service.Result("acc-01") // in memory, read by the node controller
 ```
 
 - `Login` reads the account and its sealed password with
@@ -312,7 +319,10 @@ result, ok := service.Result("acc-01") // in memory, for the future session fact
   password is a `Secret`; the plaintext byte slice is cleared after conversion.
 - Success: `store.MarkLogin` sets `active` (or `expired` when the vendor says
   so), updates `lastLoginAt`, adopts the vendor user name, and appends
-  `account.login`. The `LoginResult` is retained in a mutex-protected map;
+  `account.login`. `Login` then sends the follow-up `loginSync` and merges the
+  refreshed connect password and server map into the result; a sync failure is
+  logged as `account_login_sync_failed` and leaves the login successful with an
+  empty server map. The `LoginResult` is retained in a mutex-protected map;
   `Result` returns a copy. `Close` releases idle connections and drops it.
 - Auth rejection (`*account.AuthError`): `store.MarkAuthFailed` sets
   `auth_failed` and appends `account.auth_failed` with the sanitized vendor
@@ -474,10 +484,11 @@ Wire contract (RFC 1928, no auth, CONNECT only):
   (`node_id`, `target`, `ingress_bytes`, `egress_bytes`, `duration`) and warn
   lines for rejections. The gate never receives a credential; only host:port is
   logged.
-- Limitation: the package is not wired to the node supervisor, port allocator
-  or Resin. Nothing constructs it from a login session, publishes `State` or
-  serves the `GateController` HTTP surface yet; it binds loopback only and has
-  no per-user auth (P3).
+- Limitation: the package is now constructed from a login session by the node
+  controller (`internal/runtime/nodes.go`, B0), which allocates the port and
+  reconciles Resin. It is still not wired to the node supervisor, publishes no
+  `State` and serves no `GateController` HTTP surface; it binds loopback only
+  and has no per-user auth (P3).
 
 `server_test.go` runs only loopback and in-process fakes: a `net.Pipe` echo
 session for domain/IPv4/IPv6 CONNECT, relay and exact counters; limit 1 with a
@@ -490,6 +501,82 @@ stopping the listener, force-closing an active flow and cancelling a blocked
 `OpenFlow`. It also waits for the accept loop and every handler to finish, so a
 leak fails the test. The package passes `go test -race -count=3` on the dev
 host.
+
+## Node controller (AJS-62 / B0)
+
+`internal/runtime/nodes.go` is the production caller the B0 gap called out: the
+FV session factory and the gate are no longer test-only. It runs only when
+`AJS_ACCOUNT_LOGIN=1`; the default build still contacts no vendor host and
+binds no gate port.
+
+```go
+factory := account.NewFactory(account.Linux423Binary, &fvfacade.HTTPUpgrade{},
+    fvfacade.AuthOptions{})
+controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+    Store:      st,
+    Logins:     loginService, // Result(accountID)
+    Sessions:   factory,      // Open(ctx, SessionRequest)
+    Reconciler: panel,        // nil when Resin is disabled
+    Profile:    account.Linux423Binary,
+    Logger:     logger,
+})
+// ...
+api.Config{LoginHook: controller.SyncAccount}
+defer controller.Stop(stopCtx)
+```
+
+The flow after `POST /v1/accounts/{id}/actions/login` succeeds (the login
+service has already sent `loginSync`):
+
+1. read the retained `LoginResult` and the account's stored device identity
+   (`account.DeviceForIdentity`); a missing result or identity is an error;
+2. keep only servers whose `sts` is `ok`; the node id is
+   `<accountID>:<serverID>` and the label (also the Resin tag) is
+   `<cc>-<account>-<server>` in the lowercase tag alphabet;
+3. reuse the gate of a server that already has one, so a repeated login never
+   re-authenticates or re-binds;
+4. otherwise open one FV session (`account.Factory`) and start one SOCKS5 gate
+   on `127.0.0.1:<port>`, allocating from 13000 upward and skipping the ports
+   of running gates and store nodes; a bind failure retries the next port;
+5. write the node `LIVE` with `gatePort`, `serverId`, protocol `socks5` and the
+   session's egress address (`sip`, then `cip`, then `ip`); a per-server
+   failure writes it `DOWN` with no gate port and the batch continues;
+6. reconcile Resin once (skipped without a panel).
+
+A server that disappears from the login has its gate and session closed and its
+node deleted. `DrainNode`/`UndrainNode` drive the gate and the store together
+and reconcile the panel, and a login refresh does not undo an operator drain.
+`Stop` closes every gate and session and reconciles once. Every mutation is
+serialized, so concurrent logins for one account share one gate.
+
+The API hook is best-effort: `LoginHook` runs after the login is recorded, and
+a hook error is logged as `account_login_hook_error` without changing the 200
+response.
+
+- Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
+  skipping ports already used by a running gate or a store node. Each gate
+  admits `32` concurrent flows, mirrored onto the node's `capacity`.
+- Store: `ProxyNode.ServerID` (`serverId`, `omitempty`) is additive, so
+  `SnapshotVersion` stays 1 and older documents restore with an empty field.
+  `Store.PutNode` upserts a runtime node (validating id, account, tag label,
+  region, state and port) and preserves the probe/lease fields `InUse`,
+  `SuccessRate` and `LastProbeAt`; `Store.DeleteNode` removes the node and every
+  lease that pointed at it.
+- Live status: `[UNVERIFIED]`. No vendor host was contacted and no live Resin
+  subscription was changed. The tests use a fake session opener, a real
+  `gate.NewServer` on `127.0.0.1:13000` and a fake reconciler; the first live
+  login still depends on B1/B2 in `research/81-protocol-gaps/REPORT.md`.
+
+`internal/runtime/nodes_test.go` covers: sync creating two gates on 13000/13001
+with the session's egress IP, a SOCKS5 CONNECT relayed through the fake session,
+a second sync reusing both ports without new sessions, server removal closing
+its gate and deleting its node, drain rejecting a flow with `0x05` and undrain
+accepting again, an operator drain surviving a refresh, stop closing every gate
+and session, partial failure leaving the working node LIVE and the failed node
+DOWN, no-node-started returning an aggregate error that names both nodes, no
+usable server, missing login/device preconditions, four concurrent syncs
+sharing one gate, and an injected gate factory. `TestAccountLoginHook` pins the
+API seam.
 
 ## Supervisor (AJS-43)
 
@@ -596,7 +683,7 @@ test binary as the child.
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth (loopback only) |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
-| `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path; anything else logs `account_login_disabled` and keeps the store-only refresh |
+| `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
@@ -860,7 +947,7 @@ All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
 | GET | `/v1/accounts/{id}` | single account |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
 | DELETE | `/v1/accounts/{id}` | remove account, its nodes, its leases and its sealed secret; keep audit |
-| POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login, then `active`/`expired` and a retained `LoginResult`; otherwise refresh `lastLoginAt` and clear `auth_failed` |
+| POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
 | POST | `/v1/nodes/{id}/actions/drain` | → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
@@ -1680,6 +1767,67 @@ ok  	ajsproxy/internal/api	0.003s
 No live vendor host was contacted; live acceptance of either shape remains
 `[UNVERIFIED]`.
 
+### Node controller (AJS-62 / B0)
+
+Both trees were copied to a fresh scratch root; no live vendor host or Resin
+instance was contacted:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc \
+  'rm -rf /srv/dwgxhomecloud/scratch/ajs-62-nodecontroller \
+   && mkdir -p /srv/dwgxhomecloud/scratch/ajs-62-nodecontroller \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-62-nodecontroller'
+```
+
+On HMC (`go1.25.14 linux/amd64`; `GOTOOLCHAIN=auto` selects the cached
+`go1.26.0` toolchain the module requires):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-62-nodecontroller/daemon
+$ go test -race -count=1 ./... && go build ./... && go vet ./... && echo ALL_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.112s
+ok  	ajsaccountd/internal/api	1.185s
+ok  	ajsaccountd/internal/gate	1.571s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.058s
+ok  	ajsaccountd/internal/resin	1.352s
+ok  	ajsaccountd/internal/runtime	1.302s
+ok  	ajsaccountd/internal/secret	1.027s
+ok  	ajsaccountd/internal/store	1.512s
+ok  	ajsaccountd/internal/supervisor	7.714s
+ALL_OK
+```
+
+The controller evidence (real `gate.NewServer` on `127.0.0.1:13000`, fake
+session opener, fake reconciler):
+
+```console
+$ go test -race -count=1 -v -run 'TestNodeControllerSyncCreatesReusesAndRemoves|TestNodeControllerDrainUndrain|TestNodeControllerStopClosesGates' ./internal/runtime
+=== RUN   TestNodeControllerSyncCreatesReusesAndRemoves
+    nodes_test.go:385: sync 1: acc-01:s1 server=s1 label=cn-acc01-s1 port=13000 state=LIVE egress=198.51.100.7; acc-01:s2 server=s2 label=cn-acc01-s2 port=13001 state=LIVE
+    nodes_test.go:419: sync 2: reused acc-01:s1 port=13000 without a new session
+    nodes_test.go:441: sync 3: removed acc-01:s2, port 13001 refused, acc-01:s1 kept port 13000
+--- PASS: TestNodeControllerSyncCreatesReusesAndRemoves (0.00s)
+=== RUN   TestNodeControllerDrainUndrain
+    nodes_test.go:480: drain acc-01:s1: state=DRAINING gate reply=0x05
+    nodes_test.go:494: undrain acc-01:s1: state=LIVE gate reply=0x00
+--- PASS: TestNodeControllerDrainUndrain (0.00s)
+=== RUN   TestNodeControllerStopClosesGates
+    nodes_test.go:557: stop: ports 13000/13001 refused, both sessions closed, reconciles=2
+--- PASS: TestNodeControllerStopClosesGates (0.00s)
+PASS
+ok  	ajsaccountd/internal/runtime	1.019s
+```
+
+`TestNodeControllerPerServerFailure` records `acc-01:s1 state=LIVE port=13000;
+acc-01:s2 state=DOWN port=0`; `TestNodeControllerNoNodeStarted` returns an
+aggregate error naming both nodes; `TestAccountLoginHook` proves the hook runs
+after a successful login and its error is logged without changing the 200
+response. No live vendor login, FV authentication or Resin write was performed;
+live acceptance remains `[UNVERIFIED]`.
+
 ## Limitations / next
 
 - State survives a restart through the JSON snapshot, but there is still no
@@ -1687,12 +1835,19 @@ No live vendor host was contacted; live acceptance of either shape remains
   `AJS_SNAPSHOT_INTERVAL` of mutations, and there is no schema migration path.
   Sealed secrets are file-backed only when `AJS_MASTER_KEY` is set.
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
-  With it, login calls the control API, but neither the session factory nor the
-  gate is wired to a supervisor: the `LoginResult` stays in process memory and
-  is lost on restart. Lease rotate/release and node drain/undrain write through
-  Resin when a panel is configured; account, user, key and settings mutations
-  remain store-only, and `/v1/reconcile` is the only path that re-renders the
-  whole subscription on demand.
+  With it, login calls the control API, follows it with `loginSync`, and the
+  node controller opens one gate per usable server. The `LoginResult` and the
+  controller's gate map still live in process memory: a restart keeps the
+  persisted nodes but no gate is bound until the next login, and the node
+  supervisor is not wired. Lease rotate/release and node drain/undrain write
+  through Resin when a panel is configured; account, user, key and settings
+  mutations remain store-only, and `/v1/reconcile` is the only path that
+  re-renders the whole subscription on demand.
+- Deleting or logging out an account does not close its controller gates:
+  `DELETE /v1/accounts/{id}` and `POST .../actions/logout` only change the
+  store, and the controller's gates are released on the next `Stop`. The
+  controller's own `DrainNode`/`UndrainNode` are not wired to the HTTP drain
+  path yet.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
   `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.
@@ -1706,12 +1861,14 @@ No live vendor host was contacted; live acceptance of either shape remains
 - There is no background reconciler: after startup, Resin drift (node circuits,
   an out-of-band subscription edit) is corrected only by `POST /v1/reconcile`.
 - Probe is a bookkeeping canary, not a network probe; `DOWN` nodes return 503.
-- The API's drain has no flow scheduler yet (`inUse` is seed data); the gate's
-  own `Drain` is implemented and tested but nothing calls it.
-- The gate is not wired to the node supervisor, the port allocator or Resin:
-  nothing constructs it from a login session, allocates `13000–13999`, publishes
-  its `State` or serves the `GateController` HTTP surface. It has no per-user
-  auth or quota (P3) and binds loopback only.
+- The API's drain has no flow scheduler yet (`inUse` is seed data);
+  `runtime.NodeController.DrainNode` drains the gate, but the HTTP drain path
+  still goes through the panel/store and the controller's drain is not wired to
+  it.
+- The gate is constructed from a login session and allocates `13000` upward
+  through the node controller, but it is not wired to the node supervisor,
+  publishes no `State` and serves no `GateController` HTTP surface. It has no
+  per-user auth or quota (P3) and binds loopback only.
 - The supervisor is not wired to the runtime: nothing starts an `ajsproxy`
   child, allocates its `12000–12999` port or reacts to its events. Readiness is
   a TCP dial on `ReadyAddr`, not an FV auth check, and a crashed child is

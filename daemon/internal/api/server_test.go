@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -449,6 +450,59 @@ func TestAccountLoginServiceStatusMapping(t *testing.T) {
 			}
 			requireErrorCode(t, body, tc.code)
 		})
+	}
+}
+
+func TestAccountLoginHook(t *testing.T) {
+	var logs bytes.Buffer
+	var hookID string
+	hookErr := errors.New("node sync failed")
+	server := New(Config{
+		AdminToken: testToken,
+		LoginService: &stubLoginService{
+			account: model.Account{ID: "acc-01", Label: "Northwind Ops", State: model.AccountActive},
+		},
+		LoginHook: func(_ context.Context, accountID string) error {
+			hookID = accountID
+			return hookErr
+		},
+	}, store.New(), slog.New(slog.NewTextHandler(&logs, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/login", nil)
+	requireStatus(t, resp, http.StatusOK)
+	account := decodeBody[model.Account](t, body)
+	if account.ID != "acc-01" || account.State != model.AccountActive {
+		t.Fatalf("login body = %+v, want the successful login", account)
+	}
+	if hookID != "acc-01" {
+		t.Fatalf("hook account = %q, want acc-01", hookID)
+	}
+	if !strings.Contains(logs.String(), "account_login_hook_error") {
+		t.Fatalf("logs = %q, want the hook failure", logs.String())
+	}
+}
+
+func TestAccountLoginHookSkippedOnFailure(t *testing.T) {
+	called := false
+	server := New(Config{
+		AdminToken: testToken,
+		LoginService: &stubLoginService{
+			err: fmt.Errorf("wrapped: %w", account.ErrAuthRejected),
+		},
+		LoginHook: func(context.Context, string) error {
+			called = true
+			return nil
+		},
+	}, store.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	resp, _ := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/login", nil)
+	requireStatus(t, resp, http.StatusUnauthorized)
+	if called {
+		t.Fatal("hook ran after a failed login")
 	}
 }
 

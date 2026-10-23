@@ -121,6 +121,10 @@ type ProxyNode struct {
 	Protocol     ProxyProtocol `json:"protocol"`
 	GatePort     int           `json:"gatePort"`
 	LastProbeAt  string        `json:"lastProbeAt"`
+	// ServerID is the vendor server this node was opened for. It is empty for
+	// the seeded skeleton nodes and set by the runtime node controller, which
+	// keys the gate on (account, server).
+	ServerID string `json:"serverId,omitempty"`
 }
 
 // Lease mirrors the dashboard Lease interface.

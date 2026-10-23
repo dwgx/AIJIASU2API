@@ -2,6 +2,7 @@ package account
 
 import (
 	"errors"
+	"strings"
 
 	"ajsaccountd/internal/store"
 	"ajsproxy/apifacade"
@@ -84,6 +85,23 @@ func Identify(device apifacade.Device) store.DeviceIdentity {
 		InstMkt: device.InstMkt,
 		Vrf:     device.Vrf,
 	}
+}
+
+// DeviceForIdentity rebuilds the control and FV descriptor from the identity
+// the login service stored for an account. It is the runtime counterpart of
+// Identify: the node controller opens a session with exactly the device the
+// login presented.
+//
+// A record missing one of UID/OSDID/CUID/CSEID is rejected; EnsureAccountDevice
+// stores only complete records, so a rejection means the snapshot was edited.
+func DeviceForIdentity(identity store.DeviceIdentity) (apifacade.Device, error) {
+	if strings.TrimSpace(identity.UID) == "" ||
+		strings.TrimSpace(identity.OSDID) == "" ||
+		strings.TrimSpace(identity.CUID) == "" ||
+		strings.TrimSpace(identity.CSEID) == "" {
+		return apifacade.Device{}, errors.New("account: stored device identity is incomplete (need uid/osdid/cuid/cseid)")
+	}
+	return deviceFromIdentity(identity, ""), nil
 }
 
 // deviceFromIdentity rebuilds the control and FV descriptor from a stored

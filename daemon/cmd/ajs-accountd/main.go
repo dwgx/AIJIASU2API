@@ -24,6 +24,7 @@ import (
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/secret"
 	"ajsaccountd/internal/store"
+	"ajsproxy/fvfacade"
 )
 
 func main() {
@@ -121,11 +122,26 @@ func run() error {
 	}
 
 	var loginService api.LoginService
-	if service, err := startAccountLogin(st, logger); err != nil {
+	var loginHook func(context.Context, string) error
+	if service, profile, err := startAccountLogin(st, logger); err != nil {
 		return err
 	} else if service != nil {
 		defer service.Close()
 		loginService = service
+		controller, err := startNodeController(st, logger, panel, service, profile)
+		if err != nil {
+			return err
+		}
+		// Registered after the snapshot defer, so gates close and the final
+		// node state is written before the last state file is saved.
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := controller.Stop(stopCtx); err != nil {
+				logger.Warn("node_controller_stop_failed", "error", err)
+			}
+		}()
+		loginHook = controller.SyncAccount
 	}
 
 	server := api.New(api.Config{
@@ -134,6 +150,7 @@ func run() error {
 		CORSOrigins:   splitList(*corsOrigins),
 		Panel:         panel,
 		LoginService:  loginService,
+		LoginHook:     loginHook,
 	}, st, logger)
 
 	httpServer := &http.Server{
@@ -314,15 +331,16 @@ func startResinPanel(ctx context.Context, st *store.Store, logger *slog.Logger, 
 // is the only switch: without it the daemon logs account_login_disabled and
 // the handler keeps the store-only refresh. Construction performs no I/O and
 // contacts no host. The returned *account.LoginService satisfies
-// api.LoginService; a nil value means disabled.
-func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginService, error) {
+// api.LoginService; a nil value means disabled. The profile is returned so the
+// node controller can open sessions with the same claims the login used.
+func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginService, account.VersionProfile, error) {
 	if os.Getenv("AJS_ACCOUNT_LOGIN") != "1" {
 		logger.Info("account_login_disabled", "reason", "AJS_ACCOUNT_LOGIN is not 1")
-		return nil, nil
+		return nil, account.VersionProfile{}, nil
 	}
 	profile, err := loginProfile(envOr("AJS_ACCOUNT_PROFILE", "linux-4.2.3.0"))
 	if err != nil {
-		return nil, err
+		return nil, account.VersionProfile{}, err
 	}
 	hosts := splitList(os.Getenv("AJS_API_HOSTS"))
 	if len(hosts) == 0 {
@@ -335,10 +353,36 @@ func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginServ
 		Logger:  logger,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("account login: %w", err)
+		return nil, account.VersionProfile{}, fmt.Errorf("account login: %w", err)
 	}
 	logger.Info("account_login_enabled", "hosts", len(hosts), "profile", profile.Name)
-	return service, nil
+	return service, profile, nil
+}
+
+// startNodeController builds the FV session factory and the node controller
+// that turns a successful login into one loopback gate per usable server.
+// Construction performs no I/O: gates bind only when SyncAccount runs after a
+// login. A nil panel (Resin disabled) still creates nodes; only the reconcile
+// step is skipped.
+func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile) (*runtime.NodeController, error) {
+	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
+	var reconciler runtime.Reconciler
+	if panel != nil {
+		reconciler = panel
+	}
+	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		Store:      st,
+		Logins:     logins,
+		Sessions:   factory,
+		Reconciler: reconciler,
+		Profile:    profile,
+		Logger:     logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("node controller: %w", err)
+	}
+	logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil)
+	return controller, nil
 }
 
 // loginProfile maps AJS_ACCOUNT_PROFILE to a version profile. Only the tested

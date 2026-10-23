@@ -71,6 +71,11 @@ type Config struct {
 	// /v1/accounts/{id}/actions/login then performs a vendor login instead
 	// of the store-only session refresh.
 	LoginService LoginService
+	// LoginHook runs after a successful vendor login, before the response is
+	// written. It is nil unless AJS_ACCOUNT_LOGIN=1 wired the node
+	// controller. An error is logged and the login response is unchanged, so
+	// a failed gate start never turns a successful login into an error.
+	LoginHook func(ctx context.Context, accountID string) error
 }
 
 // Server wires the store to an http.Handler.

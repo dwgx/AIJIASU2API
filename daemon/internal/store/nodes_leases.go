@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"ajsaccountd/internal/model"
@@ -23,6 +24,158 @@ func nextEgressIP(current string) string {
 		}
 	}
 	return egressPool[0]
+}
+
+// maxNodeRegionLen bounds the region label mirrored from a vendor server.
+const maxNodeRegionLen = 64
+
+// PutNode creates or updates one runtime node. The account must exist, its
+// label always follows the account, and a label may not be shared with another
+// node because it is also the Resin subscription tag.
+//
+// The probe- and lease-owned fields (InUse, SuccessRate, LastProbeAt) are
+// preserved from the existing row when the input leaves them zero, so a
+// runtime refresh cannot clobber a concurrent probe or lease write. A new node
+// is appended after the existing rows and gets LastProbeAt=now.
+func (s *Store) PutNode(node model.ProxyNode) (model.ProxyNode, error) {
+	id := strings.TrimSpace(node.ID)
+	if id == "" || id != node.ID || strings.ContainsAny(id, " \t\r\n") {
+		return model.ProxyNode{}, invalidf("node id %q is required and must not contain whitespace", node.ID)
+	}
+	label := strings.TrimSpace(node.Label)
+	if !validNodeLabel(label) {
+		return model.ProxyNode{}, invalidf("node %q label %q is not a lowercase Resin tag (a-z, 0-9, single hyphens)", id, node.Label)
+	}
+	region := strings.TrimSpace(node.Region)
+	if region == "" {
+		return model.ProxyNode{}, invalidf("node %q region is required", id)
+	}
+	if len(region) > maxNodeRegionLen {
+		return model.ProxyNode{}, invalidf("node %q region must be at most %d characters", id, maxNodeRegionLen)
+	}
+	if node.GatePort < 0 || node.GatePort > 65535 {
+		return model.ProxyNode{}, invalidf("node %q gate port must be between 0 and 65535", id)
+	}
+	if !validNodeState(node.State) {
+		return model.ProxyNode{}, invalidf("node %q state %q is not supported", id, node.State)
+	}
+	if node.InUse < 0 {
+		return model.ProxyNode{}, invalidf("node %q inUse must not be negative", id)
+	}
+	if node.Capacity < 0 {
+		return model.ProxyNode{}, invalidf("node %q capacity must not be negative", id)
+	}
+	serverID := strings.TrimSpace(node.ServerID)
+	if strings.ContainsAny(serverID, " \t\r\n") {
+		return model.ProxyNode{}, invalidf("node %q server id must not contain whitespace", id)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	accountIdx := s.accountIndexLocked(node.AccountID)
+	if accountIdx < 0 {
+		return model.ProxyNode{}, notFoundf("account %q not found", node.AccountID)
+	}
+	account := s.accounts[accountIdx]
+
+	idx := s.nodeIndexLocked(id)
+	if idx >= 0 && s.nodes[idx].AccountID != node.AccountID {
+		return model.ProxyNode{}, conflictf("node %q belongs to account %q", id, s.nodes[idx].AccountID)
+	}
+	for i, other := range s.nodes {
+		if i != idx && other.Label == label {
+			return model.ProxyNode{}, conflictf("node label %q is already used by %q", label, other.ID)
+		}
+	}
+
+	node.ID = id
+	node.AccountID = account.ID
+	node.AccountLabel = account.Label
+	node.Label = label
+	node.Region = region
+	node.ServerID = serverID
+	if idx >= 0 {
+		existing := s.nodes[idx]
+		if node.InUse == 0 {
+			node.InUse = existing.InUse
+		}
+		if node.SuccessRate == 0 {
+			node.SuccessRate = existing.SuccessRate
+		}
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = existing.LastProbeAt
+		}
+		s.nodes[idx] = node
+	} else {
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = iso(s.now())
+		}
+		s.nodes = append(s.nodes, node)
+	}
+	s.syncAccountCountsLocked()
+	return node, nil
+}
+
+// DeleteNode removes a node and every lease that pointed at it. It does not
+// touch the node's gate: the caller owns the listener and closes it first.
+func (s *Store) DeleteNode(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.nodeIndexLocked(id)
+	if idx < 0 {
+		return notFoundf("node %q not found", id)
+	}
+	node := s.nodes[idx]
+	s.nodes = append(s.nodes[:idx], s.nodes[idx+1:]...)
+	kept := s.leases[:0]
+	for _, lease := range s.leases {
+		if lease.NodeID == id {
+			continue
+		}
+		kept = append(kept, lease)
+	}
+	s.leases = kept
+	s.syncAccountCountsLocked()
+	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
+		fmt.Sprintf("Node removed · account %s", node.AccountID))
+	return nil
+}
+
+// validNodeLabel reports whether label is a lowercase Resin tag. It enforces
+// the same shape as publisher.ValidTag; the store keeps its own copy so the
+// state package stays free of the publisher's Resin dependency.
+func validNodeLabel(label string) bool {
+	if label == "" {
+		return false
+	}
+	partLen := 0
+	for i := range len(label) {
+		switch c := label[i]; {
+		case c == '-':
+			if partLen == 0 {
+				return false
+			}
+			partLen = 0
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			partLen++
+		default:
+			return false
+		}
+	}
+	return partLen > 0
+}
+
+// validNodeState reports whether state is part of the dashboard node
+// vocabulary.
+func validNodeState(state model.NodeState) bool {
+	switch state {
+	case model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown:
+		return true
+	default:
+		return false
+	}
 }
 
 // DrainNode moves a node to DRAINING. In-flight flows are left untouched; this

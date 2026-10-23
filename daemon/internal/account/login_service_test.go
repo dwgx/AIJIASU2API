@@ -122,6 +122,39 @@ func TestLoginServiceSuccess(t *testing.T) {
 	}
 }
 
+// TestLoginServiceRetainsServers proves the follow-up loginSync reaches the
+// retained result: the node controller reads Servers and the refreshed connect
+// password from there.
+func TestLoginServiceRetainsServers(t *testing.T) {
+	st := store.NewWithSealer(plainSealer{})
+	account := newLoginAccount(t, st)
+	server, _ := newFake(t, func(request capturedRequest) (int, string) {
+		if request.form.Get("_client_login") == "" {
+			return http.StatusOK, loginReply
+		}
+		return http.StatusOK, syncReply
+	})
+	service := newTestLoginService(t, st, server.URL, nil)
+
+	if _, err := service.Login(context.Background(), account.ID); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	result, ok := service.Result(account.ID)
+	if !ok {
+		t.Fatal("Result: no stored login result")
+	}
+	entry, ok := result.Servers["s1"]
+	if !ok || entry.ID != "s1" || !entry.OK() {
+		t.Fatalf("Servers = %+v, want the usable s1 entry", result.Servers)
+	}
+	if got := result.ConnectPassword.Reveal(); got != "cp-2" {
+		t.Fatalf("ConnectPassword = %q, want the loginSync refresh cp-2", got)
+	}
+	if result.AuthResult != "OK" || result.UserName != "user" {
+		t.Fatalf("result = (%q, %q), want the login identity", result.AuthResult, result.UserName)
+	}
+}
+
 func TestLoginServiceExpiredMembership(t *testing.T) {
 	const expiredReply = `{"Login":{"AuthResult":"OK","LoginToken":"tok-1|user","UserName":"user",` +
 		`"ConnectPassword":"cp-1","MembershipStatus":"basic","ExpireTime":1767225600000,"Expired":true}}`
@@ -365,7 +398,18 @@ func TestLoginServiceDeviceStable(t *testing.T) {
 		}
 		devices[run-1] = device
 	}
-	first, second := <-requests, <-requests
+	// Two logins, each followed by loginSync: keep the login requests only.
+	var loginRequests []capturedRequest
+	for range 4 {
+		request := <-requests
+		if request.form.Get("_client_login") == "" {
+			loginRequests = append(loginRequests, request)
+		}
+	}
+	if len(loginRequests) != 2 {
+		t.Fatalf("login requests = %d, want 2", len(loginRequests))
+	}
+	first, second := loginRequests[0], loginRequests[1]
 
 	uid := first.form.Get("_uid")
 	if len(uid) != 20 {

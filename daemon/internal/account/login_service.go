@@ -78,7 +78,7 @@ type LoginConfig struct {
 //
 // The account's device identity is loaded from the store and generated once on
 // the first login; later logins reuse it. LoginResult values are kept in memory
-// for the future session factory; they are never written to the store or a log.
+// for the node controller; they are never written to the store or a log.
 // A LoginService is safe for concurrent use. Close releases the idle HTTP
 // connections of the controls it keeps and is idempotent.
 type LoginService struct {
@@ -201,6 +201,22 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	if err != nil {
 		control.Close()
 		return model.Account{}, fmt.Errorf("account: record login for %q: %w", accountID, err)
+	}
+	// The Login response carries credentials only. Every shipping client
+	// follows it with loginSync to fetch the server list, and the node
+	// controller needs that list to open one gate per server. A sync failure
+	// does not fail the login: the account is already marked active and the
+	// next login retries the sync.
+	if synced, syncErr := control.LoginSync(ctx); syncErr != nil {
+		s.logger.Warn("account_login_sync_failed", "account", accountID, "error", syncErr)
+	} else {
+		if synced.UserName != "" {
+			result.UserName = synced.UserName
+		}
+		if synced.ConnectPassword != "" {
+			result.ConnectPassword = synced.ConnectPassword
+		}
+		result.Servers = synced.Servers
 	}
 	if !s.remember(accountID, control, result) {
 		control.Close()

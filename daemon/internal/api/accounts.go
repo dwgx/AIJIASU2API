@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -85,7 +86,20 @@ func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeLoginError(w, err)
 		return
 	}
+	s.runLoginHook(r.Context(), id)
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// runLoginHook hands a successful login to the node controller. The login is
+// already recorded and the response is already earned, so a hook failure is
+// logged and swallowed: it must not turn a successful login into an error.
+func (s *Server) runLoginHook(ctx context.Context, accountID string) {
+	if s.cfg.LoginHook == nil {
+		return
+	}
+	if err := s.cfg.LoginHook(ctx, accountID); err != nil {
+		s.logger.Warn("account_login_hook_error", "account", accountID, "error", err)
+	}
 }
 
 // writeLoginError maps the account login errors onto the dashboard contract.
