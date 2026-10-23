@@ -8,7 +8,7 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 48 tests.
+- Tests: Vitest + React Testing Library + jsdom, 50 tests.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. No git commits, no credentials, no vendor calls.
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 48 tests
+npm test           # Vitest, 50 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -169,7 +169,7 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
-`npm test` — exit 0, `Test Files 7 passed (7)`, `Tests 48 passed (48)`:
+`npm test` — exit 0, `Test Files 8 passed (8)`, `Tests 50 passed (50)`:
 
 | File | Tests |
 |---|---|
@@ -179,8 +179,13 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | `tests/interactions.test.tsx` | 9 |
 | `tests/live-mode.test.tsx` | 1 |
 | `tests/palette-focus.test.tsx` | 3 |
+| `tests/theme-contrast.test.ts` | 2 |
 | `tests/useAsync.test.tsx` | 13 |
-| **Total** | **48** |
+| **Total** | **50** |
+
+The contrast pass re-ran the computed-style audit on the built SPA at `/accounts` (1440×900, both
+themes): `.kbd` (`Ctrl K`) and the inactive `.segmented__item` measure 4.91:1 on `#f4f7f5` in light
+mode and 5.66:1 on `#0b0f0e` in dark mode; both were 3.96:1 in light before the token change.
 
 Docker image built on HMC (`docker build -t loveplus-dashboard:local .`) and smoke-tested without a
 host port mapping:
@@ -214,7 +219,7 @@ columns at 1440 and one 336 px column at 390.
 
 ## Tests and QA
 
-- 48 Vitest tests in 7 files (see [Verification](#verification-recorded-2026-10-23)).
+- 50 Vitest tests in 8 files (see [Verification](#verification-recorded-2026-10-23)).
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
@@ -223,6 +228,9 @@ columns at 1440 and one 336 px column at 390.
   selection plus the shared test-login action, the mobile grid and its CSS contract.
   `tests/live-mode.test.tsx` stubs `VITE_USE_MOCK=false` before importing the app, then asserts the
   live shell (`live API`, `v0.1.0 · live`) and the absence of the reset card.
+  `tests/theme-contrast.test.ts` parses the `:root` and `[data-theme="light"]` token blocks from
+  `app.css?raw` and asserts `--text`, `--text-2`, `--muted` and `--text-tertiary` stay at 4.5:1 or
+  better on `--bg`, `--surface`, `--elevated` and `--sidebar` in both themes.
 - Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
 
 | Viewport | Routes checked | `scrollWidth` | Console/page errors |
@@ -363,16 +371,28 @@ Dark-first tokens (light is a derived variant with the same roles):
 
 ```css
 --bg:#0B0F0E; --sidebar:#0E1412; --surface:#131A17; --elevated:#1A2420; --active:#22302A;
---text:#E6F1EC; --text-2:#A3B8AE; --muted:#6F857B; --text-tertiary:#829A90;
+--text:#E6F1EC; --text-2:#A3B8AE; --muted:#7A9086; --text-tertiary:#829A90;
 --border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.14);
 --mint:#5EEAD4; --mint-strong:#2DD4BF; --success:#34D399; --warning:#FBBF24;
 --danger:#FB7185; --info:#60A5FA;
 --radius-card:12px; --radius-control:8px; --sidebar-w:248px; --topbar-h:64px;
 ```
 
-`--muted` is reserved for icons, rules and non-text decoration. Small text uses
-`--text-tertiary` (`#829A90`) because `#6F857B` measures 4.48:1 on surface and 4.04:1 on elevated —
-below AA for normal text. This follows `docs/DESIGN-SYSTEM.md` §3.8 without editing that contract.
+`--muted` was raised from `#6F857B` to `#7A9086` (dark) and from `#6B7F75` to `#5C7066` (light) so
+the `Ctrl K` kbd hint and the inactive segmented label clear AA instead of measuring 3.96:1 on
+`--bg`. Both tokens now clear 4.5:1 on every non-selected surface:
+
+| `--muted` | `--bg` | `--surface` | `--elevated` | `--sidebar` |
+|---|---|---|---|---|
+| dark `#7A9086` | 5.66 | 5.19 | 4.68 | 5.46 |
+| light `#5C7066` | 4.91 | 5.30 | 5.30 | 4.58 |
+
+The AA correction block still routes small labels to `--text-tertiary` (`#829A90` / `#5B6F65`) to
+keep the `--text` > `--text-2` > `--text-tertiary` > `--muted` hierarchy. `tests/theme-contrast.test.ts`
+parses both token blocks and fails if any of the four text tokens drops below 4.5:1 on `--bg`,
+`--surface`, `--elevated` or `--sidebar` in either theme. The small-text rule from
+`docs/DESIGN-SYSTEM.md` §3.8 is unchanged; that document now records the raised `--muted` values
+alongside the brief's original hex.
 
 - Type: 13/18 UI, 11/14 uppercase labels with +0.06em, 20/26 page title, 28/32 metric, 12/18 mono.
 - Controls 32 px, table rows 36 px, content padding 24 px, card gap 16 px.
@@ -390,6 +410,10 @@ below AA for normal text. This follows `docs/DESIGN-SYSTEM.md` §3.8 without edi
 - Drawers/modals trap focus, close on Esc/backdrop, and restore the previous focus.
 - Tables use real `<table>` semantics with an accessible caption; status is dot **and** label.
 - Toasts announce through `aria-live="polite"`; destructive actions confirm in a modal.
+- Contrast: `--text`, `--text-2`, `--muted` and `--text-tertiary` each measure at least 4.5:1 on
+  `--bg`, `--surface`, `--elevated` and `--sidebar` in both themes. `tests/theme-contrast.test.ts`
+  recomputes WCAG relative luminance from `app.css?raw` and fails with the offending pair and ratio
+  on regression.
 - `prefers-reduced-motion` disables animation and transition duration.
 
 ## Docker

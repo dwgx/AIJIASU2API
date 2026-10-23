@@ -11,7 +11,7 @@
 
   --text: #e6f1ec;
   --text-2: #a3b8ae;
-  --muted: #6f857b;
+  --muted: #7a9086;
   --text-tertiary: #829a90;
   --bg-sunken: #070a09;
 
@@ -57,7 +57,7 @@
 
   --text: #10201a;
   --text-2: #44594f;
-  --muted: #6b7f75;
+  --muted: #5c7066;
   --text-tertiary: #5b6f65;
   --bg-sunken: #f7faf8;
 
@@ -2609,7 +2609,7 @@ svg {
 
 /* ==========================================================================
    AA correction: small text uses --text-tertiary (#829A90).
-   --text-muted (#6F857B) stays for icons, rules and non-text decoration only.
+   --muted (#7A9086) stays for icons, rules and non-text decoration only.
    ========================================================================== */
 .brand__sub,
 .workspace__meta,

@@ -74,13 +74,14 @@ one token serves canvas, card and menu.
 | `--text-primary` | `#E6F1EC` | body, cells, values | 15.29:1 | 13.79:1 |
 | `--text-secondary` | `#A3B8AE` | labels, helpers, captions | 8.44:1 | 7.61:1 |
 | `--text-tertiary` | `#829A90` | timestamps, units, meta | 5.87:1 | 5.29:1 |
-| `--text-muted` | `#6F857B` | **non-text only**: icons, axis lines, rules | 4.48:1 | 4.04:1 |
+| `--text-muted` | `#7A9086` | icons, axis lines, rules; `Ctrl K` hint and inactive segmented label | 5.19:1 | 4.68:1 |
 | `--text-disabled` | `#5E7067` | disabled labels (house bar 3:1) | 3.36:1 | 3.03:1 |
 | `--text-inverse` | `#0B0F0E` | ink on mint/success/warning fills | — | — |
 | `--text-on-mint` | `#04211C` | ink on `--mint` at ≤13 px | — | — |
 
-`--text-tertiary` is **not** the brief's `#6F857B` — see §3.8. `#6F857B` survives as
-`--text-muted` for non-text roles, where AA does not apply.
+`--text-tertiary` is **not** the brief's `#6F857B` — see §3.8. The brief hex became `--text-muted`
+and was later raised to `#7A9086` (light `#5C7066`) so the muted role clears
+4.5:1 on every non-selected surface.
 
 ### 3.3 Semantic
 
@@ -162,7 +163,7 @@ Every text token against all five surfaces:
 | `--text-primary` `#E6F1EC` | 16.68 | 16.11 | 15.29 | 13.79 | 11.91 |
 | `--text-secondary` `#A3B8AE` | 9.21 | 8.89 | 8.44 | 7.61 | 6.58 |
 | `--text-tertiary` `#829A90` | 6.40 | 6.19 | 5.87 | 5.29 | 4.58 |
-| `--text-muted` `#6F857B` | 4.88 | 4.72 | 4.48 | 4.04 | 3.49 |
+| `--text-muted` `#7A9086` | 5.66 | 5.46 | 5.19 | 4.68 | 4.04 |
 | `--text-disabled` `#5E7067` | 3.66 | 3.54 | 3.36 | 3.03 | 2.62 |
 
 Bars used: body text ≥4.5:1, large text ≥3:1, non-text UI ≥3:1, disabled ≥3:1 (house rule; WCAG
@@ -170,23 +171,29 @@ exempts inactive controls), focus indicator ≥3:1 against both the control and 
 
 - `--text-tertiary` clears 4.5:1 on every surface including `--bg-active` (4.58). It is the
   smallest text allowed on a selected row.
-- `--text-muted` clears 4.5:1 only on base/sidebar and 4.48 on surface — it is therefore
-  **not a text token**; icons and rules are the only consumers (3:1 bar, met everywhere except
-  `--bg-active`, where icons use `--text-secondary`).
+- `--text-muted` clears 4.5:1 on base/sidebar/surface/elevated (4.68 minimum on elevated) but only
+  4.04 on `--bg-active`, so it never carries text on a selected surface. The AA correction block
+  keeps small labels on `--text-tertiary`, preserving `--text` > `--text-2` > `--text-tertiary` >
+  `--text-muted`; the `Ctrl K` kbd hint and the inactive segmented label stay on `--muted` on
+  `--bg` (4.91:1 light, 5.66:1 dark). Icons and rules clear the 3:1 non-text bar on every surface.
 - `--mint` as a focus ring measures 11.95:1 against `--bg-surface` and 13.04:1 against
   `--bg-base`; as a fill it carries `--text-inverse` at 13.04:1. Both clear 1.4.11 and 1.4.3.
 - Every semantic hue as *text* on `--bg-surface` is ≥6.5:1, so status labels may be coloured.
 - `--text-disabled` clears 3:1 on base/sidebar/surface/elevated but only 2.62 on `--bg-active`;
   a disabled control therefore never sits inside a selected row — disable the row action instead.
 
+Light variant (`[data-theme="light"]`): `--text-muted` `#5C7066` measures 4.58 (sidebar), 4.91
+(base) and 5.30 (surface/elevated). `tests/theme-contrast.test.ts` enforces ≥4.5:1 for all four text
+tokens on the four non-selected surfaces in both themes.
+
 ### 3.8 Measured corrections to the brief
 
-Three values in the design brief do not survive measurement. Each is resolved here; the brief's
-hex is preserved as a token so nothing is silently discarded.
+Three values in the design brief do not survive measurement. Each is resolved here; the brief hexes
+and their measurements are recorded below so nothing is silently discarded.
 
 | Brief value | Measured | Resolution |
 |---|---|---|
-| tertiary text `#6F857B` | 4.48:1 on `--bg-surface`, 4.04:1 on `--bg-elevated` — **below AA 4.5** for normal text | keep `#6F857B` as `--text-muted` (non-text); add `--text-tertiary: #829A90` (5.87 / 5.29 / 4.58) for text |
+| tertiary text `#6F857B` | 4.48:1 on `--bg-surface`, 4.04:1 on `--bg-elevated` — **below AA 4.5** for normal text | kept as `--text-muted` (non-text), later raised to `#7A9086` dark / `#5C7066` light so muted clears AA on non-selected surfaces; `--text-tertiary: #829A90` (5.87 / 5.29 / 4.58) carries text |
 | `--bg-active #22302A` as a *border* colour | 1.28:1 vs surface — invisible as an edge | selection edges use `--border-mint` `#254C44`; `--bg-active` stays a fill |
 | disabled text implied by 3:1 | `#55665E` = 2.90:1 | `--text-disabled` lifted to `#5E7067` (3.36 on surface, 3.03 on elevated) |
 
@@ -843,7 +850,8 @@ Target: **WCAG 2.2 AA**, verified with axe-core in Vitest/RTL and one manual key
   ≥3:1, disabled ≥3:1. The §3.7 matrix is the audit; any new token must be added to it.
 - Colour is never the sole carrier: status = dot + label, validation = border + message + icon,
   sort = chevron + `aria-sort`, selection = fill + mint edge.
-- `--text-muted` is not a text token. If a designer asks for grey text, the answer is
+- `--text-muted` is not a body-text token — it paints small labels, hints and metadata (including
+  the `Ctrl K` hint and inactive segmented labels). If a designer asks for grey text, the answer is
   `--text-tertiary`.
 
 ### 14.3 Keyboard map (global)
@@ -942,8 +950,9 @@ and the "New" discovery purple — none of them have a job in an operator consol
    offset.
 7. One reduced-motion block at the root that zeroes durations and drops transforms.
 8. No second spacing scale, no second radius ladder, no raw `z-index`.
-9. Dark-only in v1. Do **not** ship a `prefers-color-scheme: light` branch; the tokens are one
-   palette and a half-built light theme is worse than none.
+9. Dark-first; the light variant is an explicit `[data-theme="light"]` override, not a
+   `prefers-color-scheme` branch. The tokens are one palette, and a half-built light theme is worse
+   than none.
 
 ## 17. Open items
 
@@ -951,11 +960,11 @@ and the "New" discovery purple — none of them have a job in an operator consol
 |---|---|---|
 | Chart library theming | Recharts cannot read CSS vars directly; the implementer must pass resolved hex from a token map | no — derive from §3.6 |
 | Virtualised table above 500 rows | v1 renders up to 500 rows unpaginated, then pages server-side | no — v1 tradeoff |
-| Light theme | out of scope for v1 | yes, later |
+| Light theme | **supported derived theme** (dark-first): `ThemeProvider` sets `[data-theme="light"]` and persists the choice under `localStorage` key `ajs.theme`; `tests/theme-contrast.test.ts` holds both themes to ≥4.5:1 | no — settled |
 | Density toggle (28/32/36 rows) | not in v1; the 36 px row is fixed | yes, later |
 | Per-page saved column widths | `localStorage`, key `ajs.table.<page>` | no |
 | Font subsetting | ship Inter + JetBrains Mono latin subset only (~120 KB total woff2) | no |
-| The brief's `#6F857B` tertiary | replaced for text by `#829A90` (§3.8) | **yes — confirm the substitution** |
+| The brief's `#6F857B` tertiary | replaced for text by `#829A90` (§3.8) | **yes — confirmed**; `--text-muted` later raised to `#7A9086` / `#5C7066` (§3.8) |
 
 Anything not listed here is settled by this document. If an implementation question is not
 answered by a row above, the answer is "use the token that already exists", not "add one".
