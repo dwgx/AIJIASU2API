@@ -29,14 +29,16 @@ As of 2026-10-23:
   live calls and holds no credentials.
 - `dashboard/` — operator console: React 19, Vite 6, TypeScript, 8 pages (Overview, Accounts,
   Nodes, Leases, Users, Requests, Logs, Settings) in the Obsidian Mint design. Mock data is the
-  default; a live mode against `ajs-accountd` is opt-in at build time. 28 Vitest tests.
+  default; a live mode against `ajs-accountd` is opt-in at build time. 41 Vitest tests.
   HMC serves the mock build on `18081` and the live build on `18082`.
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
   exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, and the
-  account-control plus FV session-factory seams. 153 Go test functions, mostly `httptest` fakes;
-  the tests use no Resin process, no vendor account and no network.
+  account-control plus FV session-factory seams. 200 Go test functions, mostly `httptest` fakes;
+  the tests use no Resin process, no vendor account and no network. The Linux 4.2.3.0 request
+  shape (B1), stable per-account device identity (B5) and binary-carrier mapping (C3) are covered
+  by offline conformance tests; live acceptance remains `[UNVERIFIED]`.
 - `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
   on `127.0.0.1:18081`, and Resin v1.3.0 behind the optional `resin` profile. Both images build
   from this tree; the stack does not include the gate or node supervision. See
@@ -124,7 +126,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (28 Vitest tests), `cd daemon && go test ./...` (needs
+Tests: `cd dashboard && npm test` (41 Vitest tests), `cd daemon && go test ./...` (needs
 `../emulator`), `cd emulator && go test ./...`. All three suites run offline. The last recorded
 dashboard and daemon runs are on HMC, alongside the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
