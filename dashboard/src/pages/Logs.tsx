@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { formatDateTime, formatRelative } from '../lib/format'
 import { SEVERITY } from '../lib/labels'
 import type { AuditEvent, Severity } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { useToast } from '../components/Toast'
@@ -22,7 +22,7 @@ import {
 } from '../components/primitives'
 
 export default function Logs() {
-  const audit = useAsync(() => api.listAudit(20), [])
+  const audit = useAsync(() => api.listAudit(20), [], { intervalMs: 15_000 })
   const { push } = useToast()
   const [severity, setSeverity] = useState<'all' | Severity>('all')
   const [actor, setActor] = useState('all')
@@ -93,6 +93,7 @@ export default function Logs() {
       <PageHeader
         title="Logs"
         subtitle="Control-plane audit trail. Secrets and request bodies are redacted by design."
+        refresh={summarizeRefresh([audit])}
         actions={
           <>
             <Button variant="ghost" icon={<Download size={14} />} onClick={exportLog}>

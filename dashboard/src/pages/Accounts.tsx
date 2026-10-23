@@ -6,7 +6,7 @@ import { api, isMockMode } from '../lib/api'
 import { formatBytes, formatDate, formatRelative } from '../lib/format'
 import { ACCOUNT_STATE } from '../lib/labels'
 import type { Account, AccountState, CreateAccountInput, Platform } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { ConfirmDialog, Drawer } from '../components/Overlay'
@@ -38,7 +38,7 @@ const EMPTY_FORM = {
 }
 
 export default function Accounts() {
-  const accounts = useAsync(() => api.listAccounts(), [])
+  const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const [params, setParams] = useSearchParams()
   const { push } = useToast()
   const [query, setQuery] = useState('')
@@ -290,6 +290,7 @@ export default function Accounts() {
       <PageHeader
         title="Accounts"
         subtitle="Vendor logins, concurrency ceilings and entitlement windows."
+        refresh={summarizeRefresh([accounts])}
       />
 
       <Card bodyClassName="card__body--flush">

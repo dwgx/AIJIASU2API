@@ -5,7 +5,7 @@ import { api } from '../lib/api'
 import { formatBytes, formatDateTime, formatNumber } from '../lib/format'
 import { statusTone } from '../lib/labels'
 import type { MutationLabInput, RequestLog } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { Drawer } from '../components/Overlay'
@@ -27,7 +27,7 @@ import {
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'CONNECT']
 
 export default function Requests() {
-  const requests = useAsync(() => api.listRequests(), [])
+  const requests = useAsync(() => api.listRequests(), [], { intervalMs: 10_000 })
   const nodes = useAsync(() => api.listNodes(), [])
   const { push } = useToast()
   const [query, setQuery] = useState('')
@@ -163,6 +163,7 @@ export default function Requests() {
       <PageHeader
         title="Requests"
         subtitle="Per-request telemetry from the gate and the mutation lab."
+        refresh={summarizeRefresh([requests])}
         actions={
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={requests.reload}>
             Refresh

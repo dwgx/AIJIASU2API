@@ -14,7 +14,7 @@ import { api } from '../lib/api'
 import { formatBytes, formatCompact, formatDateTime, formatNumber, formatRelative, formatTime } from '../lib/format'
 import { ACCOUNT_STATE, SEVERITY } from '../lib/labels'
 import type { MetricRange } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import {
   Badge,
   Card,
@@ -132,14 +132,15 @@ function OverviewSkeleton() {
 export default function Overview() {
   const [range, setRange] = useState<MetricRange>('24h')
   const navigate = useNavigate()
-  const metrics = useAsync(() => api.getMetrics(range), [range])
-  const accounts = useAsync(() => api.listAccounts(), [])
-  const nodes = useAsync(() => api.listNodes(), [])
-  const leases = useAsync(() => api.listLeases(), [])
-  const audit = useAsync(() => api.listAudit(4), [])
+  const metrics = useAsync(() => api.getMetrics(range), [range], { intervalMs: 10_000 })
+  const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
+  const nodes = useAsync(() => api.listNodes(), [], { intervalMs: 15_000 })
+  const leases = useAsync(() => api.listLeases(), [], { intervalMs: 15_000 })
+  const audit = useAsync(() => api.listAudit(4), [], { intervalMs: 15_000 })
 
-  const failure = [metrics, accounts, nodes, leases, audit].find((state) => state.status === 'error')
-  const loading = [metrics, accounts, nodes, leases, audit].some((state) => state.status === 'loading')
+  const states = [metrics, accounts, nodes, leases, audit]
+  const failure = states.find((state) => state.status === 'error')
+  const loading = states.some((state) => state.status === 'loading')
 
   const reloadAll = () => {
     metrics.reload()
@@ -166,6 +167,7 @@ export default function Overview() {
       <PageHeader
         title="Overview"
         subtitle="Fleet health, traffic and recent operator activity."
+        refresh={summarizeRefresh(states)}
         actions={
           <SegmentedControl
             label="Traffic range"

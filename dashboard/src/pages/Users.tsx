@@ -4,7 +4,7 @@ import type { FormEvent } from 'react'
 import { api } from '../lib/api'
 import { formatBytes, formatDate, formatRelative, percent } from '../lib/format'
 import type { ApiKey, CreateKeyResult, PanelUser } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { ConfirmDialog, Modal } from '../components/Overlay'
@@ -28,8 +28,8 @@ import {
 } from '../components/primitives'
 
 export default function Users() {
-  const users = useAsync(() => api.listUsers(), [])
-  const keys = useAsync(() => api.listKeys(), [])
+  const users = useAsync(() => api.listUsers(), [], { intervalMs: 15_000 })
+  const keys = useAsync(() => api.listKeys(), [], { intervalMs: 15_000 })
   const { push } = useToast()
   const [createOpen, setCreateOpen] = useState(false)
   const [createUserId, setCreateUserId] = useState('')
@@ -201,6 +201,7 @@ export default function Users() {
       <PageHeader
         title="Users"
         subtitle="Panel identities, API keys and source allowlists."
+        refresh={summarizeRefresh([users, keys])}
         actions={
           <Button
             variant="primary"

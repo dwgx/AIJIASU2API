@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { api } from '../lib/api'
 import { formatDate, formatNumber, formatTtl, proxyUrl } from '../lib/format'
 import type { Lease } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { ConfirmDialog } from '../components/Overlay'
@@ -20,7 +20,7 @@ import {
 } from '../components/primitives'
 
 export default function Leases() {
-  const leases = useAsync(() => api.listLeases(), [])
+  const leases = useAsync(() => api.listLeases(), [], { intervalMs: 15_000 })
   const { push } = useToast()
   const [releaseId, setReleaseId] = useState<string | null>(null)
   const [releasing, setReleasing] = useState(false)
@@ -154,6 +154,7 @@ export default function Leases() {
       <PageHeader
         title="Leases"
         subtitle={`${leases.data?.length ?? 0} active assignments · ${stickyCount} sticky on egress IP.`}
+        refresh={summarizeRefresh([leases])}
       />
 
       <div className="callout callout--info">

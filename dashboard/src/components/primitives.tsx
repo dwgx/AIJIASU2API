@@ -9,6 +9,8 @@ import type {
   TextareaHTMLAttributes,
 } from 'react'
 import type { Tone } from '../lib/types'
+import { formatTime } from '../lib/format'
+import type { RefreshSummary } from '../lib/useAsync'
 
 export type { Tone }
 
@@ -387,17 +389,30 @@ export function PageHeader({
   subtitle,
   actions,
   eyebrow,
+  refresh,
 }: {
   title: string
   subtitle?: string
   actions?: ReactNode
   eyebrow?: string
+  refresh?: RefreshSummary
 }) {
+  const staleLabel = refresh?.stale
+    ? `Showing last-good data — last updated ${
+        refresh.updatedAt ? formatTime(new Date(refresh.updatedAt).toISOString()) : 'unknown'
+      }${refresh.error ? ` · ${refresh.error}` : ''}`
+    : ''
+
   return (
     <header className="page-head">
       <div>
         {eyebrow ? <p className="page-head__eyebrow">{eyebrow}</p> : null}
-        <h1 className="page-head__title">{title}</h1>
+        <div className="page-head__title-row">
+          <h1 className="page-head__title">{title}</h1>
+          {refresh?.stale ? (
+            <span className="stale-dot" role="img" aria-label={staleLabel} title={staleLabel} />
+          ) : null}
+        </div>
         {subtitle ? <p className="page-head__subtitle">{subtitle}</p> : null}
       </div>
       {actions ? <div className="page-head__actions">{actions}</div> : null}

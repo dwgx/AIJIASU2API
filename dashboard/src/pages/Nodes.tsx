@@ -5,7 +5,7 @@ import { formatDateTime, formatRelative, percent } from '../lib/format'
 import { NODE_STATE } from '../lib/labels'
 import { regionName } from '../lib/mock'
 import type { NodeState, ProxyNode } from '../lib/types'
-import { useAsync } from '../lib/useAsync'
+import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { Drawer } from '../components/Overlay'
@@ -34,7 +34,7 @@ function latencyHistory(latency: number): number[] {
 }
 
 export default function Nodes() {
-  const nodes = useAsync(() => api.listNodes(), [])
+  const nodes = useAsync(() => api.listNodes(), [], { intervalMs: 15_000 })
   const { push } = useToast()
   const [query, setQuery] = useState('')
   const [regionFilter, setRegionFilter] = useState('all')
@@ -194,6 +194,7 @@ export default function Nodes() {
       <PageHeader
         title="Nodes"
         subtitle="One gate per (account, server). Drain before rotating a vendor session."
+        refresh={summarizeRefresh([nodes])}
         actions={
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={nodes.reload}>
             Refresh

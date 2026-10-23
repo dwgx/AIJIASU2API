@@ -1,6 +1,8 @@
 import { Menu, Plus, RefreshCw, Search } from 'lucide-react'
+import clsx from 'clsx'
 import { useNavigate } from 'react-router-dom'
 import { isMockMode } from '../lib/api'
+import { useRefreshActivity } from '../lib/useAsync'
 import { Button, IconButton } from './primitives'
 import { useToast } from './Toast'
 
@@ -15,6 +17,7 @@ export function Topbar({
 }) {
   const navigate = useNavigate()
   const { push } = useToast()
+  const refreshing = useRefreshActivity()
 
   const refresh = () => {
     window.dispatchEvent(new Event('ajs:refresh'))
@@ -23,6 +26,7 @@ export function Topbar({
 
   return (
     <header className="topbar">
+      <span className={clsx('topbar__progress', refreshing && 'is-active')} aria-hidden="true" />
       <div className="topbar__left">
         <IconButton
           label="Open navigation"

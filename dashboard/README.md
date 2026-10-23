@@ -8,7 +8,7 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 25 tests.
+- Tests: Vitest + React Testing Library + jsdom, 41 tests.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. No git commits, no credentials, no vendor calls.
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 25 tests
+npm test           # Vitest, 41 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -66,6 +66,40 @@ verified run used `http://127.0.0.1:18082,http://127.0.0.1:18081`).
 **Token:** `local-test-token` is a loopback placeholder, not a production secret. Every `VITE_*`
 value is readable in the shipped bundle, so production must terminate auth in a BFF or reverse
 proxy and keep `ajs-accountd` bound to `127.0.0.1`.
+
+## Polling and stale data
+
+Every list page refreshes itself on the interval from `docs/PAGES.md` §2.2. Polling lives in one
+place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`.
+
+| Surface | Interval | Notes |
+|---|---|---|
+| Overview metrics | 10 s | the same page polls accounts, nodes, leases and audit at 15 s |
+| Accounts / Nodes / Leases / Users | 15 s | Users polls both users and API keys |
+| Requests | 10 s | the table has no range switch in v1, so the short cadence is always on |
+| Logs (audit) | 15 s | SSE runtime logs remain `[PROPOSED]` |
+| Settings | — | manual only |
+
+Rules shared by every polling hook:
+
+- **Hidden tabs pause.** `visibilitychange` clears the timer while
+  `document.visibilityState === 'hidden'`; becoming visible refreshes once and restarts the cadence.
+- **No stacked requests.** A timer tick during an in-flight request is dropped. A manual refresh
+  during an in-flight request is queued behind it instead of opening a second request.
+- **Last good data survives a failed poll.** The table keeps its rows, `status` stays `ready`, and
+  the hook records `staleAt` (first failure) plus `error`; the next success clears both.
+- **No skeleton after the first load.** `status` only returns to `loading` when there is no data yet,
+  so a refresh never flashes the page skeleton.
+- **Manual refresh always works.** The topbar refresh button, the per-page refresh buttons and the
+  `ajs:refresh` window event call `reload()`, which restarts the timer.
+- **Subtle progress line.** A 1 px mint line under the topbar tracks the global in-flight count
+  (`useRefreshActivity`). It is absolutely positioned, so it never shifts layout.
+- **Stale marker.** While a page holds stale data, a 12 px warning dot sits next to the page title,
+  with the last-good timestamp and the error in its tooltip (`PageHeader`'s `refresh` prop).
+
+`tests/useAsync.test.tsx` drives the hook with Vitest fake timers — interval, hidden pause, visible
+resume, unmount, overlapping polls, failed poll, manual reload, dependency change and
+`enabled: false` — and asserts the stale dot renders only while stale.
 
 ## HMC layout
 
@@ -121,21 +155,21 @@ vendor login, SQLite store or gate is wired in yet, and no vendor request was ma
 Build and test were executed on the HMC build host, not on the Windows product tree:
 
 ```bash
-# copy only dashboard/ to HMC scratch
-tar -C D:/Project/LovePlusSpeedToProxy/dashboard -czf - . \
+# copy only dashboard/ source to the HMC scratch tree (node_modules stays on the host)
+cd dashboard && tar -czf - --exclude=./node_modules --exclude=./dist --exclude=./dist-mock . \
   | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/loveplus-dashboard && tar -xzf - -C /srv/dwgxhomecloud/scratch/loveplus-dashboard'
 ssh hmc 'cd /srv/dwgxhomecloud/scratch/loveplus-dashboard && npm install && npm run build && npm test'
 ```
 
-Both modes were built from the same source on HMC:
+Both modes were built from the same source on HMC (polling/stale slice included):
 
 | Build | Command | Result |
 |---|---|---|
-| Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.81s`, `dist-mock/assets/index-Dsrk9h6r.js` |
-| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.57s`, `dist/assets/index-DeEyHtXf.js` |
+| Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.52s`, `dist-mock/assets/index-BuWhRhC0.js` |
+| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.54s`, `dist/assets/index-CdKbee-7.js` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
-`npm test` — exit 0, `Test Files 4 passed (4)`, `Tests 25 passed (25)`:
+`npm test` — exit 0, `Test Files 6 passed (6)`, `Tests 41 passed (41)`:
 
 | File | Tests |
 |---|---|
@@ -143,7 +177,9 @@ Both modes were built from the same source on HMC:
 | `tests/app.test.tsx` | 6 |
 | `tests/interactions.test.tsx` | 9 |
 | `tests/live-mode.test.tsx` | 1 |
-| **Total** | **25** |
+| `tests/palette-focus.test.tsx` | 3 |
+| `tests/useAsync.test.tsx` | 13 |
+| **Total** | **41** |
 
 Docker image built on HMC (`docker build -t loveplus-dashboard:local .`) and smoke-tested without a
 host port mapping:
@@ -164,9 +200,17 @@ chromium --headless --no-sandbox --disable-gpu --hide-scrollbars \
   --screenshot=screenshots/overview-fit.png http://127.0.0.1:18081/
 ```
 
+After the polling slice the mock build was re-rendered from `dist-mock` on a scratch port
+(`vite preview --port 18085`): Overview keeps the same metric grid, chart and activity list, the DOM
+carries the idle `.topbar__progress` element, no `.stale-dot` appears while the mock data is fresh,
+and Accounts still renders its 6-row table.
+
 ## Tests and QA
 
-- 25 Vitest tests in 4 files (see [Verification](#verification-recorded-2026-10-23)).
+- 41 Vitest tests in 6 files (see [Verification](#verification-recorded-2026-10-23)).
+  `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
+  dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
+  in-flight activity flag behind the topbar progress line.
   `tests/live-mode.test.tsx` stubs `VITE_USE_MOCK=false` before importing the app, then asserts the
   live shell (`live API`, `v0.1.0 · live`) and the absence of the reset card.
 - Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
@@ -220,7 +264,7 @@ src/
     labels.ts             account/node/severity tone maps
     nav.tsx               navigation + command registry metadata
     theme.tsx             dark/light provider, localStorage persistence
-    useAsync.ts           load/error/ready state, global refresh event
+    useAsync.ts           load/poll/dedupe/stale state, global refresh event
     useFocusTrap.ts       Esc + Tab trap for palette/drawer/modal
   components/
     AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton
@@ -232,6 +276,8 @@ tests/
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
   api.test.ts             seed counts, metrics, CRUD, reset, settings persistence
   live-mode.test.tsx      live shell labels, no reset card when VITE_USE_MOCK=false
+  palette-focus.test.tsx  command palette focus trap and focus restoration
+  useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
 ```
 
 ## Data layer
@@ -342,8 +388,8 @@ and reports healthy on `/healthz`.
   role model or session; production needs a BFF or reverse proxy.
 - Mock state is in memory; refreshing the tab discards edits (Settings → Reset dataset does the same
   explicitly).
-- Log export is a placeholder; polling/SSE, pagination above 500 rows and server-side sorting are
-  not implemented in v1.
+- Log export is a placeholder; SSE, pagination above 500 rows and server-side sorting are not
+  implemented in v1. Polling is implemented (see [Polling and stale data](#polling-and-stale-data)).
 - `dashboard/docs/` is the AJS-20 design contract and is not edited by this slice.
 - No git commit or push was performed.
 

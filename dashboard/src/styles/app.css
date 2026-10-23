@@ -605,6 +605,31 @@ svg {
   display: none;
 }
 
+.topbar__progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--mint) 70%, transparent) 45%,
+    var(--mint) 50%,
+    color-mix(in srgb, var(--mint) 70%, transparent) 55%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms var(--ease-move);
+}
+
+.topbar__progress.is-active {
+  opacity: 1;
+  animation: progress-sweep 1.1s linear infinite;
+}
+
 .search-trigger {
   display: flex;
   width: 260px;
@@ -700,6 +725,22 @@ svg {
   font-weight: 600;
   line-height: 26px;
   letter-spacing: -0.015em;
+}
+
+.page-head__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stale-dot {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 16%, transparent);
+  animation: dot-pulse 2s ease-in-out infinite;
 }
 
 .page-head__subtitle {
@@ -3059,6 +3100,15 @@ svg {
   }
 }
 
+@keyframes progress-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -3067,5 +3117,11 @@ svg {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+
+  .topbar__progress.is-active {
+    animation: none;
+    background-image: none;
+    background-color: var(--mint);
   }
 }
