@@ -521,7 +521,10 @@ controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
     Logger:     logger,
 })
 // ...
-api.Config{LoginHook: controller.SyncAccount}
+api.Config{
+    LoginHook:         controller.SyncAccount,
+    AccountDeleteHook: controller.StopAccount, // gates close before the store cascade
+}
 defer controller.Stop(stopCtx)
 ```
 
@@ -549,9 +552,25 @@ and reconcile the panel, and a login refresh does not undo an operator drain.
 `Stop` closes every gate and session and reconciles once. Every mutation is
 serialized, so concurrent logins for one account share one gate.
 
-The API hook is best-effort: `LoginHook` runs after the login is recorded, and
-a hook error is logged as `account_login_hook_error` without changing the 200
-response.
+`StopAccount` is the account-delete seam. It closes every gate and session the
+controller runs for one account, removes them from the running set, leaves the
+other accounts untouched and reconciles the panel once. It deliberately does
+not touch store nodes: `store.DeleteAccount` owns that cascade, and the gates
+must be gone before the rows are. It is idempotent — with no running gate for
+the account it returns `nil` without reconciling — and it aggregates close and
+reconcile failures; a failed close still drops the gate from the running set,
+so a retry cannot double-close it.
+
+The two API hooks have opposite failure policies. `LoginHook` is best-effort:
+it runs after the login is recorded, and a hook error is logged as
+`account_login_hook_error` without changing the 200 response.
+`AccountDeleteHook` is a gate: `DELETE /v1/accounts/{id}` calls it before
+`store.DeleteAccount`, and an error is logged as `account_delete_hook_error`
+and answers 500 `INTERNAL` without deleting anything, so a deleted account
+cannot leave a listening gate or a live FV session behind. A missing account
+answers 404 without calling the hook. Both hooks are nil unless
+`AJS_ACCOUNT_LOGIN=1` wired the controller, so the default build keeps the
+store-only behaviour.
 
 - Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
   skipping ports already used by a running gate or a store node. Each gate
@@ -572,11 +591,16 @@ with the session's egress IP, a SOCKS5 CONNECT relayed through the fake session,
 a second sync reusing both ports without new sessions, server removal closing
 its gate and deleting its node, drain rejecting a flow with `0x05` and undrain
 accepting again, an operator drain surviving a refresh, stop closing every gate
-and session, partial failure leaving the working node LIVE and the failed node
-DOWN, no-node-started returning an aggregate error that names both nodes, no
-usable server, missing login/device preconditions, four concurrent syncs
-sharing one gate, and an injected gate factory. `TestAccountLoginHook` pins the
-API seam.
+and session, stop-account closing only one account's gates while the other
+account keeps serving, reconciling once and staying idempotent (a repeat and an
+unknown account do not reconcile), the aggregated close+reconcile error with a
+failed close still dropping the gate, partial failure leaving the working node
+LIVE and the failed node DOWN, no-node-started returning an aggregate error that
+names both nodes, no usable server, missing login/device preconditions, four
+concurrent syncs sharing one gate, an injected gate factory, and an end-to-end
+`DELETE /v1/accounts/{id}` through `api.New` with the real controller that
+proves the gates are refused and the store cascade then removes the nodes.
+`TestAccountLoginHook` and `TestAccountDeleteHook` pin the API seams.
 
 ## Supervisor (AJS-43)
 
@@ -946,7 +970,7 @@ All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
 | GET | `/v1/accounts/{id}` | single account |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
-| DELETE | `/v1/accounts/{id}` | remove account, its nodes, its leases and its sealed secret; keep audit |
+| DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove account, its nodes, its leases and its sealed secret; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
@@ -1828,6 +1852,81 @@ after a successful login and its error is logged without changing the 200
 response. No live vendor login, FV authentication or Resin write was performed;
 live acceptance remains `[UNVERIFIED]`.
 
+### Delete gate (AJS-65)
+
+The same fresh-scratch workflow; no live vendor host or Resin instance was
+contacted:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon emulator | ssh hmc \
+  'rm -rf /srv/dwgxhomecloud/scratch/ajs-65-deletegate \
+   && mkdir -p /srv/dwgxhomecloud/scratch/ajs-65-deletegate \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-65-deletegate'
+```
+
+On HMC (`go1.25.14 linux/amd64`; `GOTOOLCHAIN=auto` selects the cached
+`go1.26.0` toolchain the module requires):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-65-deletegate/daemon
+$ go test -race -count=1 ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.098s
+ok  	ajsaccountd/internal/api	1.190s
+ok  	ajsaccountd/internal/gate	1.554s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.048s
+ok  	ajsaccountd/internal/resin	1.337s
+ok  	ajsaccountd/internal/runtime	1.282s
+ok  	ajsaccountd/internal/secret	1.014s
+ok  	ajsaccountd/internal/store	1.485s
+ok  	ajsaccountd/internal/supervisor	7.705s
+$ go build ./... && echo BUILD_OK && go vet ./... && echo VET_OK && test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
+BUILD_OK
+VET_OK
+GOFMT_CLEAN
+```
+
+The stop/delete evidence (real `gate.NewServer` on `127.0.0.1:13000`, fake
+session opener, fake reconciler, real controller behind `api.New`):
+
+```console
+$ go test -race -count=1 -v -run 'TestNodeControllerStopAccount|TestAccountDeleteStopsGatesBeforeStoreCascade' ./internal/runtime
+=== RUN   TestNodeControllerStopAccount
+    nodes_test.go:659: stop-account acc-01: ports 13000/13001 refused, sessions closed, acc-02:t1 kept port 13002, reconciles=3
+--- PASS: TestNodeControllerStopAccount (0.00s)
+=== RUN   TestNodeControllerStopAccountAggregatesErrors
+    nodes_test.go:732: stop-account errors: node acc-01:s1: close gate: gate close failed
+        runtime: reconcile after node sync: resin unavailable
+--- PASS: TestNodeControllerStopAccountAggregatesErrors (0.00s)
+=== RUN   TestAccountDeleteStopsGatesBeforeStoreCascade
+    nodes_test.go:819: delete acc-01: gates 13000/13001 refused, sessions closed, nodes removed, reconciles=2
+--- PASS: TestAccountDeleteStopsGatesBeforeStoreCascade (0.00s)
+PASS
+ok  	ajsaccountd/internal/runtime	1.019s
+$ go test -race -count=1 -v -run 'TestAccountDeleteHook' ./internal/api
+=== RUN   TestAccountDeleteHook
+=== RUN   TestAccountDeleteHook/hook_error_aborts_the_delete
+=== RUN   TestAccountDeleteHook/success_deletes_after_the_hook
+=== RUN   TestAccountDeleteHook/nil_hook_keeps_the_store-only_delete
+=== RUN   TestAccountDeleteHook/missing_account_skips_the_hook
+--- PASS: TestAccountDeleteHook (0.01s)
+    --- PASS: TestAccountDeleteHook/hook_error_aborts_the_delete (0.00s)
+    --- PASS: TestAccountDeleteHook/success_deletes_after_the_hook (0.00s)
+    --- PASS: TestAccountDeleteHook/nil_hook_keeps_the_store-only_delete (0.00s)
+    --- PASS: TestAccountDeleteHook/missing_account_skips_the_hook (0.00s)
+PASS
+ok  	ajsaccountd/internal/api	1.016s
+```
+
+`TestAccountDeleteHook` proves the hook runs while the account still exists,
+that a hook error answers 500 `INTERNAL` and leaves the account and its nodes in
+the store, that a successful hook is followed by the store cascade, that a nil
+hook keeps the old behaviour, and that a missing account answers 404 without
+calling the hook. No live vendor login, FV authentication or Resin write was
+performed; live acceptance remains `[UNVERIFIED]`.
+
 ## Limitations / next
 
 - State survives a restart through the JSON snapshot, but there is still no
@@ -1843,11 +1942,13 @@ live acceptance remains `[UNVERIFIED]`.
   through Resin when a panel is configured; account, user, key and settings
   mutations remain store-only, and `/v1/reconcile` is the only path that
   re-renders the whole subscription on demand.
-- Deleting or logging out an account does not close its controller gates:
-  `DELETE /v1/accounts/{id}` and `POST .../actions/logout` only change the
-  store, and the controller's gates are released on the next `Stop`. The
-  controller's own `DrainNode`/`UndrainNode` are not wired to the HTTP drain
-  path yet.
+- Deleting an account now stops its controller gates first: `DELETE
+  /v1/accounts/{id}` runs `AccountDeleteHook` (`NodeController.StopAccount`)
+  before the store cascade and aborts with 500 if the stop fails. Logout still
+  only changes the store: `POST .../actions/logout` pauses the account and
+  drains its nodes, so its gates and FV sessions stay open until the next
+  `Stop` or delete. The controller's own `DrainNode`/`UndrainNode` are not
+  wired to the HTTP drain path yet.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
   `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.

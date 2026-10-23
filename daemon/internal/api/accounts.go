@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"ajsaccountd/internal/account"
@@ -63,11 +64,35 @@ func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteAccount(pathParam(r, "id")); err != nil {
+	id := pathParam(r, "id")
+	if _, ok := s.store.Account(id); !ok {
+		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("account %q not found", id))
+		return
+	}
+	if err := s.runAccountDeleteHook(r.Context(), id); err != nil {
+		// A hook failure is a runtime failure, not a store contract error, so
+		// it answers 500 instead of the mapped store status. The detail stays
+		// in the log; the account and its nodes are untouched.
+		s.logger.Error("account_delete_hook_error", "account", id, "error", err)
+		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
+		return
+	}
+	if err := s.store.DeleteAccount(id); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// runAccountDeleteHook stops the account's runtime gates before the store
+// cascade removes its nodes. Unlike the login hook its error is returned: the
+// caller aborts the delete instead of orphaning a listening gate. A nil hook
+// keeps the store-only behaviour of a daemon without AJS_ACCOUNT_LOGIN=1.
+func (s *Server) runAccountDeleteHook(ctx context.Context, accountID string) error {
+	if s.cfg.AccountDeleteHook == nil {
+		return nil
+	}
+	return s.cfg.AccountDeleteHook(ctx, accountID)
 }
 
 func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {

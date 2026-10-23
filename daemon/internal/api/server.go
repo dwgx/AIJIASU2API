@@ -76,6 +76,12 @@ type Config struct {
 	// controller. An error is logged and the login response is unchanged, so
 	// a failed gate start never turns a successful login into an error.
 	LoginHook func(ctx context.Context, accountID string) error
+	// AccountDeleteHook runs before DELETE /v1/accounts/{id} removes the
+	// account from the store. It is nil unless AJS_ACCOUNT_LOGIN=1 wired the
+	// node controller, which uses it to stop the account's gates and FV
+	// sessions. Unlike LoginHook its error aborts the delete: removing the
+	// store nodes while their gates stay open is the B0 gap this seam closes.
+	AccountDeleteHook func(ctx context.Context, accountID string) error
 }
 
 // Server wires the store to an http.Handler.

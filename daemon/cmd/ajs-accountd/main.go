@@ -123,6 +123,7 @@ func run() error {
 
 	var loginService api.LoginService
 	var loginHook func(context.Context, string) error
+	var accountDeleteHook func(context.Context, string) error
 	if service, profile, err := startAccountLogin(st, logger); err != nil {
 		return err
 	} else if service != nil {
@@ -142,15 +143,17 @@ func run() error {
 			}
 		}()
 		loginHook = controller.SyncAccount
+		accountDeleteHook = controller.StopAccount
 	}
 
 	server := api.New(api.Config{
-		AdminToken:    *token,
-		AllowInsecure: *insecure,
-		CORSOrigins:   splitList(*corsOrigins),
-		Panel:         panel,
-		LoginService:  loginService,
-		LoginHook:     loginHook,
+		AdminToken:        *token,
+		AllowInsecure:     *insecure,
+		CORSOrigins:       splitList(*corsOrigins),
+		Panel:             panel,
+		LoginService:      loginService,
+		LoginHook:         loginHook,
+		AccountDeleteHook: accountDeleteHook,
 	}, st, logger)
 
 	httpServer := &http.Server{

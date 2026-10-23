@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"ajsaccountd/internal/account"
+	"ajsaccountd/internal/api"
 	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/runtime"
@@ -566,6 +569,257 @@ func TestNodeControllerStopClosesGates(t *testing.T) {
 	}
 }
 
+func TestNodeControllerStopAccount(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	first := newNodeTestAccount(t, st, "node-stop-account-a")
+	second := newNodeTestAccount(t, st, "node-stop-account-b")
+	logins := newFakeLoginResults()
+	logins.set(first.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers: map[string]apifacade.Server{
+			"s1": testServer("s1"),
+			"s2": testServer("s2"),
+		},
+	})
+	logins.set(second.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers:         map[string]apifacade.Server{"t1": testServer("t1")},
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeController(t, st, logins, opener, rec)
+
+	for _, id := range []string{first.ID, second.ID} {
+		if err := controller.SyncAccount(context.Background(), id); err != nil {
+			t.Fatalf("SyncAccount(%s): %v", id, err)
+		}
+	}
+	firstNode := nodeByServer(t, st, first.ID, "s1")
+	secondNode := nodeByServer(t, st, first.ID, "s2")
+	keptNode := nodeByServer(t, st, second.ID, "t1")
+	if got := rec.callCount(); got != 2 {
+		t.Fatalf("reconciles after the syncs = %d, want 2", got)
+	}
+
+	if err := controller.StopAccount(context.Background(), first.ID); err != nil {
+		t.Fatalf("StopAccount: %v", err)
+	}
+	if got := rec.callCount(); got != 3 {
+		t.Fatalf("reconciles after StopAccount = %d, want 3", got)
+	}
+	for _, port := range []int{firstNode.GatePort, secondNode.GatePort} {
+		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
+			_ = conn.Close()
+			t.Fatalf("stopped account's gate %d still accepts connections", port)
+		}
+	}
+	for _, serverID := range []string{"s1", "s2"} {
+		if session := opener.session(serverID); session == nil || !session.isClosed() {
+			t.Fatalf("%s session is not closed after StopAccount", serverID)
+		}
+	}
+	if session := opener.session("t1"); session == nil || session.isClosed() {
+		t.Fatal("StopAccount closed the other account's session")
+	}
+	code, conn := socks5Connect(t, keptNode.GatePort)
+	if code != 0x00 {
+		t.Fatalf("other account's gate reply = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+
+	// StopAccount stops gates, not store nodes: the store cascade is the
+	// caller's job.
+	for _, node := range []model.ProxyNode{firstNode, secondNode, keptNode} {
+		if _, ok := st.Node(node.ID); !ok {
+			t.Fatalf("StopAccount deleted store node %s", node.ID)
+		}
+	}
+
+	// Idempotent: a second call and an unknown account change nothing and do
+	// not reconcile again.
+	if err := controller.StopAccount(context.Background(), first.ID); err != nil {
+		t.Fatalf("second StopAccount: %v", err)
+	}
+	if err := controller.StopAccount(context.Background(), "acc-does-not-exist"); err != nil {
+		t.Fatalf("StopAccount for an unknown account: %v", err)
+	}
+	if got := rec.callCount(); got != 3 {
+		t.Fatalf("reconciles after idempotent calls = %d, want 3", got)
+	}
+	code, conn = socks5Connect(t, keptNode.GatePort)
+	if code != 0x00 {
+		t.Fatalf("kept gate reply after idempotent calls = 0x%02x, want success", code)
+	}
+	echoOnce(t, conn)
+	t.Logf("stop-account %s: ports %d/%d refused, sessions closed, %s kept port %d, reconciles=%d",
+		first.ID, firstNode.GatePort, secondNode.GatePort, keptNode.ID, keptNode.GatePort, rec.callCount())
+}
+
+func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-stop-account-errors")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers: map[string]apifacade.Server{
+			"s1": testServer("s1"),
+			"s2": testServer("s2"),
+		},
+	})
+	closeErr := errors.New("gate close failed")
+	reconcileErr := errors.New("resin unavailable")
+	opener := newFakeSessionOpener()
+	var built int
+	gates := make([]*fakeGate, 0, 2)
+	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		Store:      st,
+		Logins:     logins,
+		Sessions:   opener,
+		Reconciler: &fakeReconciler{err: reconcileErr},
+		Gates: func(_ gate.Config, _ gate.Session) (runtime.Gate, error) {
+			built++
+			g := &fakeGate{}
+			if built == 1 {
+				g.closeErr = closeErr
+			}
+			gates = append(gates, g)
+			return g, nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewNodeController: %v", err)
+	}
+	t.Cleanup(func() { _ = controller.Stop(context.Background()) })
+
+	// The sync succeeds at the gate level but reports the reconcile failure.
+	if err := controller.SyncAccount(context.Background(), acct.ID); !errors.Is(err, reconcileErr) {
+		t.Fatalf("SyncAccount error = %v, want the reconcile failure", err)
+	}
+	if built != 2 || len(gates) != 2 {
+		t.Fatalf("gates built = %d/%d, want 2", built, len(gates))
+	}
+
+	err = controller.StopAccount(context.Background(), acct.ID)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("StopAccount error = %v, want the close failure", err)
+	}
+	if !errors.Is(err, reconcileErr) {
+		t.Fatalf("StopAccount error = %v, want the reconcile failure", err)
+	}
+	stopErr := err
+	for i, g := range gates {
+		if !g.closed.Load() {
+			t.Fatalf("gate %d was not closed despite the error", i)
+		}
+	}
+	for _, serverID := range []string{"s1", "s2"} {
+		if session := opener.session(serverID); session == nil || !session.isClosed() {
+			t.Fatalf("%s session is not closed despite the gate error", serverID)
+		}
+	}
+	// A failed close still drops the gate, so a retry is a clean no-op.
+	if err := controller.StopAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("second StopAccount = %v, want nil", err)
+	}
+	t.Logf("stop-account errors: %v", stopErr)
+}
+
+// TestAccountDeleteStopsGatesBeforeStoreCascade pins the B0 delete seam end to
+// end: DELETE runs the controller's StopAccount before store.DeleteAccount, so
+// the gates and sessions are closed and the store cascade then removes the
+// account and its nodes.
+func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
+	requirePort13000(t)
+	st := newNodeTestStore(t)
+	acct := newNodeTestAccount(t, st, "node-delete")
+	logins := newFakeLoginResults()
+	logins.set(acct.ID, account.LoginResult{
+		AuthResult:      "OK",
+		UserName:        "vendor-user",
+		ConnectPassword: account.Secret(testConnectPassword),
+		Servers: map[string]apifacade.Server{
+			"s1": testServer("s1"),
+			"s2": testServer("s2"),
+		},
+	})
+	opener := newFakeSessionOpener()
+	rec := &fakeReconciler{}
+	controller := newNodeController(t, st, logins, opener, rec)
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+	first := nodeByServer(t, st, acct.ID, "s1")
+	second := nodeByServer(t, st, acct.ID, "s2")
+
+	ts := httptest.NewServer(api.New(api.Config{
+		AllowInsecure:     true,
+		AccountDeleteHook: controller.StopAccount,
+	}, st, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(ts.Close)
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/v1/accounts/"+acct.ID, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", resp.StatusCode)
+	}
+
+	if got := rec.callCount(); got != 2 {
+		t.Fatalf("reconciles = %d, want 2 (sync + delete stop)", got)
+	}
+	for _, port := range []int{first.GatePort, second.GatePort} {
+		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond); err == nil {
+			_ = conn.Close()
+			t.Fatalf("deleted account's gate %d still accepts connections", port)
+		}
+	}
+	for _, serverID := range []string{"s1", "s2"} {
+		if session := opener.session(serverID); session == nil || !session.isClosed() {
+			t.Fatalf("%s session is not closed after DELETE", serverID)
+		}
+	}
+	if _, ok := st.Account(acct.ID); ok {
+		t.Fatal("DELETE left the account in the store")
+	}
+	if nodes := st.Nodes(); len(nodes) != 0 {
+		t.Fatalf("DELETE left %d nodes in the store", len(nodes))
+	}
+
+	// A second delete of the same id is a plain 404 and must not run the hook
+	// again.
+	req, err = http.NewRequest(http.MethodDelete, ts.URL+"/v1/accounts/"+acct.ID, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err = ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("second DELETE: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second DELETE status = %d, want 404", resp.StatusCode)
+	}
+	if got := rec.callCount(); got != 2 {
+		t.Fatalf("reconciles after the 404 = %d, want 2", got)
+	}
+	t.Logf("delete %s: gates %d/%d refused, sessions closed, nodes removed, reconciles=%d",
+		acct.ID, first.GatePort, second.GatePort, rec.callCount())
+}
+
 func TestNodeControllerPerServerFailure(t *testing.T) {
 	requirePort13000(t)
 	st := newNodeTestStore(t)
@@ -763,14 +1017,18 @@ type fakeGate struct {
 	started  atomic.Bool
 	draining atomic.Bool
 	closed   atomic.Bool
+	closeErr error
 	addr     net.Addr
 }
 
 func (g *fakeGate) Start(context.Context) error { g.started.Store(true); return nil }
 func (g *fakeGate) Drain(context.Context) error { g.draining.Store(true); return nil }
 func (g *fakeGate) Undrain() error              { g.draining.Store(false); return nil }
-func (g *fakeGate) Close() error                { g.closed.Store(true); return nil }
-func (g *fakeGate) Addr() net.Addr              { return g.addr }
+func (g *fakeGate) Close() error {
+	g.closed.Store(true)
+	return g.closeErr
+}
+func (g *fakeGate) Addr() net.Addr { return g.addr }
 
 func TestNodeControllerGateFactory(t *testing.T) {
 	st := newNodeTestStore(t)

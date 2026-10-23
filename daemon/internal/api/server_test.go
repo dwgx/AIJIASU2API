@@ -506,6 +506,114 @@ func TestAccountLoginHookSkippedOnFailure(t *testing.T) {
 	}
 }
 
+func TestAccountDeleteHook(t *testing.T) {
+	t.Run("hook error aborts the delete", func(t *testing.T) {
+		var logs bytes.Buffer
+		st := store.New()
+		var hookID string
+		var hookSawAccount bool
+		hookErr := errors.New("stop gates failed")
+		server := New(Config{
+			AdminToken: testToken,
+			AccountDeleteHook: func(_ context.Context, accountID string) error {
+				hookID = accountID
+				_, hookSawAccount = st.Account(accountID)
+				return hookErr
+			},
+		}, st, slog.New(slog.NewTextHandler(&logs, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		nodesBefore := len(st.Nodes())
+		resp, body := apiCall(t, ts, http.MethodDelete, "/v1/accounts/acc-01", nil)
+		requireStatus(t, resp, http.StatusInternalServerError)
+		requireErrorCode(t, body, CodeInternal)
+		if hookID != "acc-01" {
+			t.Fatalf("hook account = %q, want acc-01", hookID)
+		}
+		if !hookSawAccount {
+			t.Fatal("hook ran after the account was already deleted")
+		}
+		if _, ok := st.Account("acc-01"); !ok {
+			t.Fatal("a failed hook still deleted the account")
+		}
+		if got := len(st.Nodes()); got != nodesBefore {
+			t.Fatalf("nodes after the failed delete = %d, want %d", got, nodesBefore)
+		}
+		if _, ok := st.Node("node-01"); !ok {
+			t.Fatal("a failed hook still removed the account's nodes")
+		}
+		if !strings.Contains(logs.String(), "account_delete_hook_error") {
+			t.Fatalf("logs = %q, want the hook failure", logs.String())
+		}
+	})
+
+	t.Run("success deletes after the hook", func(t *testing.T) {
+		st := store.New()
+		var hookID string
+		var hookSawAccount bool
+		server := New(Config{
+			AdminToken: testToken,
+			AccountDeleteHook: func(_ context.Context, accountID string) error {
+				hookID = accountID
+				_, hookSawAccount = st.Account(accountID)
+				return nil
+			},
+		}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodDelete, "/v1/accounts/acc-01", nil)
+		requireStatus(t, resp, http.StatusNoContent)
+		if len(body) != 0 {
+			t.Fatalf("DELETE body = %q, want empty", body)
+		}
+		if hookID != "acc-01" || !hookSawAccount {
+			t.Fatalf("hook = %q sawAccount=%v, want acc-01/true", hookID, hookSawAccount)
+		}
+		if _, ok := st.Account("acc-01"); ok {
+			t.Fatal("account survived a successful delete")
+		}
+		for _, node := range st.Nodes() {
+			if node.AccountID == "acc-01" {
+				t.Fatalf("node %s survived the account delete", node.ID)
+			}
+		}
+	})
+
+	t.Run("nil hook keeps the store-only delete", func(t *testing.T) {
+		ts, st := newTestServer(t)
+		resp, body := apiCall(t, ts, http.MethodDelete, "/v1/accounts/acc-01", nil)
+		requireStatus(t, resp, http.StatusNoContent)
+		if len(body) != 0 {
+			t.Fatalf("DELETE body = %q, want empty", body)
+		}
+		if _, ok := st.Account("acc-01"); ok {
+			t.Fatal("account survived the store-only delete")
+		}
+	})
+
+	t.Run("missing account skips the hook", func(t *testing.T) {
+		called := false
+		server := New(Config{
+			AdminToken: testToken,
+			AccountDeleteHook: func(context.Context, string) error {
+				called = true
+				return nil
+			},
+		}, store.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodDelete, "/v1/accounts/acc-missing", nil)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+		if called {
+			t.Fatal("hook ran for a missing account")
+		}
+	})
+}
+
 func TestNodeDrainUndrainProbe(t *testing.T) {
 	ts, _ := newTestServer(t)
 
