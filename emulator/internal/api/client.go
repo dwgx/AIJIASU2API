@@ -34,6 +34,12 @@ type Client struct {
 	UserAgent string
 	Now       func() time.Time
 
+	// NoSign omits the X-Timestamp and X-Sig headers. Every shipping client
+	// signs, but the Linux 4.2.3.0 profile's secret is [UNKNOWN], so a caller
+	// may choose to send that profile's requests unsigned instead. The zero
+	// value signs.
+	NoSign bool
+
 	// Session state filled by Login / LoginSync.
 	LoginToken      string
 	UserName        string
@@ -145,8 +151,11 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 		params["username"] = c.authUserName()
 	}
 	body := BuildQuery(params)
-	timestamp := strconv.FormatInt(c.Now().UnixMilli(), 10)
-	sig := Sign(c.Secret, body, timestamp)
+	var timestamp, sig string
+	if !c.NoSign {
+		timestamp = strconv.FormatInt(c.Now().UnixMilli(), 10)
+		sig = Sign(c.Secret, body, timestamp)
+	}
 
 	var lastErr error
 	for _, host := range c.Hosts {
@@ -158,8 +167,10 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Accept-Encoding", "gzip")
 		req.Header.Set("User-Agent", c.UserAgent)
-		req.Header.Set("X-Timestamp", timestamp)
-		req.Header.Set("X-Sig", sig)
+		if !c.NoSign {
+			req.Header.Set("X-Timestamp", timestamp)
+			req.Header.Set("X-Sig", sig)
+		}
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

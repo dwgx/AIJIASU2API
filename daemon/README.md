@@ -1,0 +1,874 @@
+# ajs-accountd (skeleton)
+
+In-memory Go daemon that serves the JSON contract the dashboard's
+live client expects (standard library plus the in-repo `ajsproxy` module). The
+Resin admin client, the publisher, the
+startup/topology/reconcile wiring and the runtime mutations are in place: when
+`AJS_RESIN_ADMIN_TOKEN` is set the daemon renders the store's `LIVE` nodes into
+the `ajs-live` local subscription before it starts listening,
+`/v1/topology` / `/v1/reconcile` report the Resin view, and lease
+rotate/release plus node drain/undrain write through Resin. Without the token it
+keeps the store-derived view and the in-memory mutation behavior, and logs
+`resin_disabled`. With `AJS_MASTER_KEY` set, created account passwords are
+sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
+validated and discarded. There is still no live vendor login, SQLite or gate.
+
+- Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
+- Listen: `127.0.0.1:2261` by default
+- State: process memory, reseeded from the dashboard mock on every start, plus
+  sealed account secrets in `$AJS_STATE_DIR/secrets.json` when
+  `AJS_MASTER_KEY` is set
+- Wire contract: `dashboard/src/lib/types.ts` field names and
+  `dashboard/src/lib/api.ts` paths/methods
+
+## Layout
+
+```
+go.mod
+cmd/ajs-accountd/main.go     flags/env, listener, graceful shutdown
+internal/model/model.go      wire structs, inputs and patches
+internal/store/              mutex-protected state + deterministic seed
+internal/store/seed.go       mock-compatible seed data and metrics series
+internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
+internal/resin/              Resin admin-API client (stdlib net/http)
+internal/publisher/          subscription render, coalesced publish, rotation
+internal/runtime/            startup wiring, panel topology/reconcile and mutations
+internal/account/            FV protocol seam + account control client (Secret, Device, Control)
+internal/api/server.go       router, auth, CORS, logging, JSON helpers
+internal/api/*.go            account, node/lease, user/key and ops handlers
+internal/api/server_test.go  httptest coverage
+```
+
+## Build, test, run
+
+```bash
+cd daemon
+go test ./...
+go build ./...
+AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd
+```
+
+```bash
+curl -s http://127.0.0.1:2261/healthz
+curl -s -H 'Authorization: Bearer local-test-token' http://127.0.0.1:2261/v1/accounts
+```
+
+`local-test-token` is a local placeholder, not a credential. Without a token the
+process refuses to start unless `AJS_ALLOW_INSECURE=1` is set.
+
+## FV protocol seam
+
+The daemon reuses the emulator's tested FV protocol core instead of
+reimplementing it. Go's internal-package rule blocks `ajsaccountd` from
+importing `ajsproxy/internal/fv`, so the emulator module publishes a thin
+facade:
+
+```
+emulator/fvfacade/facade.go   FV type aliases + function variables, no logic
+emulator/apifacade/facade.go  control API aliases + function variables, no logic
+emulator/internal/fv/         tested FV implementation (unchanged)
+emulator/internal/api/        tested control API implementation (unchanged)
+daemon/internal/account/      protocol seam + account control client
+```
+
+`fvfacade` re-exports `Session`, `Transport`, `Registry`, `AuthConfig`,
+`AuthOptions`, `AuthError`, `RawTCP`, `HTTPUpgrade` and `OPV2Packet` as type
+aliases, and the protocol functions (`Authenticate`, `DefaultRegistry`,
+`NewSessionKey`, `NewIV`, `BuildAuthBody`, `BuildBinaryAuthBody`,
+`EncodeFrame`, `DecodeHeader`, `ParseFields`, `ParseResponse`,
+`Socks5ConnectRequest`, `VendorPublicKey`, `HashByName`, `RSAOAEPEncrypt`,
+`AESCTR`, `RandomBytes`, `BuildDataText`, `BuildAuthText`, `RandomPad`,
+`ParseRSAPublicKey`) as function variables. Aliases and variables keep the
+symbols identical to the internal ones, so no adapter or conversion is needed;
+the package adds no dependencies.
+
+`daemon/go.mod` binds the modules:
+
+```
+require ajsproxy v0.0.0
+replace ajsproxy => ../emulator
+```
+
+The `replace` makes `emulator` and `daemon` sibling directories; the daemon
+therefore cannot be built from a checkout that lacks the emulator. The daemon
+`go` directive is `1.26.0` because the emulator module declares that language
+version; with `GOTOOLCHAIN=auto` the toolchain switches automatically.
+
+`internal/account.NewProtocol()` wires `fvfacade.DefaultRegistry()` and
+`fvfacade.RawTCP{}`; `Available()` reports whether the transport is registered.
+This is a compile/import proof, not a vendor client: it performs no I/O and
+`protocol_test.go` asserts `RawTCP.Name() == "rawtcp"` and that the registry
+contains `rawtcp`.
+
+### Building the sibling modules
+
+Both modules are tested and built independently, with the daemon run after the
+emulator is present at `../emulator`:
+
+```bash
+cd daemon   && go test ./... && go build ./...
+cd ../emulator && go test ./... && go build ./...
+```
+
+On HMC, copy the two trees as siblings to the scratch root (the layout the
+module `replace` assumes). The `fv` tests also read the captured mock packets
+from `research/60-dynamic/captures`, resolved as `../../../research/...` from
+`emulator/internal/fv`, so place that directory at the same scratch root:
+
+```
+/srv/dwgxhomecloud/scratch/ajs-multimodule/
+├── daemon/                          # ajsaccountd
+├── emulator/                        # ajsproxy
+└── research/60-dynamic/captures/    # fvmock-1.bin, fvmock-2.bin fixtures
+```
+
+```bash
+rsync -a --delete daemon emulator /srv/dwgxhomecloud/scratch/ajs-multimodule/
+mkdir -p /srv/dwgxhomecloud/scratch/ajs-multimodule/research/60-dynamic/captures
+rsync -a research/60-dynamic/captures/fvmock-*.bin \
+  /srv/dwgxhomecloud/scratch/ajs-multimodule/research/60-dynamic/captures/
+cd /srv/dwgxhomecloud/scratch/ajs-multimodule/daemon && go test ./... && go build ./...
+cd ../emulator && go test ./... && go build ./...
+```
+
+## Account control layer
+
+`internal/account` carries the control-API client and the FV session factory
+that use it. It wraps the emulator's tested `internal/api` and `internal/fv`
+packages through `apifacade`/`fvfacade`; it performs no I/O until a method is
+called and has never contacted a vendor host.
+
+```
+emulator/apifacade/facade.go        control API aliases + function variables
+emulator/fvfacade/facade.go         FV protocol aliases + function variables
+daemon/internal/account/secret.go   Secret: fmt/slog/JSON redaction
+daemon/internal/account/device.go   device profiles + non-secret identity summary
+daemon/internal/account/control.go  Login / LoginSync / Servers wrapper
+daemon/internal/account/session.go  VersionProfile, SessionRequest, FlowSession, Factory
+```
+
+`apifacade` re-exports `Client`, `Device`, `LoginResult`, `Server`, `ServerFV`,
+`ServerPar`, `ServerLoc` and `ErrNoLoginToken` as aliases, `DefaultSecret` as a
+constant, and `NewClient`, `DefaultDevice`, `NewDeviceID`, `NewUID`,
+`BuildQuery`, `Sign`, `DualHashHex`, `URLEncode` as function variables. Aliases
+and variables keep the symbols identical to the internal ones, so the daemon
+uses the tested client without conversion and the facade adds no dependencies.
+
+### Profiles and signing
+
+| Profile | `_v` | Constructor | Signing |
+|---|---|---|---|
+| Linux 4.2.3.0 (default) | `4.2.3.0` | `NewDevice("")` | `X-Timestamp` + `X-Sig` with the OpenAJS secret — `[UNVERIFIED]` |
+| OpenAJS Android | `4.11.10.0` | `NewDevice(OpenAJSClientVersion)` | signed, exactly as OpenAJS does |
+
+`NewDevice` starts from `apifacade.DefaultDevice`, overrides `_v`, and generates
+`_os_did` (16 hex) and `_uid` (22 characters) with `EnsureIDs`. `Identify`
+returns the non-secret `DeviceIdentity` summary for logs and store records.
+
+The caveat is the one recorded on `api.DefaultSecret`: the shipping Linux
+4.2.3.0 binary contains neither the OpenAJS secret string nor its raw bytes, and
+no live request has been made from this tree. Whether the vendor backend accepts
+a signed request from that profile is therefore `[UNVERIFIED]`;
+`Options.NoSigning` omits both headers for it. Signing is on by default (the
+zero `Options` signs), so the daemon cannot send an unsigned request by
+accident. The only emulator change is a `NoSign` field on
+`emulator/internal/api.Client`, which skips both headers; `NewClient` and the
+zero value still sign.
+
+### Control client
+
+```go
+device, err := account.NewDevice("")                 // Linux 4.2.3.0
+control := account.NewControl(hosts, device, account.Options{})
+defer control.Close()
+login, err := control.Login(ctx, username, password)  // password: account.Secret
+sync, err := control.LoginSync(ctx)                   // refreshes ConnectPassword
+servers, err := control.Servers(ctx)                  // map[string]apifacade.Server
+```
+
+- `Options`: `HTTPClient`, `UserAgent`, `NoSigning`, `Now`. The zero value keeps
+  the api package's 35-second HTTP client, `okhttp/4.9.3`, signing and
+  `time.Now`.
+- `LoginResult`: `AuthResult`, `AuthMessage`, `Token`, `UserName`,
+  `ConnectPassword`, `MembershipStatus`, `ExpireTime`, `Expired`, `Servers`.
+  `Token` and `ConnectPassword` are `Secret`; `Servers` stays nil on `Login`.
+- A non-OK `AuthResult` is an `*AuthError` carrying the code and server message
+  (no credentials); the parsed result is returned with it. Transport and
+  protocol failures are returned as-is.
+- `LoginSync` fails with `apifacade.ErrNoLoginToken` before a successful login.
+  It returns the refreshed token/user/connect password plus the server map;
+  `AuthResult` stays empty because the emulator client reduces the sync
+  response to credentials and servers.
+- Failover matches OpenAJS: only a transport error advances to the next host.
+  An HTTP 4xx/5xx, invalid JSON or a response without a `Login` object is
+  returned to the caller and the next host is not contacted.
+- `Control` keeps the last session and is not safe for concurrent use; the
+  session factory owns one per account. `Close` releases idle HTTP connections;
+  the emulated surface has no logout command.
+
+### Secret handling
+
+`account.Secret` is a string type whose `String`, `GoString`, `MarshalJSON` and
+`slog.LogValue` methods all yield `[redacted]`; `Reveal()` is the only
+accessor. A `LoginResult`, a request log line or a JSON document can therefore
+be printed without leaking the login token or connect password. No credential
+is written to the store, the README or a test fixture.
+
+### FV session factory (AJS-34)
+
+`session.go` opens one authenticated FV session per request and exposes its
+data channels. It adds no wire logic of its own: authentication is
+`fvfacade.Authenticate` and every flow is `fvfacade.Session.OpenStreamContext`.
+
+```go
+f := account.NewFactory(account.Linux423Binary, &fvfacade.HTTPUpgrade{},
+    fvfacade.AuthOptions{})
+sess, err := f.Open(ctx, account.SessionRequest{
+    AccountID:       "acc-01",
+    Server:          login.Servers["s1"],
+    Device:          device,
+    UserName:        login.UserName,
+    ConnectPassword: login.ConnectPassword, // account.Secret
+    Profile:         account.Linux423Binary, // optional; must match the factory
+})
+defer sess.Close()
+flow, err := sess.OpenFlow(ctx, "example.com", 443)
+```
+
+- `VersionProfile`: `Name`, `ClientVersion` (`_v`), `CoreVersion` (`cv`),
+  `ProtocolVersion`, `OAEPHash`, `SigningMode`, `Transport`.
+- `Linux423Binary` (default): `linux-4.2.3.0-binary`, `_v=4.2.3.0`,
+  `cv=20241105-1`, protocol 2, OAEP-SHA1, signing none, carrier label
+  `rawtcp` (plain TCP, no HTTP request line). The label is descriptive: the
+  protocol-2 binary carrier is implemented by `fvfacade.HTTPUpgrade`, so that
+  is the transport to inject. `NewFactory` keeps the profile and the transport
+  separate because the emulator type is named after the legacy HTTP-upgrade
+  carrier it also implements.
+- Auth body mapping: `u=UserName`, `p=ConnectPassword.Reveal()`,
+  `cuid`/`cseid=Device.DeviceID`, `st=Device.Site` (default `ajs`),
+  `v=Profile.ClientVersion`, `cv=Profile.CoreVersion`, `osp=Device.Platform`,
+  `osd=Device.OSDevice`, `osv=Device.OSVersion`, `dim=Device.OSDim`.
+- `Open` rejects a request with no FV endpoint (`svr`/`par.fv.p`), no user, no
+  connect password, no device id, a profile that differs from the factory's, or
+  an unknown OAEP hash. `AuthOptions.OAEPHash` overrides the profile hash; zero
+  means the profile's.
+- `FlowSession`: `SID`, `Fields` (merged auth response, read-only),
+  `OpenFlow`, `Healthy` (`SID != ""`, no probe), `Close` (idempotent).
+- The connect password exists only in the auth body. It is a `Secret` in the
+  request, so `%v`, `%#v`, JSON and `slog` redact it; the factory never logs.
+- Limitation: the factory is not wired to the store, the API or a login yet,
+  and no live vendor endpoint has been contacted. Its wire behaviour is proven
+  only against the in-process mock.
+
+`session_test.go` runs an in-process FV server built only from `fvfacade`
+exports (`AESCTR`, `NewCTR`, `ParseFields`, `HashByName`, the carrier
+constants) and a generated 1024-bit RSA key. It decodes the binary-carrier
+auth, decrypts OAEP-SHA1 with the test key, checks `u/p/cuid/cseid/v/cv/st`,
+writes `code=200` plus the auth map and half-closes; then it accepts the data
+connection, decodes the SOCKS5 CONNECT (`echo.example:80`), replies `05 00` and
+relays to a local echo listener. The reject case asserts an `r=denied` map
+surfaces as `*fvfacade.AuthError` with no password in the message;
+`TestLinux423BinaryProfile` pins the default profile.
+
+The only emulator change is on `fvfacade`: `NewCTR` (the streaming cipher the
+relay needs, since `AESCTR` resets its position) and the
+`SessionKeySize`/`IVSize`/`HeaderSize`/`OAEPBlockMagic` constants. No internal
+package is imported and no emulator test changed.
+
+## Configuration
+
+| Variable | Flag | Default | Meaning |
+|---|---|---|---|
+| `AJS_LISTEN` | `-listen` | `127.0.0.1:2261` | admin API address |
+| `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token |
+| `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth (loopback only) |
+| `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
+| `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
+| `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
+| `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
+| `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
+| `AJS_PLATFORM_NAME` | `-platform-name` | subscription name | Resin platform name |
+| `AJS_MASTER_KEY` | — | — | 32-byte secret-encryption key (64 hex characters or base64); set → seal account passwords, empty → `secrets_disabled` |
+| `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` (created `0700`) |
+
+## Secret storage
+
+`internal/secret` is a stdlib-only file-backed store for account passwords.
+When `AJS_MASTER_KEY` holds a 32-byte key, `cmd/ajs-accountd` opens
+`$AJS_STATE_DIR/secrets.json` and `POST /v1/accounts` seals the password before
+the account is stored.
+
+- Key format: 64 hex characters or standard base64 (padded or raw), exactly 32
+  bytes. A malformed key fails startup with an `AJS_MASTER_KEY` error; a missing
+  key logs `secrets_disabled` and passwords are validated and discarded as
+  before. The key is never logged.
+- Envelope: `v1` + 12-byte random nonce + AES-256-GCM ciphertext/tag, base64 in
+  the JSON document. The account id is the additional authenticated data, so a
+  sealed blob cannot be moved to another account.
+- File: `$AJS_STATE_DIR/secrets.json`, mode `0600`, rewritten on every seal
+  through a `0600` temporary file and an atomic rename. A missing file starts an
+  empty store.
+- Rotation: `secret.Store.Rotate(newKey)` re-seals every entry under the new key
+  and rewrites the file; the old key stays active if re-sealing or the write
+  fails. There is no HTTP endpoint for rotation.
+- Access: `store.AccountSecret(id)` opens a password for the account client. It
+  is not exposed over HTTP and `model.Account` has no credential field.
+- Limitation: the rest of the store is still in-memory and reseeded on every
+  start, so accounts created at runtime disappear on restart while their sealed
+  blobs stay in `secrets.json`. SQLite (PANEL §6) is a later slice.
+
+## Resin integration
+
+`internal/resin` is a stdlib-only client for the Resin v1.3.0 admin API;
+`internal/publisher` renders the local subscription and owns the write policy;
+`internal/runtime` is the startup/topology/reconcile seam. The API handlers
+never call Resin directly: they see only the `api.Panel` interface, which is
+nil when the integration is disabled. Every test uses `httptest`; no Resin
+process, vendor account or network call is involved.
+
+### Startup wiring
+
+When `AJS_RESIN_ADMIN_TOKEN` is set, `cmd/ajs-accountd` builds
+`resin.ConfigFromEnv`, `publisher.New` and `runtime.NewResinPanel`, then calls
+`Start` before the listener starts. The order is the one the M1 spike proved:
+
+1. `PATCH /api/v1/system/config {"max_latency_test_interval":"30s"}`; a
+   `404`/`405` from an older build is logged and tolerated.
+2. Render the store's `LIVE` nodes with `publisher.Render`
+   (`socks5://127.0.0.1:<gatePort>#<tag>`, sorted, trailing newline). With no
+   `LIVE` node the subscription is left untouched: no create, PATCH or refresh,
+   because Resin rejects empty content and a parsed empty body evicts the pool.
+3. `EnsureSubscription(<AJS_SUBSCRIPTION_NAME>, content, "30s")` — creates the
+   local ephemeral subscription, or PATCHes it when content/interval differ.
+4. `EnsurePlatform` with `sticky_ttl` from the panel settings
+   (`model.PanelSettings.LeaseTTL`, default `8h`),
+   `regex_filters=["<subscription>/.*"]` and `allocation_policy=BALANCED`
+   (there is no store setting for the policy yet, so `runtime.Config` supplies
+   it).
+5. `Publish` — the publisher PATCHes the content and refreshes, coalescing to
+   one PATCH+refresh per 5 s and refusing empty content.
+
+Success logs `resin_connected` with `subscription_id` and `platform_id`. A
+failed start logs `resin_start_failed` and the daemon keeps serving:
+`GET /v1/topology` answers `503 UPSTREAM_UNAVAILABLE` until `POST /v1/reconcile`
+succeeds, which retries the same sequence. Without the token the daemon logs
+`resin_disabled` and keeps the in-memory behaviour.
+
+### Panel endpoints
+
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/v1/topology` | panel view when Resin is enabled, otherwise the store-derived `ajs-live` map |
+| POST | `/v1/reconcile` | re-render + PATCH + refresh; `503 UPSTREAM_UNAVAILABLE` when no panel is configured |
+
+The panel view is `{subscription_id, platform_id, content, nodes, last_good,
+resin_version}`: `nodes` maps node id → tag for the rendered `LIVE` nodes,
+`content` is the last render, `last_good` is the content Resin accepted, and
+`resin_version` is `GET /api/v1/system/info`. It carries no credentials.
+
+### Runtime mutations
+
+With a panel configured, the four mutation handlers call `api.Panel` (an alias
+of `runtime.Panel`) instead of the store; the response bodies are unchanged.
+Without a panel they keep calling the store exactly as before.
+
+| Route | Panel path | Store fallback (no panel) |
+|---|---|---|
+| POST `/v1/leases/{id}/actions/rotate` | read store lease → full tag `<subscription>/<tag>` from the last topology → `pub.Rotate(..., true)` → `GetLease` → `store.ApplyLeaseRotation` | next pool IP, expiry refreshed, requests +17 |
+| DELETE `/v1/leases/{id}` | `DeleteLease` (404 idempotent) → `store.ReleaseLease` | `store.ReleaseLease` |
+| POST `/v1/nodes/{id}/actions/drain` | `store.DrainNode` → `Reconcile` (publish the LIVE-only set) | `store.DrainNode` |
+| POST `/v1/nodes/{id}/actions/undrain` | `store.UndrainNode` → `Reconcile` | `store.UndrainNode` |
+
+Rotation call order: `GET platform` (read filters) → `PATCH platform`
+(`regex_filters` + `!^<subscription>/<tag>$`) → `DELETE lease` → `PATCH platform`
+(restore) → `GET lease`. The publisher owns the exclude/delete/restore sequence
+and restores before returning, so the panel reads the new lease after the
+restore. Delete-only rotation is not used: the M1 spike showed it re-picks the
+same node. `ApplyLeaseRotation` records Resin's `egress_ip`/`expiry` and mirrors
+the IP onto the node, preserving id/account/user/node/TTL and the local request
+counter; the synthetic next-IP pool only runs in fallback mode.
+
+Drain/undrain transition the store first and then republish. When the publish
+fails the handler answers 503 but the store state stays DRAINING/LIVE, and the
+next `/v1/reconcile` converges Resin.
+
+Mutation errors reuse the panel contract:
+
+| Condition | HTTP | Code |
+|---|---|---|
+| unknown store lease/node | 404 | `NOT_FOUND` |
+| panel not started (no platform id) | 409 | `CONFLICT` |
+| lease's node is not in the published topology | 409 | `CONFLICT` |
+| publisher per-account rotation window (10 s) | 409 | `CONFLICT` |
+| Resin call or reconcile failure | 503 | `UPSTREAM_UNAVAILABLE` |
+
+`resin.ConfigFromEnv()` reads `AJS_RESIN_URL` and `AJS_RESIN_ADMIN_TOKEN` (see
+Configuration); the proxy token is never used by this client. `resin.New`
+applies a 10 s per-call timeout, sends `Authorization: Bearer` plus a generated
+`X-Request-Id`, maps non-2xx bodies (`{"error":{"code","message"}}`) to
+`*resin.APIError`, and logs method, path, status, duration and request id —
+never headers, so the token cannot leak. `DeleteLease` treats 404 as success
+(idempotent); `GetLease` keeps NOT_FOUND distinguishable via
+`resin.IsNotFound`.
+
+Client methods: `SystemInfo`, `EnsureSubscription`, `PatchSubscription`,
+`RefreshSubscription`, `ListNodes`, `GetNode`, `EnsurePlatform`,
+`GetPlatform`, `PatchPlatformFilters`, `GetLease`, `DeleteLease`,
+`PatchSystemConfig`, `ListRequestLogs`.
+
+Publisher behavior:
+
+- `Render` emits `socks5://127.0.0.1:<gatePort>#<tag>` one line per node,
+  sorted by tag, with a trailing newline. Duplicate tags, invalid tags and
+  invalid ports are rejected. `TagAllocator` derives stable lowercase tags
+  `<cc>[-<subdiv>]-<seq>`; the sequence is assigned once per `(account,
+  server)` from a global counter so tags stay unique across the subscription.
+- `Publish(ctx, nodes)` coalesces to at most one PATCH+refresh per 5 s, skips
+  identical content, refuses an empty body, and keeps `LastGood()`. A failed
+  refresh retries with exponential backoff (3 attempts, 250 ms doubling); the
+  accepted content stays last-known-good and the next publish retries only the
+  refresh.
+- `Rotate(ctx, platformID, account, currentTag, avoidCurrentIP)` reads the
+  filters, adds `!^<currentTag>$` (idempotent), PATCHes, deletes the lease,
+  then restores the original filters even when the delete fails; restoration is
+  retried with backoff. One rotation per account per 10 s.
+  `RotationRestoreDelay` defaults to 0 (immediate) and can be raised to the
+  PANEL §8 10 s window.
+- `DropLeasesOnOpenCircuits` deletes leases pinned to nodes with a non-empty
+  `circuit_open_since` and returns the deleted `(platform, account)` ids.
+  DRAINING nodes are skipped: their leases belong to the drain path.
+- `EnsureProbeConfig` PATCHes `max_latency_test_interval=30s`; a 404/405 from
+  an older build is logged as a warning and tolerated.
+
+### M1 caveats encoded here
+
+Source: `research/77-m1-spike/REPORT.md` (Resin v1.3.0, image
+`ghcr.io/resinat/resin:1.3.0`, digest
+`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`).
+
+1. **Probe interval.** The default `max_latency_test_interval` is 1 h, so a
+   restarted node stayed circuit-open and unroutable; PATCHing it to `30s`
+   closed the circuit in 6.1 s. `EnsureProbeConfig` is the startup reconciler.
+2. **Rotation must exclude, not just delete.** Five delete/request cycles
+   re-picked the same node and IP under `BALANCED`; filter exclusion moved the
+   lease in 0.3 s. `Rotate` therefore PATCHes `!^tag$` before deleting and
+   restores afterwards.
+3. **Kill window.** A dead leased node costs 3 failed requests over ~6 s and
+   ~12.6 s until re-route; Resin never retries another node inside one request.
+   The gate retries idempotent requests once on `UPSTREAM_CONNECT_FAILED`
+   (`resin.IsUpstreamConnectFailed`).
+4. **Circuit-open leases.** When `circuit_open_since` appears for a leased node,
+   delete the lease instead of waiting for the probe cycle;
+   `DropLeasesOnOpenCircuits` does that and leaves DRAINING nodes alone.
+5. **Empty content is never publishable.** v1.3.0 rejects empty `content` on
+   both create and PATCH (`content: must be a non-empty string`), while a
+   successfully parsed empty body (for example from a remote fetch) diffs every
+   node away. The publisher therefore refuses empty renders outright and keeps
+   last-known-good; a fully drained pool must delete or disable the
+   subscription instead.
+
+Two deviations, both deliberate:
+
+- `GET /api/v1/request-logs` in v1.3.0 pages with `cursor` and rejects
+  `offset` (400). `RequestLogQuery` carries both, sends `offset` only when
+  non-zero, and callers should use `Cursor`.
+- Resin sends no request-id response header. The client generates one per call,
+  sends it as `X-Request-Id`, and logs it for correlation.
+
+## API
+
+All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
+`/healthz` is unauthenticated. List endpoints return bare JSON arrays, matching
+`api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper objects.
+
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/healthz` | process status + account-state counts |
+| GET | `/v1/metrics?range=24h\|7d` | deterministic series, totals, account health |
+| GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
+| POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
+| GET | `/v1/accounts/{id}` | single account |
+| PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
+| DELETE | `/v1/accounts/{id}` | remove account, its nodes, its leases and its sealed secret; keep audit |
+| POST | `/v1/accounts/{id}/actions/login` | refresh `lastLoginAt`, clear `auth_failed` |
+| POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
+| GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
+| POST | `/v1/nodes/{id}/actions/drain` | → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
+| POST | `/v1/nodes/{id}/actions/undrain` | → `LIVE` (DOWN → `READY`); republishes when configured |
+| POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
+| GET | `/v1/leases` | list; filter `user_id` |
+| POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17 |
+| DELETE | `/v1/leases/{id}` | panel: delete Resin lease, then store row; fallback: store release; decrement node `inUse` |
+| GET | `/v1/users` | list |
+| POST | `/v1/users` | create; name conflict → 409 |
+| PATCH | `/v1/users/{id}` | stickyTtl, quota (null = unlimited), allowlist, platform |
+| DELETE | `/v1/users/{id}` | release leases, revoke keys, remove user |
+| POST | `/v1/users/{id}/suspend` | `enabled=false` |
+| POST | `/v1/users/{id}/resume` | `enabled=true` |
+| PATCH | `/v1/users/{id}/allowlist` | replace allowlist (`{"allowlist":[…]}`) |
+| GET | `/v1/apikeys` | list; filter `user_id` |
+| POST | `/v1/apikeys` | `{userId,label}` → `{key,secret}`; secret shown once |
+| DELETE | `/v1/apikeys/{id}` | revoke (`revokedAt` set; row retained) |
+| GET | `/v1/requests` | request log, newest first |
+| POST | `/v1/requests/mutations` | append a `mutation-lab` row + audit event |
+| GET | `/v1/audit?limit=` | newest-first audit, default 20, max 500 |
+| GET | `/v1/settings` | runtime settings |
+| PATCH | `/v1/settings` | partial; unknown keys → 400 |
+| GET | `/v1/topology` | store `ajs-live` map when Resin is disabled; live panel view when enabled |
+| POST | `/v1/reconcile` | re-render + PATCH + refresh; 503 without a panel |
+
+Errors are always `{"error":{"code":"…","message":"…"}}`:
+
+| Code | HTTP | Used for |
+|---|---|---|
+| `INVALID_ARGUMENT` | 400 (413 oversize) | malformed JSON, bad enum/range, unknown settings key |
+| `NOT_FOUND` | 404 | unknown id or route |
+| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node |
+| `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel |
+| `QUOTA_EXCEEDED` | 429 | reserved; quotas are advisory in v1 |
+| `UNAUTHORIZED` | 401 | missing/wrong bearer token |
+| `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
+| `INTERNAL` | 500 | unexpected store failure |
+
+Other contract details:
+
+- Timestamps are RFC 3339 (nanosecond precision), byte counts are integers.
+- `quotaBytesMonth`, `lastUsedAt`, `revokedAt` are `null` when unset.
+- `POST /v1/apikeys` stores only a SHA-256 hash plus the 16-character prefix;
+  the plaintext secret exists only in that response.
+- Middleware adds `X-Request-Id`, logs one `slog` line per request (never
+  headers, so `Authorization` cannot leak), limits bodies to 1 MiB, and answers
+  CORS preflight for the two configured origins.
+- Account passwords are validated then discarded; no credential is persisted.
+
+## Seed
+
+Deterministic values match `dashboard/src/lib/mock.ts`:
+
+| Collection | Count |
+|---|---|
+| accounts | 6 (`acc-01`…`acc-06`) |
+| nodes | 12 (`node-01`…`node-12`) |
+| leases | 8 (`lease-01`…`lease-08`) |
+| users | 4 (`u-01`…`u-04`) |
+| API keys | 6 (`key-01`…`key-06`, display-only) |
+| requests | 40 (`req-001`…`req-040`, seeded PRNG `20261023`) |
+| audit | 20 (`audit-001`…`audit-020`) |
+
+Mutations append `audit-0NN` events at the head of the audit list.
+
+## Tests
+
+`internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
+200, seed counts and exact field names, account create/409/delete, node
+drain/undrain/probe, lease rotate/release, user suspend/resume/allowlist and
+cascade delete, API-key show-once/revoke plus stored-hash checks, mutation log
+append, settings roundtrip, CORS preflight, 404/405, pagination, metrics,
+topology, the 1 MiB body limit, and token redaction in request logs.
+
+`internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
+mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen
+under the new key, the 0600 file mode with no temp-file leftovers, a missing
+file starting empty, key-length rejection, and that the JSON file holds only
+base64 envelopes (no plaintext). `internal/store/secret_test.go` covers
+seal-on-create, `AccountSecret` per account, delete, the nil-sealer discard
+path, seeded accounts without a secret, no credential in the account JSON, and
+a failing sealer leaving the store unchanged.
+
+`internal/resin/client_test.go` runs against an `httptest` fake Resin and covers
+subscription create/unchanged/PATCH, platform create/update with only the
+differing fields, filter replacement, lease get/delete (including 404
+tolerance), request-log query construction, node pagination, `circuit_open_since`
+null vs timestamp, system-config PATCH, the auth header, request-id presence,
+and that the admin token never appears in an error string or log line.
+
+`internal/publisher/publisher_test.go` uses the same fake plus a fake clock and
+covers golden render lines, duplicate/invalid/empty guards, stable tag
+allocation, coalescing and identical-content skips, the empty-publish refusal,
+refresh retry/backoff and last-known-good retention, the exact rotation call
+order (read filters → exclude PATCH → DELETE → restore PATCH), restore after a
+failed delete, restore retry, rotation rate limiting, circuit-open lease
+cleanup with DRAINING exclusion, and probe-config 404/405 tolerance.
+
+`internal/runtime/panel_test.go` drives the real client and publisher against a
+fake Resin admin server (`httptest`) with a fake clock. It asserts the exact
+startup call order and payloads (probe config → subscription → platform →
+publish → system info), the topology content and JSON field set, an idempotent
+reconcile and a changed-content reconcile after draining one node, the
+empty-node guard (no subscription call at all), 404/405 probe-config tolerance,
+error propagation at each step, and the API wiring: store map + 503 without a
+panel, 503 before the first start, and the live view + reconcile with one.
+
+`internal/runtime/mutations_test.go` extends the same fake with platform and
+lease routes. It covers the rotate call order (exclusion PATCH before DELETE,
+filter restore, lease read), the exact `!^ajs-live/<tag>$` filter and the
+restored filter list, store egress/expiry updates with immutable fields
+preserved, missing lease (404), missing platform and unpublished tag (409), the
+10 s rate limit (409), release with a 404-idempotent Resin delete, drain/undrain
+published content and topology, 503 plus the kept store transition when a
+publish fails, the API JSON for all four mutations, and the unchanged store
+fallback without a panel.
+
+`internal/account/control_test.go` drives a fake `httptest` `/client.php` and
+covers signed login (request fields, generated device IDs, exact `X-Sig` over
+the raw body, `X-Timestamp`, user agent, no `Authorization`), unsigned mode
+omitting both signature headers, a non-OK `AuthResult` as `*AuthError`,
+`loginSync` refreshing `ConnectPassword` plus the `Servers` map (`sts=ok`,
+`par.fv.p`, `loc`) and its `_client_login`/`username` fields,
+`ErrNoLoginToken` before login, transport failover to the second host, no
+failover on HTTP 500 or on a response without a `Login` object, the two device
+profiles, and redaction through every `fmt` verb, JSON and slog.
+
+## HMC evidence
+
+Copy only `daemon/` to the HMC scratch path:
+
+```bash
+cd D:/Project/LovePlusSpeedToProxy
+tar -czf - daemon | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/ajs-accountd-ajs30 \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-accountd-ajs30 --strip-components=1'
+```
+
+On HMC (`go1.25.14 linux/amd64`):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-accountd-ajs30 && go test -count=1 ./... && go build ./... && echo BUILD_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/api	0.036s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.013s
+ok  	ajsaccountd/internal/resin	0.212s
+ok  	ajsaccountd/internal/runtime	0.039s
+?   	ajsaccountd/internal/store	[no test files]
+BUILD_OK
+```
+
+### Account control (AJS-33)
+
+The two sibling trees were copied to a fresh scratch root with the capture
+fixtures, so no other worker's scratch tree was touched:
+
+```bash
+tar -czf - daemon emulator | ssh hmc \
+  'tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-33-accountcontrol'
+tar -czf - -C research/60-dynamic captures | ssh hmc \
+  'tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-33-accountcontrol/research/60-dynamic'
+```
+
+On HMC (`go1.26.0 linux/amd64`):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-33-accountcontrol/emulator && go build ./... && go test ./...
+?   	ajsproxy/apifacade	[no test files]
+?   	ajsproxy/cmd/ajsproxy	[no test files]
+?   	ajsproxy/fvfacade	[no test files]
+ok  	ajsproxy/internal/api	0.004s
+ok  	ajsproxy/internal/config	0.002s
+ok  	ajsproxy/internal/fv	0.024s
+ok  	ajsproxy/internal/proxy	0.003s
+
+$ cd ../daemon && go build ./... && go test ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.007s
+ok  	ajsaccountd/internal/api	0.032s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.013s
+ok  	ajsaccountd/internal/resin	0.212s
+ok  	ajsaccountd/internal/runtime	0.032s
+ok  	ajsaccountd/internal/secret	0.003s
+ok  	ajsaccountd/internal/store	0.003s
+
+$ go test ./internal/account -v -count=1
+--- PASS: TestLoginSigned (0.00s)
+--- PASS: TestLoginUnsigned (0.00s)
+--- PASS: TestLoginRejected (0.00s)
+--- PASS: TestLoginSyncAndServers (0.00s)
+--- PASS: TestLoginSyncRequiresToken (0.00s)
+--- PASS: TestLoginFailoverOnTransportError (0.00s)
+--- PASS: TestNoFailoverOnHTTPError (0.00s)
+--- PASS: TestNoFailoverOnProtocolError (0.00s)
+--- PASS: TestNewDeviceProfiles (0.00s)
+--- PASS: TestSecretRedaction (0.00s)
+--- PASS: TestProtocolSeam (0.00s)
+PASS
+ok  	ajsaccountd/internal/account	0.006s
+```
+
+### FV session factory (AJS-34)
+
+The two sibling trees and the capture fixtures were copied to a fresh scratch
+root, so no other worker's tree was touched:
+
+```bash
+tar -czf - daemon emulator | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-34-sessionfactory \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-34-sessionfactory'
+tar -czf - -C research/60-dynamic captures | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-34-sessionfactory/research/60-dynamic \
+  && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-34-sessionfactory/research/60-dynamic'
+```
+
+On HMC (`go1.26.0 linux/amd64`):
+
+```console
+$ cd .../ajs-34-sessionfactory/emulator && go test -count=1 ./... && go build ./...
+?   	ajsproxy/apifacade	[no test files]
+?   	ajsproxy/cmd/ajsproxy	[no test files]
+?   	ajsproxy/fvfacade	[no test files]
+ok  	ajsproxy/internal/api	0.003s
+ok  	ajsproxy/internal/config	0.003s
+ok  	ajsproxy/internal/fv	0.055s
+ok  	ajsproxy/internal/proxy	0.003s
+EMULATOR_BUILD_OK
+
+$ cd ../daemon && go test -count=1 ./... && go build ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.047s
+ok  	ajsaccountd/internal/api	0.035s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.013s
+ok  	ajsaccountd/internal/resin	0.213s
+ok  	ajsaccountd/internal/runtime	0.037s
+ok  	ajsaccountd/internal/secret	0.003s
+ok  	ajsaccountd/internal/store	0.004s
+DAEMON_BUILD_OK
+
+$ go test -count=1 -v -run 'TestFactoryOpen|TestLinux423Binary' ./internal/account
+=== RUN   TestFactoryOpenAgainstMockFV
+--- PASS: TestFactoryOpenAgainstMockFV (0.01s)
+=== RUN   TestFactoryOpenRejectsDeniedAuth
+--- PASS: TestFactoryOpenRejectsDeniedAuth (0.01s)
+=== RUN   TestLinux423BinaryProfile
+--- PASS: TestLinux423BinaryProfile (0.00s)
+PASS
+ok  	ajsaccountd/internal/account	0.017s
+```
+
+Both runs are in-process only: the mock listens on `127.0.0.1`, no vendor host
+is contacted and no credential is involved.
+
+### Panel smoke (fake Resin, dev host)
+
+The process-level wiring was also exercised on the dev host against a
+throwaway fake admin API (stdlib `net/http`, not in the repo) so no live Resin
+or vendor call is involved:
+
+```console
+$ AJS_LISTEN=127.0.0.1:12261 AJS_ADMIN_TOKEN=local-test-token \
+  AJS_RESIN_URL=http://127.0.0.1:12260 AJS_RESIN_ADMIN_TOKEN=local-resin-placeholder \
+  ./ajs-accountd.exe
+time=2026-10-23T12:28:03.712+09:00 level=INFO msg=resin_connected subscription_id=sub-smoke platform_id=plat-smoke
+time=2026-10-23T12:28:03.713+09:00 level=INFO msg="ajs-accountd listening" addr=127.0.0.1:12261 auth=bearer
+```
+
+Fake admin log — startup order, then the idempotent reconcile:
+
+```console
+PATCH /api/v1/system/config
+GET /api/v1/subscriptions
+POST /api/v1/subscriptions
+GET /api/v1/platforms
+POST /api/v1/platforms
+PATCH /api/v1/subscriptions/sub-smoke
+POST /api/v1/subscriptions/sub-smoke/actions/refresh
+GET /api/v1/system/info
+PATCH /api/v1/system/config          # POST /v1/reconcile: content unchanged,
+GET /api/v1/subscriptions            # so no subscription PATCH or refresh
+GET /api/v1/platforms
+GET /api/v1/system/info
+```
+
+```console
+$ curl -s -o top.json -w 'GET /v1/topology HTTP %{http_code}\n' \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+GET /v1/topology HTTP 200
+$ python -c "import json;d=json.load(open('top.json'));print('subscription_id=%s platform_id=%s nodes=%d content_lines=%d last_good_lines=%d resin_version=%s' % (d['subscription_id'],d['platform_id'],len(d['nodes']),d['content'].count(chr(10)),d['last_good'].count(chr(10)),d['resin_version']))"
+subscription_id=sub-smoke platform_id=plat-smoke nodes=8 content_lines=8 last_good_lines=8 resin_version=v1.3.0
+
+$ curl -s -o rec.json -w 'POST /v1/reconcile HTTP %{http_code}\n' -X POST \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+POST /v1/reconcile HTTP 200
+$ python -c "import json;d=json.load(open('rec.json'));print('reconcile nodes=%d same_content=%s' % (len(d['nodes']), d['content']==json.load(open('top.json'))['content']))"
+reconcile nodes=8 same_content=True
+```
+
+Without the token the same binary logs `resin_disabled` and keeps the store
+view:
+
+```console
+time=2026-10-23T12:27:09.483+09:00 level=INFO msg=resin_disabled reason="AJS_RESIN_ADMIN_TOKEN is not set"
+$ curl -s -o top-off.json -w 'topology HTTP %{http_code}\n' \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+topology HTTP 200
+$ python -c "import json;d=json.load(open('top-off.json'));print('subscription=',d['subscription'],'nodes=',len(d['nodes']),'platforms=',len(d['platforms']))"
+subscription= ajs-live nodes= 12 platforms= 4
+$ curl -s -w '\nreconcile HTTP %{http_code}\n' -X POST \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+{"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin is not configured; set AJS_RESIN_ADMIN_TOKEN"}}
+reconcile HTTP 503
+```
+
+With a token but an unreachable Resin, startup degrades instead of exiting:
+
+```console
+time=2026-10-23T12:27:18.547+09:00 level=WARN msg=resin_start_failed error="runtime: ensure probe config: publisher: set max_latency_test_interval: resin: PATCH /api/v1/system/config: Patch \"http://127.0.0.1:12262/api/v1/system/config\": dial tcp 127.0.0.1:12262: connectex: No connection could be made because the target machine actively refused it."
+$ curl -s -w '\ntopology HTTP %{http_code}\n' \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/topology
+{"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin topology unavailable"}}
+topology HTTP 503
+$ curl -s -w '\nreconcile HTTP %{http_code}\n' -X POST \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:12261/v1/reconcile
+{"error":{"code":"UPSTREAM_UNAVAILABLE","message":"resin reconcile failed"}}
+reconcile HTTP 503
+```
+
+Smoke run on `127.0.0.1:2261` with the placeholder token:
+
+```console
+$ AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-accountd &
+$ curl -s -o /tmp/ajs-health.json -w 'HTTP %{http_code}\n' http://127.0.0.1:2261/healthz
+HTTP 200
+$ cat /tmp/ajs-health.json
+{"status":"ok","service":"ajs-accountd","version":"0.1.0","time":"2026-10-23T03:05:57.153798762Z","accounts":{"active":4,"auth_failed":1,"expired":0,"paused":1}}
+
+$ curl -s -o /tmp/ajs-accounts.json -w 'HTTP %{http_code}\n' \
+    -H 'Authorization: Bearer local-test-token' http://127.0.0.1:2261/v1/accounts
+HTTP 200
+$ jq length /tmp/ajs-accounts.json
+6
+$ jq -c '.[0]' /tmp/ajs-accounts.json
+{"id":"acc-01","label":"Northwind Ops","username":"demo-northwind","platform":"android","state":"active","concurrency":200,"regions":["cn-zj","cn-sh","hk"],"nodeCount":3,"liveNodeCount":2,"usageBytes":82400000000,"expiresAt":"2026-11-10T03:05:57.130488609Z","lastLoginAt":"2026-10-23T02:53:57.130488609Z","createdAt":"2026-07-19T03:05:57.130488609Z"}
+
+$ curl -s -o /tmp/ajs-unauth.json -w 'HTTP %{http_code}\n' http://127.0.0.1:2261/v1/accounts
+HTTP 401
+$ cat /tmp/ajs-unauth.json
+{"error":{"code":"UNAUTHORIZED","message":"missing or invalid bearer token"}}
+```
+
+The daemon logged `ajs-accountd shutting down`, `pgrep -x ajs-accountd`
+returned nothing, and port 2261 was free afterward. No process was left running.
+
+## Limitations / next
+
+- State is lost on restart; there is no persistence, SQLite, or secret store.
+- Login/logout only update timestamps and state. Lease rotate/release and node
+  drain/undrain write through Resin when a panel is configured; account, user,
+  key and settings mutations remain store-only, and `/v1/reconcile` is the only
+  path that re-renders the whole subscription on demand.
+- Rotation restores the platform filters before reading the new lease (the
+  publisher owns that sequence). The M1 spike recommends restoring only after
+  the new lease is observed; changing that needs a publisher change outside
+  this slice.
+- `ApplyLeaseRotation` trusts Resin's `egress_ip`/`expiry` strings; there is no
+  local validation or retry when `GetLease` answers 404 before Resin creates
+  the replacement lease.
+- There is no background reconciler: after startup, Resin drift (node circuits,
+  an out-of-band subscription edit) is corrected only by `POST /v1/reconcile`.
+- Probe is a bookkeeping canary, not a network probe; `DOWN` nodes return 503.
+- Drain has no flow scheduler to drain yet; `inUse` is seed data.
+- Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
+  and `/v1/nodes/{id}/flows` are out of this slice.
+- Quotas are advisory; `QUOTA_EXCEEDED` is defined but never emitted.
+- No TLS, rate limiting, multi-process coordination, or CSRF surface; keep it
+  loopback-only.
+- The dashboard was not modified; enabling live mode is a separate task.
