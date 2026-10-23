@@ -55,6 +55,8 @@ internal/runtime/            startup wiring, panel topology/reconcile and mutati
 internal/runtime/nodes.go    login -> per-server FV session + loopback gate + node store
 internal/account/            FV protocol seam + account control client (Secret, Device, Control, LoginService)
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
+internal/account/tls.go         opt-in control-API certificate pin (PinnedHTTPClient)
+internal/account/tls_test.go    pin match/mismatch/malformed/default-reject coverage
 internal/gate/                per-node SOCKS5 gate (admission, byte counters, drain)
 internal/supervisor/          per-node child process: start, readiness, events, stop
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
@@ -174,6 +176,7 @@ daemon/internal/account/device.go   device profiles + stable identity record map
 daemon/internal/account/control.go  Login / LoginSync / Servers wrapper
 daemon/internal/account/login_service.go  store-backed login path (default-off)
 daemon/internal/account/session.go  VersionProfile, SessionRequest, FlowSession, Factory
+daemon/internal/account/tls.go       opt-in control certificate pin (PinnedHTTPClient)
 ```
 
 `apifacade` re-exports `Client`, `Device`, `LoginResult`, `Server`, `ServerFV`,
@@ -336,6 +339,54 @@ result, ok := service.Result("acc-01") // in memory, read by the node controller
   account is `store.ErrNotFound`; a missing sealed password is `ErrNoSecret`.
 - No log line, error or stored value contains the password, login token or
   connect password.
+
+### Control certificate pin (AJS-93)
+
+Every control API host currently presents the same self-signed
+`CN=localhost` certificate, so a login with default TLS verification fails
+while the shipping Linux client connects anyway. `AJS_CONTROL_CERT_SHA256`
+adds an explicit, opt-in pin for exactly that transport:
+
+```bash
+# 64 hex chars; colons optional
+AJS_ACCOUNT_LOGIN=1 AJS_CONTROL_CERT_SHA256=AA:BB:CC:…:22 ./ajs-accountd
+```
+
+- `account.PinnedHTTPClient(fingerprint, timeout)` clones the default
+  transport and sets `MinVersion: tls.VersionTLS12`, `InsecureSkipVerify` and
+  a `VerifyPeerCertificate` that compares `sha256(rawCerts[0])` with the
+  configured fingerprint using `hmac.Equal`. **The pin replaces chain and
+  hostname verification for this client only**: this is intentional and is
+  the documented trade-off — the pin is the verification. Every other HTTPS
+  client of the daemon keeps standard verification; nothing skips TLS
+  globally.
+- Empty/unset keeps the current default verification and changes no behavior.
+  A malformed value (non-hex or not 32 bytes) fails startup with
+  `AJS_CONTROL_CERT_SHA256: …` instead of silently weakening the check.
+- The client is built in `startAccountLogin` with the same 35-second timeout
+  the api package uses and passed as `LoginConfig.HTTPClient`, so both the
+  login and the follow-up `loginSync` ride the pinned transport. Startup
+  logs `control_tls_pin` with the fingerprint — public configuration, never
+  a credential.
+- **Pin source**: the fingerprint of the certificate the vendor transport
+  actually presents, e.g.
+  `openssl s_client -connect login.ajs-app.com:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256`.
+  The vendor rotates or re-issues the certificate → the pin must be updated
+  to the new fingerprint and the daemon restarted; a stale pin fails the
+  handshake (`account: certificate pin mismatch`) rather than connecting.
+  Rotating ahead of the vendor is not possible: only one fingerprint is
+  accepted.
+- **Warning**: this is a *vendor-transport pin*, not a general insecure
+  switch. Setting it does not disable TLS, does not affect any other host or
+  client, and protects nothing beyond the control API endpoints. Do not use
+  it as a template to skip verification elsewhere.
+- `tls_test.go` proves the four behaviours with an `httptest.NewTLSServer`:
+  a matching pin (colon and raw-hex forms) lets the self-signed certificate
+  through, a wrong pin fails with `ErrCertPin`, a malformed fingerprint is
+  rejected before any connection, and a default client still rejects the
+  same certificate (no global skip).
+- Live login with the pin remains `[UNVERIFIED]`: no vendor host has been
+  contacted from this tree; the acceptance is the in-process TLS server.
 
 ### Secret handling
 
@@ -765,6 +816,7 @@ test binary as the child.
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
+| `AJS_CONTROL_CERT_SHA256` | — | — | SHA-256 fingerprint (64 hex chars, `AA:BB:…` or raw) of the control API leaf certificate; set → the login transport pins exactly that certificate instead of chain/hostname verification (see “Control certificate pin”), empty → default verification. Malformed → startup fails |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
 | `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
 | `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
@@ -2241,7 +2293,10 @@ of this test failed on `strconv.Atoi("1981371\n")` — the pid file written by
   nodes DRAINING, while the other accounts keep their gates and sessions.
 - The login path has never contacted a live vendor host. The default
   `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
-  `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.
+  `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`. The
+  optional `AJS_CONTROL_CERT_SHA256` pin is proven only against an in-process
+  TLS server; matching the live control certificate stays `[UNVERIFIED]`
+  until the actual login is rerun.
 - Rotation restores the platform filters before reading the new lease (the
   publisher owns that sequence). The M1 spike recommends restoring only after
   the new lease is observed; changing that needs a publisher change outside

@@ -344,9 +344,11 @@ func startResinPanel(ctx context.Context, st *store.Store, logger *slog.Logger, 
 // startAccountLogin builds the optional vendor login path. AJS_ACCOUNT_LOGIN=1
 // is the only switch: without it the daemon logs account_login_disabled and
 // the handler keeps the store-only refresh. Construction performs no I/O and
-// contacts no host. The returned *account.LoginService satisfies
-// api.LoginService; a nil value means disabled. The profile is returned so the
-// node controller can open sessions with the same claims the login used.
+// contacts no host. AJS_CONTROL_CERT_SHA256 optionally pins the control TLS
+// certificate (empty keeps the default verification). The returned
+// *account.LoginService satisfies api.LoginService; a nil value means
+// disabled. The profile is returned so the node controller can open sessions
+// with the same claims the login used.
 func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginService, account.VersionProfile, error) {
 	if os.Getenv("AJS_ACCOUNT_LOGIN") != "1" {
 		logger.Info("account_login_disabled", "reason", "AJS_ACCOUNT_LOGIN is not 1")
@@ -360,17 +362,53 @@ func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginServ
 	if len(hosts) == 0 {
 		hosts = append([]string(nil), account.DefaultLoginHosts...)
 	}
+	httpClient, err := controlHTTPClient(logger)
+	if err != nil {
+		return nil, account.VersionProfile{}, err
+	}
 	service, err := account.NewLoginService(st, account.LoginConfig{
-		Hosts:   hosts,
-		Profile: profile,
-		Enabled: true,
-		Logger:  logger,
+		Hosts:      hosts,
+		Profile:    profile,
+		HTTPClient: httpClient,
+		Enabled:    true,
+		Logger:     logger,
 	})
 	if err != nil {
 		return nil, account.VersionProfile{}, fmt.Errorf("account login: %w", err)
 	}
-	logger.Info("account_login_enabled", "hosts", len(hosts), "profile", profile.Name)
+	logger.Info("account_login_enabled", "hosts", len(hosts), "profile", profile.Name,
+		"control_tls_pin", pinState())
 	return service, profile, nil
+}
+
+// controlLoginTimeout matches the api package's 35-second control client.
+const controlLoginTimeout = 35 * time.Second
+
+// controlHTTPClient resolves AJS_CONTROL_CERT_SHA256. An empty value keeps
+// the default verification (nil client); a set value builds the pinned
+// transport, whose fingerprint is public configuration and the only thing
+// logged for it. A malformed fingerprint fails startup instead of silently
+// falling back to default verification.
+func controlHTTPClient(logger *slog.Logger) (*http.Client, error) {
+	pin := strings.TrimSpace(os.Getenv("AJS_CONTROL_CERT_SHA256"))
+	if pin == "" {
+		return nil, nil
+	}
+	client, err := account.PinnedHTTPClient(pin, controlLoginTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("AJS_CONTROL_CERT_SHA256: %w", err)
+	}
+	logger.Info("control_tls_pin", "fingerprint", pin)
+	return client, nil
+}
+
+// pinState reports the startup log label for the TLS pin: "pinned" when
+// AJS_CONTROL_CERT_SHA256 is set, "default" when it is empty.
+func pinState() string {
+	if strings.TrimSpace(os.Getenv("AJS_CONTROL_CERT_SHA256")) == "" {
+		return "default"
+	}
+	return "pinned"
 }
 
 // startNodeController builds the FV session factory and the node controller
