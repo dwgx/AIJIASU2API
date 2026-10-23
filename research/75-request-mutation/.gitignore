@@ -1,0 +1,11 @@
+# Lab-only captures and keys stay out of git.
+captures/
+lab/pki/
+lab/state/
+*.jsonl
+*.bin
+*.pcap
+*.key
+*.pem
+__pycache__/
+*.pyc

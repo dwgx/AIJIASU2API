@@ -146,3 +146,15 @@ copied.
 **Use boundary:** self-use with accounts the operator owns or is explicitly **authorized** to use.
 No public proxy service, no resale or sharing of access, no bypassing vendor account limits. The
 operator is responsible for the vendor's terms of service and for local law.
+
+### Decision update — competitive evaluation (2026-10-23)
+
+A wider search (78 repositories searched, 23 assessed — `research/71-panel-alt/REPORT.md`) found no
+better base than Resin: Rota lacks an IP-anchored lease and ProxyCat is GPL-2.0 with no account
+lease. A source audit confirmed 10/10 integration claims against Resin v1.3.0
+(`research/72-resin-audit/REPORT.md`). Build-vs-reuse scoring recommends a hybrid — D 77.0 vs A 75.0,
+C 72.0, B 46.0 (`research/73-build-vs-reuse/DECISION.md`): Resin unmodified plus a thin
+`ajs-gateway`/console for per-user auth, IP allowlist, concurrency/RPS, byte quota and pinned
+single-socket node switching, with `ajs-accountd` unchanged. The gateway is **recommended if per-user
+auth/quota or single-socket switching are v1 requirements**; otherwise A (Resin alone) is about two
+weeks cheaper. Gate either choice on the 2-day M1 spike.

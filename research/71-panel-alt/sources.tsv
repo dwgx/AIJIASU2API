@@ -1,0 +1,76 @@
+source_id	url	date	quote
+S01	https://api.github.com/repos/Resinat/Resin	2026-10-23	stargazers_count=2482; license.spdx_id=MIT; language=Go; default_branch=master; pushed_at=2026-10-21T16:28:33Z; archived=false
+S02	https://api.github.com/repos/Resinat/Resin	2026-10-23	description: A high-performance proxy pool gateway. Turn massive proxy subscriptions into a stable, smart, and observable network with sticky sessions.
+S03	https://github.com/Resinat/Resin/blob/master/DESIGN.md	2026-10-23	系统支持 HTTP 正向代理、SOCKS5 正向代理与反向代理三种接入模式，能够根据业务需求自动维护 IP 租约
+S04	https://github.com/Resinat/Resin/blob/master/DESIGN.md	2026-10-23	租约生命周期: 首次请求 随机选择节点，创建 Lease; 后续请求 复用 Lease; 租约节点失效 就地修改 Lease 绑定的节点; 同 IP 节点耗尽 释放 Lease; 租约过期 立刻清理
+S05	https://github.com/Resinat/Resin/blob/master/DESIGN.md	2026-10-23	如果是同 IP 轮换，属于就地更新 Lease 的节点，不修改 Expiry; Lease 包含 NodeHash, EgressIP, Expiry, LastAccessed; 一个租约的过期时间固定，不会续期
+S06	https://github.com/Resinat/Resin/blob/master/DESIGN.md	2026-10-23	Proxy-Authorization: Basic Platform.Account:PROXY_TOKEN（user=Platform.Account，pass=PROXY_TOKEN）
+S07	https://github.com/Resinat/Resin/blob/master/DESIGN.md	2026-10-23	每个 Platform 维护自己独立的租约表 xsync.Map<Account, Lease>; IPLoadStats 原子计数每个出口 IP 当前的租约数
+S08	https://api.github.com/repos/Resinat/Resin/contents/internal/api/server.go	2026-10-23	GET /api/v1/platforms/{id}/leases; DELETE /api/v1/platforms/{id}/leases/{account}; GET /api/v1/platforms/{id}/ip-load; POST /api/v1/subscriptions/{id}/actions/refresh
+S09	https://api.github.com/repos/Resinat/Resin/contents/internal/model/models.go	2026-10-23	grep -inE 'quota|allowlist|whitelist|password|ip_?limit|byte' returned 0 matches in the model file
+S10	https://api.github.com/repos/Resinat/Resin/releases/latest	2026-10-23	tag_name=v1.3.0; assets resin-darwin-amd64, resin-darwin-arm64, resin-linux-amd64, resin-linux-arm64, resin-windows-amd64
+S11	https://api.github.com/repos/alpkeskin/rota	2026-10-23	stargazers_count=769; license.spdx_id=Apache-2.0; language=Go; pushed_at=2026-09-25T13:33:12Z
+S12	https://github.com/alpkeskin/rota/blob/main/README.md	2026-10-23	Per-pool rotation: round-robin, random or sticky (N requests per IP); http://user:pass@host:8000 each user gets a main pool + ordered fallbacks; Per-user requests_per_minute cap
+S13	https://github.com/alpkeskin/rota/blob/main/README.md	2026-10-23	A Go proxy server ... plus a real-time dashboard on TimescaleDB; It still needs a TimescaleDB to connect to
+S14	https://api.github.com/repos/alpkeskin/rota/releases/latest	2026-10-23	tag_name=v2.3.0; assets linux_amd64, linux_arm64, darwin_amd64, darwin_arm64, windows_amd64
+S15	https://api.github.com/repos/Rain-kl/PoolX	2026-10-23	stargazers_count=300; license.spdx_id=MIT; language=Go; created_at=2023-06-11; pushed_at=2026-09-01
+S16	https://github.com/Rain-kl/PoolX/blob/main/README.md	2026-10-23	A proxy pool control panel built with Gin and React. Its core goal is to organize Clash/Mihomo nodes into reusable proxy pools; Multiple port listeners, each mapped to a different proxy pool configuration
+S17	https://api.github.com/repos/Rain-kl/PoolX/contents/backend/internal/domain/clash/clash.go	2026-10-23	PortProfileProxySettings{StrategyType, AuthEnabled, AuthUsername, AuthPassword}; strategies select, url-test, fallback, load-balance; no Account or Lease type in the domain
+S18	https://api.github.com/repos/Rain-kl/PoolX/releases/latest	2026-10-23	tag_name=v1.1.2; assets darwin_amd64, darwin_arm64, linux_amd64, linux_arm64, windows_amd64
+S19	https://api.github.com/repos/honmashironeko/ProxyCat	2026-10-23	stargazers_count=2654; license.spdx_id=GPL-2.0; language=Go; created_at=2024-08-21; pushed_at=2026-10-10; forks=278
+S20	https://github.com/honmashironeko/ProxyCat/blob/main/ProxyCat-Manual/Features.md	2026-10-23	将短效 IP（有效期 1-60 分钟）转换为固定 IP; 同一个端口同时接受 HTTP 与 SOCKS5; 两种轮换模式 cycle / loadbalance; 客户端 IP 白名单/黑名单; 出口认证
+S21	https://github.com/honmashironeko/ProxyCat/blob/main/ProxyCat-Manual/Configuration.md	2026-10-23	[Users] 出口代理的 Basic 认证账号表：键为用户名、值为密码，一行一个账号；整段为空表示代理不要求认证
+S22	https://github.com/honmashironeko/ProxyCat/blob/main/API.md	2026-10-23	面板 /api/* 与代理池 /api/pool/* 的参数、响应示例与错误码; GET /api/switch_proxy; GET/POST /api/ip_lists
+S23	https://api.github.com/repos/jiusanzhou/proxyhub	2026-10-23	stargazers_count=1; license.spdx_id=MIT; language=Go; created_at=2026-04-25; pushed_at=2026-07-23
+S24	https://github.com/jiusanzhou/proxyhub/blob/main/README.md	2026-10-23	Aggregated proxy pool microservice - session-sticky IPs ... One binary, zero external deps; X-Proxyhub-Session sticky session ID (same ID = same IP); X-Proxyhub-TTL session TTL
+S25	https://github.com/jiusanzhou/proxyhub/blob/main/README.md	2026-10-23	POST /api/v1/sessions/{id}/rotate; DELETE /api/v1/sessions/{id}; GET /api/v1/sessions; multi-source free proxy aggregation
+S26	https://api.github.com/repos/daimon3332/easy-proxies	2026-10-23	stargazers_count=201; license.spdx_id=NOASSERTION; language=Go; pushed_at=2026-08-27
+S27	https://github.com/daimon3332/easy-proxies/blob/main/LICENSE	2026-10-23	MIT License Copyright (c) 2026 daimon3332; Portions copyright (c) jasonwong1991/easy_proxies contributors
+S28	https://github.com/daimon3332/easy-proxies/blob/main/README.md	2026-10-23	multi-port: One local port per pooled node; pool: One shared entry that schedules across pooled nodes; hybrid: both
+S29	https://api.github.com/repos/Aurora-Admin-Panel/deploy	2026-10-23	stargazers_count=1988; license.spdx_id=MIT; language=Go
+S30	https://github.com/Aurora-Admin-Panel/deploy/blob/main/README.md	2026-10-23	这是一个多服务器端口租用管理面板，你可以添加多台服务器及端口，并将其分配给任意注册用户; 支持的端口功能 iptables, socat, gost, haproxy, shadowsocks
+S31	https://api.github.com/repos/kazeyukiro/3m-ui	2026-10-23	stargazers_count=169; license.spdx_id=GPL-3.0; language=Go; pushed_at=2026-10-19
+S32	https://github.com/kazeyukiro/3m-ui/blob/main/README.md	2026-10-23	Mihomo 服务端 Web 管理面板; 用户 一键创建 绑定节点 流量限额 按节点分别计量 到期 订阅 Token; JWT TOTP GitHub OAuth
+S33	https://api.github.com/repos/shenaba/2s-ui	2026-10-23	stargazers_count=242; license.spdx_id=GPL-3.0; language=Go; pushed_at=2026-10-18
+S34	https://github.com/shenaba/2s-ui/blob/main/README.md	2026-10-23	Client management - traffic quota, expiry date, IP limit, live online status; Traffic statistics - per inbound, per client and per outbound; Multi-node cluster
+S35	https://api.github.com/repos/Gozargah/Marzban	2026-10-23	stargazers_count=7471; license.spdx_id=AGPL-3.0; language=Python; pushed_at=2026-10-14
+S36	https://github.com/Gozargah/Marzban/blob/master/README.md	2026-10-23	Fully REST API backend; Multi-user on a single inbound; Traffic and expiry date limitations; Subscription link compatible with V2ray, Clash
+S37	https://api.github.com/repos/cedar2025/Xboard	2026-10-23	stargazers_count=4797; license.spdx_id=MIT; language=PHP; pushed_at=2026-10-22
+S38	https://github.com/cedar2025/Xboard/blob/master/README.md	2026-10-23	Xboard is a modern panel system built on Laravel 11; PHP 8.2.35+, MySQL 5.7+, Docker deployment
+S39	https://api.github.com/repos/remnawave/panel	2026-10-23	stargazers_count=5244; license.spdx_id=AGPL-3.0; language=TypeScript; pushed_at=2026-10-22
+S40	https://api.github.com/repos/go-gost/gost	2026-10-23	stargazers_count=7684; license.spdx_id=MIT; language=Go; pushed_at=2026-10-21
+S41	https://github.com/go-gost/gost/blob/master/README.md	2026-10-23	功能特性: 准入控制, 限速限流, 插件系统, Prometheus监控指标, 动态配置, Web API, GUI/WebUI
+S42	https://api.github.com/repos/go-gost/gost-ui	2026-10-23	stargazers_count=263; license=null; web ui for GOST API management
+S43	https://api.github.com/repos/3proxy/3proxy	2026-10-23	stargazers_count=5542; license.spdx_id=NOASSERTION; language=C; pushed_at=2026-10-22
+S44	https://github.com/3proxy/3proxy/blob/master/copying	2026-10-23	3proxy 0.9 Public License Agreement ... This software is FREEWARE. Redistribution and use in source and binary forms ... (BSD style license)
+S45	https://api.github.com/repos/haproxytech/dataplaneapi	2026-10-23	stargazers_count=394; license.spdx_id=Apache-2.0; language=Go
+S46	https://github.com/haproxytech/dataplaneapi/blob/master/README.md	2026-10-23	Data Plane API is a sidecar process that runs next to HAProxy and provides API endpoints for managing HAProxy
+S47	https://api.github.com/repos/abhinavsingh/proxy.py	2026-10-23	stargazers_count=3559; license.spdx_id=BSD-3-Clause; language=Python; pushed_at=2026-10-19
+S48	https://github.com/abhinavsingh/proxy.py/blob/master/README.md	2026-10-23	Plugin Examples: HTTP Proxy Plugins, ShortLink Plugin, Modify Post Data Plugin, Mock Api Plugin, Redirect To Custom Server Plugin, Filter By Upstream Host Plugin
+S49	https://api.github.com/repos/constverum/ProxyBroker	2026-10-23	stargazers_count=4171; license.spdx_id=Apache-2.0; language=Python; pushed_at=2024-03-18
+S50	https://github.com/constverum/ProxyBroker/blob/master/README.rst	2026-10-23	ProxyBroker is an open source tool that asynchronously finds public proxies from multiple sources and concurrently checks them
+S51	https://api.github.com/repos/MikeChongCan/scylla	2026-10-23	stargazers_count=4023; license.spdx_id=Apache-2.0; language=Python; pushed_at=2025-06-09
+S52	https://github.com/MikeChongCan/scylla/blob/master/README.md	2026-10-23	Automatic proxy ip crawling and validation; Easy-to-use JSON API; Simple but beautiful web-based user interface; Simple HTTP Forward proxy server
+S53	https://api.github.com/repos/jhao104/proxy_pool	2026-10-23	stargazers_count=23764; license.spdx_id=MIT; language=Python; pushed_at=2026-06-15
+S54	https://api.github.com/repos/pingc0y/go_proxy_pool	2026-10-23	stargazers_count=777; license=null; language=Go; pushed_at=2023-05-03
+S55	https://api.github.com/repos/nssanc/ProxyPoolHub	2026-10-23	stargazers_count=0; license=null; language=TypeScript; pushed_at=2026-01-22
+S56	https://api.github.com/repos/MetaCubeX/metacubexd	2026-10-23	stargazers_count=4560; license.spdx_id=MIT; language=TypeScript; pushed_at=2026-10-21
+S57	https://github.com/MetaCubeX/metacubexd/blob/main/README.md	2026-10-23	Mihomo Dashboard, The Official One, XD. A modern, beautiful, and fully-featured web dashboard for Mihomo (Clash Meta)
+S58	https://api.github.com/repos/tongsq/proxy-collect	2026-10-23	stargazers_count=195; license=null; language=Go; pushed_at=2024-06-23
+S59	https://github.com/tongsq/proxy-collect/blob/master/README.md	2026-10-23	隧道代理服务：支持开启多个端口监听，支持多协议，多级转发，用户名密码较验，用户限流; 自动抓取互联网上的免费代理ip
+S60	https://www.webshare.io/features	2026-10-23	HTTP/SOCKS5 support, Downloadable Proxy List, Global IP coverage; Proxy Locations - United States, France, Germany, UK, Netherlands and 20+ countries
+S61	https://www.webshare.io/features/dashboard	2026-10-23	Large organizations can take advantage of sub-users; Track Analytics - Bandwidth, Error Rate and Activity statistics
+S62	https://apidocs.webshare.io/ipauthorization	2026-10-23	Webshare proxy offers 2 methods for authenticating with the proxies: password and IP Authorization
+S63	https://apidocs.webshare.io/subuser	2026-10-23	Sub-Users: Each sub-user ... (sub-user CRUD, refresh proxy list, masquerade as a sub-user)
+S64	https://apidocs.webshare.io/	2026-10-23	Webshare API uses token to allow access to the API ... Authorization: Token <TOKEN>; General API 240 requests every minute
+S65	https://api.github.com/repos/apify/proxy-chain	2026-10-23	stargazers_count=1051; license.spdx_id=Apache-2.0; language=TypeScript; pushed_at=2026-10-21
+S66	https://github.com/apify/proxy-chain/blob/master/README.md	2026-10-23	A programmable proxy server (think Squid) with support for SSL/TLS, authentication, upstream proxy chaining, SOCKS4/5 protocol
+S67	https://api.github.com/repos/awesome-net-dev/sticky-proxy	2026-10-23	stargazers_count=0; license.spdx_id=Apache-2.0; language=Go; created_at=2025-12-15
+S68	https://github.com/awesome-net-dev/sticky-proxy/blob/main/README.md	2026-10-23	A high-performance stateful-backend orchestrator written in Go. Routes requests from the same user to the same backend server using JWT-based identification
+S69	https://api.github.com/repos/dubr1k/proxy-control	2026-10-23	stargazers_count=4; license.spdx_id=MIT; language=Python; pushed_at=2026-10-21
+S70	D:/Project/LovePlusSpeedToProxy/research/70-panel/REPORT.md	2026-10-23	Gaps are explicit: per-user passwords, IP allowlists, hard quotas and multi-IP identities are phase 2
+S71	https://api.github.com/repos/yukkcat/socks5-proxy	2026-10-23	stargazers_count=196; license=null; Self-rotating SOCKS5 proxy pool with auto-failover, health checks, and web dashboard
+S72	https://api.github.com/repos/highkay/go-proxy-manager	2026-10-23	stargazers_count=25; license=null; GPM is a lightweight, high-performance proxy pool manager written in Go
+S73	https://api.github.com/repos/spidernet-io/egressgateway	2026-10-23	stargazers_count=315; license.spdx_id=Apache-2.0; Layer4 egress gateway for Kubernetes
+S74	https://api.github.com/repos/sspanel-uim/sspanel-uim	2026-10-23	HTTP 404 Not Found from the GitHub API on 2026-10-23 (repository does not exist at this path)
+S75	https://api.github.com/repos/v2board/v2board	2026-10-23	stargazers_count=5061; license.spdx_id=MIT; language=PHP; pushed_at=2024-03-19

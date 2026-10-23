@@ -1,0 +1,22 @@
+{
+  "id": "baseline-linux-4.2.3.0",
+  "layer": "control_request",
+  "source": "research/60-dynamic/REPORT.md control capture; dummy account, 2026-10-23",
+  "fields": {
+    "_lang": "en",
+    "_m": "linux",
+    "_os_dev": "x86_64",
+    "_os_dim": "w=1080&h=2400&d=440",
+    "_os_ver": "Linux version 6.18.33.2-microsoft-standard-WSL2",
+    "_site": "ajs",
+    "_tz": "480",
+    "_uid": "6ada95c900de9bbb3a82",
+    "_v": "4.2.3.0",
+    "cmd": "ClientApiLogin/Login",
+    "cv": "20241105-1",
+    "password": "lab-secret",
+    "trigger": "login",
+    "username": "labuser",
+    "v": "4.2.3.0"
+  }
+}

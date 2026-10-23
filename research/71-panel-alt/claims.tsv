@@ -1,0 +1,45 @@
+claim_id	claim	source_ids	grade
+C01	Resin is MIT-licensed Go software with 2,482 stars, v1.3.0 published, last push 2026-10-21 (GitHub API, 2026-10-23).	S01;S10	A
+C02	Resin's proxy entrypoint authenticates as Platform.Account:PROXY_TOKEN and routes by Platform + Account, so one proxy credential maps to one business account.	S02;S06	A
+C03	Resin keeps a fixed-expiry lease per (Platform, Account) anchored on the egress IP; a same-IP node swap rewrites the lease's node in place and does not change Expiry.	S04;S05;S07	A
+C04	Resin exposes lease list/get/delete by account, lease-delete-all and ip-load endpoints, plus subscription refresh, so rotation and drain are programmatic.	S08	A
+C05	Resin's data model has no quota, IP allowlist, or per-user password field; those features are absent, not merely undocumented.	S09;S70	A
+C06	Resin ships darwin-amd64, darwin-arm64, linux-amd64, linux-arm64 and windows-amd64 release artifacts.	S10	A
+C07	Rota is Apache-2.0, Go, 769 stars, v2.3.0, and ships linux/darwin/windows binaries.	S11;S14	A
+C08	Rota's stickiness is "sticky (N requests per IP)" per pool, not a TTL lease keyed to a business account.	S12	B
+C09	Rota requires a TimescaleDB instance; it is not a single-binary zero-dependency service.	S13	B
+C10	Rota gives each proxy user a main pool plus ordered fallbacks and a per-user requests_per_minute cap.	S12	B
+C11	PoolX is MIT, Go(Gin)+React, 300 stars, v1.1.2, cross-platform binaries, and organizes Clash/Mihomo nodes into reusable pools exposed as multiple listener ports.	S15;S16;S18	A
+C12	PoolX supports per-port single username/password auth and four strategies (select, url-test, fallback, load-balance); it has no Account or Lease entity.	S17	A
+C13	PoolX depends on an external Mihomo kernel binary; it is a panel, not a proxy engine.	S16	B
+C14	ProxyCat is GPL-2.0, Go, 2,654 stars, 278 forks, and converts short-lived upstream IPs (1-60 min) into a fixed tunnel entry with HTTP+SOCKS5 on one port.	S19;S20	A
+C15	ProxyCat authenticates proxy clients against a shared [Users] Basic-auth table and supports client IP whitelist/blacklist plus exit username/password.	S21;S20	B
+C16	ProxyCat rotates exits by time lifetime and/or request count and by load; it has no per-account sticky lease.	S20	B
+C17	ProxyCat exposes panel and pool REST APIs including manual upstream switch, IP-list CRUD, logs and access records.	S22	B
+C18	proxyhub is MIT, Go, single binary + SQLite, and implements session-sticky exit IPs with TTL, rotate and delete endpoints, plus Bright Data-style username routing.	S23;S24;S25	A
+C19	proxyhub had 1 star and was created 2026-04-25, so its maturity is negligible regardless of design fit.	S23	A
+C20	proxyhub aggregates free public proxies rather than subscription/account-bound nodes and has no Platform/Account tenancy or quota model.	S24;S25	B
+C21	easy-proxies is MIT per its LICENSE file even though GitHub reports license.spdx_id=NOASSERTION; it runs one local port per pooled node plus an optional shared pool entry.	S26;S27;S28	A
+C22	Aurora-Admin-Panel is an MIT multi-server port-leasing panel that assigns ports to registered tenants and can run gost/socat/iptables/haproxy behind them; it is not an egress proxy pool.	S29;S30	B
+C23	3m-ui is GPL-3.0 and manages Mihomo listeners, users with traffic quotas and per-node metering, subscriptions and multi-machine sync.	S31;S32	A
+C24	2s-ui is GPL-3.0 and manages sing-box clients with quota, expiry and IP limit, plus per-inbound/client/outbound traffic stats and multi-node clusters.	S33;S34	A
+C25	Marzban is AGPL-3.0 with a REST API, multi-user inbounds, traffic/expiry limits and subscription links; its data plane is Xray inbound, not an outbound pool.	S35;S36	A
+C26	Xboard is MIT (Laravel 11, MySQL) and Remnawave is AGPL-3.0 (Xray-based); both are subscription/user panels, not egress-pool gateways.	S37;S38;S39	B
+C27	gost is MIT and has admission control, rate limiting, dynamic config and a Web API, but its WebUI lives in a separate repository with no license.	S40;S41;S42	A
+C28	3proxy is freeware under a custom BSD-style license (GitHub: NOASSERTION) and has no built-in management panel.	S43;S44	A
+C29	HAProxy Dataplane API is Apache-2.0 and manages HAProxy configuration; it provides no tenant, lease or per-account egress model.	S45;S46	B
+C30	proxy.py is BSD-3-Clause and programmable via plugins but ships no pool, lease or panel; proxy-chain is Apache-2.0 and likewise a library, not a control plane.	S47;S48;S65;S66	B
+C31	ProxyBroker, Scylla, proxy_pool and proxy-collect harvest/validate free public proxies; they solve discovery, not account-bound egress.	S49;S50;S51;S52;S53;S58;S59	B
+C32	go_proxy_pool, ProxyPoolHub, proxy-collect, yukkcat/socks5-proxy and highkay/go-proxy-manager have no license file (GitHub license=null), so they are non-reusable.	S54;S55;S58;S71;S72	A
+C33	metacubexd is an MIT Mihomo dashboard only; it has no proxy pool, auth or lease logic.	S56;S57	B
+C34	Webshare (commercial benchmark) offers sub-users, password and IP-authorization auth, downloadable proxy lists, 20+ countries, bandwidth/error-rate analytics and a token REST API.	S60;S61;S62;S63;S64	B
+C35	Webshare's API is rate-limited (general 240 req/min) and token-authenticated; its proxy list and IP authorization are separate API resources.	S62;S64	A
+C36	No assessed open-source candidate combines (a) per-account sticky lease anchored on egress IP, (b) a forward HTTP/SOCKS5 pool gateway, (c) a panel plus programmatic rotate API, and (d) a permissive license.	S03;S04;S08;S12;S17;S20;S24;S28	A
+C37	The only other project with a session-to-exit-IP lease plus rotate API is proxyhub, which is 1-star and three months old; it cannot be adopted as a base today.	S23;S24;S25	A
+C38	Rota is the strongest fallback if Resin fails, because it is Apache-2.0, actively released, has per-user credentials and per-user rate caps, and its gap (no lease) can be layered on.	S11;S12;S13	[INFERENCE]
+C39	ProxyCat is the closest operational analogue to the AJiaSu situation (fixed entry over short-lived upstreams) but GPL-2.0 plus the absence of account leases rules it out as a base.	S19;S20	B
+C40	Embedding GPL-2.0 ProxyCat code in our product would impose GPL on our distribution; running it unmodified as a separate service is a different case and would still need legal review.	S19	[INFERENCE]
+C41	Resin's lease table is per-Platform (xsync.Map<Account, Lease>) and IPLoadStats counts leases per egress IP, which is what makes multi-account redundancy on one IP expressible.	S05;S07	A
+C42	Resin's MIT license permits commercial reuse and modification provided the copyright notice and permission notice are retained.	S01	[INFERENCE]
+C43	Bright Data, IPRoyal, Oxylabs and proxy-seller are closed hosted services; their session-control docs describe username-embedded session IDs, not reusable code.	none	[UNKNOWN]
+C44	No candidate was found that implements per-account quotas on top of a proxy pool; quotas exist only in inbound subscription panels (Marzban, 2s-ui, 3m-ui) or as per-user RPM caps (Rota).	S09;S12;S34;S36	[INFERENCE]

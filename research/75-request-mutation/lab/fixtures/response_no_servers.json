@@ -1,0 +1,15 @@
+{
+  "SyncVersion": {},
+  "Login": {
+    "AuthResult": "OK",
+    "AuthMessage": "",
+    "GroupTitle": "lab",
+    "ExpireTime": 0,
+    "Expired": false,
+    "UrlWeb": "https://lab.invalid/",
+    "LatestVersion": "4.2.3.0",
+    "LoginToken": "lab-token",
+    "UserName": "labuser",
+    "ConnectPassword": "lab-connect"
+  }
+}

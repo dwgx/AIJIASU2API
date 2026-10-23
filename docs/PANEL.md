@@ -228,6 +228,30 @@ and LAN targets so those are dialed directly instead of through a pool node.
 P3 is explicitly out of scope unless the Owner answers open question 2 with "yes". Until then the
 proxy token is shared and per-user enforcement is advisory.
 
+## 10. Decision update — competitive evaluation (2026-10-23)
+
+A second, wider search (`research/71-panel-alt/REPORT.md`) covered 78 repositories and assessed 23;
+no candidate beats Resin as the base. The top three are Resin (MIT), Rota (Apache-2.0, but its
+`stick` is an N-request counter, not an IP-anchored lease) and ProxyCat (GPL-2.0, no account lease).
+Resin stays.
+
+A source audit of Resin v1.3.0 (`research/72-resin-audit/REPORT.md`) confirmed **10 of 10**
+integration claims this design depends on: local subscription `content` + `PATCH`, loopback SOCKS
+nodes, `(Platform, Account)` leases anchored on egress IP, no per-user passwords/quotas,
+cross-platform release assets, and MIT.
+
+The build-vs-reuse scoring (`research/73-build-vs-reuse/DECISION.md`) recommends **hybrid D at 77.0**
+against A 75.0, C 72.0 and B 46.0: Resin unmodified plus a thin `ajs-gateway`/console for per-user
+auth, IP allowlist, concurrency/RPS, byte quota and pinned single-socket node switching, with
+`ajs-accountd` unchanged. **This is a conditional recommendation, not a settled decision:** D beats A
+only if per-user auth/quota or single-socket switching are v1 requirements; otherwise A (Resin alone)
+is about two weeks cheaper. Either way, gate the choice on the 2-day M1 spike (Resin + one `ajsproxy`
++ a hand-written subscription).
+
+Evidence: [`../research/71-panel-alt/REPORT.md`](../research/71-panel-alt/REPORT.md),
+[`../research/72-resin-audit/REPORT.md`](../research/72-resin-audit/REPORT.md),
+[`../research/73-build-vs-reuse/DECISION.md`](../research/73-build-vs-reuse/DECISION.md).
+
 ## 11. License and boundary
 
 - Repository code: MIT, `Copyright (c) 2026 The LovePlusSpeedToProxy Authors` (root `LICENSE`).

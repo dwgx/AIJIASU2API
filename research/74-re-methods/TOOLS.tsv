@@ -1,0 +1,54 @@
+tool	platform	purpose	command	risk
+sha256sum	linux,macos	artifact identity	sha256sum ajiasu	none
+Get-FileHash	windows	artifact identity	powershell -NoProfile -Command "Get-FileHash -Algorithm SHA256 .\AJiaSu.exe"	none
+file	linux,macos	file-type triage	file ajiasu	none
+strings	all	literal + offset mining	strings -t x -n 5 AJiaSu.exe	none
+objdump	all	PE/ELF headers, sections, imports	objdump -p AJiaSu.exe	none
+readelf	linux	ELF header/sections/symbols	readelf -hSWs ajiasu	none
+nm	linux,macos	symbol presence	nm -C ajiasu	none
+pefile	python	scripted PE parsing	Python: pefile.PE(path)	none
+PE-bear	windows	GUI PE structure review	open AJiaSu.exe in PE-bear	none
+IDA Pro 9.2 (idat.exe)	all	disassembly, decompile, headless scripts	idat.exe -A -S"dump.py" AJiaSu.exe	med (writes .i64/.id0, licence-bound)
+Ghidra	all	headless auto-analysis + decompile	analyzeHeadless C:\gh proj -import AJiaSu.exe -postScript Dump.java	low
+radare2 / rabin2	all	CLI triage, xrefs, ESIL	rabin2 -Izz ajiasu	low
+GoReSym	all	Go pclntab/moduledata recovery	GoReSym.exe -t -d ajsproxy.exe	low
+go version -m	all	Go build info from a binary	go version -m ajsproxy.exe	none
+FLOSS	all	obfuscated/stack string recovery	floss.exe -n 6 AJiaSu.exe	low
+capa	all	capability/behaviour mapping	capa.exe -vv AJiaSu.exe	low
+YARA-X (yr)	all	signature compile + scan	yr scan rules/ajs.yar AJiaSu.exe	low
+sigcheck	windows	Authenticode + catalog lookup	sigcheck64.exe -a -h AJiaSu.exe	none
+7-Zip	all	NSIS/MSI payload extraction	7z x AJiaSu_4.9.6.0.exe -oextract	low
+x64dbg	windows	userland debugger, scripted logging	x64dbg.exe AJiaSu.exe	med (debug privileges, target runs)
+WinDbg / cdb	windows	debugger + ETW + crash dumps	cdb.exe -c "bp ws2_32!connect;g" AJiaSu.exe	med
+gdb	linux	breakpoint scripting, memory dumps	gdb -q -batch -x dump_ctr.gdb ./ajiasu	low
+lldb	macos	breakpoint scripting	lldb -b -o "br set -n SSL_write" ./ajiasu	low
+Frida	all	spawn/attach instrumentation	frida -f ./ajiasu -l hook.js --runtime=v8	med (code injection into target)
+frida-trace	all	API call tracing with auto-stubs	frida-trace -f AJiaSu.exe -i "ws2_32!*"	med
+API Monitor	windows	Win32 API logging with decoded params	GUI: API Monitor -> AJiaSu.exe -> Network	low
+Procmon	windows	file/registry/network event capture	Procmon64.exe /BackingFile out.pml /Quiet	low
+ETW (wpr / logman)	windows	kernel + provider traces	wpr -start GeneralProfile -filemode	low
+Process Explorer	windows	handles, DLLs, device objects	procexp64.exe	none
+Sysinternals handle	windows	per-process handle enumeration	handle64.exe -p AJiaSu.exe	none
+strace	linux	syscall trace	strace -f -e trace=network -s 256 ./ajiasu	low
+ltrace	linux	library-call trace	ltrace -f -e "SSL_*+RSA_*" ./ajiasu	low
+perf	linux	sampling + syscall trace	perf trace -p $(pgrep ajiasu)	low
+Wireshark / tshark	all	packet capture + protocol decode	tshark -i 5 -w cap.pcapng	low
+Npcap	windows	capture driver for Wireshark/tshark	installer from npcap.com	low
+tcpdump	linux	packet capture	tcpdump -i lo -s 0 -w cap.pcap	low
+mitmproxy	all	HTTP(S) intercept + programmatic rewrite	mitmdump -p 8080 -s addon.py	med (requires trusting lab CA)
+Burp Suite	all	intercept, Repeater, macros	GUI: Proxy -> Intercept -> Repeater	med
+Charles Proxy	all	HTTP/2 intercept with rewrite rules	GUI: Proxy Settings -> SSL Proxying	med
+openssl s_client	all	TLS handshake, chain, pin check	openssl s_client -connect login.ajs-app.com:443 -showcerts	none
+websocat	all	WebSocket client/replay	websocat ws://127.0.0.1:8080/s	low
+nghttp2 (nghttp)	all	HTTP/2 frame inspection	nghttp -nv https://login.ajs-app.com/client.php	low
+grpcurl	all	gRPC reflection + calls	grpcurl -plaintext 127.0.0.1:50051 list	low
+protoc	all	protobuf wire decode	protoc --decode_raw < msg.bin	none
+GH-Injector	windows	DLL injection	"GH Injector - x64.exe" -p AJiaSu.exe -d hook.dll	high (arbitrary code in target)
+LD_PRELOAD + gcc	linux	libc/syscall shim	gcc -shared -fPIC -o shim.so shim.c && LD_PRELOAD=./shim.so ./ajiasu	med (process-wide interposition)
+DYLD_INSERT_LIBRARIES	macos	library interposition	DYLD_INSERT_LIBRARIES=./shim.dylib DYLD_FORCE_FLAT_NAMESPACE=1 ./ajiasu	med
+MinHook / Detours	windows	IAT + inline hooks	build against MinHook, hook ws2_32!send	med
+bpftrace	linux	uprobe/uretprobe/tracepoint eBPF	bpftrace -e 'uprobe:/path/ajiasu:0x401000 { printf("%x\n", arg0); }'	med (root, kernel-visible)
+tcpreplay	linux	pcap replay onto an interface	tcpreplay -i lo cap.pcap	med (injects real packets)
+boofuzz	python	protocol fuzzing	Python: boofuzz Session(target=TCPSocketConnection(...))	high (target crash/DoS)
+python cryptography	all	protocol crypto reimplementation	Python: Cipher(algorithms.AES(k), modes.CTR(iv))	none
+osslsigncode	all	Authenticode sign/verify	osslsigncode sign -certs lab.pem -key lab.key -in x.exe -out x-signed.exe	med (creates signed artifact)

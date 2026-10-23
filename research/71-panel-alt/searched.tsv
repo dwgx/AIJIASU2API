@@ -1,0 +1,79 @@
+repo	source	assessed	note
+Resinat/Resin	metadata+source	yes	MIT Go pool gateway; lease model read in DESIGN.md and server.go
+alpkeskin/rota	metadata+readme	yes	Apache-2.0 Go rotation engine + TimescaleDB
+Rain-kl/PoolX	metadata+readme+source	yes	MIT Gin/React panel over Mihomo pools
+honmashironeko/ProxyCat	metadata+readme+docs	yes	GPL-2.0 tunnel proxy middleware with panel
+jiusanzhou/proxyhub	metadata+readme	yes	MIT session-sticky proxy pool, 1 star
+daimon3332/easy-proxies	metadata+readme	yes	MIT per-node ports via sing-box
+Aurora-Admin-Panel/deploy	metadata+readme	yes	MIT multi-server port leasing panel
+kazeyukiro/3m-ui	metadata+readme	yes	GPL-3.0 Mihomo listener/user panel
+shenaba/2s-ui	metadata+readme	yes	GPL-3.0 sing-box panel
+Gozargah/Marzban	metadata+readme	yes	AGPL-3.0 Xray subscription panel
+cedar2025/Xboard	metadata+readme	yes	MIT Laravel subscription panel
+remnawave/panel	metadata	yes	AGPL-3.0 Xray panel
+go-gost/gost	metadata+readme	yes	MIT tunnel/proxy with config API
+3proxy/3proxy	metadata+copying	yes	custom BSD-style proxy server, no panel
+haproxytech/dataplaneapi	metadata+readme	yes	Apache-2.0 HAProxy config API
+abhinavsingh/proxy.py	metadata+readme	yes	BSD-3 embeddable proxy with plugins
+constverum/ProxyBroker	metadata+readme	yes	Apache-2.0 public proxy finder/checker
+MikeChongCan/scylla	metadata+readme	yes	Apache-2.0 public proxy pool with UI
+jhao104/proxy_pool	metadata	yes	MIT free-proxy pool
+pingc0y/go_proxy_pool	metadata	yes	no license, free-proxy pool, stale
+nssanc/ProxyPoolHub	metadata	yes	no license, 0 stars
+MetaCubeX/metacubexd	metadata+readme	yes	MIT Mihomo dashboard only
+tongsq/proxy-collect	metadata+readme	yes	no license, free proxy + tunnel
+hiddify/Hiddify-Manager	metadata	no	GPL-3.0 inbound subscription panel
+MHSanaei/3x-ui	metadata+readme	no	GPL-3.0 Xray inbound panel
+v2board/v2board	metadata	no	MIT PHP subscription panel, stale 2024
+haishanh/yacd	metadata+readme	no	MIT Clash dashboard
+Zephyruso/zashboard	metadata+readme	no	MIT Clash dashboard
+zu1k/proxypool	metadata	no	GPL-3.0 free-proxy pool, stale 2023
+wzdnzd/aggregator	metadata	no	Apache-2.0 subscription aggregator
+snail007/goproxy	metadata	no	GPL-3.0 proxy toolchain
+alireza0/s-ui	metadata	no	GPL-3.0 sing-box panel
+NginxProxyManager/nginx-proxy-manager	metadata	no	MIT reverse-proxy admin, not forward proxy
+envoyproxy/envoy	metadata	no	Apache-2.0 data plane, admin endpoint is not a panel
+traefik/traefik	metadata	no	MIT reverse proxy, no forward-proxy tenant model
+gravitl/netmaker	metadata	no	NOASSERTION WireGuard mesh control plane
+firezone/firezone	metadata	no	Apache-2.0 WireGuard zero-trust, not proxy egress
+ngoduykhanh/wireguard-ui	metadata	no	MIT WireGuard UI
+shadowsocks/shadowsocks-manager	metadata	no	GPL-3.0 multi-user SS manager, stale 2024
+qiyeboy/IPProxyPool	metadata	no	no license, stale 2018
+awolfly9/IPProxyTool	metadata	no	MIT proxy collector, stale 2022
+OutlineFoundation/outline-server	metadata	no	Apache-2.0 VPN management, not proxy pool
+pritunl/pritunl	metadata	no	NOASSERTION VPN server with user admin
+mitmproxy/mitmproxy	metadata	no	MIT debugging proxy, not a pool/panel
+MetaCubeX/mihomo	metadata	no	MIT proxy core (data plane)
+SagerNet/sing-box	metadata	no	NOASSERTION proxy core (data plane)
+apify/proxy-chain	metadata+readme	no	Apache-2.0 programmable proxy library
+awesome-net-dev/sticky-proxy	metadata+readme	no	Apache-2.0 sticky reverse-proxy orchestrator, 0 stars
+dubr1k/proxy-control	metadata	no	MIT MTProxy/NaiveProxy control panel, 4 stars
+go-gost/gost-ui	metadata	no	no license, WebUI for gost API
+yukkcat/socks5-proxy	search	no	no license, self-rotating SOCKS5 pool
+konstpic/SharX	search	no	no license, multi-node proxy infrastructure platform
+highkay/go-proxy-manager	search	no	no license, 25 stars
+nfx/slrp	search	no	MIT rotating open-proxy multiplexer
+Temporalitas/ipv6-proxy-server	search	no	MIT IPv6 backconnect proxy server
+spidernet-io/egressgateway	metadata	no	Apache-2.0 Kubernetes L4 egress gateway
+ustayready/fireprox	search	no	GPL-3.0 AWS API Gateway proxy generator
+MrTurvey/flareprox	search	no	MIT Cloudflare pass-through proxy generator
+vincentrosso/proxypool	metadata	no	no license, 0 stars, Go sticky-session library
+bia-pain-bache/BPB-Worker-Panel	search	no	GPL-3.0 Cloudflare Worker subscription panel
+mattes/rotating-proxy	search	no	Unlicense Tor rotating proxy
+rookmoot/proxifier	search	no	BSD-3-Clause proxy rotator
+mhyrzt/xrat	search	no	MIT Xray/sing-box subscription manager
+jinqians/psm-panel	search	no	AGPL-3.0 multi-machine xray/sing-box script
+PRVTPRO/Amnezia-Web-Panel	search	no	GPL-3.0 AmneziaWG/Xray web panel
+IRNova/Nova-Server	search	no	NOASSERTION Xray admin panel
+ClickDevTech/CELERITY-panel	search	no	MIT Hysteria2/Xray panel
+missuo/snell-panel	search	no	GPL-3.0 Snell node manager
+SulgX/SulgX-Panel	search	no	MIT VLESS subscription panel
+GFW4Fun/x-ui-pro	search	no	no license, Xray nginx panel
+F0rc3Run/RailPanel	search	no	no license, VLESS panel
+wizwizdev/wizwizxui-timebot	search	no	MIT x-ui Telegram bot
+chenerzhu/proxy-pool	search	no	no license, Java proxy pool
+chenjiandongx/async-proxy-pool	search	no	MIT async proxy pool library
+sspanel-uim/sspanel-uim	api	no	HTTP 404 on 2026-10-23; repository path does not exist
+yms168/proxy-panel-v2	search	no	MIT, 0 stars, residential proxy pool + UI
+dttxorg/miniproxy	search	no	no license, 0 stars, single-VPS proxy pool + web panel
+overflow0verture/proxy_harvester	search	no	MIT, 16 stars, modular proxy pool + rotating gateway

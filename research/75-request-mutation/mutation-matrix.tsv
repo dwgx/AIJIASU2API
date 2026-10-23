@@ -1,0 +1,59 @@
+id	layer	field	baseline	mutations	expected_client	expected_server	risk
+C01	control_request	cmd	ClientApiLogin/Login	delete:cmd	client logs request failure or retries; no crash expected	mock logs missing cmd; emulator should answer a JSON error	medium
+C02	control_request	cmd	ClientApiLogin/Login	set:cmd=ClientApiLogin/Logout	client treats body as an error envelope; failover only on IOException	unknown command path; return Result!=Success	low
+C03	control_request	cmd	ClientApiLogin/Login	set:cmd=clientapilogin/login	command matching is exact; expect an error envelope	server must be case-sensitive	low
+C04	control_request	_v	4.2.3.0	set:_v=9.9.9.9	version is informational on this path; record any upgrade prompt	server may gate features by version	low
+C05	control_request	v	4.2.3.0	set:v=4.3.0.1	client may keep the binary version; compare with the 4.3.0.1 build	server-side version gate unknown	low
+C06	control_request	cv	20241105-1	set:cv=00000000-0	core version is sent to FV; login may still succeed	server-side core gate unknown	low
+C07	control_request	_m	linux	set:_m=windows	platform string is echoed; watch for platform-specific response branches	server may branch on platform	low
+C08	control_request	_os_dev	x86_64	len:_os_dev=512	device model string length; watch for truncation	server-side length limits unknown	low
+C09	control_request	_os_dim	lid=...;w=...	set:_os_dim=w=0&h=0&d=0	screen geometry is informational	server-side validation unknown	low
+C10	control_request	_uid	22 hex	set:_uid=0000000000000000000000	uid checksum is not verified by the client locally	server may treat uid as a device key	medium
+C11	control_request	_tz	480	set:_tz=9999	timezone is informational	server may use it for time checks	low
+C12	control_request	username	labuser	empty:username	empty account should produce AuthResult!=OK from the mock	emulator must reject empty account	medium
+C13	control_request	password	<redacted>	empty:password	mock accepts any password; never use a real one	emulator must not log the value	high
+C14	control_request	password	<redacted>	len:password=1024	mock accepts; watch request size limits	server-side length limit unknown	high
+C15	control_request	trigger	login	delete:trigger	login still sent; trigger is advisory	server may require trigger	low
+C16	control_request	username	labuser	dup:username	urlencoded duplicate key; parser takes first or last	server parser must define precedence	medium
+C17	control_request	unknown	-	set:zz_lab=1	unknown fields are ignored by the client	server should ignore unknown fields	low
+C18	control_request	X-Sig	absent	set:X-Sig=0000000000000000	Linux 4.2.3.0 does not send it; Windows signed path may	server must reject a bad signature if it checks	medium
+C19	control_request	X-Timestamp	absent	set:X-Timestamp=0	Windows signed path only; Linux ignores	server replay window unknown	medium
+C20	control_request	body	urlencoded	append trailing &	client 4.2.3.0 sends a trailing &; compare with 4.3.0.1	server parser must tolerate it	low
+F01	fv_auth	s	empty	set:s=stale	s should be empty on auth; watch for rejection	server must reject a non-empty auth s	medium
+F02	fv_auth	n	32 hex	len:n=30	15-byte IV; client-side IV check may abort	server must reject a short IV	medium
+F03	fv_auth	n	32 hex	set:n=ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ	non-hex IV; parse error path	server must reject a non-hex IV	low
+F04	fv_auth	n	random	set:n=<previous value>	IV reuse across two auth connections	server must not reuse CTR keystream; detect	high
+F05	fv_auth	k	OAEP block	empty:k	missing RSA block; auth must fail	server cannot derive session key	medium
+F06	fv_auth	k	OAEP block	set:k=AAAA	bad base64/magic; auth must fail	server rejects non-OAEP magic	low
+F07	fv_auth	k	OAEP-SHA1	set:k=<OAEP-SHA256 block>	client still sends SHA1; server-side only	server must use SHA1 for this build	medium
+F08	fv_auth	l	body length	set:l=+1	declared length off by one; client may hang or error	server must reject a mismatch	medium
+F09	fv_auth	l	body length	set:l=-1	negative length; parser boundary	server must reject a negative length	medium
+F10	fv_auth	l	body length	set:l=999999	length far beyond the frame	server must reject or cap	high
+F11	fv_auth	_	random pad	delete:_	missing padding field	padding is optional on the server?	low
+F12	fv_auth	_	random pad	len:_=4096	huge padding; request size	server must cap the text	medium
+F13	fv_auth	body	key=value lines	dup:c=au	duplicate body field; first/last wins	server parser must define precedence	low
+F14	fv_auth	text	LF separator	set:text_sep=CRLF	CRLF in text; field parser tolerance	server parser tolerance	low
+F15	fv_auth	body	encrypted	truncate:body	body shorter than l; client-side error	server must reject a short body	medium
+F16	fv_auth	body	encrypted	set:body_plaintext=1	body not encrypted with session key	server must reject plaintext	high
+F17	fv_data	s	sid	set:s=lab-unknown	unknown sid; expect code!=200	server must reject an unknown sid	medium
+F18	fv_data	s	sid	set:s=<auth sid>	valid reuse; tests multi-flow	session key lookup by sid	low
+F19	fv_data	k	empty	set:k=AAAA	k must be empty on data; parser path	server must ignore or reject k	low
+F20	fv_data	l	absent	set:l=18	l must be absent on data; parser path	server must not require l	low
+F21	fv_data	socks	ATYP 3	set:atyp=9	unsupported ATYP; SOCKS error path	server must return a SOCKS error	low
+F22	fv_data	socks	port 80	set:port=0	port zero; connect failure path	server must reject port 0	low
+R01	control_response	AuthResult	OK	set:AuthResult=FAIL	client should report login failure and stay offline	emulator should return a failure envelope	low
+R02	control_response	AuthResult	OK	delete:AuthResult	missing token; client treats as not OK	emulator must define the failure shape	low
+R03	control_response	SyncVersion	{}	set:SyncVersion=1	client may abort in json_value.cpp	emulator must send an object	medium
+R04	control_response	Servers	map	delete:Servers	client may login but has no node to connect	emulator should send an empty map	medium
+R05	control_response	Servers	map	set:svr=203.0.113.10	client would try an external node; lab guard must block	never allow a non-lab svr in this lab	high
+R06	control_response	LatestVersion	string	delete:LatestVersion	client may abort on a missing string	emulator must include the string	medium
+R07	control_response	http_status	200	set:status=500	client may still parse the JSON; failover only on IOException	emulator must not rely on HTTP status alone	low
+R08	control_response	body	complete	set:truncate=10	body not ending in }; response check failed	emulator must send complete JSON	medium
+R09	control_response	encoding	identity	set:encoding=gzip-corrupt	client gzip decode failure path	emulator must send valid gzip or none	low
+R10	fv_response	code	200	set:code=403	auth rejected; client should not listen	server refusal path	low
+R11	fv_response	r	ok	set:r=auth.limit	client maps r!=ok to auth failure	emulator must map r tokens	low
+R12	fv_response	sid	present	delete:sid	data channel s=null; connect fails	server must always send sid	medium
+R13	fv_response	halfclose	1	set:halfclose=0	client waits for EOF before parsing the auth map	server must half-close after the auth map	high
+R14	fv_response	length	single	set:duplicate_length=1	client parses garbage and times out	server must send one length block	medium
+R15	fv_response	response	complete	set:truncate=2	short response; EOF path	server must send 4+len bytes	low
+R16	fv_response	ka	30	set:ka=0	keepalive interval zero; timer path	server must define a sane default	medium

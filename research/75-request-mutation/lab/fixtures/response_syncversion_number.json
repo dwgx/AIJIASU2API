@@ -1,0 +1,30 @@
+{
+  "SyncVersion": 1,
+  "Login": {
+    "AuthResult": "OK",
+    "AuthMessage": "",
+    "GroupTitle": "lab",
+    "ExpireTime": 0,
+    "Expired": false,
+    "UrlWeb": "https://lab.invalid/",
+    "LatestVersion": "4.2.3.0",
+    "LoginToken": "lab-token",
+    "UserName": "labuser",
+    "ConnectPassword": "lab-connect"
+  },
+  "Servers": {
+    "lab-node": {
+      "id": "lab-node",
+      "vsid": 1,
+      "ctry": "CN",
+      "svr": "10.75.0.1",
+      "tit": "Lab Node",
+      "cmt": "",
+      "sts": "ok",
+      "ord": "1",
+      "cat": ["lab"],
+      "par": {"fv": {"u": 1001, "p": 8444, "ps": "lab"}},
+      "loc": [{"c": "CN", "n": "Lab", "o": 1}]
+    }
+  }
+}
