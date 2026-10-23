@@ -35,8 +35,11 @@ As of 2026-10-23:
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
   exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, and the
-  account-control plus FV session-factory seams. 200 Go test functions, mostly `httptest` fakes;
-  the tests use no Resin process, no vendor account and no network. The Linux 4.2.3.0 request
+  account control, FV session factory, node controller, SOCKS5 gate and process supervisor seams.
+  After a successful login the node controller starts one loopback gate per usable server and
+  reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and remains
+  `[UNVERIFIED]` live. 218 Go test functions, mostly `httptest` fakes; the tests use no Resin
+  process, no vendor account and no network. The Linux 4.2.3.0 request
   shape (B1), stable per-account device identity (B5) and binary-carrier mapping (C3) are covered
   by offline conformance tests; live acceptance remains `[UNVERIFIED]`.
 - `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
