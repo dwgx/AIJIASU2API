@@ -109,6 +109,7 @@ type Publisher struct {
 
 	mu            sync.Mutex
 	publishMu     sync.Mutex
+	rotateMu      sync.Mutex
 	subscription  string
 	lastGood      string
 	lastPublishAt time.Time
@@ -179,9 +180,12 @@ func (p *Publisher) LastGood() string {
 // invalid tags and invalid ports are rejected. With no nodes the result is the
 // empty string, which is the only case where an empty publish is legitimate.
 func Render(nodes []Node) (string, error) {
-	lines := make([]string, 0, len(nodes))
-	seen := make(map[string]struct{}, len(nodes))
-	for _, node := range nodes {
+	sorted := append([]Node(nil), nodes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Tag < sorted[j].Tag })
+
+	lines := make([]string, 0, len(sorted))
+	seen := make(map[string]struct{}, len(sorted))
+	for _, node := range sorted {
 		if !ValidTag(node.Tag) {
 			return "", fmt.Errorf("%w: %q", ErrInvalidTag, node.Tag)
 		}
@@ -197,7 +201,6 @@ func Render(nodes []Node) (string, error) {
 	if len(lines) == 0 {
 		return "", nil
 	}
-	sort.Strings(lines)
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
@@ -380,6 +383,12 @@ func (p *Publisher) refresh(ctx context.Context, subscription string) error {
 // then restore the original filters. Restoration runs even when the delete
 // fails and is retried with backoff. currentTag is the full Resin tag,
 // "<subscription>/<tag>".
+//
+// The whole read-modify-write is serialised by rotateMu: rotations for
+// different accounts are allowed by the per-account rate limit, and without
+// the lock one rotation's restore would drop another's exclusion before its
+// lease delete. ResinPanel.RotateLease additionally holds its opMu, so a
+// concurrent reconcile cannot reset the filters mid-rotation.
 func (p *Publisher) Rotate(ctx context.Context, platformID, account, currentTag string, avoidCurrentIP bool) error {
 	if platformID == "" || account == "" {
 		return errors.New("publisher: platform id and account are required")
@@ -387,11 +396,14 @@ func (p *Publisher) Rotate(ctx context.Context, platformID, account, currentTag 
 	if avoidCurrentIP && currentTag == "" {
 		return errors.New("publisher: current tag is required for exclusion rotation")
 	}
-	if err := p.reserveRotation(account); err != nil {
-		return err
-	}
 	if p.client == nil {
 		return errors.New("publisher: nil resin client")
+	}
+	p.rotateMu.Lock()
+	defer p.rotateMu.Unlock()
+
+	if err := p.reserveRotation(account); err != nil {
+		return err
 	}
 	if !avoidCurrentIP {
 		return p.client.DeleteLease(ctx, platformID, account)

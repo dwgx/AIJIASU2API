@@ -658,6 +658,116 @@ func TestDropLeasesReportsDeleteFailure(t *testing.T) {
 	}
 }
 
+// TestRenderSortsByTagNotPort covers a fixture where the gate ports run
+// opposite to the tags: the documented order is by tag.
+func TestRenderSortsByTagNotPort(t *testing.T) {
+	content, err := Render([]Node{
+		{Tag: "hk-02", GatePort: 13000},
+		{Tag: "cn-zj-01", GatePort: 13009},
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "socks5://127.0.0.1:13009#cn-zj-01\nsocks5://127.0.0.1:13000#hk-02\n"
+	if content != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+}
+
+// serialClient is an in-memory Client that records the platform filters seen
+// by every DeleteLease, so a dropped exclusion is observable without a live
+// Resin.
+type serialClient struct {
+	mu         sync.Mutex
+	filters    []string
+	exclusions map[string]string
+	deletes    []string
+	missing    []string
+	delay      time.Duration
+}
+
+func (c *serialClient) PatchSubscription(context.Context, string, string) (resin.Subscription, error) {
+	return resin.Subscription{}, nil
+}
+
+func (c *serialClient) RefreshSubscription(context.Context, string) error { return nil }
+
+func (c *serialClient) GetPlatform(_ context.Context, id string) (resin.Platform, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return resin.Platform{ID: id, RegexFilters: append([]string(nil), c.filters...)}, nil
+}
+
+func (c *serialClient) PatchPlatformFilters(_ context.Context, platformID string, filters []string) (resin.Platform, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.filters = append([]string(nil), filters...)
+	return resin.Platform{ID: platformID, RegexFilters: append([]string(nil), filters...)}, nil
+}
+
+func (c *serialClient) DeleteLease(_ context.Context, platformID, account string) error {
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deletes = append(c.deletes, account)
+	if want := c.exclusions[account]; want != "" && !containsString(c.filters, want) {
+		c.missing = append(c.missing, account+" without "+want)
+	}
+	return nil
+}
+
+func (c *serialClient) PatchSystemConfig(context.Context, string, any) error { return nil }
+
+// TestRotateSerialisesConcurrentRotations runs two rotations for different
+// accounts (the rate limit is per account) and asserts each lease delete still
+// sees its own exclusion and the original filter list is restored.
+func TestRotateSerialisesConcurrentRotations(t *testing.T) {
+	client := &serialClient{
+		filters: []string{"ajs-live/.*"},
+		exclusions: map[string]string{
+			"acct-a": "!^ajs-live/cn-zj-01$",
+			"acct-b": "!^ajs-live/hk-02$",
+		},
+		delay: 2 * time.Millisecond,
+	}
+	pub := New(client, Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	rotations := []struct{ account, tag string }{
+		{"acct-a", "cn-zj-01"},
+		{"acct-b", "hk-02"},
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(rotations))
+	for _, item := range rotations {
+		wg.Add(1)
+		go func(item struct{ account, tag string }) {
+			defer wg.Done()
+			errs <- pub.Rotate(context.Background(), "plat-1", item.account, "ajs-live/"+item.tag, true)
+		}(item)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.deletes) != len(rotations) {
+		t.Fatalf("lease deletes = %v, want %d", client.deletes, len(rotations))
+	}
+	if len(client.missing) != 0 {
+		t.Fatalf("exclusion dropped before lease delete: %v", client.missing)
+	}
+	if !equalStrings(client.filters, []string{"ajs-live/.*"}) {
+		t.Fatalf("filters after rotations = %v, want the original list", client.filters)
+	}
+}
+
 func TestEnsureProbeConfig(t *testing.T) {
 	admin := &fakeAdmin{t: t}
 	pub, _ := newPublisher(t, admin, nil)

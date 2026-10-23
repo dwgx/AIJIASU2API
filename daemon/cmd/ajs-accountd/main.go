@@ -140,7 +140,12 @@ func run() error {
 		Addr:              *listen,
 		Handler:           server,
 		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// ReadTimeout bounds a trickled request body (MaxBytesReader bounds
+		// bytes, not time). WriteTimeout sits above the worst-case handler: a
+		// reconcile is ~30s of Resin calls plus refresh backoff.
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

@@ -55,6 +55,10 @@ const (
 	// handshakeTimeout bounds the greeting and the CONNECT request. It is
 	// independent of AdmissionTimeout, which bounds the semaphore wait.
 	handshakeTimeout = 30 * time.Second
+
+	// acceptBackoff is the pause after a transient Accept error before the
+	// loop retries, so a persistent failure cannot spin a core.
+	acceptBackoff = 50 * time.Millisecond
 )
 
 var (
@@ -374,7 +378,11 @@ func (s *Server) watchContext(ctx context.Context) {
 	}
 }
 
-// serve accepts connections until the listener closes.
+// serve accepts connections until the listener closes. A transient Accept
+// error (EMFILE, ECONNABORTED, a reset backlog) must not end the loop: the
+// listener stays bound and the port keeps completing handshakes, so returning
+// would leave a dead gate that looks healthy to a readiness dial. Only a closed
+// listener ends the loop.
 func (s *Server) serve(ln net.Listener) {
 	defer close(s.serveDone)
 	for {
@@ -384,7 +392,8 @@ func (s *Server) serve(ln net.Listener) {
 				return
 			}
 			s.logger.Warn("gate accept failed", "node_id", s.cfg.NodeID, "error", err)
-			return
+			time.Sleep(acceptBackoff)
+			continue
 		}
 		s.handlers.Add(1)
 		go func() {

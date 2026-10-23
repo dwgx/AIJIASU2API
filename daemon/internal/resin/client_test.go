@@ -619,6 +619,31 @@ func TestTimeoutIsEnforced(t *testing.T) {
 	}
 }
 
+// TestSuccessBodyIsSizeLimited is the F9 regression: an unbounded success body
+// must fail the call instead of growing memory without limit.
+func TestSuccessBodyIsSizeLimited(t *testing.T) {
+	client, _ := newClient(t, testToken, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"version":"`)
+		chunk := strings.Repeat("a", 1<<20)
+		for range 9 {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `"}`)
+	})
+
+	_, err := client.SystemInfo(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("SystemInfo error = %v, want the response size limit", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token leaked into the error: %v", err)
+	}
+}
+
 func TestStringSetEqual(t *testing.T) {
 	if !stringSetEqual([]string{"a", "b"}, []string{"b", "a"}) {
 		t.Fatal("order-insensitive comparison failed")

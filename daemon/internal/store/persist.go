@@ -134,6 +134,14 @@ func (s *Store) Restore(data []byte) error {
 	s.keySeq = snap.KeySeq
 	s.mutationSeq = snap.MutationSeq
 	s.auditSeq = snap.AuditSeq
+	// Both histories are newest first: a snapshot written by an older build
+	// (or edited by hand) is cut to the retention window, never the reverse.
+	if len(s.requests) > RequestRetention {
+		s.requests = s.requests[:RequestRetention]
+	}
+	if len(s.audit) > AuditRetention {
+		s.audit = s.audit[:AuditRetention]
+	}
 	s.syncAccountCountsLocked()
 	s.mu.Unlock()
 	return nil

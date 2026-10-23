@@ -669,3 +669,72 @@ func TestFlowLogCarriesNodeTargetAndBytes(t *testing.T) {
 		}
 	}
 }
+
+// flakyListener injects Accept failures before delegating to a real listener.
+type flakyListener struct {
+	net.Listener
+
+	mu   sync.Mutex
+	errs []error
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+func (l *flakyListener) injected() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.errs)
+}
+
+// TestAcceptErrorKeepsServing proves a transient Accept failure does not end
+// the loop: the next connection is still served.
+func TestAcceptErrorKeepsServing(t *testing.T) {
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln := &flakyListener{Listener: base, errs: []error{errors.New("accept: too many open files")}}
+
+	sess := &fakeSession{}
+	srv, err := NewServer(Config{NodeID: "node-1", AccountID: "acc-1", Limit: 4}, sess)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv.mu.Lock()
+	srv.ln = ln
+	srv.started = true
+	srv.startedAt = time.Now()
+	srv.mu.Unlock()
+	go srv.serve(ln)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c, err := net.DialTimeout("tcp", base.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial gate: %v", err)
+	}
+	defer c.Close()
+	connectOK(t, c, atypDomain, append([]byte{11}, []byte("example.com")...), 443)
+	echoOnce(t, c, []byte("ping"))
+	_ = c.Close()
+
+	st := waitState(t, srv, func(st State) bool { return st.Accepted == 1 && st.Active == 0 })
+	if st.Rejected != 0 {
+		t.Fatalf("rejected = %d, want 0", st.Rejected)
+	}
+	if opens := sess.recorded(); len(opens) != 1 {
+		t.Fatalf("OpenFlow calls = %v, want one", opens)
+	}
+	if remaining := ln.injected(); remaining != 0 {
+		t.Fatalf("injected Accept errors remaining = %d", remaining)
+	}
+}

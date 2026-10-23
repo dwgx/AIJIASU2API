@@ -65,7 +65,7 @@ func (s *Store) CreateUser(in model.CreateUserInput) (model.PanelUser, error) {
 		Name:            name,
 		Platform:        platform,
 		StickyTTL:       stickyTTL,
-		QuotaBytesMonth: in.QuotaBytesMonth,
+		QuotaBytesMonth: copyInt64(in.QuotaBytesMonth),
 		UsedBytes:       0,
 		Enabled:         true,
 		Allowlist:       normalized,
@@ -113,7 +113,7 @@ func (s *Store) UpdateUser(id string, patch model.UserPatch) (model.PanelUser, e
 		if patch.QuotaBytesMonth != nil && *patch.QuotaBytesMonth < 0 {
 			return model.PanelUser{}, invalidf("quotaBytesMonth must be zero or positive")
 		}
-		user.QuotaBytesMonth = patch.QuotaBytesMonth
+		user.QuotaBytesMonth = copyInt64(patch.QuotaBytesMonth)
 		changed = append(changed, "quotaBytesMonth")
 	}
 	if patch.Allowlist != nil {
@@ -316,7 +316,7 @@ func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, err
 		LatencyMs:    latency,
 		Source:       model.SourceMutationLab,
 	}
-	s.requests = append([]model.RequestLog{entry}, s.requests...)
+	s.requests = prependCapped(s.requests, entry, RequestRetention)
 	s.addAuditLocked(model.SeverityInfo, "operator", "request.mutation", node.Label,
 		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
 	return entry, nil

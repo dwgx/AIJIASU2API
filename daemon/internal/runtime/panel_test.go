@@ -25,21 +25,21 @@ const (
 	testToken = "test-admin-token-not-a-credential"
 	// wantContent is the seed's eight LIVE nodes rendered by
 	// publisher.Render: sorted by tag, one socks5 line each.
-	wantContent = "socks5://127.0.0.1:13000#cn-zj-01\n" +
-		"socks5://127.0.0.1:13001#cn-sh-01\n" +
+	wantContent = "socks5://127.0.0.1:13001#cn-sh-01\n" +
+		"socks5://127.0.0.1:13000#cn-zj-01\n" +
+		"socks5://127.0.0.1:13008#de-fra-01\n" +
+		"socks5://127.0.0.1:13005#hk-02\n" +
 		"socks5://127.0.0.1:13003#jp-tyo-01\n" +
 		"socks5://127.0.0.1:13004#sg-01\n" +
-		"socks5://127.0.0.1:13005#hk-02\n" +
 		"socks5://127.0.0.1:13006#tw-tpe-01\n" +
-		"socks5://127.0.0.1:13008#de-fra-01\n" +
 		"socks5://127.0.0.1:13009#uk-lon-01\n"
 	// wantContentAfterDrain drops node-06 (hk-02, DRAINING after the test).
-	wantContentAfterDrain = "socks5://127.0.0.1:13000#cn-zj-01\n" +
-		"socks5://127.0.0.1:13001#cn-sh-01\n" +
+	wantContentAfterDrain = "socks5://127.0.0.1:13001#cn-sh-01\n" +
+		"socks5://127.0.0.1:13000#cn-zj-01\n" +
+		"socks5://127.0.0.1:13008#de-fra-01\n" +
 		"socks5://127.0.0.1:13003#jp-tyo-01\n" +
 		"socks5://127.0.0.1:13004#sg-01\n" +
 		"socks5://127.0.0.1:13006#tw-tpe-01\n" +
-		"socks5://127.0.0.1:13008#de-fra-01\n" +
 		"socks5://127.0.0.1:13009#uk-lon-01\n"
 )
 
@@ -99,6 +99,12 @@ type fakeResin struct {
 	// lease the panel is expected to apply.
 	leases            map[string]resin.Lease
 	leaseDeleteStatus int
+
+	// leaseDeleteStarted/Release block a DELETE so a test can hold a rotation
+	// open and prove a concurrent reconcile waits for it.
+	leaseDeleteStarted chan struct{}
+	leaseDeleteRelease chan struct{}
+	leaseDeleteOnce    sync.Once
 }
 
 func newFakeResin(t *testing.T) *fakeResin {
@@ -302,7 +308,15 @@ func (f *fakeResin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/leases/"):
 		f.mu.Lock()
 		status := f.leaseDeleteStatus
+		started := f.leaseDeleteStarted
+		release := f.leaseDeleteRelease
 		f.mu.Unlock()
+		if started != nil {
+			f.leaseDeleteOnce.Do(func() { close(started) })
+		}
+		if release != nil {
+			<-release
+		}
 		if status != 0 {
 			writeError(w, status, "INTERNAL", "lease delete failed")
 			return

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"ajsaccountd/internal/api"
 	"ajsaccountd/internal/model"
@@ -138,6 +139,63 @@ func TestRotateLeaseThroughPanel(t *testing.T) {
 	node, ok := st.Node("node-01")
 	if !ok || node.EgressIP != "203.0.113.99" {
 		t.Fatalf("node-01 egress after rotate = %q (ok=%v), want 203.0.113.99", node.EgressIP, ok)
+	}
+}
+
+func TestReconcileWaitsForRotation(t *testing.T) {
+	_, panel, fake := newStartedPanel(t)
+	fake.setLease("acc-01", resin.Lease{
+		PlatformID: "plat-1",
+		Account:    "acc-01",
+		EgressIP:   "203.0.113.99",
+		Expiry:     "2026-10-23T13:00:00Z",
+	})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fake.mu.Lock()
+	fake.leaseDeleteStarted = started
+	fake.leaseDeleteRelease = release
+	fake.mu.Unlock()
+	fake.reset()
+
+	rotateDone := make(chan error, 1)
+	go func() {
+		_, err := panel.RotateLease(context.Background(), "lease-01")
+		rotateDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotation never reached DeleteLease")
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		_, err := panel.Reconcile(context.Background())
+		reconcileDone <- err
+	}()
+
+	// With RotateLease holding opMu, Reconcile cannot run while the exclusion
+	// is live: no platform PATCH beyond the exclusion may appear, and the
+	// reconcile must not finish.
+	select {
+	case err := <-reconcileDone:
+		t.Fatalf("Reconcile finished during rotation: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := fake.countExact(http.MethodPatch, "/api/v1/platforms/plat-1"); got != 1 {
+		t.Fatalf("platform patches during rotation = %d, want 1 (the exclusion): %v", got, fake.paths())
+	}
+
+	close(release)
+	if err := <-rotateDone; err != nil {
+		t.Fatalf("RotateLease: %v", err)
+	}
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := fake.platformValue().RegexFilters; len(got) != 1 || got[0] != "ajs-live/.*" {
+		t.Fatalf("platform filters after both = %v, want the original list", got)
 	}
 }
 

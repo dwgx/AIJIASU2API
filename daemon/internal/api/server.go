@@ -443,8 +443,14 @@ func (s *Server) writePanelError(w http.ResponseWriter, err error) {
 	}
 }
 
+// decodeJSON decodes exactly one JSON value into dst and rejects unknown
+// object fields, so a typo such as "concurency" answers 400 instead of being
+// silently dropped and replaced by a default. PATCH /v1/settings decodes into
+// a map, where DisallowUnknownFields has no effect; that handler keeps its
+// explicit allowlist.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -463,6 +469,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 // paginate returns the [start,end) window for ?limit=&offset=. A limit of 0
 // means "no limit"; the dashboard always sends a limit for audit only.
+//
+// The window is clamped before adding: offset never exceeds total, so
+// total-offset cannot go negative and offset+limit cannot overflow however
+// large the query values are.
 func paginate(w http.ResponseWriter, r *http.Request, total int) (int, int, bool) {
 	limit, offset := 0, 0
 	query := r.URL.Query()
@@ -485,9 +495,11 @@ func paginate(w http.ResponseWriter, r *http.Request, total int) (int, int, bool
 	if offset > total {
 		offset = total
 	}
-	end := total
-	if limit > 0 && offset+limit < total {
-		end = offset + limit
+	if limit == 0 {
+		return offset, total, true
 	}
-	return offset, end, true
+	if limit > total-offset {
+		limit = total - offset
+	}
+	return offset, offset + limit, true
 }

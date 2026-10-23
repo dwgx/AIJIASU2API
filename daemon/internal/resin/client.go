@@ -25,7 +25,11 @@ const (
 	DefaultTimeout = 10 * time.Second
 
 	maxErrorBodyBytes = 1 << 20
-	maxListPageSize   = 1000
+	// maxResponseBodyBytes bounds a successful JSON document. A Resin that
+	// streams an unbounded body (loopback, but reachable with the admin
+	// token) must fail the call instead of growing the daemon's heap.
+	maxResponseBodyBytes = 8 << 20
+	maxListPageSize      = 1000
 )
 
 // EnvBaseURL and EnvAdminToken are the environment variables read by
@@ -539,10 +543,19 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return decodeAPIError(resp, method, path, requestID)
 	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBodyBytes))
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	// Read one byte past the cap so an oversized document is rejected
+	// explicitly instead of surfacing as a truncated decode error.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("resin: read %s %s: %w", method, path, err)
+	}
+	if len(raw) > maxResponseBodyBytes {
+		return fmt.Errorf("resin: %s %s: response exceeds %d bytes", method, path, maxResponseBodyBytes)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("resin: decode %s %s: %w", method, path, err)
 	}
 	return nil

@@ -61,6 +61,11 @@ func TestSupervisorHelper(t *testing.T) {
 			fmt.Fprintln(os.Stderr, line)
 		}
 		serveHelper(addr, nil)
+	case "env":
+		fmt.Fprintln(os.Stderr, "AJS_MASTER_KEY="+os.Getenv("AJS_MASTER_KEY"))
+		fmt.Fprintln(os.Stderr, "AJS_ADMIN_TOKEN="+os.Getenv("AJS_ADMIN_TOKEN"))
+		fmt.Fprintln(os.Stderr, "PROBE="+os.Getenv("PROBE"))
+		serveHelper(addr, nil)
 	case "noready":
 		// Deliberately never listens, so Start's readiness poll expires.
 		time.Sleep(5 * time.Second)
@@ -218,6 +223,38 @@ func TestStartReadyStop(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "SUPERVISOR_HELPER_TOKEN") {
 		t.Fatal("env key missing from the log")
+	}
+}
+
+func TestStartUsesEnvAllowlist(t *testing.T) {
+	// The daemon environment carries credentials in production; a child must
+	// never see them.
+	t.Setenv("AJS_MASTER_KEY", "leaked-master-key")
+	t.Setenv("AJS_ADMIN_TOKEN", "leaked-admin-token")
+
+	sup := New(nil)
+	spec := helperSpec("acc-test:srv-env", "env", freeAddr(t))
+	spec.Env = []string{"GO_WANT_SUPERVISOR_HELPER=1", "PROBE=1"}
+	h, err := sup.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Close(context.Background()) })
+
+	var lines []string
+	deadline := time.Now().Add(5 * time.Second)
+	for len(lines) < 3 && time.Now().Before(deadline) {
+		lines = h.Stderr()
+		time.Sleep(10 * time.Millisecond)
+	}
+	want := []string{"AJS_MASTER_KEY=", "AJS_ADMIN_TOKEN=", "PROBE=1"}
+	if len(lines) != len(want) {
+		t.Fatalf("child stderr = %v, want %v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("child stderr[%d] = %q, want %q (all: %v)", i, lines[i], want[i], lines)
+		}
 	}
 }
 

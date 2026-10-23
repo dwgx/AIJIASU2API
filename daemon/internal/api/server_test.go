@@ -956,11 +956,80 @@ func TestPagination(t *testing.T) {
 		t.Fatalf("empty page = %q", body)
 	}
 
+	// offset+limit used to overflow int and panic the handler on a negative
+	// slice bound; every list route must clamp instead.
+	for _, path := range []string{
+		"/v1/accounts?limit=9223372036854775807&offset=7",
+		"/v1/nodes?limit=9223372036854775807&offset=7",
+		"/v1/leases?limit=9223372036854775807&offset=7",
+		"/v1/users?limit=9223372036854775807&offset=7",
+		"/v1/apikeys?limit=9223372036854775807&offset=7",
+		"/v1/requests?limit=9223372036854775807&offset=7",
+	} {
+		resp, body := apiCall(t, ts, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusOK)
+		var page []json.RawMessage
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatalf("%s: invalid page %q: %v", path, body, err)
+		}
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/accounts?limit=9223372036854775807", nil)
+	requireStatus(t, resp, http.StatusOK)
+	all := decodeBody[[]model.Account](t, body)
+	if len(all) == 0 {
+		t.Fatalf("unbounded page = %q, want every account", body)
+	}
+
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/audit?limit=0", nil)
 	requireStatus(t, resp, http.StatusOK)
 	events := decodeBody[[]model.AuditEvent](t, body)
 	if len(events) != 0 {
 		t.Fatalf("audit limit=0 returned %d events", len(events))
+	}
+}
+
+func TestUnknownJSONFieldRejected(t *testing.T) {
+	ts, st := newTestServer(t)
+	beforeAccounts := len(st.Accounts())
+	beforeUsers := len(st.Users())
+
+	// A typo must not create the account with a default concurrency.
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts", map[string]any{
+		"label":       "Typo Co",
+		"username":    "typo",
+		"password":    "pw-not-a-credential",
+		"platform":    "android",
+		"concurrency": 8,
+		"regions":     []string{},
+		"concurency":  8,
+	})
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+	if after := len(st.Accounts()); after != beforeAccounts {
+		t.Fatalf("rejected body created an account (%d -> %d)", beforeAccounts, after)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodPost, "/v1/users", map[string]any{
+		"name":     "Typo User",
+		"platform": "typo",
+		"extra":    true,
+	})
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+	if after := len(st.Users()); after != beforeUsers {
+		t.Fatalf("rejected body created a user (%d -> %d)", beforeUsers, after)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodPatch, "/v1/accounts/acc-01", map[string]any{
+		"state": "paused",
+		"stat":  "paused",
+	})
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+	account, ok := st.Account("acc-01")
+	if !ok || account.State == model.AccountPaused {
+		t.Fatalf("rejected patch mutated the account: %+v (ok=%v)", account, ok)
 	}
 }
 

@@ -216,7 +216,14 @@ func (p *ResinPanel) Close() error { return nil }
 // 404; a missing platform or topology tag maps to 409; Resin failures wrap
 // store.ErrUpstream (503). The publisher's per-account rate limit is returned
 // unchanged so the API can answer 409.
+//
+// The whole sequence holds opMu, so a concurrent Reconcile (whose
+// EnsurePlatform PATCHes the same regex_filters) or Drain/Undrain cannot reset
+// the exclusion filter between the PATCH and the lease delete.
 func (p *ResinPanel) RotateLease(ctx context.Context, leaseID string) (model.Lease, error) {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+
 	lease, ok := p.store.Lease(leaseID)
 	if !ok {
 		return model.Lease{}, fmt.Errorf("%w: lease %q not found", store.ErrNotFound, leaseID)

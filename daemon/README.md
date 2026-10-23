@@ -984,6 +984,45 @@ child exiting before ready, stderr events plus the bounded ring, unknown
 `Stop`/`Signal`, `Signal` on a running node, and `Close` stopping two nodes,
 idempotency and `Start` after close.
 
+## Review fixes (AJS-53)
+
+The line-by-line review in `research/79-code-review/REPORT.md` raised 12
+findings; all are fixed in this wave with no dashboard/API JSON change.
+
+| # | Sev | Fix | Code | Regression test |
+|---|---|---|---|---|
+| F1 | high | child env is an allowlist (`PATH`, `HOME`, `SystemRoot`, `TMPDIR`, `TEMP`, `TMP`) plus `Spec.Env`; `os.Environ()` is never inherited | `internal/supervisor/supervisor.go` (`childEnv`) | `TestStartUsesEnvAllowlist` |
+| F2 | med | `paginate` clamps `offset`/`limit` before adding, so no negative slice bound | `internal/api/server.go` | `TestPagination` (MaxInt64 on all six list routes) |
+| F3 | med | publisher `rotateMu` serialises the whole filter read-modify-write; `ResinPanel.RotateLease` holds `opMu` so reconcile/drain cannot reset filters mid-rotation | `internal/publisher/publisher.go`, `internal/runtime/panel.go` | `TestRotateSerialisesConcurrentRotations`, `TestReconcileWaitsForRotation` |
+| F4 | med | a transient Accept error logs, backs off 50 ms and continues; only `net.ErrClosed` ends the loop | `internal/gate/server.go` | `TestAcceptErrorKeepsServing` |
+| F5 | med | audit capped at 1000 and requests at 10000, oldest dropped on insert; `Restore` trims oversized snapshots | `internal/store/store.go`, `users_keys.go`, `persist.go` | `TestAuditRetention`, `TestRestoreTrimsHistories`, `TestPrependCapped` |
+| F6 | med | `CreateAccount` reserves the id and label, seals outside the write lock, then re-locks to insert; `AccountSecret` copies the sealed blob before `Open` | `internal/store/store.go` | `TestCreateAccountSealsOutsideLock`, `TestCreateAccountReservesLabel`, `TestCreateDeleteAccountConcurrent` |
+| F7 | low | `Render` sorts a copy of the nodes by tag before formatting; the gate port no longer decides order | `internal/publisher/publisher.go` | `TestRenderSortsByTagNotPort` |
+| F8 | low | `cloneUser`, `CreateUser` and `UpdateUser` deep-copy `QuotaBytesMonth` | `internal/store/store.go`, `users_keys.go` | `TestUserQuotaPointerNotAliased` |
+| F9 | low | success bodies are read through an 8 MiB limit and rejected when over it | `internal/resin/client.go` | `TestSuccessBodyIsSizeLimited` |
+| F10 | low | `ReadTimeout: 15s` and `WriteTimeout: 120s` added beside the header/idle timeouts | `cmd/ajs-accountd/main.go` | — (wiring only; no unit test) |
+| F11 | low | `decodeJSON` sets `DisallowUnknownFields`; a typo answers 400 without mutating state | `internal/api/server.go` | `TestUnknownJSONFieldRejected` |
+| F12 | low | `Rotate` clears the decrypted plaintext after re-sealing, including the error path | `internal/secret/store.go` | `TestRotateTwiceKeepsEntriesUsable` (plus the existing `TestRotate`) |
+
+Residual risk / notes:
+
+- F1 is latent until the supervisor is wired into `main`; the package doc and
+  the `Spec.Env` comment now state the allowlist contract.
+- F6 leaves the reserved account id unused when `Seal` fails (the sequence is
+  not rolled back, so concurrent creates cannot collide). If a `Restore`
+  inserts the same label while a create is sealing, the defensive conflict
+  leaves an orphan sealed entry in the secret store; `Restore` is a startup-only
+  path in production.
+- F7 changes the subscription text order for a fixture whose ports do not
+  ascend with its tags. The first reconcile after upgrading PATCHes the new
+  content once; Resin compares content as a whole, so routing is unaffected.
+- F11 rejects unknown fields on every JSON body. The dashboard sends exactly
+  the declared fields for accounts, users, keys, mutations and settings, so its
+  payloads are unchanged. `PATCH /v1/settings` keeps its map-based allowlist
+  because `DisallowUnknownFields` does not apply to maps.
+- F5 keeps the newest-first order; a snapshot written by an older build with
+  more rows is trimmed on `Restore`.
+
 ## HMC evidence
 
 Copy only `daemon/` to the HMC scratch path:
@@ -1459,6 +1498,55 @@ ERROR ajs-accountd failed error="load state: state file /tmp/ajs45/corrupt/state
 exit=1
 ERROR ajs-accountd failed error="load state: state file /tmp/ajs45/version/state.json: unsupported state snapshot version 2 (want 1)"
 exit=1
+```
+
+### Review fixes (AJS-53)
+
+Both trees were copied to a fresh scratch root (no other worker's tree was
+touched); the emulator's capture fixtures were added separately because the
+daemon does not need them:
+
+```bash
+tar -czf - daemon emulator | ssh hmc \
+  'root=/srv/dwgxhomecloud/scratch/ajs-accountd-ajs53-$(date +%s); mkdir -p "$root" && tar -xzf - -C "$root"'
+tar -czf - -C research/60-dynamic captures | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-accountd-ajs53-<ts>/research/60-dynamic \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-accountd-ajs53-<ts>/research/60-dynamic'
+```
+
+On HMC (`go1.26.0 linux/amd64`; `go.mod` is `go 1.26.0`, so `GOTOOLCHAIN=auto`
+upgrades the host's `go1.25.14`):
+
+```console
+$ cd .../daemon && go test -race -count=1 ./...
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.093s
+ok  	ajsaccountd/internal/api	1.179s
+ok  	ajsaccountd/internal/gate	1.566s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.058s
+ok  	ajsaccountd/internal/resin	1.356s
+ok  	ajsaccountd/internal/runtime	1.298s
+ok  	ajsaccountd/internal/secret	1.023s
+ok  	ajsaccountd/internal/store	1.492s
+ok  	ajsaccountd/internal/supervisor	7.715s
+$ go vet ./... && echo VET_OK
+VET_OK
+$ test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
+GOFMT_CLEAN
+
+$ cd .../emulator && go test -race -count=1 ./...
+?   	ajsproxy/apifacade	[no test files]
+?   	ajsproxy/cmd/ajsproxy	[no test files]
+?   	ajsproxy/fvfacade	[no test files]
+ok  	ajsproxy/internal/api	1.015s
+ok  	ajsproxy/internal/config	1.013s
+ok  	ajsproxy/internal/fv	1.044s
+ok  	ajsproxy/internal/proxy	1.015s
+$ go vet ./... && echo VET_OK
+VET_OK
+$ test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
+GOFMT_CLEAN
 ```
 
 ## Limitations / next

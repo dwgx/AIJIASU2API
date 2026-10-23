@@ -5,8 +5,12 @@
 // waits for its TCP readiness address, emits lifecycle events, forwards
 // signals, and stops the child with a grace period before killing it.
 //
-// The supervisor never holds credentials. Environment values are passed to the
-// child verbatim but only their names are logged.
+// The supervisor never holds credentials. A child receives only an explicit
+// allowlist of process essentials (PATH, HOME, SystemRoot, TMPDIR, TEMP, TMP)
+// plus Spec.Env; the daemon's own environment is never inherited, so
+// AJS_MASTER_KEY, AJS_ADMIN_TOKEN and AJS_RESIN_ADMIN_TOKEN cannot reach a node
+// process. Environment values are passed verbatim but only their names are
+// logged.
 package supervisor
 
 import (
@@ -70,8 +74,10 @@ type Spec struct {
 	Binary string
 	// Args are the child arguments, one element per argument.
 	Args []string
-	// Env entries are appended to the parent environment as "KEY=VALUE".
-	// Values are never logged.
+	// Env entries are added to the child environment as "KEY=VALUE". The
+	// child does not inherit the daemon environment; only PATH, HOME,
+	// SystemRoot, TMPDIR, TEMP and TMP are passed through, and a Spec.Env
+	// entry overrides an allowlisted name. Values are never logged.
 	Env []string
 	// ReadyAddr is the "host:port" dialed until the node accepts TCP.
 	ReadyAddr string
@@ -269,7 +275,7 @@ func (s *Supervisor) Start(ctx context.Context, spec Spec) (*Handle, error) {
 	s.mu.Unlock()
 
 	cmd := exec.CommandContext(ctx, spec.Binary, spec.Args...)
-	cmd.Env = append(os.Environ(), spec.Env...)
+	cmd.Env = childEnv(spec.Env)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		s.release(spec.NodeID)
@@ -576,6 +582,35 @@ func (s *Supervisor) emit(ev Event) {
 	default:
 		s.logger.Warn("supervisor event buffer full; dropping event", "node_id", ev.NodeID, "kind", ev.Kind)
 	}
+}
+
+// childEnv builds the environment of one node process: an explicit allowlist
+// of process essentials plus extra. The daemon environment is deliberately not
+// inherited, so credentials such as AJS_MASTER_KEY never reach a child. An
+// extra entry wins over an allowlisted name.
+func childEnv(extra []string) []string {
+	allowlist := [...]string{"PATH", "HOME", "SystemRoot", "TMPDIR", "TEMP", "TMP"}
+	env := make([]string, 0, len(allowlist)+len(extra))
+	for _, key := range allowlist {
+		value, ok := os.LookupEnv(key)
+		if !ok || envHasKey(extra, key) {
+			continue
+		}
+		env = append(env, key+"="+value)
+	}
+	return append(env, extra...)
+}
+
+// envHasKey reports whether env defines key. Names are compared
+// case-insensitively because Windows treats them that way.
+func envHasKey(env []string, key string) bool {
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(name, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // envKeys renders the environment variable names for logs, never the values.

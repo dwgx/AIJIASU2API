@@ -149,6 +149,10 @@ func (s *Store) Rotate(newKey []byte) error {
 			return fmt.Errorf("secret: rotate account %q: %w", accountID, err)
 		}
 		resealed, err := sealWith(next, accountID, plaintext)
+		// Zero the old key's plaintext as soon as it is no longer needed,
+		// including when re-sealing fails: this package exists to minimise
+		// plaintext lifetime.
+		clear(plaintext)
 		if err != nil {
 			return fmt.Errorf("secret: rotate account %q: %w", accountID, err)
 		}

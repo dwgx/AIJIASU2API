@@ -187,6 +187,31 @@ func TestRotate(t *testing.T) {
 	}
 }
 
+// TestRotateTwiceKeepsEntriesUsable covers F12: zeroing the decrypted
+// plaintext after each re-seal must not disturb repeated rotations.
+func TestRotateTwiceKeepsEntriesUsable(t *testing.T) {
+	s := newMemoryStore(t, testKey(0x71))
+	first, err := s.Seal("acc-01", []byte("password-one"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	for i, key := range [][]byte{testKey(0x72), testKey(0x73)} {
+		if err := s.Rotate(key); err != nil {
+			t.Fatalf("Rotate %d: %v", i+1, err)
+		}
+		opened, err := s.Open("acc-01", s.entries["acc-01"])
+		if err != nil {
+			t.Fatalf("Open after rotate %d: %v", i+1, err)
+		}
+		if string(opened) != "password-one" {
+			t.Fatalf("Open after rotate %d = %q, want password-one", i+1, opened)
+		}
+	}
+	if _, err := s.Open("acc-01", first); !errors.Is(err, ErrEnvelope) {
+		t.Fatalf("envelope from before the rotations error = %v, want ErrEnvelope", err)
+	}
+}
+
 func TestFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not expose Unix permission bits")

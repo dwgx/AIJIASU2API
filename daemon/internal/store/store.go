@@ -55,6 +55,15 @@ type Sealer interface {
 	Open(accountID string, sealed []byte) ([]byte, error)
 }
 
+// Retention caps for the two append-only histories. An insert past the cap
+// drops the oldest entry, so memory and the periodic snapshot stay bounded
+// however long the daemon runs. Audit events are small and frequent; request
+// rows are larger and only the mutation lab appends them.
+const (
+	AuditRetention   = 1000
+	RequestRetention = 10000
+)
+
 // Store holds every panel collection plus the sequence counters used for new
 // identifiers. All exported methods are safe for concurrent use.
 type Store struct {
@@ -78,6 +87,11 @@ type Store struct {
 	// sealed blobs. Neither is part of model.Account or any JSON response.
 	sealer  Sealer
 	secrets map[string][]byte
+
+	// pendingLabels holds the lowercased labels of account creates that are
+	// sealing their password outside the write lock. A label is reserved
+	// before the slow call so a concurrent create or rename cannot take it.
+	pendingLabels map[string]struct{}
 
 	accountSeq  int
 	userSeq     int
@@ -103,22 +117,23 @@ func newWithClock(now func() time.Time, sealer Sealer) *Store {
 	users := buildUsers(stamp)
 	nodes := buildNodes(stamp)
 	s := &Store{
-		now:        now,
-		accounts:   buildAccounts(stamp),
-		nodes:      nodes,
-		leases:     buildLeases(stamp),
-		users:      users,
-		keys:       buildKeys(stamp),
-		requests:   buildRequests(stamp, users, nodes),
-		audit:      buildAudit(stamp),
-		settings:   defaultSettings(),
-		keyHashes:  make(map[string]string),
-		sealer:     sealer,
-		secrets:    make(map[string][]byte),
-		accountSeq: 6,
-		userSeq:    4,
-		keySeq:     6,
-		auditSeq:   seedAudit,
+		now:           now,
+		accounts:      buildAccounts(stamp),
+		nodes:         nodes,
+		leases:        buildLeases(stamp),
+		users:         users,
+		keys:          buildKeys(stamp),
+		requests:      buildRequests(stamp, users, nodes),
+		audit:         buildAudit(stamp),
+		settings:      defaultSettings(),
+		keyHashes:     make(map[string]string),
+		sealer:        sealer,
+		secrets:       make(map[string][]byte),
+		pendingLabels: make(map[string]struct{}),
+		accountSeq:    6,
+		userSeq:       4,
+		keySeq:        6,
+		auditSeq:      seedAudit,
 	}
 	s.syncAccountCountsLocked()
 	return s
@@ -154,6 +169,12 @@ func (s *Store) AccountSecret(id string) ([]byte, error) {
 	idx := s.accountIndexLocked(id)
 	sealer := s.sealer
 	sealed, stored := s.secrets[id]
+	if stored {
+		// Copy before unlocking: the map value must not be read after the
+		// lock is released, and a concurrent delete or restore must not
+		// change what Open authenticates.
+		sealed = append([]byte(nil), sealed...)
+	}
 	s.mu.RUnlock()
 
 	if idx < 0 {
@@ -293,13 +314,12 @@ func (s *Store) Settings() model.PanelSettings {
 	return s.settings
 }
 
-// CreateAccount validates input, prepends the account and appends an audit
-// event. When a Sealer is configured the password is sealed under the new
-// account id; otherwise it is validated and discarded.
+// CreateAccount validates input, reserves the id and label, seals the password
+// outside the write lock and then inserts the account. A Sealer's Seal may
+// fsync, so holding the store lock across it would block every reader; the
+// reservation keeps concurrent creates and renames conflict-safe. Without a
+// sealer the password is validated and discarded under the lock.
 func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	label := strings.TrimSpace(in.Label)
 	username := strings.TrimSpace(in.Username)
 	switch {
@@ -327,27 +347,59 @@ func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error
 	if err != nil {
 		return model.Account{}, err
 	}
-	for _, existing := range s.accounts {
-		if strings.EqualFold(existing.Label, label) {
-			return model.Account{}, conflictf("an account named %q already exists", label)
-		}
+
+	s.mu.Lock()
+	if s.accountLabelTakenLocked(label) {
+		s.mu.Unlock()
+		return model.Account{}, conflictf("an account named %q already exists", label)
+	}
+	if s.sealer == nil {
+		id := s.reserveAccountIDLocked()
+		account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, nil)
+		s.mu.Unlock()
+		return cloneAccount(account), nil
+	}
+	id := s.reserveAccountIDLocked()
+	s.pendingLabels[strings.ToLower(label)] = struct{}{}
+	s.mu.Unlock()
+
+	sealed, err := s.sealer.Seal(id, []byte(in.Password))
+	if err != nil {
+		s.mu.Lock()
+		delete(s.pendingLabels, strings.ToLower(label))
+		s.mu.Unlock()
+		return model.Account{}, fmt.Errorf("seal account secret: %w", err)
 	}
 
-	now := s.now()
-	id := fmt.Sprintf("acc-%02d", s.accountSeq+1)
-	var sealed []byte
-	if s.sealer != nil {
-		sealed, err = s.sealer.Seal(id, []byte(in.Password))
-		if err != nil {
-			return model.Account{}, fmt.Errorf("seal account secret: %w", err)
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pendingLabels, strings.ToLower(label))
+	if s.accountLabelTakenLocked(label) {
+		// Defensive: the reservation makes this unreachable while every label
+		// writer honours pendingLabels.
+		return model.Account{}, conflictf("an account named %q already exists", label)
 	}
+	account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, sealed)
+	return cloneAccount(account), nil
+}
+
+// reserveAccountIDLocked advances the account sequence and returns the new id.
+// A failed seal burns the reserved id rather than risk handing the same id to
+// two concurrent creates. The caller holds the write lock.
+func (s *Store) reserveAccountIDLocked() string {
 	s.accountSeq++
+	return fmt.Sprintf("acc-%02d", s.accountSeq)
+}
+
+// insertAccountLocked prepends the account, stores its sealed secret and
+// records the audit event. The caller holds the write lock.
+func (s *Store) insertAccountLocked(id, label, username string, platform model.Platform, concurrency int, regions []string, sealed []byte) model.Account {
+	now := s.now()
 	account := model.Account{
 		ID:          id,
 		Label:       label,
 		Username:    username,
-		Platform:    in.Platform,
+		Platform:    platform,
 		State:       model.AccountActive,
 		Concurrency: concurrency,
 		Regions:     regions,
@@ -361,8 +413,22 @@ func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error
 	}
 	s.accounts = append([]model.Account{account}, s.accounts...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.create", label,
-		fmt.Sprintf("platform %s · concurrency %d", in.Platform, concurrency))
-	return cloneAccount(account), nil
+		fmt.Sprintf("platform %s · concurrency %d", platform, concurrency))
+	return account
+}
+
+// accountLabelTakenLocked reports whether label is used by an account or
+// reserved by an in-flight create. The caller holds at least the read lock.
+func (s *Store) accountLabelTakenLocked(label string) bool {
+	if _, ok := s.pendingLabels[strings.ToLower(label)]; ok {
+		return true
+	}
+	for _, existing := range s.accounts {
+		if strings.EqualFold(existing.Label, label) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateAccount applies a partial entitlement update.
@@ -389,6 +455,9 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 			if i != idx && strings.EqualFold(other.Label, label) {
 				return model.Account{}, conflictf("an account named %q already exists", label)
 			}
+		}
+		if _, pending := s.pendingLabels[strings.ToLower(label)]; pending {
+			return model.Account{}, conflictf("an account named %q already exists", label)
 		}
 		if label != next.Label {
 			next.Label = label
@@ -680,7 +749,23 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 		Target:   target,
 		Detail:   detail,
 	}
-	s.audit = append([]model.AuditEvent{event}, s.audit...)
+	s.audit = prependCapped(s.audit, event, AuditRetention)
+}
+
+// prependCapped inserts item at the front of items (newest first) and drops the
+// oldest entry once limit is reached. The slice is reused, so an insert costs
+// one bounded copy instead of reallocating the whole history.
+func prependCapped[T any](items []T, item T, limit int) []T {
+	if limit <= 0 {
+		return items
+	}
+	items = append(items, item)
+	copy(items[1:], items[:len(items)-1])
+	items[0] = item
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
 
 // clientMessage reduces a vendor-provided string to one bounded line for an
@@ -703,7 +788,18 @@ func cloneAccount(account model.Account) model.Account {
 
 func cloneUser(user model.PanelUser) model.PanelUser {
 	user.Allowlist = append([]string{}, user.Allowlist...)
+	user.QuotaBytesMonth = copyInt64(user.QuotaBytesMonth)
 	return user
+}
+
+// copyInt64 returns a pointer to a copy of value, so a snapshot never aliases
+// the store's quota field.
+func copyInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 func cloneKey(key model.APIKey) model.APIKey {
