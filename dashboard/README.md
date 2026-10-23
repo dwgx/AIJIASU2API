@@ -485,11 +485,15 @@ and reports healthy on `/healthz`.
 
 ## Limitations
 
-- `ajs-accountd` is an in-memory skeleton: it reseeds from the dashboard mock on every start, so
-  created accounts, keys, leases and settings do not survive a daemon restart. There is no
-  persistence, no Resin publisher wiring, no vendor login and no gate yet.
-- Live mode is verified against that skeleton only. No AJiaSu vendor endpoint is contacted; the
-  mutation lab records and answers locally.
+- `ajs-accountd` persists accounts, nodes, leases, keys and settings in a versioned JSON
+  snapshot (`AJS_STATE_FILE`, saved every 30 s and on shutdown, sealed secrets included),
+  so the store survives a restart; SQLite is still the target schema (`docs/PANEL.md` §6),
+  not the current storage.
+- The Resin publisher/runtime wiring and the node controller/gate are in place, and vendor
+  login is wired but default-off (`AJS_ACCOUNT_LOGIN=1` opts in). Live vendor login/FV/Resin
+  remains `[UNVERIFIED]` without an Owner account.
+- Live mode is verified against the local daemon; the tests use fakes and contact no vendor
+  endpoint.
 - The live build hides the mock reset action entirely — the daemon has no reset endpoint.
 - `VITE_PANEL_TOKEN` is build-time and readable from the bundle. There is no per-operator auth,
   role model or session; production needs a BFF or reverse proxy.
@@ -497,9 +501,9 @@ and reports healthy on `/healthz`.
   explicitly).
 - Log export is a placeholder; SSE, pagination above 500 rows and server-side sorting are not
   implemented in v1. Polling is implemented (see [Polling and stale data](#polling-and-stale-data)).
-- `dashboard/docs/` is the AJS-20 design contract; the accent slice only adds §3.9 (accent table)
-  to `DESIGN-SYSTEM.md` and leaves the rest of the contract unchanged.
-- No git commit or push was performed.
+- Documentation scope, not a limitation: `dashboard/docs/` is the AJS-20 design contract; the
+  accent slice only adds §3.9 (accent table) to `DESIGN-SYSTEM.md` and leaves the rest of the
+  contract unchanged.
 
 ## License
 
