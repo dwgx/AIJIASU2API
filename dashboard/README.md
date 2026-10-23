@@ -1,7 +1,7 @@
 # AJiaSu Proxy Console
 
 Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, request telemetry, the
-audit trail and a read-only Lab instrument in one Obsidian Mint surface. **Mock-first:** the
+audit trail and a read-only Lab instrument in one graphite-and-mint APC surface. **Mock-first:** the
 default build runs on deterministic in-memory data and never contacts AJiaSu, a vendor binary or a
 live daemon. A live mode against the local `ajs-accountd` skeleton is also built and verified; it
 is opt-in through build-time environment variables (see [Modes](#modes) and
@@ -9,7 +9,7 @@ is opt-in through build-time environment variables (see [Modes](#modes) and
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 105 tests in 14 files.
+- Tests: Vitest + React Testing Library + jsdom, 131 tests in 19 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings language card.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
@@ -23,9 +23,23 @@ The mode is fixed at build time; there is no runtime switch.
 | Mock (default) | `VITE_USE_MOCK` unset or `true` | deterministic in-browser store (`src/lib/mock.ts`), seeded on page load | **Settings → Reset dataset**, or a full reload |
 | Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` optional (otherwise the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
 
-The shell reports the active mode: the topbar pill reads `mock data` or `live API`, and the sidebar
-version reads `v0.1.0 · mock` or `v0.1.0 · live`. The Lab page works in both modes: deterministic
-fixtures in mock, `/v1/lab/*` in live; a live 401 opens the runtime token gate described below.
+The shell reports the active mode with the topbar pill (`mock data` or `live API`); the sidebar
+shows the APC mark, the full name and the language/theme controls, and a desktop toggle collapses
+it to a 56 px icon rail whose state is stored in `localStorage["ajs.sidebar"]`. The Lab page works
+in both modes: deterministic fixtures in mock, `/v1/lab/*` in live; a live 401 opens the runtime
+token gate described below.
+
+### Demo-free live store
+
+The mock store is a development fixture, never live data. `ajs-accountd` starts from
+`store.NewEmpty()` and loads its JSON snapshot, so a fresh state directory serves zero
+accounts/nodes/leases/users/keys/requests and every page shows its empty state instead of demo
+rows. The old HMC snapshot was migrated once on 2026-10-24 with `AJS_DROP_DEMO=1`
+(`demo_purged accounts=6 nodes=12 leases=8 users=4 keys=6 requests=40 audit=20`); the switch is
+unset again, and the live store holds exactly 1 account (`acc-07`) and 1 node
+(`acc-07:vvn-2076-264`, `LIVE`). Mock mode is unchanged: it still seeds 6 accounts and 12 nodes
+for development and reset. A live restart with no snapshot therefore renders empty lists, not
+the mock dataset.
 
 ## Language
 
@@ -59,7 +73,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 105 tests in 14 files
+npm test           # Vitest, 131 tests in 19 files
 npm run typecheck  # tsc -b
 ```
 
@@ -111,7 +125,7 @@ vendor call and no vendor credential is used.
 |---|---|---|
 | Overview | `/v1/lab/overview`, `/v1/lab/flags` | count tiles, daemon posture (version, commit, uptime, effective modes), warnings, and effective flags with provenance (`env`/`flag`/`default`); secret flags expose `set` and `redacted` only |
 | Gates & sessions | `/v1/lab/gates`, `/v1/lab/sessions` | gate listener/state/byte counters per node and FV session health with a redacted SID and the vendor's claimed egress |
-| Egress | `GET /v1/lab/egress`, `POST /v1/lab/egress-check` | claimed-vs-verified rows plus a guarded check for the selected node with a running gate: verified/claimed, match, latency, checkedAt, source `echo`, and the probe error. 409 without a running gate, 429 inside the 5 s per-node quota |
+| Egress | `GET /v1/lab/egress`, `POST /v1/lab/egress-check` | claimed-vs-verified rows plus a guarded check for the selected node with a running gate: verified/claimed, match, latency, checkedAt, source `echo`, and the probe error. The observation is merged into that node's row and kept per node, so polls, a manual refresh or a node switch do not clear it. 409 without a running gate, 429 inside the 5 s per-node quota |
 | Servers | `GET /v1/accounts/{id}/servers` | the vendor catalog for the selected account; `stale` with an empty list and a reason when the daemon holds no in-memory login result (e.g. after a restart) |
 | Protocol | `GET /v1/lab/profiles` | supported version profiles and the sample matrix (platforms, versions, cores, carriers) |
 | Device | `GET /v1/accounts/{id}/device` | the stable identity as `sha256:`-prefixed truncated hashes plus non-secret claims |
@@ -126,13 +140,16 @@ Behaviour:
 - **Read-only page, one probe route.** The page never mutates daemon state.
   The daemon's only non-GET Lab route is `POST /v1/lab/egress-check` — an explicit
   claimed-vs-verified probe through the node's own gate (5 s per-node cooldown; 409 without a
-  running gate) — whose result is returned, not stored; the GET egress panel stays claim-only.
+  running gate) — whose result is returned, not stored server-side: the GET egress panel stays
+  claim-only, and the client keeps the observation keyed by node in component state. A poll, a
+  manual refresh or a node switch therefore keeps the verified IP and latency on that row; a full
+  page reload drops it and the row is claim-only again until the next check.
   The UI disables the button for the same 5 s window and surfaces the daemon's 409/429 message.
 - **Redaction.** Sessions expose `a1b2…(32)`-style SIDs, device identifiers are truncated
   `sha256:` hashes, and secret flags never carry a value.
 - **Mock parity.** In mock mode the same tabs render deterministic fixtures (`src/lib/lab.ts`,
   `src/lib/mock.ts`) and contact no backend; the mock egress check mirrors the 409/429 guards and
-  returns the seeded exit without storing it.
+  returns the seeded exit, which the client keeps in the same per-node state as a live observation.
 - **Runtime token gate.** A live build without `VITE_PANEL_TOKEN` still works. `http()` dispatches
   `ajs:unauthorized` on a 401 (except a vendor login rejection on `/actions/login`), and
   `TokenGate` asks for the admin token; the Settings **Daemon** card dispatches
@@ -149,7 +166,7 @@ place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`.
 |---|---|---|
 | Overview metrics | 10 s | the same page polls accounts, nodes, leases and audit at 15 s |
 | Accounts / Nodes / Leases / Users | 15 s | Users polls both users and API keys |
-| Requests | 10 s | the table has no range switch in v1, so the short cadence is always on |
+| Requests flows | 5 s | polls `/v1/lab/flows?limit=200`; mutation history 10 s, node labels 15 s |
 | Logs (audit) | 15 s | SSE runtime logs remain `[PROPOSED]` |
 | Settings | — | manual only |
 
@@ -209,12 +226,63 @@ Accounts and Nodes read a `q` search param and use it to prefill their search bo
   the Accounts create drawer (`?new=1`, which is preserved independently) does not touch the
   search.
 - The filter itself is unchanged: Accounts matches label, username and regions; Nodes matches
-  node label, account label, city and egress IP.
+  node label, account label, city and egress IP in the Connected tab and title, id, host, region
+  and account label in the Catalog tab.
 
 `tests/palette-search.test.tsx` covers the account and node round-trips (palette → URL →
 prefilled table), the two-character threshold (empty and one-character queries show no data
 entries), palette resilience when both list APIs reject, and the mounted-page `q` update plus
 the typed-query preservation on unrelated param changes.
+
+## Nodes catalog
+
+`/nodes` has two views: **Catalog** (what could be served) and **Connected** (what is running).
+
+- **Catalog** merges `GET /v1/accounts/{id}/servers` for every account (`src/lib/nodes.ts`); each
+  row carries its account label because vendor server ids are unique only per account. Rows sort
+  by region, title and id and render in per-region groups with a group header, a group caption and
+  a per-region select-all. The live `acc-07` login result is **2,814 vendor servers**, all carrying
+  region `cn`, so the page shows one *China* group of 2,814 rows; region labels come from
+  `src/lib/regions.ts` (ISO 3166-1 alpha-2 plus a few city subdivisions, English and Chinese), and
+  the raw vendor code stays visible as secondary mono text rather than being the primary label.
+- Columns: server title/id, account, region (localised name + code), `host:port`, vendor status,
+  runtime state (`Current` for a `LIVE` node, otherwise the node state or `not linked`), selection
+  (`selected` / `not selected` / `skipped by node limit`) and flags (`full load`, `member only`,
+  blocking marks, `ping secret`, `stale snapshot`).
+- Search matches title, id, host, region and account label; region and status selects narrow the
+  list. Selection is local UI state — the bulk bar says so and no daemon mutation is made.
+- A retained-but-not-refreshed snapshot shows the `stale snapshot` badge plus a callout with the
+  fetch time and account labels; accounts whose request failed are named in a separate callout and
+  their rows are left missing, not filled with placeholders; a disabled login mode renders the
+  `{enabled:false}` reason. No demo or overseas rows are invented.
+- The catalog polls every 30 s, the Connected tab every 15 s. Connected renders `/v1/nodes` with
+  region/state filters, latency sparkline, success/capacity meters, drain/undrain, probe and a
+  detail drawer.
+- Mock mode serves deterministic fixtures from `src/lib/mock.ts`, so the same layout is
+  reviewable offline.
+
+## Requests flows
+
+`/requests` is the audit table over the daemon's gate flow ring, not the vendor's request log.
+
+- **Source.** `GET /v1/lab/flows?limit=200` every 5 s; node labels come from `/v1/nodes` every
+  15 s and the mutation-lab history from `/v1/requests` every 10 s. Rows from the two sources share
+  one table and a `source` filter (`Gate flows` / `Mutation lab`).
+- **Columns.** Time, account/node, method, target (`host:port` only), status (`ok` / `rejected`
+  for gate flows; HTTP status for mutation rows), bytes in/out, duration, source and error class.
+  The daemon records only host and port — never a URL, headers or a credential — and the SID is
+  already redacted server-side. A row opens a detail drawer with the same fields.
+- **Summary.** Five tiles (flows, accepted, rejected, p95 duration, bytes) computed over the
+  filtered rows, plus the `{shown} of {total} rows · {dropped} dropped` hint from the bounded
+  500-entry per-gate rings.
+- **Filters.** Search (host, account, node, method, id), time range (15 m / 1 h / 24 h / all),
+  status, method, account/node, source and error class. The source filter isolates gate flows from
+  mutation-lab rows.
+- **States.** An empty ring explains that no gate flow has finished yet; an `{enabled:false}`
+  body renders the daemon's reason instead of an empty table; a failed poll keeps the last good
+  rows with the stale marker (see [Polling and stale data](#polling-and-stale-data)).
+- **Mutation lab.** The separate drawer still appends a synthetic row to `/v1/requests`; those rows
+  are labelled `Mutation lab` and need a `LIVE` node to target.
 
 ## HMC layout
 
@@ -273,6 +341,17 @@ in, and no vendor request made. Current HEAD no longer matches that note: the da
 versioned JSON snapshot (`AJS_STATE_FILE`), the Resin publisher/runtime and the node
 controller/gate are wired, and vendor login is default-off (`AJS_ACCOUNT_LOGIN=1` opts in);
 SQLite remains the target schema (`docs/PANEL.md` §6), not the current storage.
+
+**Live store after the demo purge (2026-10-24):** the daemon now starts empty, and the HMC
+snapshot was migrated once with `AJS_DROP_DEMO=1`
+(`demo_purged accounts=6 nodes=12 leases=8 users=4 keys=6 requests=40 audit=20`). It holds exactly
+1 account (`acc-07`, `active`) and 1 node (`acc-07:vvn-2076-264`, `LIVE`); the Accounts table
+renders one row and Nodes' Catalog only that account's retained vendor servers — 2,814 of them, all
+region `cn`, in one *China* group. The node's gate port is allocated from `127.0.0.1:13000` upward
+and must be read from `GET /v1/lab/gates` (the purge deployment reported `13000`). The Lab egress
+check answered 200 with `verified=222.186.57.63` against the vendor's claimed RFC1918 egress,
+which varies per session (`claimed=10.98.206.1` on the current run, `10.78.248.1` on the purge
+run), so it renders `match:false` (verified vs claimed).
 
 ## Verification (recorded 2026-10-23)
 
@@ -390,7 +469,7 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 105 Vitest tests in 14 files (65 at the 2026-10-23 record; see
+- 131 Vitest tests in 19 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -403,7 +482,7 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   `ajs.accounts.view` preference across remounts, an invalid stored value, card anatomy, card
   selection plus the shared test-login action, the mobile grid and its CSS contract.
   `tests/live-mode.test.tsx` stubs `VITE_USE_MOCK=false` before importing the app, then asserts the
-  live shell (`live API`, `v0.1.0 · live`) and the absence of the reset card.
+  live shell (`live API`) and the absence of the reset card.
   `tests/theme-contrast.test.ts` parses the `:root` and `[data-theme="light"]` token blocks from
   `app.css?raw` and asserts `--text`, `--text-2`, `--muted` and `--text-tertiary` stay at 4.5:1 or
   better on `--bg`, `--surface`, `--elevated` and `--sidebar` in both themes.
@@ -428,9 +507,28 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   bodies for gates/sessions and egress, servers/protocol/device tabs, log pause/resume and
   diagnostics. Its Egress block checks the selected live node, renders match/mismatch and a
   probe error with `verified=""`/`match=null`, disables the action when no gate is running and
-  surfaces a 409 without persisting the result into the claim-only table. Its `honesty fixes`
-  block also pins the simulated Requests label, the probe relabel, rotation disabled without
-  Resin, and the logout/pause copy.
+  surfaces a 409 without writing a result into the row. Its `honesty fixes` block also pins the
+  real gate-flow Requests label, the probe relabel, rotation disabled without Resin, and the
+  logout/pause copy.
+  `tests/nodes-catalog.test.tsx` covers the Catalog tab: grouping the real vendor catalog by
+  region with the live gate marked `Current`, rendering only the rows `getAccountServers`
+  returned, search/region/status filters, local multi-select with count and clear, the honest
+  empty state, the disabled reason, and the runtime actions on Connected.
+  `tests/regions.test.ts` pins `regionName()`: ISO country codes and city subdivisions resolve to
+  English and Chinese names, case is normalised, `unknown` and empty codes become `Unknown
+  region`, and any other unknown code passes through unchanged.
+  `tests/overview-telemetry.test.tsx` pins the no-telemetry empty state: with
+  `telemetryAvailable:false` the Overview shows `No gate telemetry yet` with the explanation and
+  `not measured`, draws no chart, sparkline or zeroed traffic KPI, keeps the live-node/lease
+  counts and account health, and restores the chart and traffic tiles when the daemon reports a
+  real meter.
+  `tests/requests.test.tsx` covers the gate-flow table: real rows plus the animated summary,
+  status/source and host-search/time-range filters with clear-all, the detail drawer (id,
+  redacted SID, host-only target), the empty-ring explanation, the disabled reason, error with
+  retry, and that no full URL or credential reaches the table.
+  `tests/ui-quickfix.test.tsx` pins the shell quick fixes: the 248→56 px sidebar collapse with
+  `localStorage["ajs.sidebar"]` persistence, the APC branding (no workspace switcher or operator
+  avatar), and the centered add-account modal with concurrency fixed at one and the vendor note.
   `tests/token-gate.test.tsx` covers the runtime token gate: a live 401 opens **Panel token
   required**, submitting stores `ajs.panelToken` in `sessionStorage` and retries with the bearer
   header.
@@ -461,12 +559,12 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 | Route | Page | Primary surfaces |
 |---|---|---|
-| `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions |
-| `/accounts` | Accounts | filterable table or card grid (view switch), add drawer, login test, pause/resume, delete confirm, bulk select |
-| `/nodes` | Nodes | region/status filters, latency sparklines, success/capacity meters, drain toggle, detail drawer |
+| `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay) |
+| `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select |
+| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, search/region/status filters, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
-| `/requests` | Requests | request log, status/method/source filters, mutation lab drawer |
+| `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, audit table, export placeholder |
 | `/lab` | Lab | tabs: Overview, Gates & sessions, Egress (guarded check), Servers, Protocol, Device, Logs, Diagnostics; environment badges; account picker for Servers/Device |
 | `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, language, **Updates** check card, daemon/token card, reset |
@@ -485,6 +583,7 @@ src/
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
+    nodes.ts              per-account vendor catalog merge + region grouping
     format.ts             bytes, dates, TTL, proxy URL helpers
     i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
     labels.ts             account/node/severity tone maps
@@ -495,6 +594,8 @@ src/
   components/
     AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton, TokenGate
     DataTable, Overlay (Drawer/Modal/ConfirmDialog), primitives
+    icons/                APC brand, nav, status and shell glyphs (inline SVG)
+    nodes/                CatalogTab (grouped vendor catalog), ConnectedTab (runtime nodes)
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
   pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Lab, Settings
 tests/
@@ -506,11 +607,15 @@ tests/
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
+  nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
+  requests.test.tsx       gate-flow rows, filters, detail, empty/error, host-only targets
+  ui-quickfix.test.tsx    APC brand, sidebar collapse, add-account modal, Requests honesty fixes
   api.test.ts             seed counts, metrics, CRUD, reset, settings persistence
   live-mode.test.tsx      live shell labels, no reset card when VITE_USE_MOCK=false
   palette-focus.test.tsx  command palette focus trap and focus restoration
   palette-search.test.tsx palette Account/Node search, ?q= prefill, API-failure resilience
   theme-accent.test.tsx   accent switch, persistence, tokens, 8-way WCAG contrast
+  theme-contrast.test.ts  token contrast audit for both themes
   useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
 ```
 
@@ -572,7 +677,7 @@ contract only):
 | Audit | `GET /v1/audit?limit=` | `[SPEC]` |
 | Metrics | `GET /v1/metrics?range=24h\|7d` | `[PROPOSED]` |
 | Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by `ajs-accountd` |
-| Lab telemetry (read-only) | `GET /v1/lab/{overview,flags,gates,sessions,egress,profiles,logs,diagnostics}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab telemetry (read-only) | `GET /v1/lab/{overview,flags,gates,flows,sessions,egress,profiles,logs,diagnostics}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab account reads | `GET /v1/accounts/{id}/{servers,device}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
@@ -580,47 +685,68 @@ Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory 
 as a versioned JSON snapshot); `[SPEC]` / `[PROPOSED]` describe where the contract is defined,
 not whether it is implemented.
 
+`GET /v1/metrics` also carries `telemetryAvailable`. `ajs-accountd` answers `false` — there is no
+traffic meter yet — so the Overview replaces the ingress/egress chart, the traffic KPI tiles and
+the range switch with a no-telemetry empty state that says exactly that; live node, lease and
+account-health facts still render, and no synthetic curve or zeroed KPI is drawn. A daemon that
+reports `true` gets the chart and the `Requests · 24h` / `Egress · 24h` tiles back.
+
 The mock store is module-level and mutable: create/pause/delete accounts, drain nodes, rotate and
 release leases, create/revoke keys, edit allowlists, add mutation-lab requests, save settings and
 reset the dataset. A full browser reload restores the seed data.
 
-## Design system — Obsidian Mint
+## Design system — APC (graphite + mint)
 
-Dark-first tokens (light is a derived variant with the same roles):
+`src/styles/app.css` opens with one token block per theme; components read semantic names and
+never a hex. Dark is canonical, light mirrors every role:
 
 ```css
---bg:#0B0F0E; --sidebar:#0E1412; --surface:#131A17; --elevated:#1A2420; --active:#22302A;
---text:#E6F1EC; --text-2:#A3B8AE; --muted:#7A9086; --text-tertiary:#829A90;
---border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.14);
---mint:#5EEAD4; --mint-strong:#2DD4BF; --success:#34D399; --warning:#FBBF24;
---danger:#FB7185; --info:#60A5FA;
---radius-card:12px; --radius-control:8px; --sidebar-w:248px; --topbar-h:64px;
+--canvas:#0A0D0C; --surface:#101413; --raised:#161C1A; --overlay:#1C2421; --sunken:#070A09;
+--sidebar:#0C1110; --active:#212B27;
+--text:#F2F7F5; --text-2:#C3D2CB; --muted:#98AAA2; --text-tertiary:#7E928A; --text-disabled:#5C6D66;
+--border-faint:rgba(255,255,255,.05); --border:rgba(255,255,255,.08);
+--border-strong:rgba(255,255,255,.14); --border-input:rgba(255,255,255,.20);
+--mint:#5EEAD4; --mint-strong:#2DD4BF;
+--success:#34D399; --warning:#FBBF24; --danger:#FB7185; --info:#60A5FA; --unavailable:#8A9A93;
+--sidebar-w:248px; --sidebar-w-collapsed:56px; --topbar-h:64px;
+--control-h:32px; --row-h:56px; --row-h-comfy:60px; --table-head-h:40px;
+--radius-control:8px; --radius-menu:12px; --radius-card:16px; --radius-modal:24px;
+--dur-fast:120ms; --dur-base:180ms; --ease-out:cubic-bezier(.16,1,.3,1);
 ```
 
-`--muted` was raised from `#6F857B` to `#7A9086` (dark) and from `#6B7F75` to `#5C7066` (light) so
-the `Ctrl K` kbd hint and the inactive segmented label clear AA instead of measuring 3.96:1 on
-`--bg`. Both tokens now clear 4.5:1 on every non-selected surface:
+- **Four surfaces, two layers.** Canvas → surface → raised → overlay. Pages are canvas plus
+  content; menus, modals, drawers and toasts sit on `--overlay`, never on the canvas.
+- **Borders are white alpha** (`--border-faint` 5 %, `--border` 8 %, `--border-strong` 14 %,
+  `--border-input` 20 %) so a line stays correct when the surface under it changes.
+- **Five-step text ramp.** `--text` → `--text-2` → `--muted` → `--text-tertiary` →
+  `--text-disabled`; only the first four are for text, the fifth is disabled-only. All four clear
+  AA on every surface (`bg / sidebar / surface / elevated`):
 
-| `--muted` | `--bg` | `--surface` | `--elevated` | `--sidebar` |
+| Theme | `--text` | `--text-2` | `--muted` | `--text-tertiary` |
 |---|---|---|---|---|
-| dark `#7A9086` | 5.66 | 5.19 | 4.68 | 5.46 |
-| light `#5C7066` | 4.91 | 5.30 | 5.30 | 4.58 |
+| dark | 18.03–15.96 | 12.46–11.03 | 8.00–7.08 | 5.92–5.24 |
+| light | 15.52–16.89 | 9.09–9.90 | 6.21–6.75 | 5.26–5.72 |
 
-The AA correction block still routes small labels to `--text-tertiary` (`#829A90` / `#5B6F65`) to
-keep the `--text` > `--text-2` > `--text-tertiary` > `--muted` hierarchy. `tests/theme-contrast.test.ts`
-parses both token blocks and fails if any of the four text tokens drops below 4.5:1 on `--bg`,
-`--surface`, `--elevated` or `--sidebar` in either theme. The small-text rule from
-`docs/DESIGN-SYSTEM.md` §3.8 is unchanged; that document now records the raised `--muted` values
-alongside the brief's original hex.
-
-- Type: 13/18 UI, 11/14 uppercase labels with +0.06em, 20/26 page title, 28/32 metric, 12/18 mono.
-- Controls 32 px, table rows 36 px, content padding 24 px, card gap 16 px.
-- Focus ring: 2 px mint with 2 px offset; reduced-motion fallback.
-- Motion: 150 ms state, 250 ms overlays, 300 ms panels; enter `cubic-bezier(.19,1,.22,1)`,
-  exit `cubic-bezier(.8,0,.4,1)`, move `cubic-bezier(.65,0,.35,1)`.
-- Responsive: 248 px sidebar at desktop, 64 px rail from 761–1100 px, off-canvas drawer below
-  760 px; data tables become card lists below 760 px (no horizontal document scroll); metric grid
-  collapses 4 → 2 → 1.
+  `tests/theme-contrast.test.ts` parses both blocks and fails if any of the four drops below 4.5:1.
+  `--bg`, `--elevated` and `--bg-sunken` remain as aliases of `--canvas`, `--raised` and `--sunken`.
+- **Status vocabulary.** `ok / info / warn / error / unavailable` are the only status names;
+  `--status-*` aliases the four hue tokens and adds `--unavailable` for "exists but cannot serve".
+  `StatusPill` (`components/primitives.tsx`) pairs an inline glyph with the label and tints both
+  from one `--status-hue`, so a variant is one class. `lib/labels.ts` maps account states, node
+  states and audit severities onto the vocabulary; status is never colour-only.
+- **Icons.** `components/icons/ApcIcons.tsx` draws the brand mark, every nav glyph, the five status
+  glyphs and the shell controls inline on a 24 px grid with `currentColor`; `lucide-react` remains
+  for page-level glyphs only. All decorative icons are `aria-hidden`, and the surrounding link or
+  button keeps its label.
+- **Geometry.** 248 px sidebar (56 px collapsed rail), 64 px topbar, 32 px controls, 16 px cards,
+  24 px modals, 40 px table header, 56 px rows (Accounts opts into the 60 px `comfy` density).
+- **Type.** 13/18 UI, 11/14 uppercase labels with +0.06em, 22/28 page title with −0.02em,
+  28/32 metric, 12/18 mono with tabular numerals.
+- **Motion.** 120 ms for colour/hover, 180 ms for geometry and entrances, one `--ease-out`
+  (`cubic-bezier(.16,1,.3,1)`); cards, metrics, table rows, overlays and toasts enter with a
+  short fade/rise. `prefers-reduced-motion: reduce` collapses every animation and transition to
+  0.001 ms and stops the progress sweep, pulse and entrance animations.
+- **Focus ring.** 2 px mint with 2 px offset on every interactive element.
 
 ### Accent themes
 
@@ -702,7 +828,9 @@ and reports healthy on `/healthz`.
   admin bearer over plain HTTP; there is no per-operator auth, role model or server-side session,
   so production needs a BFF or reverse proxy.
 - The Lab page only reads daemon state; the daemon's one POST (`/v1/lab/egress-check`) runs an
-  explicit egress probe through the node's gate and returns the result without storing it. Mock
+  explicit egress probe through the node's gate and returns the result without storing it. The
+  client keeps that observation per node for the life of the tab (polls and manual refreshes keep
+  it, a page reload drops it), so the verified IP is never presented as server-side history. Mock
   fixtures are deterministic, not gate telemetry, and an `enabled:false` body means the
   corresponding mode is off — the page shows the reason rather than fabricating rows.
 - Mock state is in memory; refreshing the tab discards edits (Settings → Reset dataset does the same

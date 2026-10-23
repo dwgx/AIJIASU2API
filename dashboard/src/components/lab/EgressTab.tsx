@@ -22,24 +22,71 @@ import { DisabledCallout, LabFacts } from './shared'
 
 const CHECK_COOLDOWN_MS = 5_000
 
+/**
+ * A GET claim row with the local POST observation merged in. The daemon's GET
+ * panel stays claim-only, so the check result lives in component state keyed
+ * by node and is never overwritten by a poll or refresh.
+ */
+interface EgressRow extends EgressView {
+  latencyMs?: number
+  error?: string
+}
+
+function mergeEgressRows(
+  rows: EgressView[],
+  observations: Record<string, EgressCheckResult>,
+): EgressRow[] {
+  return rows.map((row) => {
+    const observation = observations[row.nodeId]
+    if (!observation) return row
+    return {
+      ...row,
+      claimed: observation.claimed || row.claimed,
+      verified: observation.verified,
+      match: observation.match,
+      source: observation.source,
+      checkedAt: observation.checkedAt,
+      latencyMs: observation.latencyMs,
+      error: observation.error,
+    }
+  })
+}
+
 function MatchBadge({ match }: { match: boolean | null }) {
   const { t } = useI18n()
   if (match === null) return <Badge tone="neutral">{t('common.unknown')}</Badge>
   return <Badge tone={match ? 'success' : 'danger'}>{match ? t('lab.match') : t('lab.mismatch')}</Badge>
 }
 
-function EgressTable({ egress }: { egress: EgressView[] }) {
+function EgressTable({ egress }: { egress: EgressRow[] }) {
   const { t } = useI18n()
-  const columns: Array<Column<EgressView>> = [
+  const columns: Array<Column<EgressRow>> = [
     { key: 'node', label: t('lab.sessions.node'), render: (row) => <span className="cell-mono">{row.nodeId}</span> },
     { key: 'claimed', label: t('lab.egress.claimed'), render: (row) => <span className="cell-mono">{row.claimed || '—'}</span> },
     {
       key: 'verified',
       label: t('lab.egress.verified'),
       render: (row) =>
-        row.verified ? <span className="cell-mono">{row.verified}</span> : <Badge tone="warning">{t('lab.neverChecked')}</Badge>,
+        row.verified ? (
+          <span className="cell-mono">{row.verified}</span>
+        ) : row.checkedAt ? (
+          <Badge tone="warning">{t('lab.notObserved')}</Badge>
+        ) : (
+          <Badge tone="warning">{t('lab.neverChecked')}</Badge>
+        ),
     },
     { key: 'match', label: t('lab.egress.match'), render: (row) => <MatchBadge match={row.match} /> },
+    {
+      key: 'latency',
+      label: t('lab.egress.latency'),
+      align: 'right',
+      render: (row) =>
+        row.latencyMs === undefined ? (
+          <span className="cell-sub">—</span>
+        ) : (
+          <span className="cell-mono">{formatNumber(row.latencyMs)} ms</span>
+        ),
+    },
     { key: 'source', label: t('lab.egress.source'), render: (row) => <span className="cell-sub">{row.source}</span> },
     {
       key: 'checked',
@@ -65,7 +112,7 @@ export function EgressTab() {
   const gates = useAsync(() => api.listLabGates(), [], { intervalMs: 5_000 })
   const [nodeId, setNodeId] = useState('')
   const [checking, setChecking] = useState(false)
-  const [result, setResult] = useState<EgressCheckResult | null>(null)
+  const [observations, setObservations] = useState<Record<string, EgressCheckResult>>({})
   const [error, setError] = useState<string | null>(null)
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({})
 
@@ -80,13 +127,13 @@ export function EgressTab() {
   const egressRows = Array.isArray(egress.data) ? egress.data : []
   const gateRows = Array.isArray(gates.data) ? gates.data : []
   const gateIds = gateRows.map((gate) => gate.nodeId).join('|')
+  const mergedRows = mergeEgressRows(egressRows, observations)
 
   const selectedGate = gateRows.find((gate) => gate.nodeId === nodeId)
-  const selectedEgress = egressRows.find((row) => row.nodeId === nodeId)
-  const shown = result && result.nodeId === nodeId ? result : selectedEgress
-  const latencyMs =
-    shown && 'latencyMs' in shown && typeof shown.latencyMs === 'number' ? shown.latencyMs : null
-  const probeError = result && result.nodeId === nodeId ? result.error : undefined
+  const shown = mergedRows.find((row) => row.nodeId === nodeId)
+  const latencyMs = shown?.latencyMs ?? null
+  const probeError = shown?.error
+  const mismatch = shown?.match === false
   const cooldownUntil = cooldowns[nodeId] ?? 0
   const coolingDown = cooldownUntil > Date.now()
   const canCheck = selectedGate !== undefined && !checking && !coolingDown
@@ -100,7 +147,6 @@ export function EgressTab() {
     }
     if (!gateRows.some((gate) => gate.nodeId === nodeId)) {
       setNodeId(gateRows[0].nodeId)
-      setResult(null)
       setError(null)
     }
     // gateIds is the stable identity of gateRows for this effect.
@@ -128,7 +174,6 @@ export function EgressTab() {
 
   function chooseNode(value: string) {
     setNodeId(value)
-    setResult(null)
     setError(null)
   }
 
@@ -139,10 +184,12 @@ export function EgressTab() {
     setError(null)
     try {
       const next = await api.checkLabEgress(target)
-      setResult(next)
+      // Keep the observation keyed by node: switching nodes and GET refreshes
+      // must not erase a result the operator already paid a guarded probe for.
+      setObservations((prev) => ({ ...prev, [target]: next }))
       setCooldowns((prev) => ({ ...prev, [target]: Date.now() + CHECK_COOLDOWN_MS }))
     } catch (cause) {
-      setResult(null)
+      // A failed probe is not evidence that the previous observation vanished.
       setError(cause instanceof Error ? cause.message : String(cause))
       if (cause instanceof ApiError && cause.status === 429) {
         setCooldowns((prev) => ({ ...prev, [target]: Date.now() + CHECK_COOLDOWN_MS }))
@@ -292,6 +339,18 @@ export function EgressTab() {
                   </div>
                 ) : null}
 
+                {mismatch ? (
+                  <div className="callout callout--warning" role="alert">
+                    <span className="callout__icon">
+                      <AlertTriangle size={18} aria-hidden="true" />
+                    </span>
+                    <div>
+                      <p className="callout__title">{t('lab.egress.mismatchTitle')}</p>
+                      <p className="callout__text">{t('lab.egress.mismatchText')}</p>
+                    </div>
+                  </div>
+                ) : null}
+
                 {probeError ? (
                   <div className="callout callout--warning" role="alert">
                     <span className="callout__icon">
@@ -310,7 +369,7 @@ export function EgressTab() {
           <Card
             title={t('lab.egress.tableTitle')}
             subtitle={t('lab.egress.tableSubtitle')}
-            actions={<Badge tone={egressRows.some((row) => row.verified) ? 'success' : 'warning'}>{t('lab.egress.claimVsEcho')}</Badge>}
+            actions={<Badge tone={mergedRows.some((row) => row.verified) ? 'success' : 'warning'}>{t('lab.egress.claimVsEcho')}</Badge>}
             bodyClassName="card__body--flush"
           >
             {egress.status === 'error' ? (
@@ -318,7 +377,7 @@ export function EgressTab() {
             ) : egress.status === 'loading' && !egress.data ? (
               <TableSkeleton rows={5} columns={6} />
             ) : (
-              <EgressTable egress={egressRows} />
+              <EgressTable egress={mergedRows} />
             )}
           </Card>
 

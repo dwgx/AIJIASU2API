@@ -1,4 +1,4 @@
-import { ArrowUpRight, Plus, RefreshCw, ScrollText, Server, Ticket, Waypoints } from 'lucide-react'
+import { Activity, ArrowUpRight, Plus, RefreshCw, ScrollText, Server, Ticket, Waypoints } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
@@ -19,6 +19,7 @@ import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import {
   Badge,
   Card,
+  EmptyState,
   ErrorState,
   IconButton,
   MetricTile,
@@ -27,6 +28,7 @@ import {
   SegmentedControl,
   Skeleton,
   StatusDot,
+  StatusPill,
 } from '../components/primitives'
 
 function TrafficChart({ range, series }: { range: MetricRange; series: Array<{ t: string; ingress: number; egress: number }> }) {
@@ -160,7 +162,10 @@ export default function Overview() {
   const liveNodes = nodes.data?.filter((node) => node.state === 'LIVE').length ?? 0
   const totalNodes = nodes.data?.length ?? 0
   const stickyLeases = leases.data?.filter((lease) => lease.sticky).length ?? 0
-  const spark = metrics.data?.series.slice(-16).map((point) => point.egress) ?? []
+  const series = metrics.data?.series ?? []
+  const telemetryAvailable = metrics.data?.telemetryAvailable === true
+  const hasTraffic = telemetryAvailable && series.length > 0
+  const spark = hasTraffic ? series.slice(-16).map((point) => point.egress) : []
 
   const quickActions = [
     { label: t('overview.addAccount'), hint: t('overview.addAccountHint'), icon: Plus, to: '/accounts?new=1' },
@@ -176,15 +181,17 @@ export default function Overview() {
         subtitle={t('overview.subtitle')}
         refresh={summarizeRefresh(states)}
         actions={
-          <SegmentedControl
-            label={t('overview.range')}
-            value={range}
-            onChange={setRange}
-            options={[
-              { value: '24h', label: '24h' },
-              { value: '7d', label: '7d' },
-            ]}
-          />
+          telemetryAvailable ? (
+            <SegmentedControl
+              label={t('overview.range')}
+              value={range}
+              onChange={setRange}
+              options={[
+                { value: '24h', label: '24h' },
+                { value: '7d', label: '7d' },
+              ]}
+            />
+          ) : undefined
         }
       />
 
@@ -196,7 +203,7 @@ export default function Overview() {
         <OverviewSkeleton />
       ) : (
         <>
-          <div className="metric-grid">
+          <div className={telemetryAvailable ? 'metric-grid' : 'metric-grid metric-grid--2'}>
             <MetricTile
               label={t('overview.liveNodes')}
               value={`${liveNodes}/${totalNodes}`}
@@ -205,39 +212,37 @@ export default function Overview() {
                 ready: nodes.data?.filter((node) => node.state === 'READY').length ?? 0,
               })}
               icon={<Server size={15} />}
-              spark={spark}
+              spark={hasTraffic ? spark : undefined}
               tone="mint"
             />
             <MetricTile
               label={t('overview.activeLeases')}
               value={formatNumber(leases.data?.length ?? 0)}
               hint={t('overview.stickyHint', { count: stickyLeases })}
-              delta={t('overview.deltaNew')}
-              trend="up"
               icon={<Ticket size={15} />}
-              spark={spark.map((value) => value * 0.92)}
+              spark={hasTraffic ? spark.map((value) => value * 0.92) : undefined}
               tone="info"
             />
-            <MetricTile
-              label={t('overview.requestsRange', { range })}
-              value={formatCompact(metrics.data?.totals.requests ?? 0)}
-              hint={`p95 ${metrics.data?.totals.p95LatencyMs ?? 0} ms`}
-              delta="12.4%"
-              trend="up"
-              icon={<Waypoints size={15} />}
-              spark={spark.map((value) => value * 0.7)}
-              tone="success"
-            />
-            <MetricTile
-              label={t('overview.egressRange', { range })}
-              value={formatBytes(metrics.data?.totals.egressBytes ?? 0)}
-              hint={t('overview.ingressHint', { bytes: formatBytes(metrics.data?.totals.ingressBytes ?? 0) })}
-              delta="8.1%"
-              trend="up"
-              icon={<ArrowUpRight size={15} />}
-              spark={spark.map((value) => value * 1.05)}
-              tone="warning"
-            />
+            {telemetryAvailable ? (
+              <>
+                <MetricTile
+                  label={t('overview.requestsRange', { range })}
+                  value={formatCompact(metrics.data?.totals.requests ?? 0)}
+                  hint={`p95 ${metrics.data?.totals.p95LatencyMs ?? 0} ms`}
+                  icon={<Waypoints size={15} />}
+                  spark={hasTraffic ? spark.map((value) => value * 0.7) : undefined}
+                  tone="success"
+                />
+                <MetricTile
+                  label={t('overview.egressRange', { range })}
+                  value={formatBytes(metrics.data?.totals.egressBytes ?? 0)}
+                  hint={t('overview.ingressHint', { bytes: formatBytes(metrics.data?.totals.ingressBytes ?? 0) })}
+                  icon={<ArrowUpRight size={15} />}
+                  spark={hasTraffic ? spark.map((value) => value * 1.05) : undefined}
+                  tone="warning"
+                />
+              </>
+            ) : null}
           </div>
 
           <div className="grid-2-1">
@@ -245,17 +250,29 @@ export default function Overview() {
               title={t('overview.traffic')}
               subtitle={t('overview.trafficSubtitle')}
               actions={
-                <div className="legend">
-                  <span className="legend__item">
-                    <span className="legend__swatch legend__swatch--mint" /> {t('overview.egress')}
-                  </span>
-                  <span className="legend__item">
-                    <span className="legend__swatch legend__swatch--info" /> {t('overview.ingress')}
-                  </span>
-                </div>
+                hasTraffic ? (
+                  <div className="legend">
+                    <span className="legend__item">
+                      <span className="legend__swatch legend__swatch--mint" /> {t('overview.egress')}
+                    </span>
+                    <span className="legend__item">
+                      <span className="legend__swatch legend__swatch--info" /> {t('overview.ingress')}
+                    </span>
+                  </div>
+                ) : (
+                  <Badge tone="warning">{t('overview.notMeasured')}</Badge>
+                )
               }
             >
-              <TrafficChart range={range} series={metrics.data?.series ?? []} />
+              {hasTraffic ? (
+                <TrafficChart range={range} series={series} />
+              ) : (
+                <EmptyState
+                  title={t('overview.telemetryEmptyTitle')}
+                  description={t('overview.telemetryEmptyDesc')}
+                  icon={<Activity size={20} aria-hidden="true" />}
+                />
+              )}
             </Card>
 
             <Card
@@ -267,27 +284,31 @@ export default function Overview() {
                 </Link>
               }
             >
-              <ul className="health-list">
-                {metrics.data?.accountHealth.map((entry) => {
-                  const state = ACCOUNT_STATE[entry.state]
-                  return (
-                    <li key={entry.accountId} className="health-row">
-                      <div className="health-row__top">
-                        <span className="health-row__label">{entry.label}</span>
-                        <span className="health-row__score mono">{entry.score}</span>
-                      </div>
-                      <div className="health-row__bottom">
-                        <ProgressBar
-                          value={entry.score}
-                          tone={state.tone}
-                          label={t('overview.healthLabel', { name: entry.label })}
-                        />
-                        <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
-                      </div>
-                    </li>
-                  )
-                })}
-              </ul>
+              {(metrics.data?.accountHealth.length ?? 0) === 0 ? (
+                <EmptyState title={t('overview.accountHealthEmpty')} />
+              ) : (
+                <ul className="health-list">
+                  {metrics.data?.accountHealth.map((entry) => {
+                    const state = ACCOUNT_STATE[entry.state]
+                    return (
+                      <li key={entry.accountId} className="health-row">
+                        <div className="health-row__top">
+                          <span className="health-row__label">{entry.label}</span>
+                          <span className="health-row__score mono">{entry.score}</span>
+                        </div>
+                        <div className="health-row__bottom">
+                          <ProgressBar
+                            value={entry.score}
+                            tone={state.tone}
+                            label={t('overview.healthLabel', { name: entry.label })}
+                          />
+                          <StatusPill status={state.status}>{t(state.labelKey)}</StatusPill>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
             </Card>
           </div>
 

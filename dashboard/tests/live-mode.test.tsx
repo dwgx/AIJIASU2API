@@ -33,7 +33,7 @@ describe('live mode', () => {
 
     expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
     expect(screen.getByText('live API', { selector: '.topbar__env' })).toBeInTheDocument()
-    expect(screen.getByText('v0.1.0 · live')).toBeInTheDocument()
+    expect(screen.queryByText(/v0\.1\.0/)).not.toBeInTheDocument()
     expect(screen.queryByText('Reset mock data')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reset dataset' })).not.toBeInTheDocument()
   })

@@ -9,9 +9,29 @@ import { Sidebar } from './Sidebar'
 import { TokenGate } from './TokenGate'
 import { Topbar } from './Topbar'
 
+const SIDEBAR_STORAGE_KEY = 'ajs.sidebar'
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'collapsed'
+  } catch {
+    // Storage can be unavailable (private mode); start expanded for this session.
+    return false
+  }
+}
+
+function writeSidebarCollapsed(collapsed: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? 'collapsed' : 'expanded')
+  } catch {
+    // The in-memory choice still applies for this session.
+  }
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
   const location = useLocation()
   const { t } = useI18n()
   const titleKey = navItemFor(location.pathname)?.labelKey ?? 'nav.overview'
@@ -34,12 +54,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed((value) => {
+      const next = !value
+      writeSidebarCollapsed(next)
+      return next
+    })
+  }
+
   return (
-    <div className="app-shell">
+    <div className={clsx('app-shell', sidebarCollapsed && 'is-sidebar-collapsed')}>
       <a className="skip-link" href="#main">
         {t('shell.skipToContent')}
       </a>
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar open={sidebarOpen} collapsed={sidebarCollapsed} onClose={() => setSidebarOpen(false)} />
       <button
         type="button"
         className={clsx('sidebar-scrim', sidebarOpen && 'is-visible')}
@@ -50,6 +78,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="app-main">
         <Topbar
           title={title}
+          collapsed={sidebarCollapsed}
+          onToggleSidebar={toggleSidebar}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenSidebar={() => setSidebarOpen(true)}
         />

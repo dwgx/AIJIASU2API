@@ -486,6 +486,11 @@ danger, 90) · `Ingress` (mono, right, 90) · `Egress` (mono, right, 90) · `Lat
 `GET /v1/requests` `[PROPOSED]` →
 `{"requests":[{ts,user_id,user_name,account_id,node_id,target_host,target_port,status_code,reject_reason,ingress_bytes,egress_bytes,duration_ms}],"total":n,"next_cursor":"…"}`.
 
+**Implemented v1 (2026-10-24):** the Requests page reads
+`GET /v1/lab/flows?limit=200` instead — finished gate flows joined to their node, with host/port
+(never a URL), method, gate status (`ok` / `rejected`), bytes and duration. The HTTP status codes,
+summary and export endpoints below remain `[PROPOSED]`.
+
 `GET /v1/requests/summary?range=` `[PROPOSED]` →
 `{"requests":n,"ingress_bytes":n,"egress_bytes":n,"rejected":n,"by_user":[…],"series":[…]}`.
 

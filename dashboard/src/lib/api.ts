@@ -6,6 +6,7 @@ import {
   buildLabEgress,
   buildLabEgressCheck,
   buildLabFlags,
+  buildLabFlows,
   buildLabGates,
   buildLabLogs,
   buildLabOverview,
@@ -30,6 +31,7 @@ import type {
   DiagnosticsView,
   EgressCheckResult,
   EgressView,
+  FlowsView,
   GateView,
   LabFlags,
   LabDisabled,
@@ -479,6 +481,16 @@ export const api = {
     if (!USE_MOCK) return http<GateView[] | LabDisabled>('/v1/lab/gates')
     await wait()
     return clone(buildLabGates(getDb()))
+  },
+
+  /**
+   * Finished gate flows, newest first. The daemon bounds ?limit to 1..500;
+   * the page asks for 200 so one poll stays a single small GET.
+   */
+  async getLabFlows(limit = 200): Promise<FlowsView> {
+    if (!USE_MOCK) return http<FlowsView>(`/v1/lab/flows?limit=${limit}`)
+    await wait()
+    return clone(buildLabFlows(getDb(), limit))
   },
 
   async listLabSessions(): Promise<SessionView[] | LabDisabled> {

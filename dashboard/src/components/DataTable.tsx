@@ -18,9 +18,22 @@ interface DataTableProps<T> {
   rowKey: (row: T) => string
   onRowClick?: (row: T) => void
   empty?: ReactNode
+  /** Per-row class hook (live/selected state); rows stay a table concern. */
+  rowClassName?: (row: T) => string | undefined
+  /** `comfy` uses the 60px row from the reference console; default is 56px. */
+  density?: 'standard' | 'comfy'
 }
 
-export function DataTable<T>({ caption, columns, rows, rowKey, onRowClick, empty }: DataTableProps<T>) {
+export function DataTable<T>({
+  caption,
+  columns,
+  rows,
+  rowKey,
+  onRowClick,
+  empty,
+  rowClassName,
+  density = 'standard',
+}: DataTableProps<T>) {
   const compact = useMediaQuery('(max-width: 760px)')
 
   if (compact) {
@@ -39,7 +52,7 @@ export function DataTable<T>({ caption, columns, rows, rowKey, onRowClick, empty
     return (
       <div className="row-cards" role="list" aria-label={caption}>
         {rows.map((row) => (
-          <div className="row-card" key={rowKey(row)} role="listitem">
+          <div className={clsx('row-card', rowClassName?.(row))} key={rowKey(row)} role="listitem">
             <div
               className={clsx('row-card__body', onRowClick && 'is-clickable')}
               role={onRowClick ? 'button' : undefined}
@@ -93,7 +106,7 @@ export function DataTable<T>({ caption, columns, rows, rowKey, onRowClick, empty
 
   return (
     <div className="table-wrap">
-      <table className="data-table">
+      <table className={clsx('data-table', density === 'comfy' && 'data-table--comfy')}>
         <caption className="sr-only">{caption}</caption>
         <thead>
           <tr>
@@ -118,7 +131,7 @@ export function DataTable<T>({ caption, columns, rows, rowKey, onRowClick, empty
             rows.map((row) => (
               <tr
                 key={rowKey(row)}
-                className={clsx(onRowClick && 'is-clickable')}
+                className={clsx(onRowClick && 'is-clickable', rowClassName?.(row))}
                 tabIndex={onRowClick ? 0 : undefined}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 onKeyDown={

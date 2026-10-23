@@ -1,5 +1,8 @@
 export type Tone = 'neutral' | 'mint' | 'success' | 'warning' | 'danger' | 'info'
 
+/** Product status vocabulary: one name per meaning, one hue per name. */
+export type Status = 'ok' | 'info' | 'warn' | 'error' | 'unavailable'
+
 export type Platform = 'android' | 'ios' | 'windows' | 'linux'
 export type AccountState = 'active' | 'paused' | 'auth_failed' | 'expired'
 export type NodeState = 'LIVE' | 'READY' | 'STARTING' | 'DRAINING' | 'DOWN'
@@ -137,6 +140,8 @@ export interface Metrics {
     p95LatencyMs: number
   }
   accountHealth: AccountHealth[]
+  /** False when the daemon has no traffic meter: series and totals are empty/zero. */
+  telemetryAvailable: boolean
   generatedAt: string
 }
 
@@ -247,6 +252,36 @@ export interface GateView {
   egressBytes: number
   draining: boolean
   startedAt: string | null
+}
+
+/**
+ * One finished flow from the local gate ring. Targets are host plus port only:
+ * the gate records no URL, headers, credentials or full session id.
+ */
+export interface FlowView {
+  id: string
+  nodeId: string
+  accountId: string
+  /** Redacted server-side to "first4…(len)". */
+  sid?: string
+  startedAt: string
+  durationMs: number
+  method: string
+  targetHost: string
+  targetPort: number
+  /** Gate vocabulary: "ok" or "rejected". Never an HTTP status. */
+  status: string
+  bytesIn: number
+  bytesOut: number
+  errorClass?: string
+}
+
+/** GET /v1/lab/flows — bounded per-gate rings joined to their nodes. */
+export interface FlowsView {
+  enabled: boolean
+  reason?: string
+  flows: FlowView[]
+  dropped: number
 }
 
 export interface KeepaliveView {

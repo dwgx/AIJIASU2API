@@ -1,8 +1,8 @@
 import clsx from 'clsx'
-import { X } from 'lucide-react'
 import type { CSSProperties, ReactNode } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import { ApcCloseIcon } from './icons/ApcIcons'
 import { Button, IconButton } from './primitives'
 
 interface DrawerProps {
@@ -42,7 +42,7 @@ export function Drawer({ open, title, subtitle, onClose, children, footer, width
             <h2 className="drawer__title">{title}</h2>
             {subtitle ? <p className="drawer__subtitle">{subtitle}</p> : null}
           </div>
-          <IconButton label={t('common.closePanel')} icon={<X size={16} />} onClick={onClose} />
+          <IconButton label={t('common.closePanel')} icon={<ApcCloseIcon size={16} />} onClick={onClose} />
         </header>
         <div className="drawer__body">{children}</div>
         {footer ? <footer className="drawer__foot">{footer}</footer> : null}
@@ -86,7 +86,7 @@ export function Modal({ open, title, description, onClose, children, footer, siz
             <h2 className="modal__title">{title}</h2>
             {description ? <p className="modal__desc">{description}</p> : null}
           </div>
-          <IconButton label={t('common.closeDialog')} icon={<X size={16} />} onClick={onClose} />
+          <IconButton label={t('common.closeDialog')} icon={<ApcCloseIcon size={16} />} onClick={onClose} />
         </header>
         {children ? <div className="modal__body">{children}</div> : null}
         {footer ? <footer className="modal__foot">{footer}</footer> : null}

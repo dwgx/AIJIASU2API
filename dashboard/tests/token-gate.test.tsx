@@ -74,7 +74,7 @@ describe('runtime token gate', () => {
     )
     expect(screen.getByText('set (session)')).toBeInTheDocument()
     expect(screen.queryByText('test-token')).not.toBeInTheDocument()
-    expect(await screen.findByText('v9.9.9 · live')).toBeInTheDocument()
+    expect(screen.queryByText(/v9\.9\.9/)).not.toBeInTheDocument()
     expect(screen.queryByText('127.0.0.1:2261')).not.toBeInTheDocument()
   })
 })

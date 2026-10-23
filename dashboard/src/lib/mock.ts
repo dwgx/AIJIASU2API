@@ -8,6 +8,7 @@ import type {
   EgressCheckResult,
   EgressView,
   FlagView,
+  FlowsView,
   GateView,
   LabFlags,
   LabLogQuery,
@@ -27,6 +28,7 @@ import type {
   TrafficPoint,
 } from './types'
 import { ApiError } from './errors'
+import { regionName } from './regions'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -65,24 +67,6 @@ export interface MockDb {
   mutationSeq: number
   /** Epoch ms of the last guarded egress check per nodeId; reset with the dataset. */
   egressCheckedAt: Record<string, number>
-}
-
-const REGION_NAMES: Record<string, string> = {
-  'cn-zj': 'China · Zhejiang',
-  'cn-sh': 'China · Shanghai',
-  hk: 'Hong Kong',
-  'jp-tyo': 'Japan · Tokyo',
-  'sg-01': 'Singapore',
-  'tw-tpe': 'Taiwan · Taipei',
-  'kr-sel': 'South Korea · Seoul',
-  'de-fra': 'Germany · Frankfurt',
-  'uk-lon': 'United Kingdom · London',
-  'us-lax': 'United States · Los Angeles',
-  'ca-yyz': 'Canada · Toronto',
-}
-
-export function regionName(region: string): string {
-  return REGION_NAMES[region] ?? region
 }
 
 export const DEFAULT_SETTINGS: PanelSettings = {
@@ -342,6 +326,7 @@ export function buildMetrics(range: '24h' | '7d', now: number, accounts: Account
       score: account.state === 'active' ? 98 - index * 3 : account.state === 'paused' ? 62 : 24,
       state: account.state,
     })),
+    telemetryAvailable: true,
     generatedAt: iso(now),
   }
 }
@@ -468,6 +453,60 @@ export function buildLabGates(db: MockDb, now = Date.now()): GateView[] {
       draining: node.state === 'DRAINING',
       startedAt: iso(now - (index + 1) * 40 * MINUTE),
     }))
+}
+
+export function buildLabFlows(db: MockDb, limit = 200, now = Date.now()): FlowsView {
+  const gates = db.nodes.filter((node) => node.state === 'LIVE' || node.state === 'DRAINING')
+  const rand = mulberry32(20261024)
+  const hosts = [
+    'api.example.com',
+    'cdn.example.net',
+    'auth.example.org',
+    'telemetry.example.dev',
+    'registry.example.io',
+    'storage.example.net',
+    'docs.example.com',
+    '203.0.113.9',
+    '198.51.100.4',
+    'example.net',
+  ]
+  const ports = [443, 443, 443, 443, 80, 8080, 53]
+  const errorClasses = ['handshake', 'closed', 'draining', 'admission_timeout', 'open_flow', 'reply']
+  const wanted = Math.min(Math.max(Math.trunc(limit), 0), 500)
+  const flows: FlowsView['flows'] = []
+
+  for (let index = 0; index < wanted && gates.length > 0; index += 1) {
+    const node = gates[index % gates.length]
+    const rejected = rand() < 0.18
+    // A handshake refusal may never learn a destination; the real gate then
+    // records an empty method, host and port instead of inventing one.
+    const handshakeWithoutTarget = rejected && rand() < 0.2
+    const targetHost = handshakeWithoutTarget ? '' : pick(rand, hosts)
+    const targetPort = targetHost ? pick(rand, ports) : 0
+    const errorClass = rejected ? pick(rand, errorClasses) : ''
+    flows.push({
+      id: `${node.id}#${index + 1}`,
+      nodeId: node.id,
+      accountId: node.accountId,
+      sid: redactedSid(node.id),
+      startedAt: iso(now - index * 7_300 - Math.round(rand() * 3_000)),
+      durationMs: rejected ? 1 + Math.round(rand() * 40) : 18 + Math.round(rand() * 1_800),
+      method: targetHost ? 'CONNECT' : '',
+      targetHost,
+      targetPort,
+      status: rejected ? 'rejected' : 'ok',
+      bytesIn: rejected ? 0 : 400 + Math.round(rand() * 2_400_000),
+      bytesOut: rejected ? 0 : 800 + Math.round(rand() * 8_000_000),
+      ...(errorClass ? { errorClass } : {}),
+    })
+  }
+
+  flows.sort((left, right) => {
+    if (left.startedAt !== right.startedAt) return right.startedAt.localeCompare(left.startedAt)
+    return right.id.localeCompare(left.id)
+  })
+
+  return { enabled: true, flows, dropped: 3 }
 }
 
 export function buildLabSessions(db: MockDb, now = Date.now()): SessionView[] {

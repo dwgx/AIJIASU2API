@@ -169,11 +169,11 @@ describe('search param prefill on pages', () => {
     await user.type(search, 'Edge')
     expect(search).toHaveValue('Edge')
 
-    await user.click(screen.getByRole('button', { name: 'New account' }))
-    expect(await screen.findByRole('dialog', { name: 'New account' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add account' }))
+    expect(await screen.findByRole('dialog', { name: 'Add account' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Search accounts' })).toHaveValue('Edge')
 
-    await user.click(within(screen.getByRole('dialog', { name: 'New account' })).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'Add account' })).getByRole('button', { name: 'Cancel' }))
     expect(screen.getByRole('textbox', { name: 'Search accounts' })).toHaveValue('Edge')
     expect(window.location.search).toBe('')
   })

@@ -3,6 +3,13 @@
 Status: design contract v1 · 2026-10-23 · slice AJS-20. Normative for token names, values,
 component anatomy and states. `PAGES.md` is normative for page composition.
 
+> **v2 (AJS-142, 2026-10-24).** The APC system in `src/styles/app.css` supersedes the v1 surface
+> ladder (§3.1), text ramp (§3.2), geometry (§4) and motion (§7): four surfaces
+> (`--canvas / --surface / --raised / --overlay`), white-alpha borders, a five-step ramp
+> (`--text … --text-disabled`), the status vocabulary `ok / info / warn / error / unavailable`,
+> 32 px controls, 16 px cards, 24 px modals, 56/60 px rows and 120/180 ms `--ease-out` motion.
+> The token block is the contract; the tables below record the v1 capture they grew from.
+
 **No code in this file by design.** Every value is a table row (token → value → role). The
 implementer writes the `:root` block; the names and values below are the contract. Numbers copied
 from a reference artifact carry a citation; decisions that exist in no reference are `[INFERENCE]`.

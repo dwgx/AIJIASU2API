@@ -25,6 +25,17 @@ export function formatDateTime(value: string): string {
   }).format(new Date(value))
 }
 
+export function formatDateTimeSeconds(value: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(value))
+}
+
 export function formatTime(value: string): string {
   return new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit',

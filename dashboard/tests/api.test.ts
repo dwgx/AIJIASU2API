@@ -125,6 +125,20 @@ describe('lab fixtures', () => {
     expect(sessions.every((session) => session.keepalive.supported === false)).toBe(true)
   })
 
+  it('serves bounded gate flows with host-only targets and redacted sessions', async () => {
+    const view = await api.getLabFlows(200)
+    expect(view.enabled).toBe(true)
+    expect(view.flows.length).toBe(200)
+    expect(view.flows.every((flow) => /…\(32\)$/.test(flow.sid ?? ''))).toBe(true)
+    expect(view.flows.every((flow) => !flow.targetHost.includes('://'))).toBe(true)
+    expect(view.flows.every((flow) => !('target' in flow))).toBe(true)
+    expect(new Set(view.flows.map((flow) => flow.status))).toEqual(new Set(['ok', 'rejected']))
+
+    const limited = await api.getLabFlows(5)
+    expect(limited.flows).toHaveLength(5)
+    expect(limited.flows[0]?.startedAt >= (limited.flows[4]?.startedAt ?? '')).toBe(true)
+  })
+
   it('checks egress through the mock gate and enforces the 409/429 guards', async () => {
     const result = await api.checkLabEgress('node-01')
     expect(result).toMatchObject({

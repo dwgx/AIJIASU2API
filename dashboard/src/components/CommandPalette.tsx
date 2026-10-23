@@ -1,9 +1,8 @@
 import clsx from 'clsx'
-import { Moon, Plus, RefreshCw, Search, Server, Sun, Wallet } from 'lucide-react'
+import { Wallet } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { LucideIcon } from 'lucide-react'
 import { api } from '../lib/api'
 import { translate, useI18n } from '../lib/i18n'
 import type { Language } from '../lib/i18n'
@@ -11,6 +10,15 @@ import { NAV_ITEMS } from '../lib/nav'
 import { useTheme } from '../lib/theme'
 import type { Account, ProxyNode } from '../lib/types'
 import { useFocusTrap } from '../lib/useFocusTrap'
+import {
+  ApcMoonIcon,
+  ApcNodesIcon,
+  ApcPlusIcon,
+  ApcRefreshIcon,
+  ApcSearchIcon,
+  ApcSunIcon,
+} from './icons/ApcIcons'
+import type { ApcIcon } from './icons/ApcIcons'
 import { useToast } from './Toast'
 
 interface PaletteEntry {
@@ -21,7 +29,7 @@ interface PaletteEntry {
   section: string
   altSection: string
   keywords: string
-  icon: LucideIcon
+  icon: ApcIcon
   run: () => void
 }
 
@@ -133,12 +141,12 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const actions: PaletteEntry[] = [
       {
         id: 'action-new-account',
-        label: t('palette.actionNewAccount'),
-        altLabel: translate(other, 'palette.actionNewAccount'),
+        label: t('palette.actionAddAccount'),
+        altLabel: translate(other, 'palette.actionAddAccount'),
         section: t('palette.section.action'),
         altSection: translate(other, 'palette.section.action'),
         keywords: 'create add vendor login 新建 添加 厂商 登录 账户',
-        icon: Plus,
+        icon: ApcPlusIcon,
         run: () => navigate('/accounts?new=1'),
       },
       {
@@ -148,7 +156,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         section: t('palette.section.action'),
         altSection: translate(other, 'palette.section.action'),
         keywords: 'reload sync fetch 重新加载 同步 获取 刷新',
-        icon: RefreshCw,
+        icon: ApcRefreshIcon,
         run: () => {
           window.dispatchEvent(new Event('ajs:refresh'))
           push(t('shell.refreshing'))
@@ -161,7 +169,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         section: t('palette.section.action'),
         altSection: translate(other, 'palette.section.action'),
         keywords: 'appearance dark light 外观 主题 深色 浅色',
-        icon: theme === 'dark' ? Sun : Moon,
+        icon: theme === 'dark' ? ApcSunIcon : ApcMoonIcon,
         run: toggle,
       },
     ]
@@ -185,7 +193,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       section: nodeSection,
       altSection: translate(other, 'palette.section.node'),
       keywords: `${node.accountLabel} ${node.region} ${node.city} ${node.egressIp}`,
-      icon: Server,
+      icon: ApcNodesIcon,
       run: () => navigate(`/nodes?q=${encodeURIComponent(node.label)}`),
     }))
     return [...navigation, ...actions, ...accountEntries, ...nodeEntries]
@@ -244,7 +252,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         tabIndex={-1}
       >
         <div className="palette__search">
-          <Search size={16} aria-hidden="true" />
+          <ApcSearchIcon size={16} />
           <input
             className="palette__input"
             placeholder={t('palette.placeholder')}

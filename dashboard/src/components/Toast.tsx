@@ -1,8 +1,8 @@
 import clsx from 'clsx'
-import { CheckCircle2, Info, X, XCircle } from 'lucide-react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useI18n } from '../lib/i18n'
+import { ApcCloseIcon, ApcStatusGlyph } from './icons/ApcIcons'
 
 export type ToastTone = 'default' | 'success' | 'danger'
 
@@ -54,13 +54,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((item) => (
           <div key={item.id} className={clsx('toast', `toast--${item.tone}`)} role="status">
             <span className="toast__icon" aria-hidden="true">
-              {item.tone === 'success' ? (
-                <CheckCircle2 size={16} />
-              ) : item.tone === 'danger' ? (
-                <XCircle size={16} />
-              ) : (
-                <Info size={16} />
-              )}
+              <ApcStatusGlyph
+                status={item.tone === 'success' ? 'ok' : item.tone === 'danger' ? 'error' : 'info'}
+                size={16}
+              />
             </span>
             <span className="toast__message">{item.message}</span>
             <button
@@ -69,7 +66,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               aria-label={t('common.dismissNotification')}
               onClick={() => dismiss(item.id)}
             >
-              <X size={13} />
+              <ApcCloseIcon size={13} />
             </button>
           </div>
         ))}

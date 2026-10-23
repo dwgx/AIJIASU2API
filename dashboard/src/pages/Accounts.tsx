@@ -11,10 +11,9 @@ import type { Account, AccountState, CreateAccountInput, Platform } from '../lib
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
-import { ConfirmDialog, Drawer } from '../components/Overlay'
+import { ConfirmDialog, Modal } from '../components/Overlay'
 import { useToast } from '../components/Toast'
 import {
-  Badge,
   Button,
   Card,
   Checkbox,
@@ -26,14 +25,14 @@ import {
   PageHeader,
   Select,
   Skeleton,
-  StatusDot,
+  StatusPill,
   TableSkeleton,
 } from '../components/primitives'
 
 /**
  * Seeds the search box from the `q` param and follows later `q` changes (the command palette
  * can navigate here while the page is mounted) without clobbering a query the user typed on
- * re-renders that leave `q` alone — e.g. opening `?new=1` or closing the drawer.
+ * re-renders that leave `q` alone — e.g. opening `?new=1` or closing the modal.
  */
 function useParamQuery(paramValue: string | null): [string, (value: string) => void] {
   const [query, setQuery] = useState(paramValue ?? '')
@@ -53,7 +52,6 @@ const EMPTY_FORM = {
   username: '',
   password: '',
   platform: 'android' as Platform,
-  concurrency: '50',
   regions: '',
 }
 
@@ -142,8 +140,9 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
           </span>
         </div>
         <span className="account-card__state">
-          <StatusDot tone={state.tone} pulse={account.state === 'active'} />
-          <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
+          <StatusPill status={state.status} pulse={account.state === 'active'}>
+            {t(state.labelKey)}
+          </StatusPill>
         </span>
       </div>
 
@@ -301,7 +300,7 @@ export default function Accounts() {
   const [formError, setFormError] = useState('')
   const [saving, setSaving] = useState(false)
 
-  const drawerOpen = params.get('new') === '1'
+  const createOpen = params.get('new') === '1'
 
   const changeView = (next: AccountView) => {
     setView(next)
@@ -415,10 +414,6 @@ export default function Accounts() {
     if (!form.label.trim()) errors.label = t('accounts.errorLabel')
     if (!form.username.trim()) errors.username = t('accounts.errorUsername')
     if (!form.password.trim()) errors.password = t('accounts.errorPassword')
-    const concurrency = Number(form.concurrency)
-    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 2000) {
-      errors.concurrency = t('accounts.errorConcurrency')
-    }
     if ((accounts.data ?? []).some((account) => account.label.toLowerCase() === form.label.trim().toLowerCase())) {
       errors.label = t('accounts.errorDuplicate')
     }
@@ -430,7 +425,7 @@ export default function Accounts() {
       username: form.username.trim(),
       password: form.password,
       platform: form.platform,
-      concurrency,
+      concurrency: 1,
       regions: form.regions
         .split(',')
         .map((region) => region.trim())
@@ -492,8 +487,9 @@ export default function Accounts() {
         const state = ACCOUNT_STATE[account.state]
         return (
           <span className="state-cell">
-            <StatusDot tone={state.tone} pulse={account.state === 'active'} />
-            <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
+            <StatusPill status={state.status} pulse={account.state === 'active'}>
+              {t(state.labelKey)}
+            </StatusPill>
           </span>
         )
       },
@@ -690,17 +686,19 @@ export default function Accounts() {
             rows={filtered}
             rowKey={(account) => account.id}
             empty={emptyState}
+            density="comfy"
           />
         )}
       </Card>
 
-      <Drawer
-        open={drawerOpen}
+      <Modal
+        open={createOpen}
         title={t('accounts.newTitle')}
-        subtitle={
+        description={
           isMockMode() ? t('accounts.newSubtitleMock') : t('accounts.newSubtitleLive')
         }
         onClose={closeCreate}
+        size="md"
         footer={
           <>
             <Button variant="ghost" onClick={closeCreate} disabled={saving}>
@@ -748,29 +746,22 @@ export default function Accounts() {
               autoComplete="new-password"
             />
           </Field>
-          <div className="form-grid">
-            <Field label={t('accounts.platform')} htmlFor="account-platform">
-              <Select
-                id="account-platform"
-                value={form.platform}
-                onChange={(event) => setForm({ ...form, platform: event.target.value as Platform })}
-              >
-                {PLATFORMS.map((platform) => (
-                  <option key={platform} value={platform}>
-                    {platform}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label={t('accounts.concurrency')} htmlFor="account-concurrency" error={formErrors.concurrency}>
-              <Input
-                id="account-concurrency"
-                inputMode="numeric"
-                value={form.concurrency}
-                onChange={(event) => setForm({ ...form, concurrency: event.target.value })}
-              />
-            </Field>
-          </div>
+          <Field label={t('accounts.platform')} htmlFor="account-platform">
+            <Select
+              id="account-platform"
+              value={form.platform}
+              onChange={(event) => setForm({ ...form, platform: event.target.value as Platform })}
+            >
+              {PLATFORMS.map((platform) => (
+                <option key={platform} value={platform}>
+                  {platform}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <p className="form-note" role="note">
+            {t('accounts.concurrencyNote')}
+          </p>
           <Field label={t('accounts.regions')} htmlFor="account-regions" hint={t('accounts.regionsHint')}>
             <Input
               id="account-regions"
@@ -785,7 +776,7 @@ export default function Accounts() {
             </p>
           ) : null}
         </form>
-      </Drawer>
+      </Modal>
 
       <ConfirmDialog
         open={deleteIds.length > 0}

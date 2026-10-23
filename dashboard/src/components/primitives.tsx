@@ -1,5 +1,4 @@
 import clsx from 'clsx'
-import { AlertTriangle, Check, Inbox, Loader2, X } from 'lucide-react'
 import { useEffect, useId, useRef } from 'react'
 import type {
   ButtonHTMLAttributes,
@@ -8,10 +7,16 @@ import type {
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from 'react'
-import type { Tone } from '../lib/types'
+import type { Status, Tone } from '../lib/types'
 import { formatTime } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import type { RefreshSummary } from '../lib/useAsync'
+import {
+  ApcCheckIcon,
+  ApcInboxIcon,
+  ApcSpinnerIcon,
+  ApcStatusGlyph,
+} from './icons/ApcIcons'
 
 export type { Tone }
 
@@ -42,7 +47,7 @@ export function Button({
       disabled={disabled || loading}
       {...rest}
     >
-      {loading ? <Loader2 size={14} className="spin" aria-hidden="true" /> : icon}
+      {loading ? <ApcSpinnerIcon size={14} className="spin" /> : icon}
       {children ? <span>{children}</span> : null}
     </button>
   )
@@ -111,7 +116,7 @@ export function Field({ label, htmlFor, hint, error, children, className }: Fiel
       {children}
       {error ? (
         <p className="field__error" role="alert">
-          <AlertTriangle size={12} aria-hidden="true" /> {error}
+          <ApcStatusGlyph status="error" size={12} /> {error}
         </p>
       ) : hint ? (
         <p className="field__hint">{hint}</p>
@@ -142,7 +147,7 @@ export function Checkbox({ label, className, indeterminate = false, ...rest }: C
         {...rest}
       />
       <span className={clsx('check__box', indeterminate && 'is-indeterminate')} aria-hidden="true">
-        {indeterminate ? <span className="check__dash" /> : <Check size={12} strokeWidth={3} />}
+        {indeterminate ? <span className="check__dash" /> : <ApcCheckIcon size={12} />}
       </span>
       {label ? <span className="check__label">{label}</span> : null}
     </label>
@@ -182,9 +187,19 @@ const TONE_LABEL: Record<Tone, string> = {
   info: 'info',
 }
 
-export function Badge({ tone = 'neutral', children, className }: { tone?: Tone; children: ReactNode; className?: string }) {
+export function Badge({
+  tone = 'neutral',
+  children,
+  className,
+  title,
+}: {
+  tone?: Tone
+  children: ReactNode
+  className?: string
+  title?: string
+}) {
   return (
-    <span className={clsx('badge', `badge--${tone}`, className)} data-tone={TONE_LABEL[tone]}>
+    <span className={clsx('badge', `badge--${tone}`, className)} data-tone={TONE_LABEL[tone]} title={title}>
       {children}
     </span>
   )
@@ -192,6 +207,34 @@ export function Badge({ tone = 'neutral', children, className }: { tone?: Tone; 
 
 export function StatusDot({ tone = 'neutral', pulse = false }: { tone?: Tone; pulse?: boolean }) {
   return <span className={clsx('status-dot', `status-dot--${tone}`, pulse && 'is-pulsing')} aria-hidden="true" />
+}
+
+/**
+ * Status pill — the semantic variant set (ok / info / warn / error /
+ * unavailable). The glyph and the tinted chrome both follow `--status-hue`,
+ * so a variant is one class, not three colours.
+ */
+export function StatusPill({
+  status,
+  children,
+  className,
+  pulse = false,
+}: {
+  status: Status
+  children: ReactNode
+  className?: string
+  /** Breathes the glyph for live/streaming states. */
+  pulse?: boolean
+}) {
+  return (
+    <span
+      className={clsx('status-pill', `status-pill--${status}`, pulse && 'is-pulsing', className)}
+      data-status={status}
+    >
+      <ApcStatusGlyph status={status} size={11} className="status-pill__glyph" />
+      <span>{children}</span>
+    </span>
+  )
 }
 
 interface CardProps {
@@ -360,7 +403,7 @@ export function EmptyState({
 }) {
   return (
     <div className="empty">
-      <span className="empty__icon">{icon ?? <Inbox size={20} aria-hidden="true" />}</span>
+      <span className="empty__icon">{icon ?? <ApcInboxIcon size={20} />}</span>
       <p className="empty__title">{title}</p>
       {description ? <p className="empty__desc">{description}</p> : null}
       {action ? <div className="empty__action">{action}</div> : null}
@@ -373,7 +416,7 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
   return (
     <div className="empty empty--error" role="alert">
       <span className="empty__icon">
-        <X size={20} aria-hidden="true" />
+        <ApcStatusGlyph status="error" size={20} />
       </span>
       <p className="empty__title">{t('common.couldNotLoad')}</p>
       <p className="empty__desc">{message}</p>

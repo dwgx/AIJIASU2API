@@ -70,23 +70,23 @@ describe('leases', () => {
 })
 
 describe('accounts', () => {
-  it('creates an account from the drawer', async () => {
+  it('creates an account from the modal', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/accounts?new=1')
     render(<App />)
 
-    const drawer = await screen.findByRole('dialog', { name: 'New account' })
-    await user.type(within(drawer).getByLabelText('Label'), 'Test Account')
-    await user.type(within(drawer).getByLabelText('Username'), 'demo-test')
-    await user.type(within(drawer).getByLabelText('Password'), 'placeholder-password')
-    await user.click(within(drawer).getByRole('button', { name: 'Create account' }))
+    const modal = await screen.findByRole('dialog', { name: 'Add account' })
+    await user.type(within(modal).getByLabelText('Label'), 'Test Account')
+    await user.type(within(modal).getByLabelText('Username'), 'demo-test')
+    await user.type(within(modal).getByLabelText('Password'), 'placeholder-password')
+    await user.click(within(modal).getByRole('button', { name: 'Create account' }))
 
     expect(await screen.findByText('Account Test Account created')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getAllByText('Test Account').length).toBeGreaterThan(0)
     })
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: 'New account' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('dialog', { name: 'Add account' })).not.toBeInTheDocument()
     })
   })
 
@@ -171,7 +171,7 @@ describe('mobile table mode', () => {
 })
 
 describe('requests', () => {
-  it('adds a mutation-lab entry to the request table', async () => {
+  it('adds a labeled mutation-lab row with a host-only target', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/requests')
     render(<App />)
@@ -179,11 +179,17 @@ describe('requests', () => {
     await screen.findByRole('heading', { name: 'Requests', level: 1 })
     await user.click(await screen.findByRole('button', { name: 'Open mutation lab' }))
     const drawer = await screen.findByRole('dialog', { name: 'Mutation lab' })
+    const target = within(drawer).getByLabelText('Target host:port')
+    await user.clear(target)
+    await user.type(target, 'https://api.example.com/v1/status')
     await user.click(within(drawer).getByRole('button', { name: 'Send request' }))
 
     expect(await screen.findByText(/Mutation lab request completed/)).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: 'Finished gate flows' })
     await waitFor(() => {
-      expect(screen.getAllByText('mutation lab').length).toBeGreaterThan(1)
+      expect(within(table).getAllByText('mutation lab').length).toBeGreaterThan(0)
     })
+    expect(within(table).getAllByText('api.example.com:443').length).toBeGreaterThan(0)
+    expect(within(table).queryByText('https://api.example.com/v1/status')).not.toBeInTheDocument()
   })
 })

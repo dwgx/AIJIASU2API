@@ -39,7 +39,9 @@ describe('app shell', () => {
 
     for (const [link, heading] of pages) {
       await user.click(within(sidebar).getByRole('link', { name: link }))
-      expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument()
+      expect(
+        await screen.findByRole('heading', { name: heading, level: 1 }, { timeout: 5_000 }),
+      ).toBeInTheDocument()
     }
   })
 
@@ -92,7 +94,7 @@ describe('environment labels', () => {
 
     await screen.findByRole('heading', { name: 'Overview', level: 1 })
     expect(screen.getByText('mock data', { selector: '.topbar__env' })).toBeInTheDocument()
-    expect(screen.getByText('v0.1.0 · mock')).toBeInTheDocument()
+    expect(screen.queryByText(/v0\.1\.0/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('link', { name: 'Settings' }))
     await screen.findByRole('heading', { name: 'Settings', level: 1 })

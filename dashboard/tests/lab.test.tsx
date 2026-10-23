@@ -144,11 +144,49 @@ describe('lab egress check', () => {
     expect(within(result).getByText('match')).toBeInTheDocument()
     expect(within(result).getByText('echo')).toBeInTheDocument()
 
-    // The GET panel stays claim-only: the observation is the POST result, not
-    // a stored row, so the table still marks the node as never checked.
-    expect(within(table).getAllByText('never checked').length).toBeGreaterThan(0)
+    // The POST observation is merged into the claim-only GET row immediately.
+    const checkedRow = () => {
+      const cell = within(
+        screen.getByRole('table', { name: 'Egress claimed versus verified' }),
+      ).getByText('node-01')
+      return cell.closest('tr') as HTMLElement
+    }
+    expect(within(checkedRow()).getAllByText('203.0.113.11')).toHaveLength(2)
+    expect(within(checkedRow()).getByText('42 ms')).toBeInTheDocument()
+    expect(within(checkedRow()).getByText('match')).toBeInTheDocument()
+    expect(within(checkedRow()).queryByText('never checked')).not.toBeInTheDocument()
+
+    // A refresh re-reads the claim-only GET panel; the local observation must
+    // survive instead of reverting the row to "never checked". The page header
+    // also has a Refresh button, so use the tab-local one (last match).
+    const refreshButtons = screen.getAllByRole('button', { name: 'Refresh' })
+    await user.click(refreshButtons[refreshButtons.length - 1])
+    await waitFor(() => {
+      expect(within(checkedRow()).getAllByText('203.0.113.11')).toHaveLength(2)
+      expect(within(checkedRow()).queryByText('never checked')).not.toBeInTheDocument()
+    })
+
     // The 5 s quota is visible: an immediate second click is disabled.
     expect(check).toBeDisabled()
+  })
+
+  it('keeps each node observation while switching the picker', async () => {
+    const user = await openLabTab('Egress')
+    const check = screen.getByRole('button', { name: 'Check egress' })
+    await waitFor(() => expect(check).toBeEnabled())
+    await user.click(check)
+
+    const select = screen.getByRole('combobox', { name: 'Egress check node' })
+    await user.selectOptions(select, 'node-02')
+    const other = await screen.findByRole('region', { name: 'Selected node egress' })
+    expect(within(other).getByText('203.0.113.12')).toBeInTheDocument()
+    expect(within(other).getByText('not observed')).toBeInTheDocument()
+
+    await user.selectOptions(select, 'node-01')
+    const first = await screen.findByRole('region', { name: 'Selected node egress' })
+    expect(within(first).getAllByText('203.0.113.11')).toHaveLength(2)
+    expect(within(first).getByText('match')).toBeInTheDocument()
+    expect(within(first).getByText('42 ms')).toBeInTheDocument()
   })
 
   it('disables the check when no gate is running', async () => {
@@ -199,6 +237,8 @@ describe('lab egress check', () => {
     expect(within(result).getByText('198.51.100.99')).toBeInTheDocument()
     expect(within(result).getByText('mismatch')).toBeInTheDocument()
     expect(within(result).getByText('250 ms')).toBeInTheDocument()
+    expect(screen.getByText('Egress mismatch')).toBeInTheDocument()
+    expect(screen.getByText(/differs from the vendor claim/)).toBeInTheDocument()
   })
 
   it('shows a probe error and never backfills verified from the claim', async () => {
@@ -223,18 +263,28 @@ describe('lab egress check', () => {
     expect(within(result).getByText('unknown')).toBeInTheDocument()
     expect(screen.getByText('Probe failed')).toBeInTheDocument()
     expect(screen.getByText('dial tcp 127.0.0.1:13000: i/o timeout')).toBeInTheDocument()
+
+    // The row records the attempt (checkedAt/source) but never backfills the
+    // claim as the verified address.
+    const row = within(
+      screen.getByRole('table', { name: 'Egress claimed versus verified' }),
+    ).getByText('node-01').closest('tr') as HTMLElement
+    expect(within(row).getByText('not observed')).toBeInTheDocument()
+    expect(within(row).queryByText('never checked')).not.toBeInTheDocument()
   })
 })
 
 describe('honesty fixes', () => {
-  it('labels the Requests table as simulated, not gate telemetry', async () => {
+  it('labels the Requests table as real gate flows, not a simulated dataset', async () => {
     window.history.pushState({}, '', '/requests')
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Requests', level: 1 })
-    expect(screen.getByText('simulated dataset')).toBeInTheDocument()
-    expect(screen.getByText('This table does not observe the gate')).toBeInTheDocument()
-    expect(screen.getAllByText('seeded').length).toBeGreaterThan(0)
+    expect(screen.getByText('gate flow ring')).toBeInTheDocument()
+    expect(screen.getByText('Captured by the gate, not the vendor')).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: 'Finished gate flows' })
+    expect(within(table).getAllByText('gate flow').length).toBeGreaterThan(0)
+    expect(screen.queryByText('simulated dataset')).not.toBeInTheDocument()
   })
 
   it('relabels the node probe as a timestamp touch', async () => {
@@ -243,6 +293,7 @@ describe('honesty fixes', () => {
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Nodes', level: 1 })
+    await user.click(screen.getByRole('button', { name: 'Connected' }))
     await user.click(await screen.findByText('cn-zj-01'))
     const drawer = await screen.findByRole('dialog', { name: 'Node cn-zj-01' })
     expect(within(drawer).getByRole('button', { name: 'Touch probe timestamp' })).toBeInTheDocument()

@@ -10,7 +10,6 @@ import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { useToast } from '../components/Toast'
 import {
-  Badge,
   Button,
   Card,
   EmptyState,
@@ -19,6 +18,7 @@ import {
   PageHeader,
   SegmentedControl,
   Select,
+  StatusPill,
   TableSkeleton,
 } from '../components/primitives'
 
@@ -65,7 +65,7 @@ export default function Logs() {
       label: t('audit.columnSeverity'),
       render: (event) => {
         const level = SEVERITY[event.severity]
-        return <Badge tone={level.tone}>{t(level.labelKey)}</Badge>
+        return <StatusPill status={level.status}>{t(level.labelKey)}</StatusPill>
       },
     },
     {
