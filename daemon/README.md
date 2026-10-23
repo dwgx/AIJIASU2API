@@ -41,6 +41,7 @@ internal/model/model.go      wire structs, inputs and patches
 internal/store/              mutex-protected state + deterministic seed
 internal/store/seed.go       mock-compatible seed data and metrics series
 internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
+internal/store/device.go     stable per-account device identity (snapshot-backed)
 internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
 internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
@@ -110,11 +111,14 @@ therefore cannot be built from a checkout that lacks the emulator. The daemon
 `go` directive is `1.26.0` because the emulator module declares that language
 version; with `GOTOOLCHAIN=auto` the toolchain switches automatically.
 
-`internal/account.NewProtocol()` wires `fvfacade.DefaultRegistry()` and
-`fvfacade.RawTCP{}`; `Available()` reports whether the transport is registered.
-This is a compile/import proof, not a vendor client: it performs no I/O and
-`protocol_test.go` asserts `RawTCP.Name() == "rawtcp"` and that the registry
-contains `rawtcp`.
+`internal/account.NewProtocol()` wires `fvfacade.DefaultRegistry()` and the
+carrier the default profile declares. `Linux423Binary.Transport` is
+`"httpupgrade"`, so `NewProtocol()` returns `*fvfacade.HTTPUpgrade` (the
+protocol-2 binary carrier), not the OpenAJS raw-TCP transport;
+`NewProtocolForProfile(account.OpenAJSAndroid)` returns `fvfacade.RawTCP{}`
+instead. `Available()` reports whether the transport is registered. This is a
+compile/import proof, not a vendor client: it performs no I/O, and
+`protocol_test.go` pins both profile → carrier mappings.
 
 ### Building the sibling modules
 
@@ -158,7 +162,7 @@ called and has never contacted a vendor host.
 emulator/apifacade/facade.go        control API aliases + function variables
 emulator/fvfacade/facade.go         FV protocol aliases + function variables
 daemon/internal/account/secret.go   Secret: fmt/slog/JSON redaction
-daemon/internal/account/device.go   device profiles + non-secret identity summary
+daemon/internal/account/device.go   device profiles + stable identity record mapping
 daemon/internal/account/control.go  Login / LoginSync / Servers wrapper
 daemon/internal/account/login_service.go  store-backed login path (default-off)
 daemon/internal/account/session.go  VersionProfile, SessionRequest, FlowSession, Factory
@@ -173,14 +177,18 @@ uses the tested client without conversion and the facade adds no dependencies.
 
 ### Profiles and signing
 
-| Profile | `_v` | Constructor | Signing |
-|---|---|---|---|
-| Linux 4.2.3.0 (default) | `4.2.3.0` | `NewDevice("")` | `X-Timestamp` + `X-Sig` with the OpenAJS secret — `[UNVERIFIED]` |
-| OpenAJS Android | `4.11.10.0` | `NewDevice(OpenAJSClientVersion)` | signed, exactly as OpenAJS does |
+| Profile | `_v` | Constructor | Request shape | Signing |
+|---|---|---|---|---|
+| Linux 4.2.3.0 (default) | `4.2.3.0` | `NewDevice("")` / `NewDeviceForProfile(Linux423Binary)` | `ShapeLinux423` | none (`SigningMode: "none"`; no `X-Sig`/`X-Timestamp`) |
+| OpenAJS Android | `4.11.10.0` | `NewDevice(OpenAJSClientVersion)` | `ShapeOpenAJS` | `X-Timestamp` + `X-Sig` with the OpenAJS secret |
 
-`NewDevice` starts from `apifacade.DefaultDevice`, overrides `_v`, and generates
-`_os_did` (16 hex) and `_uid` (22 characters) with `EnsureIDs`. `Identify`
-returns the non-secret `DeviceIdentity` summary for logs and store records.
+`NewDevice` builds the Linux 4.2.3.0 descriptor from `apifacade.Linux423Device`
+and `EnsureLinuxIDs`: `_m=linux`, `_os_dev=x86_64`, the captured `_os_ver` and
+`_os_dim`, a 20-hex `_uid` that is also `cuid`, `cseid=linux`, and a 16-hex
+`_os_did` the Linux control body does not send. Any other version builds the
+OpenAJS/Android descriptor from `apifacade.DefaultDevice` with a 22-character
+`_uid` and a 16-hex `_os_did`; its `cuid`/`cseid` fall back to the device id.
+`Identify` returns the non-secret `store.DeviceIdentity` record.
 
 The caveat is the one recorded on `api.DefaultSecret`: the shipping Linux
 4.2.3.0 binary contains neither the OpenAJS secret string nor its raw bytes, and
@@ -190,9 +198,10 @@ a signed request from that profile is therefore `[UNVERIFIED]`;
 zero `Options` signs), so the daemon cannot send an unsigned request by
 accident. `LoginService` is the deliberate exception: it maps the profile's
 `SigningMode` (`none` for Linux 4.2.3.0) onto `NoSigning`, so the default
-login path sends unsigned requests. The only emulator change is a `NoSign`
-field on `emulator/internal/api.Client`, which skips both headers; `NewClient`
-and the zero value still sign.
+login path sends unsigned requests. The emulator changes behind this are two
+`emulator/internal/api.Client` fields: `NoSign` skips both signature headers and
+`RequestShape` selects the field set; `NewClient` and both zero values still
+sign and send the OpenAJS shape.
 
 ### Control client
 
@@ -205,9 +214,9 @@ sync, err := control.LoginSync(ctx)                   // refreshes ConnectPasswo
 servers, err := control.Servers(ctx)                  // map[string]apifacade.Server
 ```
 
-- `Options`: `HTTPClient`, `UserAgent`, `NoSigning`, `Now`. The zero value keeps
-  the api package's 35-second HTTP client, `okhttp/4.9.3`, signing and
-  `time.Now`.
+- `Options`: `HTTPClient`, `UserAgent`, `NoSigning`, `RequestShape`, `Now`.
+  The zero value keeps the api package's 35-second HTTP client,
+  `okhttp/4.9.3`, the OpenAJS shape, signing and `time.Now`.
 - `LoginResult`: `AuthResult`, `AuthMessage`, `Token`, `UserName`,
   `ConnectPassword`, `MembershipStatus`, `ExpireTime`, `Expired`, `Servers`.
   `Token` and `ConnectPassword` are `Secret`; `Servers` stays nil on `Login`.
@@ -224,6 +233,56 @@ servers, err := control.Servers(ctx)                  // map[string]apifacade.Se
 - `Control` keeps the last session and is not safe for concurrent use; the
   session factory owns one per account. `Close` releases idle HTTP connections;
   the emulated surface has no logout command.
+
+### Request shape, device identity and carrier (AJS-55)
+
+Three pre-live gaps from `research/81-protocol-gaps/REPORT.md` (B1, B5, C3) are
+closed here. No vendor host was contacted for any of them; live acceptance is
+`[UNVERIFIED]`.
+
+**B1 — Linux control request shape.** `api.Client.RequestShape` selects the
+field set; the zero value is `ShapeOpenAJS`, so the existing Android path is
+byte-identical. `ShapeLinux423` matches
+`research/60-dynamic/captures/control.jsonl` line 2, the only direct Linux
+4.2.3.0 request:
+
+- `v=4.2.3.0` instead of `_v`, and a 20-hex `_uid`;
+- only `_lang/_m/_os_dev/_os_dim/_os_ver/_site/_uid/v` plus `cmd`, `username`
+  and `password`;
+- no `_os_hw`, `_os_did`, `_os_lang`, `_tz`, `_inst_mkt`, `_vrf`, `cv` or
+  `trigger`;
+- no `User-Agent`; `Accept: */*`, `Accept-Encoding: deflate, gzip` and
+  `Connection: close`;
+- the captured trailing `&` after `v=4.2.3.0`.
+
+`emulator/internal/api/client_test.go` compares the recorded body with the
+capture field by field (uid and password are redacted in failure messages) and
+asserts the absent fields, the headers and the trailing separator;
+`TestLoginLinuxShape` repeats the check through the daemon `Control`.
+
+**B5 — stable device identity.** `store.DeviceIdentity` is the non-secret record
+(UID, OSDID, CUID, CSEID, OSP, OSD, OSV, DIM plus the remaining control
+descriptor fields). `Store.EnsureAccountDevice` stores it once and returns the
+first value forever, including under concurrent first logins; `LoginService`
+loads it before every login and generates it only when absent. The record is
+part of the state snapshot (`devices`; additive, so `SnapshotVersion` stays 1),
+so a restart keeps the identity. `TestLoginServiceDeviceStable` proves two
+logins send the same `_uid` and that UID/OSDID/CUID/CSEID survive the snapshot;
+`TestLoginServiceDeviceSurvivesRejection` proves a rejected login followed by a
+retry keeps the same identity; `daemon/internal/store/device_test.go` covers
+once-only, concurrent and validation behaviour.
+
+**C3 — transport label vs carrier.** `Linux423Binary.Transport` is now
+`httpupgrade`, the registry name of `*fvfacade.HTTPUpgrade`, which implements
+the protocol-2 binary carrier; `NewProtocol()` resolves it (and applies the
+profile's `ProtocolVersion`), while `NewProtocolForProfile(OpenAJSAndroid)`
+returns `fvfacade.RawTCP{}` (`rawtcp`). `TestProtocolProfileCarrier` pins both
+mappings and rejects an unknown or empty carrier.
+
+The FV auth identity carries the same split: `AuthConfig.CUID`/`CSEID` default
+to `DeviceID` (the OpenAJS body stays byte-identical) and the Linux device sends
+its 20-hex `cuid` with `cseid=linux`; `TestAuthIdentityCUIDCSEID` and the
+decrypted `fvmock-1` capture vector assert both.
 
 ### Login service (AJS-38)
 
@@ -247,9 +306,10 @@ result, ok := service.Result("acc-01") // in memory, for the future session fact
 ```
 
 - `Login` reads the account and its sealed password with
-  `store.AccountSecret`, builds a fresh device identity and `Control`, and
-  calls `ClientApiLogin/Login`. The password is a `Secret`; the plaintext byte
-  slice is cleared after conversion.
+  `store.AccountSecret`, loads the account's stored device identity (generating
+  and persisting one on the first login, never on a retry), builds a `Control`
+  with the profile's request shape, and calls `ClientApiLogin/Login`. The
+  password is a `Secret`; the plaintext byte slice is cleared after conversion.
 - Success: `store.MarkLogin` sets `active` (or `expired` when the vendor says
   so), updates `lastLoginAt`, adopts the vendor user name, and appends
   `account.login`. The `LoginResult` is retained in a mutex-protected map;
@@ -294,18 +354,24 @@ flow, err := sess.OpenFlow(ctx, "example.com", 443)
 ```
 
 - `VersionProfile`: `Name`, `ClientVersion` (`_v`), `CoreVersion` (`cv`),
-  `ProtocolVersion`, `OAEPHash`, `SigningMode`, `Transport`.
+  `ProtocolVersion`, `OAEPHash`, `SigningMode`, `RequestShape`, `Transport`.
 - `Linux423Binary` (default): `linux-4.2.3.0-binary`, `_v=4.2.3.0`,
-  `cv=20241105-1`, protocol 2, OAEP-SHA1, signing none, carrier label
-  `rawtcp` (plain TCP, no HTTP request line). The label is descriptive: the
-  protocol-2 binary carrier is implemented by `fvfacade.HTTPUpgrade`, so that
-  is the transport to inject. `NewFactory` keeps the profile and the transport
-  separate because the emulator type is named after the legacy HTTP-upgrade
-  carrier it also implements.
+  `cv=20241105-1`, protocol 2, OAEP-SHA1, signing none, `ShapeLinux423`,
+  carrier `httpupgrade` (the protocol-2 binary carrier implemented by
+  `fvfacade.HTTPUpgrade`). `NewFactory` still takes the transport explicitly
+  because it is a value, but the profile now names the implementation that
+  actually speaks its wire format.
+- `OpenAJSAndroid`: `openajs-4.11.10.0-rawtcp`, `_v=4.11.10.0`,
+  `cv=20260525-1`, `ShapeOpenAJS`, carrier `rawtcp`. The daemon does not wire
+  it (`AJS_ACCOUNT_PROFILE` accepts only `linux-4.2.3.0`); it exists so the
+  Android path stays available and testable.
 - Auth body mapping: `u=UserName`, `p=ConnectPassword.Reveal()`,
-  `cuid`/`cseid=Device.DeviceID`, `st=Device.Site` (default `ajs`),
-  `v=Profile.ClientVersion`, `cv=Profile.CoreVersion`, `osp=Device.Platform`,
-  `osd=Device.OSDevice`, `osv=Device.OSVersion`, `dim=Device.OSDim`.
+  `cuid=Device.CUID`, `cseid=Device.CSEID` (both fall back to
+  `Device.DeviceID` when empty, which is the OpenAJS body), `st=Device.Site`
+  (default `ajs`), `v=Profile.ClientVersion`, `cv=Profile.CoreVersion`,
+  `osp=Device.Platform`, `osd=Device.OSDevice`, `osv=Device.OSVersion`,
+  `dim=Device.OSDim`. For the Linux device this is a 20-hex `cuid`,
+  `cseid=linux`, `osp=linux`, `osd=x86_64`, the captured `osv`/`dim`.
 - `Open` rejects a request with no FV endpoint (`svr`/`par.fv.p`), no user, no
   connect password, no device id, a profile that differs from the factory's, or
   an unknown OAEP hash. `AuthOptions.OAEPHash` overrides the profile hash; zero
@@ -1548,6 +1614,71 @@ VET_OK
 $ test -z "$(gofmt -l .)" && echo GOFMT_CLEAN
 GOFMT_CLEAN
 ```
+
+### Protocol fixes (AJS-55)
+
+Both trees and the emulator's capture fixtures were copied to a fresh scratch
+root; no other worker's tree was touched:
+
+```bash
+tar -czf - daemon emulator | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-55-protocolfix \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-55-protocolfix'
+tar -czf - -C research/60-dynamic captures | ssh hmc \
+  'mkdir -p /srv/dwgxhomecloud/scratch/ajs-55-protocolfix/research/60-dynamic \
+   && tar -xzf - -C /srv/dwgxhomecloud/scratch/ajs-55-protocolfix/research/60-dynamic'
+```
+
+On HMC (`go1.25.14 linux/amd64`; `go.mod` is `go 1.26.0`, so `GOTOOLCHAIN=auto`
+selects the newer toolchain):
+
+```console
+$ cd .../emulator && go build ./... && echo EMULATOR_BUILD_OK && go test -race -count=1 ./...
+EMULATOR_BUILD_OK
+?   	ajsproxy/apifacade	[no test files]
+?   	ajsproxy/cmd/ajsproxy	[no test files]
+?   	ajsproxy/fvfacade	[no test files]
+ok  	ajsproxy/internal/api	1.020s
+ok  	ajsproxy/internal/config	1.015s
+ok  	ajsproxy/internal/fv	1.051s
+ok  	ajsproxy/internal/proxy	1.017s
+$ go vet ./... && echo EMULATOR_VET_OK && test -z "$(gofmt -l .)" && echo EMULATOR_GOFMT_CLEAN
+EMULATOR_VET_OK
+EMULATOR_GOFMT_CLEAN
+
+$ cd ../daemon && go build ./... && echo DAEMON_BUILD_OK && go test -race -count=1 ./...
+DAEMON_BUILD_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	1.089s
+ok  	ajsaccountd/internal/api	1.191s
+ok  	ajsaccountd/internal/gate	1.568s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	1.070s
+ok  	ajsaccountd/internal/resin	1.375s
+ok  	ajsaccountd/internal/runtime	1.311s
+ok  	ajsaccountd/internal/secret	1.028s
+ok  	ajsaccountd/internal/store	1.518s
+ok  	ajsaccountd/internal/supervisor	7.722s
+$ go vet ./... && echo DAEMON_VET_OK && test -z "$(gofmt -l .)" && echo DAEMON_GOFMT_CLEAN
+DAEMON_VET_OK
+DAEMON_GOFMT_CLEAN
+```
+
+The Linux-shape regression records the generated body and compares it with
+`control.jsonl:2`; the only differences are the generated `_uid` and the
+caller's credentials:
+
+```console
+$ go test -run TestLinux423RequestMatchesCapture -v ./internal/api
+=== RUN   TestLinux423RequestMatchesCapture
+    client_test.go:148: ShapeLinux423 login body (uid/password redacted): _lang=en&_m=linux&_os_dev=x86_64&_os_dim=lid%3dREDACTED%2c8e415e603088426aa42fed420212150c&_os_ver=Linux%20version%206.18.33.2-microsoft-standard-WSL2%20%28root%40f1bbfb02316b%29%20%28gcc%20%28GCC%29%2013.2.0%2c%20GNU%20ld%20%28GNU%20Binutils%29%202.41%29%20%231%20SMP%20PREEMPT_DYNAMIC%20Thu%20Jun%2018%2021%3a54%3a43%20UTC%202026%0a&_site=ajs&_uid=%5bredacted%5d&cmd=ClientApiLogin%2fLogin&password=%5bredacted%5d&username=capture-user&v=4.2.3.0
+--- PASS: TestLinux423RequestMatchesCapture (0.00s)
+PASS
+ok  	ajsproxy/internal/api	0.003s
+```
+
+No live vendor host was contacted; live acceptance of either shape remains
+`[UNVERIFIED]`.
 
 ## Limitations / next
 

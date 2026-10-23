@@ -76,10 +76,11 @@ type LoginConfig struct {
 // outcome in the store. It is the only daemon path that can contact a control
 // API host, and it exists only when the operator enables it.
 //
-// LoginResult values are kept in memory for the future session factory; they
-// are never written to the store or a log. A LoginService is safe for
-// concurrent use. Close releases the idle HTTP connections of the controls it
-// keeps and is idempotent.
+// The account's device identity is loaded from the store and generated once on
+// the first login; later logins reuse it. LoginResult values are kept in memory
+// for the future session factory; they are never written to the store or a log.
+// A LoginService is safe for concurrent use. Close releases the idle HTTP
+// connections of the controls it keeps and is idempotent.
 type LoginService struct {
 	store   *store.Store
 	cfg     LoginConfig
@@ -162,14 +163,15 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	password := Secret(string(plaintext))
 	clear(plaintext)
 
-	device, err := NewDevice(s.profile.ClientVersion)
+	identity, err := s.deviceFor(accountID)
 	if err != nil {
-		return model.Account{}, fmt.Errorf("account: device for %q: %w", accountID, err)
+		return model.Account{}, err
 	}
-	control := NewControl(s.hosts, device, Options{
-		HTTPClient: s.cfg.HTTPClient,
-		NoSigning:  s.noSign,
-		Now:        s.cfg.Now,
+	control := NewControl(s.hosts, deviceFromIdentity(identity, s.profile.ClientVersion), Options{
+		HTTPClient:   s.cfg.HTTPClient,
+		NoSigning:    s.noSign,
+		RequestShape: s.profile.RequestShape,
+		Now:          s.cfg.Now,
 	})
 
 	result, err := control.Login(ctx, account.Username, password)
@@ -207,6 +209,25 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	s.logger.Info("account_login", "account", accountID,
 		"state", updated.State, "membership", result.MembershipStatus)
 	return updated, nil
+}
+
+// deviceFor returns the account's stored device identity, generating and
+// persisting one on the first login. A retry or a concurrent login never
+// regenerates it: EnsureAccountDevice keeps the first stored record, so every
+// request presents the same _uid, _os_did, cuid and cseid.
+func (s *LoginService) deviceFor(accountID string) (store.DeviceIdentity, error) {
+	if identity, ok := s.store.AccountDevice(accountID); ok {
+		return identity, nil
+	}
+	device, err := NewDeviceForProfile(s.profile)
+	if err != nil {
+		return store.DeviceIdentity{}, fmt.Errorf("account: device for %q: %w", accountID, err)
+	}
+	identity, err := s.store.EnsureAccountDevice(accountID, Identify(device))
+	if err != nil {
+		return store.DeviceIdentity{}, fmt.Errorf("account: store device for %q: %w", accountID, err)
+	}
+	return identity, nil
 }
 
 // Result returns the last successful login result for accountID. The result

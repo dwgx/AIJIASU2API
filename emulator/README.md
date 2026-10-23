@@ -91,12 +91,50 @@ through the selected transport.
 }
 ```
 
-`transport` is `rawtcp` (variant A) or `httpupgrade` (variant B). `server`
-selects a server id; empty means the first server with `sts == "ok"` and a
-usable `svr:par.fv.p`. `oaep_hash` is `SHA-1` (default) or `SHA-256`. `device`
-overrides the control API device parameters; recognised keys are `_site`,
-`_v`, `_m`, `_os_ver`, `_os_dev`, `_os_hw`, `_os_lang`, `_os_dim`, `_inst_mkt`,
-`_lang`, `_vrf`, `_tz`.
+`transport` is `rawtcp` (variant A, the OpenAJS raw-frame carrier) or
+`httpupgrade` (variant B; its default `ProtocolVersion = 2` is the binary
+carrier the shipping Linux 4.2.3.0 proxy path uses). The CLI default is
+`rawtcp`, the OpenAJS path; the Linux profile's carrier is `httpupgrade`.
+`server` selects a server id; empty means the first server with `sts == "ok"`
+and a usable `svr:par.fv.p`. `oaep_hash` is `SHA-1` (default) or `SHA-256`.
+`device` overrides the control API device parameters; recognised keys are
+`_site`, `_v`, `_m`, `_os_ver`, `_os_dev`, `_os_hw`, `_os_lang`, `_os_dim`,
+`_inst_mkt`, `_lang`, `_vrf`, `_tz`.
+
+### Control request shapes
+
+`api.Client.RequestShape` selects the field set. The zero value keeps the
+OpenAJS/Android request, so existing callers are unchanged.
+
+| Shape | `v`/`_v` | `_uid` | Device fields | `trigger` | `User-Agent` | Trailing `&` |
+|---|---|---|---|---|---|---|
+| `ShapeOpenAJS` (default) | `_v` | 22 chars, self-checksummed | `_m/_os_ver/_os_dev/_os_hw/_os_did/_os_lang/_tz/_os_dim/_inst_mkt/_lang/_vrf` | `login` | `okhttp/4.9.3` | no |
+| `ShapeLinux423` | `v` | 20 lowercase hex | `_m/_os_dev/_os_dim/_os_ver/_lang` | omitted | none | yes |
+
+`ShapeLinux423` reproduces `research/60-dynamic/captures/control.jsonl` line 2,
+the only direct Linux 4.2.3.0 request:
+
+```
+_lang=en&_m=linux&_os_dev=x86_64&_os_dim=lid%3dREDACTED%2c8e415e...&_os_ver=Linux%20version...%0a&_site=ajs&_uid=<20 hex>&cmd=ClientApiLogin%2fLogin&password=<pw>&username=<user>&v=4.2.3.0&
+```
+
+The capture also fixes the headers: `Accept: */*`, `Accept-Encoding:
+deflate, gzip`, `Connection: close`, no `User-Agent` and no
+`X-Sig`/`X-Timestamp`. `LoginSync` has no Linux capture, so it keeps the
+OpenAJS `trigger`/`_client_login` fields under either shape and its Linux form
+is `[UNVERIFIED]`.
+
+`api.Linux423Device()` returns the captured Linux descriptor with empty IDs;
+`EnsureLinuxIDs` fills a 20-hex `_uid` that doubles as `cuid`, `cseid=linux`
+(`LinuxCSEID`), and a 16-hex `_os_did` that the Linux control body does not
+carry. `NewLinuxUID` generates the 20-hex value. `api.Device.CUID`/`CSEID`
+feed the FV auth body through `AuthConfig`; empty values fall back to
+`DeviceID`, so the OpenAJS body is byte-identical to before.
+
+`TestLinux423RequestMatchesCapture` compares the recorded body with the
+capture field for field (the uid and password are redacted in failure
+messages), asserts the absent Android fields and `User-Agent`, and asserts the
+trailing `&`. `TestOpenAJSRequestShapeUnchanged` pins the default shape.
 
 The config contains a password: keep it outside the repository, never commit
 it, and do not put real credentials in issues or reports.
@@ -106,8 +144,8 @@ it, and do not put real credentials in issues or reports.
 | Component | Status | Evidence |
 |---|---|---|
 | `dualHash`, `sign`, `buildQuery`, URL encoding | Implemented | Java/Python vectors in `internal/api/sign_test.go` |
-| Device parameters and `_uid` | Implemented | OpenAJS field set and `_uid` formula; format test |
-| Control API `login`, `loginSync`, `Servers` | Implemented | OpenAJS-style signed `POST /client.php`; failover only on transport error; httptest login test. AJS-07 saw the Linux 4.2.3.0 login send no `X-Sig`/`X-Timestamp`; that path is not emulated |
+| Device parameters, request shapes and `_uid` | Implemented | OpenAJS field set and `_uid` formula; Linux 4.2.3.0 shape pinned to `control.jsonl:2`; `TestLinux423RequestMatchesCapture`, `TestOpenAJSRequestShapeUnchanged`, `TestLinux423DeviceIdentity` |
+| Control API `login`, `loginSync`, `Servers` | Implemented | OpenAJS signed shape and the unsigned Linux 4.2.3.0 shape (no `X-Sig`/`X-Timestamp`, no `User-Agent`, trailing `&`); failover only on transport error; httptest login tests |
 | Other control endpoints (favorites, announce, telemetry, register, captcha) | Not implemented | Out of scope for this slice |
 | FV auth | Implemented | Raw-frame OpenAJS field order and binary-carrier sorted Linux fields; auth-body tests |
 | RSA-OAEP, 1024-bit vendor key | Implemented | 128-byte ciphertext, `OAEP` magic, SHA-1 confirmed, SHA-256 option, generated test key round-trip |
@@ -213,6 +251,10 @@ semantics, `s`/`n` generation, and first-packet placement remain `[INFERENCE]`.
 | `TestOPV2Frame` | Legacy OPV2 bytes against an independently generated vector, parse round-trip, CRC rejection |
 | `TestHTTPUpgradeHandshake` | Legacy text-mode upgrade, header/body shape, OPV2 SOCKS5 request and reply, echo relay |
 | `TestBuildQueryVectors`, `TestUIDFormat`, `TestLoginSignsRequest`, `TestAuthBodySerialization`, `TestSocks5ConnectRequest`, `TestHTTPProxyAbsoluteURI`, `TestLoadConfig` | Supporting checks |
+| `TestLinux423RequestMatchesCapture` | The `ShapeLinux423` login body equals `control.jsonl:2` (only `_uid`/credentials differ), with no Android-only fields, no `User-Agent` and the trailing `&` |
+| `TestOpenAJSRequestShapeUnchanged` | The default shape keeps `_v`, the 22-char `_uid`, the Android fields, `trigger=login`, `okhttp/4.9.3` and no trailing separator |
+| `TestLinux423DeviceIdentity` | 20-hex `_uid`/`cuid`, `cseid=linux`, 16-hex `_os_did`, and `EnsureLinuxIDs` never regenerates |
+| `TestAuthIdentityCUIDCSEID` | Both auth-body builders: empty CUID/CSEID reproduce the OpenAJS device id twice; the Linux identity sends its 20-hex `cuid` with `cseid=linux` (also asserted against the decrypted `fvmock-1` capture) |
 
 Only the first eight are in the metric allowlist.
 

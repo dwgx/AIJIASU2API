@@ -339,3 +339,116 @@ func TestLoginServiceDefaults(t *testing.T) {
 		t.Fatal("noSign = false, want true for the Linux profile")
 	}
 }
+
+// TestLoginServiceDeviceStable is the B5 regression: two logins for one
+// account send the same _uid, and the device identity is generated once,
+// persisted in the snapshot and reused instead of regenerated.
+func TestLoginServiceDeviceStable(t *testing.T) {
+	st := store.NewWithSealer(plainSealer{})
+	account := newLoginAccount(t, st)
+	server, requests := newFake(t, func(capturedRequest) (int, string) {
+		return http.StatusOK, loginReply
+	})
+	service := newTestLoginService(t, st, server.URL, nil)
+
+	if _, ok := st.AccountDevice(account.ID); ok {
+		t.Fatal("a device identity exists before the first login")
+	}
+	var devices [2]store.DeviceIdentity
+	for run := 1; run <= 2; run++ {
+		if _, err := service.Login(context.Background(), account.ID); err != nil {
+			t.Fatalf("Login %d: %v", run, err)
+		}
+		device, ok := st.AccountDevice(account.ID)
+		if !ok {
+			t.Fatalf("no device identity persisted after login %d", run)
+		}
+		devices[run-1] = device
+	}
+	first, second := <-requests, <-requests
+
+	uid := first.form.Get("_uid")
+	if len(uid) != 20 {
+		t.Fatalf("_uid = %q, want the captured 20-hex form", uid)
+	}
+	if got := second.form.Get("_uid"); got != uid {
+		t.Fatalf("second login _uid = %q, want the first login's %q", got, uid)
+	}
+	if _, ok := second.form["_os_did"]; ok {
+		t.Fatalf("linux body carries _os_did: %v", second.raw)
+	}
+	if got := second.form.Get("v"); got != LinuxClientVersion {
+		t.Fatalf("v = %q, want %q", got, LinuxClientVersion)
+	}
+
+	if devices[0] != devices[1] {
+		t.Fatalf("device identity changed between logins: %+v -> %+v", devices[0], devices[1])
+	}
+	device := devices[0]
+	if device.UID != uid {
+		t.Fatalf("stored UID = %q, want the wire _uid %q", device.UID, uid)
+	}
+	if len(device.OSDID) != 16 {
+		t.Fatalf("stored OSDID = %q, want 16 characters", device.OSDID)
+	}
+	if device.CUID != device.UID {
+		t.Fatalf("stored CUID = %q, want the 20-hex UID %q", device.CUID, device.UID)
+	}
+	if device.CSEID != "linux" {
+		t.Fatalf("stored CSEID = %q, want linux", device.CSEID)
+	}
+	if device.OSP != "linux" || device.OSD != "x86_64" || device.DIM != devDim {
+		t.Fatalf("stored device = %+v, want the captured Linux claims", device)
+	}
+	if !strings.Contains(device.OSV, "Linux version 6.18.33.2") {
+		t.Fatalf("stored OSV = %q, want the captured uname", device.OSV)
+	}
+
+	// The identity survives the state snapshot, so a restart keeps it too.
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := store.New()
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	after, ok := restored.AccountDevice(account.ID)
+	if !ok || after != device {
+		t.Fatalf("restored device = %+v (present %v), want %+v", after, ok, device)
+	}
+}
+
+// TestLoginServiceDeviceSurvivesRejection proves the identity is persisted
+// before the vendor call, so a rejected login followed by a retry sends the
+// same _uid instead of looking like a new device.
+func TestLoginServiceDeviceSurvivesRejection(t *testing.T) {
+	const rejectReply = `{"Login":{"AuthResult":"WrongPassword","AuthMessage":"bad password"}}`
+	st := store.NewWithSealer(plainSealer{})
+	account := newLoginAccount(t, st)
+	server, requests := newFake(t, func(capturedRequest) (int, string) {
+		return http.StatusOK, rejectReply
+	})
+	service := newTestLoginService(t, st, server.URL, nil)
+
+	for run := 1; run <= 2; run++ {
+		if _, err := service.Login(context.Background(), account.ID); !errors.Is(err, ErrAuthRejected) {
+			t.Fatalf("Login %d error = %v, want ErrAuthRejected", run, err)
+		}
+	}
+	first, second := <-requests, <-requests
+
+	device, ok := st.AccountDevice(account.ID)
+	if !ok {
+		t.Fatal("a rejected login did not persist the device identity")
+	}
+	if device.UID != first.form.Get("_uid") {
+		t.Fatalf("stored UID = %q, want the wire _uid %q", device.UID, first.form.Get("_uid"))
+	}
+	if got := second.form.Get("_uid"); got != first.form.Get("_uid") {
+		t.Fatalf("retry _uid = %q, want %q", got, first.form.Get("_uid"))
+	}
+	if current, ok := st.AccountDevice(account.ID); !ok || current != device {
+		t.Fatalf("device identity changed across the retry: %+v", current)
+	}
+}

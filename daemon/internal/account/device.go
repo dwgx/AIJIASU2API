@@ -1,25 +1,38 @@
 package account
 
-import "ajsproxy/apifacade"
+import (
+	"errors"
+
+	"ajsaccountd/internal/store"
+	"ajsproxy/apifacade"
+)
 
 // Client versions of the two supported profiles. LinuxClientVersion is the
 // default: the daemon emulates the Linux client unless told otherwise.
 const (
 	// LinuxClientVersion is the _v value of the Linux 4.2.3.0 client.
-	LinuxClientVersion = "4.2.3.0"
+	LinuxClientVersion = apifacade.Linux423Version
 	// OpenAJSClientVersion is the _v value of the OpenAJS Android client.
 	OpenAJSClientVersion = "4.11.10.0"
 )
 
 // NewDevice returns a device descriptor with generated IDs for the given
-// client version. An empty version selects LinuxClientVersion; pass
-// OpenAJSClientVersion for the OpenAJS/Android profile.
+// client version. An empty version selects LinuxClientVersion.
 //
-// The rest of the descriptor (platform, OS, locale, timezone, screen) comes
-// from apifacade.DefaultDevice, which mirrors AjsDevice.commonParams.
+// LinuxClientVersion builds the captured Linux 4.2.3.0 descriptor: linux /
+// x86_64, the captured _os_ver and _os_dim, a 20-hex _uid that doubles as cuid,
+// and cseid=linux. Any other version builds the OpenAJS/Android descriptor from
+// apifacade.DefaultDevice with a 22-character _uid and 16-hex _os_did.
 func NewDevice(version string) (apifacade.Device, error) {
 	if version == "" {
 		version = LinuxClientVersion
+	}
+	if version == LinuxClientVersion {
+		device := apifacade.Linux423Device()
+		if err := device.EnsureLinuxIDs(); err != nil {
+			return apifacade.Device{}, err
+		}
+		return device, nil
 	}
 	device := apifacade.DefaultDevice()
 	device.Version = version
@@ -29,35 +42,74 @@ func NewDevice(version string) (apifacade.Device, error) {
 	return device, nil
 }
 
-// DeviceIdentity is the non-secret summary of a device descriptor. It is what
-// the daemon stores and logs; the full descriptor never needs to be logged.
-type DeviceIdentity struct {
-	Version  string // _v
-	Platform string // _m
-	Model    string // _os_dev
-	OSVer    string // _os_ver
-	HW       string // _os_hw
-	OSDID    string // _os_did, 16 lowercase hex
-	UID      string // _uid, 22 characters
-	Lang     string // _lang
-	TZMin    int    // _tz, minutes east of UTC
-	Dim      string // _os_dim
+// NewDeviceForProfile returns the device descriptor the profile uses. It is the
+// builder LoginService calls for a first login; later logins reuse the stored
+// identity instead.
+func NewDeviceForProfile(profile VersionProfile) (apifacade.Device, error) {
+	if profile.ClientVersion == "" {
+		return apifacade.Device{}, errors.New("account: profile has no client version")
+	}
+	return NewDevice(profile.ClientVersion)
 }
 
-// Identify summarizes device for logs and store records. A device descriptor
-// carries no credentials, but the summary is still preferred: it is stable and
-// small.
-func Identify(device apifacade.Device) DeviceIdentity {
-	return DeviceIdentity{
-		Version:  device.Version,
-		Platform: device.Platform,
-		Model:    device.OSDevice,
-		OSVer:    device.OSVersion,
-		HW:       device.OSHW,
-		OSDID:    device.DeviceID,
-		UID:      device.UID,
-		Lang:     device.Lang,
-		TZMin:    device.TZMinutes,
-		Dim:      device.OSDim,
+// Identify summarizes device as the stable, non-secret record the store keeps.
+//
+// An empty CUID falls back to DeviceID and an empty CSEID to CUID, so an
+// OpenAJS device records the same value twice and a Linux device records its
+// 20-hex cuid and cseid=linux.
+func Identify(device apifacade.Device) store.DeviceIdentity {
+	cuid := device.CUID
+	if cuid == "" {
+		cuid = device.DeviceID
+	}
+	cseid := device.CSEID
+	if cseid == "" {
+		cseid = cuid
+	}
+	return store.DeviceIdentity{
+		UID:     device.UID,
+		OSDID:   device.DeviceID,
+		CUID:    cuid,
+		CSEID:   cseid,
+		OSP:     device.Platform,
+		OSD:     device.OSDevice,
+		OSV:     device.OSVersion,
+		DIM:     device.OSDim,
+		Version: device.Version,
+		Site:    device.Site,
+		HW:      device.OSHW,
+		OSLang:  device.OSLang,
+		TZMin:   device.TZMinutes,
+		Lang:    device.Lang,
+		InstMkt: device.InstMkt,
+		Vrf:     device.Vrf,
+	}
+}
+
+// deviceFromIdentity rebuilds the control and FV descriptor from a stored
+// identity. version is the profile's client version claim and wins when set:
+// the identity keeps the device stable while a profile switch changes only the
+// version claim.
+func deviceFromIdentity(identity store.DeviceIdentity, version string) apifacade.Device {
+	if version == "" {
+		version = identity.Version
+	}
+	return apifacade.Device{
+		Site:      identity.Site,
+		Version:   version,
+		Platform:  identity.OSP,
+		OSVersion: identity.OSV,
+		OSDevice:  identity.OSD,
+		OSHW:      identity.HW,
+		DeviceID:  identity.OSDID,
+		OSLang:    identity.OSLang,
+		TZMinutes: identity.TZMin,
+		OSDim:     identity.DIM,
+		InstMkt:   identity.InstMkt,
+		Lang:      identity.Lang,
+		Vrf:       identity.Vrf,
+		UID:       identity.UID,
+		CUID:      identity.CUID,
+		CSEID:     identity.CSEID,
 	}
 }

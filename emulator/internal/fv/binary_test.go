@@ -68,6 +68,14 @@ func TestBinaryCarrierCaptureVectors(t *testing.T) {
 		!strings.Contains(string(authBody), "v=4.2.3.0\n") {
 		t.Fatalf("auth body = %q", authBody)
 	}
+	// The captured Linux identity: a 20-hex cuid and the literal cseid=linux.
+	capturedIdentity := ParseFields(string(authBody))
+	if got := capturedIdentity["cuid"]; got != "6ada95c900de9bbb3a82" {
+		t.Fatalf("captured cuid = %q, want the 20-hex value", got)
+	}
+	if got := capturedIdentity["cseid"]; got != "linux" {
+		t.Fatalf("captured cseid = %q, want linux", got)
+	}
 
 	respText, err := decodeBinaryResponse(
 		mustHex(t, "eff58ae86dbcae22e178a5e4b82bb269af55ef6b17ae44b4e064aa8e68f44619884e"),

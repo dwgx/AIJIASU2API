@@ -38,6 +38,21 @@ type (
 // login. It is the same value as api.ErrNoLoginToken.
 var ErrNoLoginToken = api.ErrNoLoginToken
 
+// RequestShape selects the control request field set. The constants are the
+// internal values, so a caller can compare and pass them without conversion.
+type RequestShape = api.RequestShape
+
+const (
+	// ShapeOpenAJS is the OpenAJS/Android field set (the zero value).
+	ShapeOpenAJS = api.ShapeOpenAJS
+	// ShapeLinux423 is the captured Linux 4.2.3.0 field set.
+	ShapeLinux423 = api.ShapeLinux423
+	// Linux423Version is the Linux 4.2.3.0 client version claim.
+	Linux423Version = api.Linux423Version
+	// LinuxCSEID is the cseid the Linux 4.2.3.0 client sends ("linux").
+	LinuxCSEID = api.LinuxCSEID
+)
+
 // Functions. Variables rather than wrappers so the facade stays allocation-free
 // and the signatures remain the tested ones.
 var (
@@ -45,10 +60,14 @@ var (
 	NewClient = api.NewClient
 	// DefaultDevice returns the OpenAJS device descriptor with empty IDs.
 	DefaultDevice = api.DefaultDevice
+	// Linux423Device returns the Linux 4.2.3.0 device descriptor with empty IDs.
+	Linux423Device = api.Linux423Device
 	// NewDeviceID returns 16 random lowercase hex characters.
 	NewDeviceID = api.NewDeviceID
 	// NewUID builds the 22-character _uid.
 	NewUID = api.NewUID
+	// NewLinuxUID returns the 20-hex Linux 4.2.3.0 _uid/cuid.
+	NewLinuxUID = api.NewLinuxUID
 	// BuildQuery serializes params as a signed request body.
 	BuildQuery = api.BuildQuery
 	// Sign returns the X-Sig header value for body and timestamp.

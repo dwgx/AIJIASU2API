@@ -1,0 +1,88 @@
+package store
+
+import "strings"
+
+// DeviceIdentity is the stable, non-secret device identity of one account.
+//
+// It is generated once per account, persisted in the state snapshot and reused
+// by every login and FV session, so a retry never presents a new device to the
+// vendor. It carries no credential.
+//
+// The field names mirror the vendor claims: UID is _uid, OSDID is _os_did,
+// CUID/CSEID are the FV cuid/cseid, and OSP/OSD/OSV/DIM are the FV osp/osd/osv/
+// dim values (also _m/_os_dev/_os_ver/_os_dim on the control channel). The
+// remaining fields complete the control descriptor so a restored identity
+// rebuilds the exact request.
+type DeviceIdentity struct {
+	// UID is _uid: 22 characters for the OpenAJS/Android profile, 20 hex for
+	// Linux 4.2.3.0 (research/60-dynamic/captures/control.jsonl line 2).
+	UID string `json:"uid"`
+	// OSDID is _os_did, 16 lowercase hex. The Linux control capture does not
+	// carry the field; it is generated for every profile so the record is
+	// complete and a profile that does send it keeps one value.
+	OSDID string `json:"osdid"`
+	// CUID is the FV cuid: equal to UID for Linux 4.2.3.0, equal to OSDID for
+	// OpenAJS.
+	CUID string `json:"cuid"`
+	// CSEID is the FV cseid: "linux" for Linux 4.2.3.0
+	// (research/60-dynamic/captures/fvmock-1.log), the device id for OpenAJS.
+	CSEID string `json:"cseid"`
+	// OSP, OSD, OSV and DIM are the FV osp/osd/osv/dim values.
+	OSP string `json:"osp"`
+	OSD string `json:"osd"`
+	OSV string `json:"osv"`
+	DIM string `json:"dim"`
+
+	// Version is _v, or v under the Linux 4.2.3.0 request shape.
+	Version string `json:"version"`
+	// Site is _site.
+	Site string `json:"site"`
+	// HW is _os_hw, OSLang is _os_lang and TZMin is _tz. The Linux shape does
+	// not send them.
+	HW     string `json:"hw,omitempty"`
+	OSLang string `json:"osLang,omitempty"`
+	TZMin  int    `json:"tzMin,omitempty"`
+	// Lang is _lang.
+	Lang string `json:"lang,omitempty"`
+	// InstMkt is _inst_mkt and Vrf is _vrf.
+	InstMkt string `json:"instMkt,omitempty"`
+	Vrf     string `json:"vrf,omitempty"`
+}
+
+// valid reports whether dev carries the identifiers every request needs.
+func (dev DeviceIdentity) valid() bool {
+	return strings.TrimSpace(dev.UID) != "" &&
+		strings.TrimSpace(dev.OSDID) != "" &&
+		strings.TrimSpace(dev.CUID) != "" &&
+		strings.TrimSpace(dev.CSEID) != ""
+}
+
+// AccountDevice returns the stored device identity of an account.
+func (s *Store) AccountDevice(id string) (DeviceIdentity, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	dev, ok := s.devices[id]
+	return dev, ok
+}
+
+// EnsureAccountDevice stores dev for an account that has no device identity and
+// returns the stored identity. An existing identity is never replaced, so a
+// retry or a concurrent first login keeps the value the vendor saw first; that
+// is the stability rule behind the per-account record.
+//
+// dev must carry UID, OSDID, CUID and CSEID; the account must exist.
+func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdentity, error) {
+	if !dev.valid() {
+		return DeviceIdentity{}, invalidf("device identity for %q is missing uid/osdid/cuid/cseid", id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accountIndexLocked(id) < 0 {
+		return DeviceIdentity{}, notFoundf("account %q not found", id)
+	}
+	if existing, ok := s.devices[id]; ok {
+		return existing, nil
+	}
+	s.devices[id] = dev
+	return dev, nil
+}

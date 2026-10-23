@@ -16,9 +16,18 @@ import (
 // AuthConfig is the field set of the FV authentication body
 // (FvConnection.java:42-58).
 type AuthConfig struct {
-	User        string // u
-	Password    string // p
-	DeviceID    string // cuid and cseid, the same 16-hex device id
+	User     string // u
+	Password string // p
+	// DeviceID is the OpenAJS device id (_os_did). It is also the cuid and
+	// cseid fallback when CUID and CSEID are empty, which reproduces the
+	// OpenAJS body exactly.
+	DeviceID string
+	// CUID is the FV cuid. Empty falls back to DeviceID.
+	CUID string
+	// CSEID is the FV cseid. Empty falls back to CUID. OpenAJS repeats the
+	// device id; the Linux 4.2.3.0 client sends the literal "linux"
+	// (research/60-dynamic/captures/fvmock-1.log).
+	CSEID       string
 	Site        string // st
 	AppVersion  string // v
 	CoreVersion string // cv
@@ -26,6 +35,22 @@ type AuthConfig struct {
 	OSD         string // osd
 	OSV         string // osv
 	Dim         string // dim
+}
+
+// authCUID returns the cuid value: CUID when set, otherwise DeviceID.
+func authCUID(cfg AuthConfig) string {
+	if cfg.CUID != "" {
+		return cfg.CUID
+	}
+	return cfg.DeviceID
+}
+
+// authCSEID returns the cseid value: CSEID when set, otherwise cuid.
+func authCSEID(cfg AuthConfig) string {
+	if cfg.CSEID != "" {
+		return cfg.CSEID
+	}
+	return authCUID(cfg)
 }
 
 // DefaultAuthConfig returns the OpenAJS-compatible auth field set.
@@ -54,8 +79,8 @@ func BuildAuthBody(cfg AuthConfig, unixSeconds int64) []byte {
 		{"c", "au"},
 		{"u", cfg.User},
 		{"p", cfg.Password},
-		{"cuid", cfg.DeviceID},
-		{"cseid", cfg.DeviceID},
+		{"cuid", authCUID(cfg)},
+		{"cseid", authCSEID(cfg)},
 		{"st", cfg.Site},
 		{"v", cfg.AppVersion},
 		{"cv", cfg.CoreVersion},

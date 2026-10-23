@@ -229,3 +229,64 @@ func TestSocks5ConnectRequest(t *testing.T) {
 		t.Fatal("accepted a 256-byte host")
 	}
 }
+
+// TestAuthIdentityCUIDCSEID pins the two identity shapes in both auth body
+// builders. Empty CUID/CSEID must reproduce the OpenAJS body byte for byte
+// (cuid = cseid = device id); the Linux 4.2.3.0 identity sends its 20-hex cuid
+// with the literal cseid=linux (research/60-dynamic/captures/fvmock-1.log).
+func TestAuthIdentityCUIDCSEID(t *testing.T) {
+	base := AuthConfig{
+		User:        "test",
+		Password:    "test",
+		DeviceID:    "0123456789abcdef",
+		Site:        "ajs",
+		AppVersion:  "4.11.10.0",
+		CoreVersion: "20260525-1",
+		OSP:         "android",
+		OSD:         "Xiaomi 23013RK75C",
+		OSV:         "13",
+		Dim:         "w=1080&h=2400&d=440",
+	}
+	bodies := map[string][]byte{
+		"text":   BuildAuthBody(base, 1761177600),
+		"binary": BuildBinaryAuthBody(base, 1761177600, "pad"),
+	}
+	for name, body := range bodies {
+		fields := ParseFields(string(body))
+		if fields["cuid"] != base.DeviceID || fields["cseid"] != base.DeviceID {
+			t.Fatalf("%s OpenAJS cuid/cseid = %q/%q, want the device id twice",
+				name, fields["cuid"], fields["cseid"])
+		}
+	}
+
+	linux := base
+	linux.CUID = "6ada95c900de9bbb3a82"
+	linux.CSEID = "linux"
+	linux.AppVersion = "4.2.3.0"
+	linux.CoreVersion = "20241105-1"
+	linux.OSP = "linux"
+	linux.OSD = "x86_64"
+	linux.OSV = "Linux version 6.18.33.2"
+	linux.Dim = "lid=REDACTED,8e415e603088426aa42fed420212150c"
+	bodies = map[string][]byte{
+		"text":   BuildAuthBody(linux, 1792711256),
+		"binary": BuildBinaryAuthBody(linux, 1792711256, "pad"),
+	}
+	for name, body := range bodies {
+		fields := ParseFields(string(body))
+		if fields["cuid"] != linux.CUID {
+			t.Fatalf("%s Linux cuid = %q, want %q", name, fields["cuid"], linux.CUID)
+		}
+		if fields["cseid"] != "linux" {
+			t.Fatalf("%s Linux cseid = %q, want linux", name, fields["cseid"])
+		}
+		for key, want := range map[string]string{
+			"osp": linux.OSP, "osd": linux.OSD, "osv": linux.OSV, "dim": linux.Dim,
+			"v": linux.AppVersion, "cv": linux.CoreVersion,
+		} {
+			if got := fields[key]; got != want {
+				t.Fatalf("%s Linux %s = %q, want %q", name, key, got, want)
+			}
+		}
+	}
+}

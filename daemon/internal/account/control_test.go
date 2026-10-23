@@ -72,11 +72,23 @@ func newFake(t *testing.T, handle func(capturedRequest) (int, string)) (*httptes
 	return server, requests
 }
 
+// mustDevice returns an OpenAJS/Android device: the control tests below drive
+// the default (ShapeOpenAJS) request shape.
 func mustDevice(t *testing.T) apifacade.Device {
 	t.Helper()
-	device, err := NewDevice("")
+	device, err := NewDevice(OpenAJSClientVersion)
 	if err != nil {
 		t.Fatalf("NewDevice: %v", err)
+	}
+	return device
+}
+
+// mustLinuxDevice returns the Linux 4.2.3.0 device for ShapeLinux423 tests.
+func mustLinuxDevice(t *testing.T) apifacade.Device {
+	t.Helper()
+	device, err := NewDevice(LinuxClientVersion)
+	if err != nil {
+		t.Fatalf("NewDevice(LinuxClientVersion): %v", err)
 	}
 	return device
 }
@@ -131,8 +143,8 @@ func TestLoginSigned(t *testing.T) {
 	if got := request.form.Get("_site"); got != "ajs" {
 		t.Fatalf("_site = %q, want ajs", got)
 	}
-	if got := request.form.Get("_v"); got != LinuxClientVersion {
-		t.Fatalf("_v = %q, want %q", got, LinuxClientVersion)
+	if got := request.form.Get("_v"); got != OpenAJSClientVersion {
+		t.Fatalf("_v = %q, want %q", got, OpenAJSClientVersion)
 	}
 	if got := request.form.Get("_os_did"); len(got) != 16 {
 		t.Fatalf("_os_did = %q, want 16 characters", got)
@@ -381,14 +393,21 @@ func TestNewDeviceProfiles(t *testing.T) {
 	if linux.Version != LinuxClientVersion {
 		t.Fatalf("default Version = %q, want %q", linux.Version, LinuxClientVersion)
 	}
+	if linux.Platform != "linux" || linux.OSDevice != "x86_64" || linux.Site != "ajs" {
+		t.Fatalf("platform/device/site = %q/%q/%q, want linux/x86_64/ajs",
+			linux.Platform, linux.OSDevice, linux.Site)
+	}
+	if len(linux.UID) != 20 {
+		t.Fatalf("UID = %q, want the captured 20-hex form", linux.UID)
+	}
+	if linux.CUID != linux.UID || linux.CSEID != apifacade.LinuxCSEID {
+		t.Fatalf("cuid/cseid = %q/%q, want the UID and %q", linux.CUID, linux.CSEID, apifacade.LinuxCSEID)
+	}
 	if len(linux.DeviceID) != 16 {
 		t.Fatalf("DeviceID = %q, want 16 characters", linux.DeviceID)
 	}
-	if len(linux.UID) != 22 {
-		t.Fatalf("UID = %q, want 22 characters", linux.UID)
-	}
-	if linux.Platform != "android" || linux.Site != "ajs" {
-		t.Fatalf("platform/site = %q/%q, want android/ajs", linux.Platform, linux.Site)
+	if linux.OSDim != "lid=REDACTED,8e415e603088426aa42fed420212150c" {
+		t.Fatalf("OSDim = %q, want the captured value", linux.OSDim)
 	}
 
 	openAJS, err := NewDevice(OpenAJSClientVersion)
@@ -398,14 +417,83 @@ func TestNewDeviceProfiles(t *testing.T) {
 	if openAJS.Version != OpenAJSClientVersion {
 		t.Fatalf("Version = %q, want %q", openAJS.Version, OpenAJSClientVersion)
 	}
-	if openAJS.DeviceID == linux.DeviceID {
-		t.Fatalf("two devices share DeviceID %q", openAJS.DeviceID)
+	if openAJS.Platform != "android" || openAJS.OSDevice == linux.OSDevice {
+		t.Fatalf("OpenAJS platform/device = %q/%q, want the Android descriptor",
+			openAJS.Platform, openAJS.OSDevice)
+	}
+	if len(openAJS.UID) != 22 || len(openAJS.DeviceID) != 16 {
+		t.Fatalf("OpenAJS uid/device id = %q/%q, want 22/16 characters", openAJS.UID, openAJS.DeviceID)
+	}
+	if openAJS.DeviceID == linux.DeviceID || openAJS.UID == linux.UID {
+		t.Fatalf("two devices share an identity: %q/%q", openAJS.DeviceID, openAJS.UID)
+	}
+	if openAJS.CUID != "" || openAJS.CSEID != "" {
+		t.Fatalf("OpenAJS cuid/cseid = %q/%q, want the DeviceID fallback", openAJS.CUID, openAJS.CSEID)
 	}
 
 	identity := Identify(linux)
 	if identity.Version != linux.Version || identity.OSDID != linux.DeviceID ||
 		identity.UID != linux.UID || identity.TZMin != linux.TZMinutes {
 		t.Fatalf("Identify = %+v, want the device's version/ids/tz", identity)
+	}
+	if identity.CUID != linux.UID || identity.CSEID != apifacade.LinuxCSEID ||
+		identity.OSP != "linux" || identity.OSD != "x86_64" || identity.DIM != linux.OSDim {
+		t.Fatalf("Identify = %+v, want the captured Linux identity", identity)
+	}
+
+	rebuilt := deviceFromIdentity(identity, linux.Version)
+	if rebuilt.UID != linux.UID || rebuilt.CUID != linux.CUID || rebuilt.CSEID != linux.CSEID ||
+		rebuilt.DeviceID != linux.DeviceID || rebuilt.OSVersion != linux.OSVersion ||
+		rebuilt.OSDim != linux.OSDim || rebuilt.Platform != linux.Platform {
+		t.Fatalf("deviceFromIdentity = %+v, want the original descriptor %+v", rebuilt, linux)
+	}
+
+	openAJSIdentity := Identify(openAJS)
+	if openAJSIdentity.CUID != openAJS.DeviceID || openAJSIdentity.CSEID != openAJS.DeviceID {
+		t.Fatalf("OpenAJS identity = %+v, want cuid=cseid=DeviceID", openAJSIdentity)
+	}
+}
+
+// TestLoginLinuxShape is the daemon-side B1 regression: the Linux 4.2.3.0
+// profile must send v (not _v), a 20-hex _uid, no Android-only fields, no
+// User-Agent and the captured trailing "&".
+func TestLoginLinuxShape(t *testing.T) {
+	server, requests := newFake(t, func(capturedRequest) (int, string) {
+		return http.StatusOK, loginReply
+	})
+	control := NewControl([]string{server.URL}, mustLinuxDevice(t), Options{
+		HTTPClient:   server.Client(),
+		NoSigning:    true,
+		RequestShape: apifacade.ShapeLinux423,
+	})
+
+	if _, err := control.Login(context.Background(), "user@example.com", Secret(testPassword)); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	request := <-requests
+
+	if got := request.form.Get("v"); got != LinuxClientVersion {
+		t.Fatalf("v = %q, want %q", got, LinuxClientVersion)
+	}
+	if _, ok := request.form["_v"]; ok {
+		t.Fatalf("linux body carries _v: %v", request.raw)
+	}
+	if uid := request.form.Get("_uid"); len(uid) != 20 {
+		t.Fatalf("_uid = %q, want 20 characters", uid)
+	}
+	for _, key := range []string{"_os_hw", "_os_did", "_os_lang", "_tz", "_inst_mkt", "_vrf", "trigger", "cv"} {
+		if _, ok := request.form[key]; ok {
+			t.Fatalf("linux body carries %q: %v", key, request.raw)
+		}
+	}
+	if !strings.HasSuffix(request.raw, "&") {
+		t.Fatalf("linux body = %q, want a trailing &", request.raw)
+	}
+	if _, ok := request.header["User-Agent"]; ok {
+		t.Fatalf("User-Agent = %q, want none", request.header.Get("User-Agent"))
+	}
+	if got := request.header.Get("X-Sig"); got != "" {
+		t.Fatalf("X-Sig = %q, want none", got)
 	}
 }
 

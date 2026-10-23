@@ -36,8 +36,8 @@ func BuildBinaryAuthBody(cfg AuthConfig, unixSeconds int64, pad string) []byte {
 	fields := map[string]string{
 		"c":     "au",
 		"ce":    "",
-		"cseid": cfg.DeviceID,
-		"cuid":  cfg.DeviceID,
+		"cseid": authCSEID(cfg),
+		"cuid":  authCUID(cfg),
 		"cv":    cfg.CoreVersion,
 		"dim":   cfg.Dim,
 		"osd":   cfg.OSD,

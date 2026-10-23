@@ -30,17 +30,21 @@ type VersionProfile struct {
 	// FV auth body carries no signature, so the session factory does not use
 	// it.
 	SigningMode string
-	// Transport is the carrier label recorded for the profile. The Linux
-	// 4.2.3.0 capture names plain TCP with no HTTP request line ("rawtcp").
-	// The concrete transport is injected into NewFactory, because the
-	// protocol-2 binary carrier is implemented by fvfacade.HTTPUpgrade.
+	// RequestShape selects the control request field set: ShapeLinux423 for
+	// the captured Linux 4.2.3.0 form, ShapeOpenAJS for OpenAJS/Android.
+	RequestShape apifacade.RequestShape
+	// Transport is the registry name of the carrier that speaks this
+	// profile's wire format. Linux 4.2.3.0 runs protocolVersion=2, the binary
+	// carrier implemented by fvfacade.HTTPUpgrade ("httpupgrade"). OpenAJS
+	// uses its own frame carrier, fvfacade.RawTCP ("rawtcp").
 	Transport string
 }
 
 // Linux423Binary is the default profile: the shipping Linux 4.2.3.0 client on
-// its protocolVersion=2 binary carrier, OAEP-SHA1, no request signing, plain
-// TCP. ClientVersion and CoreVersion come from PROTOCOL.md §Version matrix;
-// the rest from the AJS-07 capture.
+// its protocolVersion=2 binary carrier (the HTTPUpgrade implementation),
+// OAEP-SHA1, no request signing. ClientVersion and CoreVersion come from
+// PROTOCOL.md §Version matrix; the request shape and device claims from the
+// AJS-07 captures.
 var Linux423Binary = VersionProfile{
 	Name:            "linux-4.2.3.0-binary",
 	ClientVersion:   LinuxClientVersion,
@@ -48,6 +52,22 @@ var Linux423Binary = VersionProfile{
 	ProtocolVersion: 2,
 	OAEPHash:        "SHA-1",
 	SigningMode:     "none",
+	RequestShape:    apifacade.ShapeLinux423,
+	Transport:       "httpupgrade",
+}
+
+// OpenAJSAndroid is the OpenAJS 4.11.10.0 profile: the OpenAJS raw-TCP frame
+// carrier, OAEP-SHA1 and the OpenAJS signing secret. The daemon does not wire
+// it (AJS_ACCOUNT_PROFILE accepts only linux-4.2.3.0), but the factory and the
+// emulator keep it available as the separate Android profile.
+var OpenAJSAndroid = VersionProfile{
+	Name:            "openajs-4.11.10.0-rawtcp",
+	ClientVersion:   OpenAJSClientVersion,
+	CoreVersion:     "20260525-1",
+	ProtocolVersion: 1,
+	OAEPHash:        "SHA-1",
+	SigningMode:     "openajs",
+	RequestShape:    apifacade.ShapeOpenAJS,
 	Transport:       "rawtcp",
 }
 
@@ -152,6 +172,8 @@ func (f *Factory) Open(ctx context.Context, req SessionRequest) (FlowSession, er
 		User:        req.UserName,
 		Password:    req.ConnectPassword.Reveal(),
 		DeviceID:    req.Device.DeviceID,
+		CUID:        req.Device.CUID,
+		CSEID:       req.Device.CSEID,
 		Site:        site,
 		AppVersion:  f.profile.ClientVersion,
 		CoreVersion: f.profile.CoreVersion,

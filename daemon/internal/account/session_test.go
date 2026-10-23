@@ -27,6 +27,9 @@ const (
 	mockTargetPort = 80
 	mockUser       = "alice"
 	mockPassword   = "cp-1"
+	// devDim is the captured Linux 4.2.3.0 _os_dim/dim value
+	// (research/60-dynamic/captures/fvmock-1.log).
+	devDim = "lid=REDACTED,8e415e603088426aa42fed420212150c"
 )
 
 // zeroIV is the CTR position the carrier uses for its outer key stream.
@@ -45,7 +48,8 @@ func TestFactoryOpenAgainstMockFV(t *testing.T) {
 	m := startMockFV(t, mockFVConfig{
 		user:     mockUser,
 		password: mockPassword,
-		cuid:     dev.DeviceID,
+		cuid:     dev.CUID,
+		cseid:    dev.CSEID,
 		host:     mockTargetHost,
 		port:     mockTargetPort,
 	})
@@ -119,7 +123,8 @@ func TestFactoryOpenRejectsDeniedAuth(t *testing.T) {
 		reject:   true,
 		user:     mockUser,
 		password: mockPassword,
-		cuid:     dev.DeviceID,
+		cuid:     dev.CUID,
+		cseid:    dev.CSEID,
 	})
 	f := NewFactory(Linux423Binary, &fvfacade.HTTPUpgrade{HandshakeTimeout: 5 * time.Second}, fvfacade.AuthOptions{
 		PublicKey:   &m.priv.PublicKey,
@@ -152,7 +157,8 @@ func TestLinux423BinaryProfile(t *testing.T) {
 	if p.ClientVersion != "4.2.3.0" || p.CoreVersion != "20241105-1" {
 		t.Fatalf("version claims = %q/%q", p.ClientVersion, p.CoreVersion)
 	}
-	if p.ProtocolVersion != 2 || p.OAEPHash != "SHA-1" || p.SigningMode != "none" || p.Transport != "rawtcp" {
+	if p.ProtocolVersion != 2 || p.OAEPHash != "SHA-1" || p.SigningMode != "none" ||
+		p.Transport != "httpupgrade" || p.RequestShape != apifacade.ShapeLinux423 {
 		t.Fatalf("profile = %+v", p)
 	}
 	f := NewFactory(p, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
@@ -167,6 +173,7 @@ type mockFVConfig struct {
 	user     string
 	password string
 	cuid     string
+	cseid    string
 	host     string
 	port     int
 }
@@ -313,8 +320,15 @@ func (m *mockFV) authenticate(conn net.Conn) ([]byte, []byte, []byte, error) {
 	if auth["u"] != m.cfg.user || auth["p"] != m.cfg.password {
 		return nil, nil, nil, fmt.Errorf("auth u/p = %q/%q", auth["u"], auth["p"])
 	}
-	if auth["cuid"] != m.cfg.cuid || auth["cseid"] != m.cfg.cuid {
-		return nil, nil, nil, fmt.Errorf("auth cuid/cseid = %q/%q", auth["cuid"], auth["cseid"])
+	if auth["cuid"] != m.cfg.cuid || auth["cseid"] != m.cfg.cseid {
+		return nil, nil, nil, fmt.Errorf("auth cuid/cseid = %q/%q, want %q/%q",
+			auth["cuid"], auth["cseid"], m.cfg.cuid, m.cfg.cseid)
+	}
+	if auth["osp"] != "linux" || auth["osd"] != "x86_64" {
+		return nil, nil, nil, fmt.Errorf("auth osp/osd = %q/%q, want linux/x86_64", auth["osp"], auth["osd"])
+	}
+	if auth["dim"] != devDim {
+		return nil, nil, nil, fmt.Errorf("auth dim = %q, want the captured value", auth["dim"])
 	}
 	if auth["v"] != Linux423Binary.ClientVersion || auth["cv"] != Linux423Binary.CoreVersion {
 		return nil, nil, nil, fmt.Errorf("auth v/cv = %q/%q", auth["v"], auth["cv"])

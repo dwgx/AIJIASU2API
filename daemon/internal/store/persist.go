@@ -41,6 +41,10 @@ type Snapshot struct {
 
 	KeyHashes map[string]string `json:"keyHashes"`
 	Secrets   map[string][]byte `json:"secrets"`
+	// Devices maps an account id to its stable device identity. It is not a
+	// credential; the field is additive, so SnapshotVersion stays 1 and a
+	// document written by a build without it restores with no devices.
+	Devices map[string]DeviceIdentity `json:"devices,omitempty"`
 
 	AccountSeq  int `json:"accountSeq"`
 	UserSeq     int `json:"userSeq"`
@@ -49,9 +53,10 @@ type Snapshot struct {
 	AuditSeq    int `json:"auditSeq"`
 }
 
-// Snapshot serializes every collection, counter and sealed secret as a
-// versioned JSON document. The read lock is held only while copying, so a slow
-// disk write never blocks the API; the copy itself is one consistent view.
+// Snapshot serializes every collection, counter, device identity and sealed
+// secret as a versioned JSON document. The read lock is held only while
+// copying, so a slow disk write never blocks the API; the copy itself is one
+// consistent view.
 func (s *Store) Snapshot() ([]byte, error) {
 	snap := Snapshot{Version: SnapshotVersion}
 
@@ -81,6 +86,10 @@ func (s *Store) Snapshot() ([]byte, error) {
 	for id, sealed := range s.secrets {
 		snap.Secrets[id] = append([]byte(nil), sealed...)
 	}
+	snap.Devices = make(map[string]DeviceIdentity, len(s.devices))
+	for id, dev := range s.devices {
+		snap.Devices[id] = dev
+	}
 	snap.AccountSeq = s.accountSeq
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
@@ -95,9 +104,10 @@ func (s *Store) Snapshot() ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// Restore replaces every collection, counter and sealed secret from data. The
-// document is decoded and validated before the write lock is taken, so an
-// empty, corrupt or unknown-version file leaves the store untouched.
+// Restore replaces every collection, counter, device identity and sealed
+// secret from data. The document is decoded and validated before the write
+// lock is taken, so an empty, corrupt or unknown-version file leaves the store
+// untouched.
 //
 // The configured sealer and clock are preserved: a snapshot only carries the
 // sealed blobs, never key material, and restored timestamps come from the
@@ -129,6 +139,7 @@ func (s *Store) Restore(data []byte) error {
 	s.settings = snap.Settings
 	s.keyHashes = snap.KeyHashes
 	s.secrets = snap.Secrets
+	s.devices = snap.Devices
 	s.accountSeq = snap.AccountSeq
 	s.userSeq = snap.UserSeq
 	s.keySeq = snap.KeySeq
@@ -269,6 +280,14 @@ func (snap *Snapshot) validate() error {
 		}
 		keys[key.ID] = struct{}{}
 	}
+	for id, dev := range snap.Devices {
+		if _, ok := accounts[id]; !ok {
+			return fmt.Errorf("state snapshot has a device for unknown account %q", id)
+		}
+		if !dev.valid() {
+			return fmt.Errorf("state snapshot has an incomplete device for account %q", id)
+		}
+	}
 	return nil
 }
 
@@ -281,6 +300,9 @@ func (snap *Snapshot) normalize() {
 	}
 	if snap.Secrets == nil {
 		snap.Secrets = make(map[string][]byte)
+	}
+	if snap.Devices == nil {
+		snap.Devices = make(map[string]DeviceIdentity)
 	}
 	for _, account := range snap.Accounts {
 		snap.AccountSeq = max(snap.AccountSeq, sequenceOf(account.ID, "acc-"))

@@ -34,11 +34,15 @@ type Client struct {
 	UserAgent string
 	Now       func() time.Time
 
-	// NoSign omits the X-Timestamp and X-Sig headers. Every shipping client
-	// signs, but the Linux 4.2.3.0 profile's secret is [UNKNOWN], so a caller
-	// may choose to send that profile's requests unsigned instead. The zero
-	// value signs.
+	// NoSign omits the X-Timestamp and X-Sig headers. OpenAJS signs; the Linux
+	// 4.2.3.0 capture is unsigned, so a caller emulating that client must set
+	// this. The zero value signs.
 	NoSign bool
+
+	// RequestShape selects the control request field set and headers. The zero
+	// value is ShapeOpenAJS; ShapeLinux423 reproduces the captured Linux
+	// 4.2.3.0 request (control.jsonl line 2).
+	RequestShape RequestShape
 
 	// Session state filled by Login / LoginSync.
 	LoginToken      string
@@ -138,7 +142,7 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 	if len(c.Hosts) == 0 {
 		return nil, errors.New("api: no hosts configured")
 	}
-	params := c.Device.CommonParams()
+	params := c.Device.ControlParams(c.RequestShape)
 	params["cmd"] = cmd
 	for k, v := range extra {
 		params[k] = v
@@ -151,6 +155,11 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 		params["username"] = c.authUserName()
 	}
 	body := BuildQuery(params)
+	if c.RequestShape == ShapeLinux423 {
+		// The captured Linux body ends with the "&" its serializer leaves
+		// behind; the signature, when present, covers the exact wire body.
+		body += "&"
+	}
 	var timestamp, sig string
 	if !c.NoSign {
 		timestamp = strconv.FormatInt(c.Now().UnixMilli(), 10)
@@ -165,8 +174,18 @@ func (c *Client) post(ctx context.Context, cmd string, extra map[string]string, 
 			return nil, fmt.Errorf("api: build request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept-Encoding", "gzip")
-		req.Header.Set("User-Agent", c.UserAgent)
+		if c.RequestShape == ShapeLinux423 {
+			// Captured Linux headers: Accept: */*, "deflate, gzip" and
+			// Connection: close, with no User-Agent. A nil User-Agent value
+			// suppresses Go's default agent.
+			req.Header.Set("Accept", "*/*")
+			req.Header.Set("Accept-Encoding", "deflate, gzip")
+			req.Header["User-Agent"] = nil
+			req.Close = true
+		} else {
+			req.Header.Set("Accept-Encoding", "gzip")
+			req.Header.Set("User-Agent", c.UserAgent)
+		}
 		if !c.NoSign {
 			req.Header.Set("X-Timestamp", timestamp)
 			req.Header.Set("X-Sig", sig)
@@ -217,12 +236,20 @@ func decodeBody(resp *http.Response) ([]byte, error) {
 
 // Login performs ClientApiLogin/Login and stores the session credentials on
 // success. A non-OK AuthResult is returned as a LoginResult, not as an error.
+//
+// ShapeLinux423 sends the captured Linux 4.2.3.0 form: v instead of _v, no
+// trigger field, and the trailing "&".
 func (c *Client) Login(ctx context.Context, username, password string) (*LoginResult, error) {
-	data, err := c.post(ctx, "ClientApiLogin/Login", map[string]string{
+	extra := map[string]string{
 		"username": username,
 		"password": password,
-		"trigger":  "login",
-	}, false)
+	}
+	if c.RequestShape != ShapeLinux423 {
+		// The Linux 4.2.3.0 capture carries no trigger field; OpenAJS sends
+		// trigger=login on both Login and LoginSync.
+		extra["trigger"] = "login"
+	}
+	data, err := c.post(ctx, "ClientApiLogin/Login", extra, false)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +272,10 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 
 // LoginSync refreshes ConnectPassword and returns the Servers map, using the
 // stored login token. The Servers map is empty when the field is absent.
+//
+// Only Login has a Linux 4.2.3.0 capture, so LoginSync keeps the OpenAJS
+// trigger/_client_login fields under every request shape; the Linux form of
+// this command is [UNVERIFIED].
 func (c *Client) LoginSync(ctx context.Context) (map[string]Server, error) {
 	data, err := c.post(ctx, "ClientApiLogin/Login", map[string]string{
 		"trigger": "login",

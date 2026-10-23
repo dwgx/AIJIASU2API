@@ -88,6 +88,10 @@ type Store struct {
 	sealer  Sealer
 	secrets map[string][]byte
 
+	// devices holds the stable, non-secret device identity of each account.
+	// It is persisted in the state snapshot and never regenerated.
+	devices map[string]DeviceIdentity
+
 	// pendingLabels holds the lowercased labels of account creates that are
 	// sealing their password outside the write lock. A label is reserved
 	// before the slow call so a concurrent create or rename cannot take it.
@@ -129,6 +133,7 @@ func newWithClock(now func() time.Time, sealer Sealer) *Store {
 		keyHashes:     make(map[string]string),
 		sealer:        sealer,
 		secrets:       make(map[string][]byte),
+		devices:       make(map[string]DeviceIdentity),
 		pendingLabels: make(map[string]struct{}),
 		accountSeq:    6,
 		userSeq:       4,
@@ -570,6 +575,7 @@ func (s *Store) DeleteAccount(id string) error {
 	s.leases = keptLeases
 	s.accounts = append(s.accounts[:idx], s.accounts[idx+1:]...)
 	delete(s.secrets, id)
+	delete(s.devices, id)
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.delete", label,
 		fmt.Sprintf("%d nodes and %d leases removed", nodesRemoved, leasesRemoved))

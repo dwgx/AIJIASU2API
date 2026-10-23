@@ -20,9 +20,13 @@ type Options struct {
 	UserAgent string
 
 	// NoSigning omits X-Timestamp and X-Sig. Signing is the default (the zero
-	// Options signs), matching every shipping client. The Linux 4.2.3.0
-	// profile's signing secret is [UNKNOWN], so that profile may need it.
+	// Options signs), matching OpenAJS. The Linux 4.2.3.0 capture is unsigned
+	// and its signing secret is [UNKNOWN], so that profile sets this.
 	NoSigning bool
+
+	// RequestShape selects the control request field set. The zero value is
+	// ShapeOpenAJS; the Linux 4.2.3.0 profile passes ShapeLinux423.
+	RequestShape apifacade.RequestShape
 
 	// Now overrides the clock used for X-Timestamp. Nil uses time.Now.
 	Now func() time.Time
@@ -51,6 +55,7 @@ func NewControl(hosts []string, device apifacade.Device, opts Options) *Control 
 	if opts.NoSigning {
 		client.NoSign = true
 	}
+	client.RequestShape = opts.RequestShape
 	if opts.Now != nil {
 		client.Now = opts.Now
 	}
