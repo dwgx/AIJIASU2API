@@ -38,7 +38,7 @@ As of 2026-10-23:
   account control, FV session factory, node controller, SOCKS5 gate and process supervisor seams.
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and remains
-  `[UNVERIFIED]` live. 222 Go test functions, mostly `httptest` fakes; the tests use no Resin
+  `[UNVERIFIED]` live. 226 Go test functions, mostly `httptest` fakes; the tests use no Resin
   process, no vendor account and no network. The Linux 4.2.3.0 request
   shape (B1), stable per-account device identity (B5) and binary-carrier mapping (C3) are covered
   by offline conformance tests; live acceptance remains `[UNVERIFIED]`.
