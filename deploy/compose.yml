@@ -1,0 +1,82 @@
+# Control plane: ajs-accountd + dashboard, with Resin as an optional profile.
+#
+#   cd deploy
+#   cp .env.example .env          # then fill in the placeholders
+#   docker compose up -d --build
+#   docker compose --profile resin up -d
+#
+# accountd and Resin use host networking because both must reach loopback
+# endpoints: Resin's admin API on 127.0.0.1:2260 and the local SOCKS5 nodes the
+# panel leases point at. The dashboard stays on a bridge network and publishes
+# to host loopback only.
+#
+# No secret is written here: values come from .env (gitignored), which is
+# optional at parse time so `docker compose config` works on a fresh checkout.
+name: ajs-control-plane
+
+services:
+  accountd:
+    build:
+      context: ..
+      dockerfile: daemon/Dockerfile
+    image: ajs-accountd:local
+    container_name: ajs-accountd
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AJS_LISTEN: 127.0.0.1:2261
+      AJS_STATE_DIR: /data
+    volumes:
+      - accountd-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2261/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: ../dashboard
+      args:
+        # Baked into the bundle: rebuild the image after changing any of these.
+        VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+        VITE_API_BASE: ${VITE_API_BASE:-http://127.0.0.1:2261}
+        VITE_PANEL_TOKEN: ${VITE_PANEL_TOKEN:-}
+    image: ajs-dashboard:local
+    container_name: ajs-dashboard
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:18081:80"
+    depends_on:
+      accountd:
+        condition: service_healthy
+    restart: unless-stopped
+
+  resin:
+    profiles: ["resin"]
+    image: ghcr.io/resinat/resin:1.3.0
+    container_name: ajs-resin
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Host networking means Resin would otherwise bind 0.0.0.0; keep the
+      # admin API and SOCKS5 listener on loopback.
+      RESIN_LISTEN_ADDRESS: ${RESIN_LISTEN_ADDRESS:-127.0.0.1}
+      RESIN_PORT: ${RESIN_PORT:-2260}
+    volumes:
+      - resin-state:/var/lib/resin
+      - resin-cache:/var/cache/resin
+      - resin-log:/var/log/resin
+    restart: unless-stopped
+
+volumes:
+  accountd-data:
+  resin-state:
+  resin-cache:
+  resin-log:

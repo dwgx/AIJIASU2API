@@ -6,10 +6,11 @@ egress IP**.
 
 ## What this repository is
 
-A research corpus plus the two artefacts built on it: an operator console (`dashboard/`) and a
-control-plane daemon skeleton (`daemon/`). It records what is known about the AJiaSu client — its
-installer payload, its Windows and Linux binaries, its `FV*` protocol stack, its
-login/node-selection flow — and implements the parts that do not require a vendor account.
+A research corpus plus the artefacts built on it: an operator console (`dashboard/`), a
+control-plane daemon skeleton (`daemon/`), and a compose deployment for the pair (`deploy/`). It
+records what is known about the AJiaSu client — its installer payload, its Windows and Linux
+binaries, its `FV*` protocol stack, its login/node-selection flow — and implements the parts that
+do not require a vendor account.
 
 It is **not** a client, not a proxy service, and not a distribution of vendor software. No vendor
 binaries, drivers, installers, packet captures, or memory dumps are committed here; `.gitignore`
@@ -17,8 +18,9 @@ blocks them at the repository root. Nothing in this tree has contacted a live AJ
 
 ## Current status
 
-**Offline emulator, dashboard and daemon; the Resin M1 integration spike is PASS. No live vendor
-call, no gate; panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
+**Offline emulator, dashboard and daemon, plus a control-plane compose stack in `deploy/`; the
+Resin M1 integration spike is PASS. No live vendor call, no gate; panel state survives a restart
+only as a versioned JSON snapshot, not SQLite.**
 
 As of 2026-10-23:
 
@@ -35,6 +37,10 @@ As of 2026-10-23:
   exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, and the
   account-control plus FV session-factory seams. 153 Go test functions, mostly `httptest` fakes;
   the tests use no Resin process, no vendor account and no network.
+- `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
+  on `127.0.0.1:18081`, and Resin v1.3.0 behind the optional `resin` profile. Both images build
+  from this tree; the stack does not include the gate or node supervision. See
+  [`deploy/README.md`](deploy/README.md).
 - Resin M1 — **PASS** on HMC against `ghcr.io/resinat/resin:1.3.0`
   (`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`): loopback SOCKS5 dial,
   IP-anchored sticky `(Platform, Account)` leases, rotation through platform filter exclusion,
@@ -55,8 +61,9 @@ As of 2026-10-23:
 - **SQLite / the full schema.** The daemon persists a versioned JSON snapshot (`AJS_STATE_FILE`,
   every 30s + shutdown) including sealed secrets, but it is not the SQLite schema in
   `docs/PANEL.md`; the snapshot is a v0.1 stopgap.
-- **Packaged deployment.** `dashboard/compose.yml` builds the mock image only; there is no compose
-  for the daemon/Resin pair, and no macOS or Windows build.
+- **Packaged deployment beyond the control plane.** `deploy/compose.yml` builds and runs
+  `ajs-accountd` + the dashboard (Resin optional), but the gate/supervisor node lifecycle is still
+  absent, so the stack proxies no traffic; there is no macOS or Windows build.
 - **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;
   probes are bookkeeping canaries, not network probes.
 
@@ -90,7 +97,17 @@ AJS_LISTEN=127.0.0.1:2261 AJS_ADMIN_TOKEN=local-test-token go run ./cmd/ajs-acco
 VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 \
   VITE_PANEL_TOKEN=local-test-token npm run build
 npx vite preview --host 127.0.0.1 --port 18082   # http://127.0.0.1:18082
+
+# 4. Control-plane compose stack: accountd + dashboard (Resin optional)
+cd deploy && cp .env.example .env                 # from the repo root; fill in the placeholders
+docker compose up -d --build                      # dashboard: http://127.0.0.1:18081
 ```
+
+The compose stack builds both images from this tree and runs `accountd` on host loopback `2261`.
+Its dashboard publishes the same `18081` as the standalone `dashboard/compose.yml`, so stop one
+before starting the other. Prerequisites, the live/mock build switch, the optional `--profile
+resin`, health checks, backup/restore and the honest limitations are in
+[`deploy/README.md`](deploy/README.md).
 
 `local-test-token` is a loopback placeholder, not a secret. `VITE_*` values are baked into `dist/`
 at build time, so the live token is readable by anyone who can fetch the bundle: keep
@@ -98,8 +115,9 @@ at build time, so the live token is readable by anyone who can fetch the bundle:
 
 The HMC build host serves three loopback-only endpoints: `18081` mock dashboard
 (`docker compose up -d` in `dashboard/`), `18082` live dashboard (`vite preview` over a live
-build), and `2261` `ajs-accountd`. Resin listens on `2260` when running. From Windows, forward
-the ports:
+build), and `2261` `ajs-accountd`. Resin listens on `2260` when running. `deploy/` packages the
+same pair as one stack and reuses `18081`, so run either it or the standalone dashboard compose,
+not both. From Windows, forward the ports:
 
 ```bash
 ssh -N -L 18081:127.0.0.1:18081 hmc
@@ -121,6 +139,7 @@ LICENSE                    MIT
 docs/PANEL.md              control-plane design: ports, API, data model, phases
 dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
 daemon/                    ajs-accountd control-plane skeleton (Go 1.26); see daemon/README.md
+deploy/                    Docker Compose control plane (accountd + dashboard, Resin profile); see deploy/README.md
 emulator/                  offline Tier-2 FV emulator (Go)
 scripts/m1/                M1 spike harness: loopback SOCKS5 nodes (dummy-socks)
 research/00-plan/          question tree, master index, ledger

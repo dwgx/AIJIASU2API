@@ -11,6 +11,16 @@ COPY public ./public
 COPY src ./src
 COPY tests ./tests
 
+# Vite inlines every VITE_* value into the bundle at build time. The mock build
+# is the default; live mode is opt-in and its token is readable by anyone who
+# can fetch the bundle, so it belongs on loopback only.
+ARG VITE_USE_MOCK=true
+ARG VITE_API_BASE=
+ARG VITE_PANEL_TOKEN=
+ENV VITE_USE_MOCK=${VITE_USE_MOCK} \
+    VITE_API_BASE=${VITE_API_BASE} \
+    VITE_PANEL_TOKEN=${VITE_PANEL_TOKEN}
+
 RUN npm run build
 
 FROM nginx:1.29-alpine AS runtime
