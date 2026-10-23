@@ -2735,6 +2735,225 @@ svg {
 }
 
 /* ==========================================================================
+   Accounts — explicit Cards view
+   ========================================================================== */
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.account-grid--empty {
+  display: block;
+  padding: 0;
+}
+
+.account-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  animation: account-card-in 150ms var(--ease-enter) both;
+  transition:
+    background-color 150ms var(--ease-move),
+    border-color 150ms var(--ease-move),
+    box-shadow 150ms var(--ease-move);
+}
+
+.account-card:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 82%, var(--elevated));
+}
+
+.account-card.is-selected {
+  border-color: color-mix(in srgb, var(--mint) 42%, var(--border));
+  background: color-mix(in srgb, var(--mint) 5%, var(--surface));
+  box-shadow: inset 0 0 0 1px var(--mint);
+}
+
+.account-card.is-selected:hover {
+  background: color-mix(in srgb, var(--mint) 7%, var(--surface));
+}
+
+.account-card--skeleton {
+  animation: none;
+}
+
+.account-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.account-card__identity {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.account-card__label,
+.account-card__username {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card__label {
+  font-weight: 600;
+}
+
+.account-card__username {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.account-card__state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-card__meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-card__platform {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--elevated);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-card__regions {
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.account-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.account-card__metric {
+  min-width: 0;
+}
+
+.account-card__metric dt {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.account-card__metric dd {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+}
+
+.account-card__meter {
+  display: block;
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.account-card__meter.is-empty {
+  background: color-mix(in srgb, var(--warning) 26%, transparent);
+}
+
+.account-card__meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--mint);
+  transition: width 300ms var(--ease-enter);
+}
+
+.account-card__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.account-card__expiry {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.account-card__expiry-label {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.account-card__expiry-date {
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.account-card__expiry-rel {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.account-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* ==========================================================================
    Light theme corrections
    ========================================================================== */
 [data-theme="light"] .metric {
@@ -2948,6 +3167,10 @@ svg {
     right: 12px;
     bottom: 12px;
   }
+
+  .account-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -3033,6 +3256,17 @@ svg {
 /* ==========================================================================
    Motion
    ========================================================================== */
+@keyframes account-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -3123,5 +3357,9 @@ svg {
     animation: none;
     background-image: none;
     background-color: var(--mint);
+  }
+
+  .account-card {
+    animation: none;
   }
 }

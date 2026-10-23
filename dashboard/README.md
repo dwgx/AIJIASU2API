@@ -8,7 +8,7 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 41 tests.
+- Tests: Vitest + React Testing Library + jsdom, 48 tests.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. No git commits, no credentials, no vendor calls.
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 41 tests
+npm test           # Vitest, 48 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -161,25 +161,26 @@ cd dashboard && tar -czf - --exclude=./node_modules --exclude=./dist --exclude=.
 ssh hmc 'cd /srv/dwgxhomecloud/scratch/loveplus-dashboard && npm install && npm run build && npm test'
 ```
 
-Both modes were built from the same source on HMC (polling/stale slice included):
+Both modes were built from the same source on HMC (Accounts view slice included):
 
 | Build | Command | Result |
 |---|---|---|
-| Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.52s`, `dist-mock/assets/index-BuWhRhC0.js` |
-| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.54s`, `dist/assets/index-CdKbee-7.js` |
+| Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.58s`, `dist-mock/assets/index-DmnOxSn9.js` |
+| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
-`npm test` — exit 0, `Test Files 6 passed (6)`, `Tests 41 passed (41)`:
+`npm test` — exit 0, `Test Files 7 passed (7)`, `Tests 48 passed (48)`:
 
 | File | Tests |
 |---|---|
 | `tests/api.test.ts` | 9 |
+| `tests/accounts-view.test.tsx` | 7 |
 | `tests/app.test.tsx` | 6 |
 | `tests/interactions.test.tsx` | 9 |
 | `tests/live-mode.test.tsx` | 1 |
 | `tests/palette-focus.test.tsx` | 3 |
 | `tests/useAsync.test.tsx` | 13 |
-| **Total** | **41** |
+| **Total** | **48** |
 
 Docker image built on HMC (`docker build -t loveplus-dashboard:local .`) and smoke-tested without a
 host port mapping:
@@ -205,12 +206,21 @@ After the polling slice the mock build was re-rendered from `dist-mock` on a scr
 carries the idle `.topbar__progress` element, no `.stale-dot` appears while the mock data is fresh,
 and Accounts still renders its 6-row table.
 
+The Accounts view slice added `screenshots/accounts-cards.png` (1440×900) and
+`screenshots/mobile-accounts-cards.png` (390×844), captured after switching to **Cards** on the mock
+build with headless Chromium over CDP. The same capture measured 6 cards, 0 `.table-wrap`,
+`document.documentElement.scrollWidth` equal to 1440 and 390 (no horizontal overflow), three grid
+columns at 1440 and one 336 px column at 390.
+
 ## Tests and QA
 
-- 41 Vitest tests in 6 files (see [Verification](#verification-recorded-2026-10-23)).
+- 48 Vitest tests in 7 files (see [Verification](#verification-recorded-2026-10-23)).
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
+  `tests/accounts-view.test.tsx` covers the table default, switching both ways, the
+  `ajs.accounts.view` preference across remounts, an invalid stored value, card anatomy, card
+  selection plus the shared test-login action, the mobile grid and its CSS contract.
   `tests/live-mode.test.tsx` stubs `VITE_USE_MOCK=false` before importing the app, then asserts the
   live shell (`live API`, `v0.1.0 · live`) and the absence of the reset card.
 - Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
@@ -239,7 +249,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | Route | Page | Primary surfaces |
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions |
-| `/accounts` | Accounts | filterable table, add drawer, login test, pause/resume, delete confirm, bulk select |
+| `/accounts` | Accounts | filterable table or card grid (view switch), add drawer, login test, pause/resume, delete confirm, bulk select |
 | `/nodes` | Nodes | region/status filters, latency sparklines, success/capacity meters, drain toggle, detail drawer |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
@@ -272,6 +282,7 @@ src/
   pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Settings
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
+  accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
   api.test.ts             seed counts, metrics, CRUD, reset, settings persistence
@@ -279,6 +290,33 @@ tests/
   palette-focus.test.tsx  command palette focus trap and focus restoration
   useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
 ```
+
+### Accounts views
+
+`/accounts` keeps the table as the default and adds a toolbar segmented control
+(`role="group" aria-label="Account view"`, buttons **Table** / **Cards**). The choice is stored in
+`localStorage["ajs.accounts.view"]` (`"table"` or `"cards"`); a missing, invalid or unavailable
+store falls back to `table` without throwing.
+
+Both views share the same search/state/platform filters, count, bulk bar and action handlers. Cards
+render as `<article role="listitem">` inside
+`<div class="account-grid" role="list" aria-label="Vendor accounts">`:
+
+| Region | Contents |
+|---|---|
+| Head | selection checkbox, label + username, state `Badge` with `StatusDot` (pulses while active) |
+| Meta | platform chip, region list, or `any region` |
+| Metrics | Nodes `live/total` with a thin capacity bar (mint; amber track at 0 live), concurrency, usage via `formatBytes` |
+| Foot | `Expires` label, expiry date + relative time, test login, pause/resume, delete (same labels and handlers as the table) |
+
+The grid is `repeat(auto-fill, minmax(280px, 1fr))` with a 12 px gap and collapses to one column
+below 760 px; card actions wrap and the card body never forces horizontal scroll. Selected cards get
+a 1 px mint inset ring plus a faint mint wash. Hover changes only the border/background (no
+translate), and the 150 ms fade + 4 px rise enter is disabled by `prefers-reduced-motion`. The table
+keeps its existing below-760 px auto-card behaviour; the explicit card view works at every width.
+`tests/accounts-view.test.tsx` covers the default table, switching both ways, the localStorage
+preference (including an invalid value), card anatomy, bulk selection plus a card action, the mobile
+grid, and the responsive CSS contract.
 
 ## Data layer
 

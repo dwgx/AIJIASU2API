@@ -1,6 +1,7 @@
-import { Pause, Play, Search, Trash2 } from 'lucide-react'
+import clsx from 'clsx'
+import { LayoutGrid, Pause, Play, Rows3, Search, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, isMockMode } from '../lib/api'
 import { formatBytes, formatDate, formatRelative } from '../lib/format'
@@ -23,6 +24,7 @@ import {
   Input,
   PageHeader,
   Select,
+  Skeleton,
   StatusDot,
   TableSkeleton,
 } from '../components/primitives'
@@ -37,6 +39,214 @@ const EMPTY_FORM = {
   regions: '',
 }
 
+type AccountView = 'table' | 'cards'
+const ACCOUNT_VIEW_KEY = 'ajs.accounts.view'
+
+function readAccountView(): AccountView {
+  try {
+    if (typeof localStorage === 'undefined') return 'table'
+    return localStorage.getItem(ACCOUNT_VIEW_KEY) === 'cards' ? 'cards' : 'table'
+  } catch {
+    return 'table'
+  }
+}
+
+function writeAccountView(view: AccountView) {
+  try {
+    localStorage.setItem(ACCOUNT_VIEW_KEY, view)
+  } catch {
+    // Storage can be unavailable (private mode or quota); the switch still works for this session.
+  }
+}
+
+function AccountViewSwitch({
+  value,
+  onChange,
+}: {
+  value: AccountView
+  onChange: (view: AccountView) => void
+}) {
+  return (
+    <div className="segmented" role="group" aria-label="Account view">
+      <button
+        type="button"
+        className={clsx('segmented__item', value === 'table' && 'is-active')}
+        aria-pressed={value === 'table'}
+        onClick={() => onChange('table')}
+      >
+        <Rows3 size={13} aria-hidden="true" />
+        <span>Table</span>
+      </button>
+      <button
+        type="button"
+        className={clsx('segmented__item', value === 'cards' && 'is-active')}
+        aria-pressed={value === 'cards'}
+        onClick={() => onChange('cards')}
+      >
+        <LayoutGrid size={13} aria-hidden="true" />
+        <span>Cards</span>
+      </button>
+    </div>
+  )
+}
+
+interface AccountCardProps {
+  account: Account
+  selected: boolean
+  onToggleSelected: (id: string) => void
+  onTest: (account: Account) => void
+  onTogglePause: (account: Account) => void
+  onDelete: (id: string) => void
+}
+
+function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePause, onDelete }: AccountCardProps) {
+  const state = ACCOUNT_STATE[account.state]
+  const capacity = account.nodeCount > 0 ? Math.min(1, Math.max(0, account.liveNodeCount / account.nodeCount)) : 0
+  const capacityPct = Math.round(capacity * 100)
+
+  return (
+    <article role="listitem" className={clsx('account-card', selected && 'is-selected')}>
+      <div className="account-card__head">
+        <Checkbox
+          aria-label={`Select ${account.label}`}
+          checked={selected}
+          onChange={() => onToggleSelected(account.id)}
+        />
+        <div className="account-card__identity">
+          <span className="account-card__label" title={account.label}>
+            {account.label}
+          </span>
+          <span className="account-card__username" title={account.username}>
+            {account.username}
+          </span>
+        </div>
+        <span className="account-card__state">
+          <StatusDot tone={state.tone} pulse={account.state === 'active'} />
+          <Badge tone={state.tone}>{state.label}</Badge>
+        </span>
+      </div>
+
+      <div className="account-card__meta">
+        <span className="account-card__platform">{account.platform}</span>
+        <span className="account-card__regions">
+          {account.regions.length > 0 ? account.regions.join(' · ') : 'any region'}
+        </span>
+      </div>
+
+      <dl className="account-card__metrics">
+        <div className="account-card__metric">
+          <dt>Nodes</dt>
+          <dd>
+            <span>
+              {account.liveNodeCount}/{account.nodeCount}
+            </span>
+            <span
+              className={clsx('account-card__meter', account.liveNodeCount === 0 && 'is-empty')}
+              role="progressbar"
+              aria-label={`Node capacity for ${account.label}`}
+              aria-valuenow={capacityPct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <span className="account-card__meter-fill" style={{ width: `${capacityPct}%` }} />
+            </span>
+          </dd>
+        </div>
+        <div className="account-card__metric">
+          <dt>Concurrency</dt>
+          <dd>{account.concurrency}</dd>
+        </div>
+        <div className="account-card__metric">
+          <dt>Usage</dt>
+          <dd>{formatBytes(account.usageBytes)}</dd>
+        </div>
+      </dl>
+
+      <div className="account-card__foot">
+        <span className="account-card__expiry">
+          <span className="account-card__expiry-label">Expires</span>
+          <span className="account-card__expiry-date">{formatDate(account.expiresAt)}</span>
+          <span className="account-card__expiry-rel">{formatRelative(account.expiresAt)}</span>
+        </span>
+        <span className="account-card__actions">
+          <IconButton
+            label={`Test login for ${account.label}`}
+            icon={<Play size={14} />}
+            onClick={() => onTest(account)}
+          />
+          <IconButton
+            label={`${account.state === 'paused' ? 'Resume' : 'Pause'} ${account.label}`}
+            icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
+            onClick={() => onTogglePause(account)}
+          />
+          <IconButton
+            label={`Delete ${account.label}`}
+            icon={<Trash2 size={14} />}
+            variant="ghost"
+            onClick={() => onDelete(account.id)}
+          />
+        </span>
+      </div>
+    </article>
+  )
+}
+
+function AccountCards({
+  accounts,
+  selected,
+  empty,
+  onToggleSelected,
+  onTest,
+  onTogglePause,
+  onDelete,
+}: {
+  accounts: Account[]
+  selected: string[]
+  empty: ReactNode
+  onToggleSelected: (id: string) => void
+  onTest: (account: Account) => void
+  onTogglePause: (account: Account) => void
+  onDelete: (id: string) => void
+}) {
+  if (accounts.length === 0) {
+    return <div className="account-grid account-grid--empty">{empty}</div>
+  }
+
+  return (
+    <div className="account-grid" role="list" aria-label="Vendor accounts">
+      {accounts.map((account) => (
+        <AccountCard
+          key={account.id}
+          account={account}
+          selected={selected.includes(account.id)}
+          onToggleSelected={onToggleSelected}
+          onTest={onTest}
+          onTogglePause={onTogglePause}
+          onDelete={onDelete}
+        />
+      ))}
+    </div>
+  )
+}
+
+function AccountCardsSkeleton() {
+  return (
+    <div className="account-grid" aria-busy="true" aria-label="Loading accounts">
+      {Array.from({ length: 6 }, (_, index) => (
+        <div className="account-card account-card--skeleton" key={index}>
+          <div className="account-card__head">
+            <Skeleton width={16} height={16} />
+            <Skeleton width="55%" height={12} />
+          </div>
+          <Skeleton width="42%" height={10} />
+          <Skeleton height={32} />
+          <Skeleton width="68%" height={10} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function Accounts() {
   const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const [params, setParams] = useSearchParams()
@@ -44,6 +254,7 @@ export default function Accounts() {
   const [query, setQuery] = useState('')
   const [stateFilter, setStateFilter] = useState<'all' | AccountState>('all')
   const [platformFilter, setPlatformFilter] = useState<'all' | Platform>('all')
+  const [view, setView] = useState<AccountView>(readAccountView)
   const [selected, setSelected] = useState<string[]>([])
   const [deleteIds, setDeleteIds] = useState<string[]>([])
   const [deleting, setDeleting] = useState(false)
@@ -53,6 +264,11 @@ export default function Accounts() {
   const [saving, setSaving] = useState(false)
 
   const drawerOpen = params.get('new') === '1'
+
+  const changeView = (next: AccountView) => {
+    setView(next)
+    writeAccountView(next)
+  }
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -285,6 +501,25 @@ export default function Accounts() {
     },
   ]
 
+  const emptyState = (
+    <EmptyState
+      title="No accounts match these filters"
+      description="Adjust the search or clear the state and platform filters."
+      action={
+        <Button
+          variant="secondary"
+          onClick={() => {
+            setQuery('')
+            setStateFilter('all')
+            setPlatformFilter('all')
+          }}
+        >
+          Clear filters
+        </Button>
+      }
+    />
+  )
+
   return (
     <div className="stack-lg">
       <PageHeader
@@ -327,6 +562,7 @@ export default function Accounts() {
               </option>
             ))}
           </Select>
+          <AccountViewSwitch value={view} onChange={changeView} />
           <span className="toolbar__count">
             {filtered.length} of {accounts.data?.length ?? 0}
           </span>
@@ -357,31 +593,28 @@ export default function Accounts() {
         {accounts.status === 'error' ? (
           <ErrorState message={accounts.error ?? 'Unknown error'} onRetry={accounts.reload} />
         ) : accounts.status === 'loading' && !accounts.data ? (
-          <TableSkeleton rows={6} columns={8} />
+          view === 'cards' ? (
+            <AccountCardsSkeleton />
+          ) : (
+            <TableSkeleton rows={6} columns={8} />
+          )
+        ) : view === 'cards' ? (
+          <AccountCards
+            accounts={filtered}
+            selected={selected}
+            empty={emptyState}
+            onToggleSelected={toggleSelected}
+            onTest={(account) => void runTest(account)}
+            onTogglePause={(account) => void togglePause(account)}
+            onDelete={(id) => setDeleteIds([id])}
+          />
         ) : (
           <DataTable
             caption="Vendor accounts"
             columns={columns}
             rows={filtered}
             rowKey={(account) => account.id}
-            empty={
-              <EmptyState
-                title="No accounts match these filters"
-                description="Adjust the search or clear the state and platform filters."
-                action={
-                  <Button
-                    variant="secondary"
-                    onClick={() => {
-                      setQuery('')
-                      setStateFilter('all')
-                      setPlatformFilter('all')
-                    }}
-                  >
-                    Clear filters
-                  </Button>
-                }
-              />
-            }
+            empty={emptyState}
           />
         )}
       </Card>
