@@ -124,3 +124,25 @@ Linux/Docker as the target runtime.
   the observation is indirect.
 - Reports in English. Binaries stay out of git (`.gitignore`).
 - One writer per tree; a slice writes only inside its `# Non-Conflict` paths.
+
+## 8. Product layer — panel decision (2026-10-23)
+
+The emulator is the data plane; the missing product layer is designed in `docs/PANEL.md` and
+evidenced in `research/70-panel/REPORT.md` (sources in `research/70-panel/sources.tsv`).
+
+- **Control plane:** run [Resin](https://github.com/Resinat/Resin) v1.3.0 **unmodified** (MIT, Go).
+  It provides the proxy entrypoint, panel, sticky leases anchored on egress IP, health checks,
+  GeoIP and per-account request logs.
+- **Integration:** `ajs-accountd` publishes one `socks5://127.0.0.1:<gate>#<region>-<n>` line per
+  live `(account, server)` into Resin's local subscription `ajs-live`; no fork, no patch.
+- **New daemon:** `ajs-accountd` — account vault, session supervisor, per-account concurrency gate,
+  byte metering, subscription publisher, drain/rotation API, SQLite state.
+- **Not implemented in this wave.** `emulator/` is unchanged; phase 1 needs no emulator change.
+
+**License:** MIT — root [`LICENSE`](LICENSE), `Copyright (c) 2026 The LovePlusSpeedToProxy Authors`.
+Third-party obligations are stated in `research/70-panel/REPORT.md`; no AGPL or unlicensed code is
+copied.
+
+**Use boundary:** self-use with accounts the operator owns or is explicitly **authorized** to use.
+No public proxy service, no resale or sharing of access, no bypassing vendor account limits. The
+operator is responsible for the vendor's terms of service and for local law.

@@ -16,12 +16,18 @@ blocks them at the repository root.
 
 ## Current status
 
-**Research only — pre-implementation.**
+**Offline emulator and design baseline; nothing here has touched the live service.**
 
-As of 2026-10-23 the repository contains the campaign plan and the static-analysis baseline:
-OSINT, Windows static inventory, Linux static analysis, and a language-neutral FV protocol
-specification. No code that logs in, connects, or proxies exists yet. Nothing in this repository
-has been validated against a live service.
+As of 2026-10-23 the repository contains the campaign plan, the static-analysis baseline (OSINT,
+Windows static inventory, Linux static analysis, FV protocol specification), and `emulator/` — a
+Go implementation of the control API, FV crypto/frame, SOCKS5/HTTP front ends and the captured
+proxy carrier. The emulator builds and passes its offline conformance tests; it makes no live
+calls and holds no credentials.
+
+The product layer above the emulator — multi-account sessions, lease allocation, per-user access
+and the management panel — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md)
+for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the
+candidate analysis behind it.
 
 ## Scope and tiers
 
@@ -60,11 +66,32 @@ this tree.
 ```
 README.md                  this file
 PLAN.md                    campaign plan, slices, acceptance criteria, risks
+LICENSE                    MIT
+docs/PANEL.md              panel and post-login architecture (implementation design)
+emulator/                  offline Tier-2 FV emulator (Go)
 research/00-plan/          question tree, master index, ledger
 research/10-* .. 90-*      per-slice research output (later waves)
+research/70-panel/         panel research: candidate matrix, sources, validation script
 ```
 
 ## Reports
 
 All research reports are written in English and cite a path, URL, or command for every claim.
 Claims that were not directly observed are marked `[INFERENCE]` or `[UNKNOWN]`.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 The LovePlusSpeedToProxy Authors.
+
+Third-party components keep their own licences. The panel design runs
+[Resin](https://github.com/Resinat/Resin) unmodified under the MIT licence
+(Copyright (c) 2026 Resinat and contributors); no AGPL-licensed or unlicensed code is copied into
+this repository. Details and attribution obligations: `research/70-panel/REPORT.md`.
+
+## Use boundary
+
+This project is for a single operator driving **accounts they own or are explicitly authorized to
+use**, for their own traffic. It is **not** a public proxy service: no resale, no sharing of
+access, no published endpoints, no bypassing vendor account limits, and no use to hide the origin
+of abusive traffic. The operator is responsible for the vendor's terms of service and for local
+law. The same boundary is restated in `PLAN.md` and `docs/PANEL.md`.
