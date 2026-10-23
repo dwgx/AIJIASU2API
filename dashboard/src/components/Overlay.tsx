@@ -1,6 +1,7 @@
 import clsx from 'clsx'
 import { X } from 'lucide-react'
 import type { CSSProperties, ReactNode } from 'react'
+import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { Button, IconButton } from './primitives'
 
@@ -15,6 +16,7 @@ interface DrawerProps {
 }
 
 export function Drawer({ open, title, subtitle, onClose, children, footer, width = 440 }: DrawerProps) {
+  const { t } = useI18n()
   const containerRef = useFocusTrap<HTMLDivElement>(open, onClose)
   if (!open) return null
   const style = { '--drawer-w': `${width}px` } as CSSProperties
@@ -40,7 +42,7 @@ export function Drawer({ open, title, subtitle, onClose, children, footer, width
             <h2 className="drawer__title">{title}</h2>
             {subtitle ? <p className="drawer__subtitle">{subtitle}</p> : null}
           </div>
-          <IconButton label="Close panel" icon={<X size={16} />} onClick={onClose} />
+          <IconButton label={t('common.closePanel')} icon={<X size={16} />} onClick={onClose} />
         </header>
         <div className="drawer__body">{children}</div>
         {footer ? <footer className="drawer__foot">{footer}</footer> : null}
@@ -60,6 +62,7 @@ interface ModalProps {
 }
 
 export function Modal({ open, title, description, onClose, children, footer, size = 'sm' }: ModalProps) {
+  const { t } = useI18n()
   const containerRef = useFocusTrap<HTMLDivElement>(open, onClose)
   if (!open) return null
   return (
@@ -83,7 +86,7 @@ export function Modal({ open, title, description, onClose, children, footer, siz
             <h2 className="modal__title">{title}</h2>
             {description ? <p className="modal__desc">{description}</p> : null}
           </div>
-          <IconButton label="Close dialog" icon={<X size={16} />} onClick={onClose} />
+          <IconButton label={t('common.closeDialog')} icon={<X size={16} />} onClick={onClose} />
         </header>
         {children ? <div className="modal__body">{children}</div> : null}
         {footer ? <footer className="modal__foot">{footer}</footer> : null}
@@ -113,6 +116,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const { t } = useI18n()
   return (
     <Modal
       open={open}
@@ -122,7 +126,7 @@ export function ConfirmDialog({
       footer={
         <>
           <Button variant="ghost" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button variant={tone} onClick={onConfirm} loading={busy}>
             {confirmLabel}

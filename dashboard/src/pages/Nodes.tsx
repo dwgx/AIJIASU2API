@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { formatDateTime, formatRelative, percent } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import { NODE_STATE } from '../lib/labels'
 import { regionName } from '../lib/mock'
 import type { NodeState, ProxyNode } from '../lib/types'
@@ -55,6 +56,7 @@ export default function Nodes() {
   const nodes = useAsync(() => api.listNodes(), [], { intervalMs: 15_000 })
   const [params] = useSearchParams()
   const { push } = useToast()
+  const { lang, t } = useI18n()
   const [query, setQuery] = useParamQuery(params.get('q'))
   const [regionFilter, setRegionFilter] = useState('all')
   const [stateFilter, setStateFilter] = useState<'all' | NodeState>('all')
@@ -82,9 +84,12 @@ export default function Nodes() {
     try {
       await api.setNodeState(node.id, next)
       nodes.reload()
-      push(`${node.label} ${next === 'DRAINING' ? 'draining' : 'live'}`, 'success')
+      push(
+        t(next === 'DRAINING' ? 'nodes.toastDraining' : 'nodes.toastLive', { name: node.label }),
+        'success',
+      )
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Could not update node', 'danger')
+      push(cause instanceof Error ? cause.message : t('nodes.toastUpdateFailed'), 'danger')
     }
   }
 
@@ -92,19 +97,16 @@ export default function Nodes() {
     try {
       await api.probeNode(node.id)
       nodes.reload()
-      push(
-        `Probe timestamp touched · ${node.label} · latency and egress unchanged, no verification`,
-        'default',
-      )
+      push(t('nodes.toastProbeTouched', { name: node.label }), 'default')
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Probe failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('nodes.toastProbeFailed'), 'danger')
     }
   }
 
   const columns: Array<Column<ProxyNode>> = [
     {
       key: 'node',
-      label: 'Node',
+      label: t('nodes.columnNode'),
       render: (node) => (
         <div className="cell-stack">
           <span className="cell-strong mono">{node.label}</span>
@@ -114,7 +116,7 @@ export default function Nodes() {
     },
     {
       key: 'region',
-      label: 'Region',
+      label: t('nodes.columnRegion'),
       render: (node) => (
         <div className="cell-stack">
           <span>{regionName(node.region)}</span>
@@ -124,20 +126,20 @@ export default function Nodes() {
     },
     {
       key: 'state',
-      label: 'Status',
+      label: t('nodes.columnStatus'),
       render: (node) => {
         const state = NODE_STATE[node.state]
         return (
           <span className="state-cell">
             <StatusDot tone={state.tone} pulse={node.state === 'LIVE'} />
-            <Badge tone={state.tone}>{state.label}</Badge>
+            <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
           </span>
         )
       },
     },
     {
       key: 'latency',
-      label: 'Latency',
+      label: t('nodes.columnLatency'),
       align: 'right',
       render: (node) => (
         <span className="latency-cell">
@@ -152,21 +154,21 @@ export default function Nodes() {
     },
     {
       key: 'success',
-      label: 'Success',
+      label: t('nodes.columnSuccess'),
       render: (node) => (
         <span className="meter-cell">
           <span className="cell-mono">{node.successRate.toFixed(1)}%</span>
           <ProgressBar
             value={node.successRate}
             tone={node.successRate >= 98 ? 'success' : node.successRate >= 95 ? 'warning' : 'danger'}
-            label={`${node.label} success rate`}
+            label={t('nodes.successRate', { name: node.label })}
           />
         </span>
       ),
     },
     {
       key: 'capacity',
-      label: 'Capacity',
+      label: t('nodes.columnCapacity'),
       render: (node) => (
         <span className="meter-cell">
           <span className="cell-mono">
@@ -175,18 +177,22 @@ export default function Nodes() {
           <ProgressBar
             value={percent(node.inUse, node.capacity)}
             tone={node.inUse / node.capacity > 0.8 ? 'warning' : 'mint'}
-            label={`${node.label} capacity`}
+            label={t('nodes.capacity', { name: node.label })}
           />
         </span>
       ),
     },
     {
       key: 'egress',
-      label: 'Egress IP',
+      label: t('nodes.columnEgress'),
       render: (node) => (
         <span className="inline-copy">
           <span className="cell-mono">{node.egressIp}</span>
-          <CopyButton value={node.egressIp} label={`Copy egress IP for ${node.label}`} toastMessage="Egress IP copied" />
+          <CopyButton
+            value={node.egressIp}
+            label={t('nodes.copyEgress', { name: node.label })}
+            toastMessage={t('nodes.egressCopied')}
+          />
         </span>
       ),
     },
@@ -204,7 +210,11 @@ export default function Nodes() {
             disabled={node.state === 'DOWN' || node.state === 'STARTING'}
             onClick={() => void toggleNode(node)}
           >
-            {node.state === 'LIVE' ? 'Drain' : node.state === 'DRAINING' ? 'Undrain' : 'Activate'}
+            {node.state === 'LIVE'
+              ? t('nodes.drain')
+              : node.state === 'DRAINING'
+                ? t('nodes.undrain')
+                : t('nodes.activate')}
           </Button>
         </span>
       ),
@@ -214,12 +224,12 @@ export default function Nodes() {
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Nodes"
-        subtitle="One gate per (account, server). Drain before rotating a vendor session."
+        title={t('nodes.title')}
+        subtitle={t('nodes.subtitle')}
         refresh={summarizeRefresh([nodes])}
         actions={
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={nodes.reload}>
-            Refresh
+            {t('common.refresh')}
           </Button>
         }
       />
@@ -229,14 +239,14 @@ export default function Nodes() {
           <div className="toolbar__search">
             <Search size={14} aria-hidden="true" />
             <Input
-              aria-label="Search nodes"
-              placeholder="Search node, account, city or IP"
+              aria-label={t('nodes.searchAria')}
+              placeholder={t('nodes.searchPlaceholder')}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <Select aria-label="Filter by region" value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)}>
-            <option value="all">All regions</option>
+          <Select aria-label={t('nodes.filterRegion')} value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)}>
+            <option value="all">{t('nodes.allRegions')}</option>
             {regions.map((region) => (
               <option key={region} value={region}>
                 {regionName(region)}
@@ -244,36 +254,36 @@ export default function Nodes() {
             ))}
           </Select>
           <Select
-            aria-label="Filter by node state"
+            aria-label={t('nodes.filterState')}
             value={stateFilter}
             onChange={(event) => setStateFilter(event.target.value as 'all' | NodeState)}
           >
-            <option value="all">All statuses</option>
-            <option value="LIVE">Live</option>
-            <option value="READY">Ready</option>
-            <option value="DRAINING">Draining</option>
-            <option value="DOWN">Down</option>
+            <option value="all">{t('nodes.allStatuses')}</option>
+            <option value="LIVE">{t('state.LIVE')}</option>
+            <option value="READY">{t('state.READY')}</option>
+            <option value="DRAINING">{t('state.DRAINING')}</option>
+            <option value="DOWN">{t('state.DOWN')}</option>
           </Select>
           <span className="toolbar__count">
-            {filtered.length} of {nodes.data?.length ?? 0}
+            {t('common.of', { shown: filtered.length, total: nodes.data?.length ?? 0 })}
           </span>
         </div>
 
         {nodes.status === 'error' ? (
-          <ErrorState message={nodes.error ?? 'Unknown error'} onRetry={nodes.reload} />
+          <ErrorState message={nodes.error ?? t('common.unknownError')} onRetry={nodes.reload} />
         ) : nodes.status === 'loading' && !nodes.data ? (
           <TableSkeleton rows={8} columns={7} />
         ) : (
           <DataTable
-            caption="Proxy nodes"
+            caption={t('nodes.caption')}
             columns={columns}
             rows={filtered}
             rowKey={(node) => node.id}
             onRowClick={(node) => setSelectedId(node.id)}
             empty={
               <EmptyState
-                title="No nodes match these filters"
-                description="Change the region or status filter, or clear the search."
+                title={t('nodes.emptyTitle')}
+                description={t('nodes.emptyDesc')}
                 action={
                   <Button
                     variant="secondary"
@@ -283,7 +293,7 @@ export default function Nodes() {
                       setStateFilter('all')
                     }}
                   >
-                    Clear filters
+                    {t('common.clearFilters')}
                   </Button>
                 }
               />
@@ -294,21 +304,21 @@ export default function Nodes() {
 
       <Drawer
         open={selected !== null}
-        title={selected ? `Node ${selected.label}` : 'Node'}
+        title={selected ? t('nodes.drawerTitle', { name: selected.label }) : t('nodes.title')}
         subtitle={selected ? `${selected.accountLabel} · ${regionName(selected.region)}` : undefined}
         onClose={() => setSelectedId(null)}
         footer={
           selected ? (
             <>
               <Button variant="ghost" onClick={() => setSelectedId(null)}>
-                Close
+                {t('common.close')}
               </Button>
               <Button
                 variant="secondary"
                 icon={<ShieldCheck size={14} />}
                 onClick={() => void probe(selected)}
               >
-                Touch probe timestamp
+                {t('nodes.touchProbe')}
               </Button>
             </>
           ) : null
@@ -323,15 +333,15 @@ export default function Nodes() {
               <div>
                 <p className="drawer-hero__title mono">{selected.label}</p>
                 <p className="drawer-hero__meta">
-                  {selected.city}, {selected.country} · gate :{selected.gatePort}
+                  {selected.city}, {selected.country} · {t('nodes.gate', { port: selected.gatePort })}
                 </p>
               </div>
-              <Badge tone={NODE_STATE[selected.state].tone}>{NODE_STATE[selected.state].label}</Badge>
+              <Badge tone={NODE_STATE[selected.state].tone}>{t(NODE_STATE[selected.state].labelKey)}</Badge>
             </div>
 
             <div className="spark-panel">
               <div className="spark-panel__head">
-                <span className="label">Latency · last 14 probes</span>
+                <span className="label">{t('nodes.latencyProbes')}</span>
                 <span className="mono">{selected.latencyMs} ms</span>
               </div>
               <Sparkline data={latencyHistory(Math.max(selected.latencyMs, 30))} width={360} height={56} />
@@ -339,37 +349,39 @@ export default function Nodes() {
 
             <dl className="facts">
               <div>
-                <dt>Region</dt>
+                <dt>{t('nodes.factsRegion')}</dt>
                 <dd className="mono">{selected.region}</dd>
               </div>
               <div>
-                <dt>Egress IP</dt>
+                <dt>{t('nodes.factsEgress')}</dt>
                 <dd className="inline-copy">
                   <span className="mono">{selected.egressIp}</span>
                   <CopyButton
                     value={selected.egressIp}
-                    label={`Copy egress IP for ${selected.label}`}
-                    toastMessage="Egress IP copied"
+                    label={t('nodes.copyEgress', { name: selected.label })}
+                    toastMessage={t('nodes.egressCopied')}
                   />
                 </dd>
               </div>
               <div>
-                <dt>Protocol</dt>
+                <dt>{t('nodes.factsProtocol')}</dt>
                 <dd className="mono">{selected.protocol}</dd>
               </div>
               <div>
-                <dt>Success rate</dt>
+                <dt>{t('nodes.factsSuccess')}</dt>
                 <dd className="mono">{selected.successRate.toFixed(1)}%</dd>
               </div>
               <div>
-                <dt>Capacity</dt>
+                <dt>{t('nodes.factsCapacity')}</dt>
                 <dd className="mono">
-                  {selected.inUse}/{selected.capacity} flows
+                  {t('nodes.flows', { used: selected.inUse, capacity: selected.capacity })}
                 </dd>
               </div>
               <div>
-                <dt>Last probe touch</dt>
-                <dd title={formatDateTime(selected.lastProbeAt)}>{formatRelative(selected.lastProbeAt)}</dd>
+                <dt>{t('nodes.factsLastProbe')}</dt>
+                <dd title={formatDateTime(selected.lastProbeAt)}>
+                  {formatRelative(selected.lastProbeAt, Date.now(), lang)}
+                </dd>
               </div>
             </dl>
 
@@ -380,19 +392,20 @@ export default function Nodes() {
                 disabled={selected.state === 'DOWN'}
                 onClick={() => void toggleNode(selected)}
               >
-                {selected.state === 'LIVE' ? 'Drain node' : selected.state === 'DRAINING' ? 'Undrain node' : 'Activate node'}
+                {selected.state === 'LIVE'
+                  ? t('nodes.drainNode')
+                  : selected.state === 'DRAINING'
+                    ? t('nodes.undrainNode')
+                    : t('nodes.activateNode')}
               </Button>
             </div>
 
             <p className="callout callout--warning" role="note">
-              <strong>Touch probe timestamp</strong> only updates <code className="mono">lastProbeAt</code>.
-              It does not dial the node, measure latency or verify egress; the real check is a phase-2
-              guarded action.
+              {t('nodes.probeNote')}
             </p>
 
             <p className="callout callout--muted">
-              Node tags are rendered as <code className="mono">ajs-live/{selected.region}</code> in the local
-              subscription. Draining removes the line only after in-flight flows finish.
+              {t('nodes.tagNote', { region: selected.region })}
             </p>
           </div>
         ) : null}

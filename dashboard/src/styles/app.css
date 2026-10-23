@@ -576,12 +576,51 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
 }
 
 .sidebar__version {
+  flex: 1;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--muted);
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.lang-switch__item {
+  min-width: 24px;
+  height: 20px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.lang-switch__item:hover {
+  color: var(--text);
+}
+
+.lang-switch__item.is-active {
+  background: var(--active);
+  color: var(--text);
+}
+
+[data-theme='light'] .lang-switch__item.is-active {
+  background: var(--active);
+  color: var(--text);
 }
 
 .sidebar-scrim {
@@ -3210,6 +3249,11 @@ svg {
   .daemon,
   .sidebar__meta {
     justify-content: center;
+  }
+
+  .sidebar__meta {
+    flex-direction: column;
+    gap: 6px;
   }
 
   .topbar {

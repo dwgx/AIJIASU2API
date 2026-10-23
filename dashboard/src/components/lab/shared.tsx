@@ -2,10 +2,11 @@ import { AlertTriangle, ShieldAlert } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Badge, EmptyState } from '../primitives'
 import type { LabWarning } from '../../lib/types'
+import { useI18n } from '../../lib/i18n'
 import { severityTone } from '../../lib/lab'
 
 export function DisabledCallout({
-  title = 'This view is disabled',
+  title,
   reason,
   flag,
 }: {
@@ -13,19 +14,20 @@ export function DisabledCallout({
   reason: string
   flag?: string
 }) {
+  const { t } = useI18n()
   return (
     <div className="callout callout--warning" role="status">
       <span className="callout__icon">
         <ShieldAlert size={18} aria-hidden="true" />
       </span>
       <div>
-        <p className="callout__title">{title}</p>
+        <p className="callout__title">{title ?? t('lab.disabledTitle')}</p>
         <p className="callout__text">
           {reason}
           {flag ? (
             <>
               {' '}
-              Set <code className="mono">{flag}</code> and restart ajs-accountd.
+              {t('lab.setFlagPrefix')} <code className="mono">{flag}</code> {t('lab.setFlagSuffix')}
             </>
           ) : null}
         </p>
@@ -35,11 +37,12 @@ export function DisabledCallout({
 }
 
 export function WarningList({ warnings }: { warnings: LabWarning[] }) {
+  const { t } = useI18n()
   if (warnings.length === 0) {
     return (
       <EmptyState
-        title="No warnings"
-        description="The daemon reported no posture or state warnings."
+        title={t('lab.noWarnings.title')}
+        description={t('lab.noWarnings.description')}
         icon={<AlertTriangle size={20} aria-hidden="true" />}
       />
     )

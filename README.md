@@ -37,7 +37,11 @@ As of 2026-10-24:
   Nodes, Leases, Users, Requests, Logs, Settings, Lab) in the Obsidian Mint design, with accent
   themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and command-palette
   search for accounts and nodes. Mock data is the default; a live mode against `ajs-accountd` is
-  opt-in at build time. 97 Vitest tests in 13 files. HMC serves the mock build on `18081` and the
+  opt-in at build time. 105 Vitest tests in 14 files. The UI is bilingual: a `中` / `EN` switch in
+  the sidebar footer and a Language card in Settings switch every page, default to the browser
+  language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
+  labels, server names, IPs and API values are data and are never translated. HMC serves the mock
+  build on `18081` and the
   live build on `18082`, the latter published on the LAN at `http://192.168.11.4:18082` against
   the daemon API at `http://192.168.11.4:2261`, where the bearer token is required (insecure
   mode is refused off loopback).
@@ -205,7 +209,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (97 Vitest tests in 13 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (105 Vitest tests in 14 files), `cd daemon && go test ./...`
 (271 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of

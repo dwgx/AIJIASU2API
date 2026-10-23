@@ -5,6 +5,7 @@ import type { FormEvent, ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, isMockMode } from '../lib/api'
 import { formatBytes, formatDate, formatRelative } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import { ACCOUNT_STATE } from '../lib/labels'
 import type { Account, AccountState, CreateAccountInput, Platform } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
@@ -83,8 +84,9 @@ function AccountViewSwitch({
   value: AccountView
   onChange: (view: AccountView) => void
 }) {
+  const { t } = useI18n()
   return (
-    <div className="segmented" role="group" aria-label="Account view">
+    <div className="segmented" role="group" aria-label={t('accounts.viewAria')}>
       <button
         type="button"
         className={clsx('segmented__item', value === 'table' && 'is-active')}
@@ -92,7 +94,7 @@ function AccountViewSwitch({
         onClick={() => onChange('table')}
       >
         <Rows3 size={13} aria-hidden="true" />
-        <span>Table</span>
+        <span>{t('accounts.table')}</span>
       </button>
       <button
         type="button"
@@ -101,7 +103,7 @@ function AccountViewSwitch({
         onClick={() => onChange('cards')}
       >
         <LayoutGrid size={13} aria-hidden="true" />
-        <span>Cards</span>
+        <span>{t('accounts.cards')}</span>
       </button>
     </div>
   )
@@ -118,6 +120,7 @@ interface AccountCardProps {
 }
 
 function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePause, onLogout, onDelete }: AccountCardProps) {
+  const { lang, t } = useI18n()
   const state = ACCOUNT_STATE[account.state]
   const capacity = account.nodeCount > 0 ? Math.min(1, Math.max(0, account.liveNodeCount / account.nodeCount)) : 0
   const capacityPct = Math.round(capacity * 100)
@@ -126,7 +129,7 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
     <article role="listitem" className={clsx('account-card', selected && 'is-selected')}>
       <div className="account-card__head">
         <Checkbox
-          aria-label={`Select ${account.label}`}
+          aria-label={t('accounts.selectAccount', { name: account.label })}
           checked={selected}
           onChange={() => onToggleSelected(account.id)}
         />
@@ -140,20 +143,20 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
         </div>
         <span className="account-card__state">
           <StatusDot tone={state.tone} pulse={account.state === 'active'} />
-          <Badge tone={state.tone}>{state.label}</Badge>
+          <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
         </span>
       </div>
 
       <div className="account-card__meta">
         <span className="account-card__platform">{account.platform}</span>
         <span className="account-card__regions">
-          {account.regions.length > 0 ? account.regions.join(' · ') : 'any region'}
+          {account.regions.length > 0 ? account.regions.join(' · ') : t('common.anyRegion')}
         </span>
       </div>
 
       <dl className="account-card__metrics">
         <div className="account-card__metric">
-          <dt>Nodes</dt>
+          <dt>{t('accounts.columnNodes')}</dt>
           <dd>
             <span>
               {account.liveNodeCount}/{account.nodeCount}
@@ -161,7 +164,7 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
             <span
               className={clsx('account-card__meter', account.liveNodeCount === 0 && 'is-empty')}
               role="progressbar"
-              aria-label={`Node capacity for ${account.label}`}
+              aria-label={t('accounts.nodeCapacity', { name: account.label })}
               aria-valuenow={capacityPct}
               aria-valuemin={0}
               aria-valuemax={100}
@@ -171,39 +174,43 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
           </dd>
         </div>
         <div className="account-card__metric">
-          <dt>Concurrency</dt>
+          <dt>{t('accounts.columnConcurrency')}</dt>
           <dd>{account.concurrency}</dd>
         </div>
         <div className="account-card__metric">
-          <dt>Usage</dt>
+          <dt>{t('accounts.columnUsage')}</dt>
           <dd>{formatBytes(account.usageBytes)}</dd>
         </div>
       </dl>
 
       <div className="account-card__foot">
         <span className="account-card__expiry">
-          <span className="account-card__expiry-label">Expires</span>
+          <span className="account-card__expiry-label">{t('accounts.expires')}</span>
           <span className="account-card__expiry-date">{formatDate(account.expiresAt)}</span>
-          <span className="account-card__expiry-rel">{formatRelative(account.expiresAt)}</span>
+          <span className="account-card__expiry-rel">
+            {formatRelative(account.expiresAt, Date.now(), lang)}
+          </span>
         </span>
         <span className="account-card__actions">
           <IconButton
-            label={`Test login for ${account.label}`}
+            label={t('accounts.testLogin', { name: account.label })}
             icon={<Play size={14} />}
             onClick={() => onTest(account)}
           />
           <IconButton
-            label={`${account.state === 'paused' ? 'Resume' : 'Pause'} ${account.label}`}
+            label={t(account.state === 'paused' ? 'accounts.resumeAccount' : 'accounts.pauseAccount', {
+              name: account.label,
+            })}
             icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => onTogglePause(account)}
           />
           <IconButton
-            label={`Logout ${account.label}`}
+            label={t('accounts.logoutAccount', { name: account.label })}
             icon={<LogOut size={14} />}
             onClick={() => onLogout(account)}
           />
           <IconButton
-            label={`Delete ${account.label}`}
+            label={t('accounts.deleteAccount', { name: account.label })}
             icon={<Trash2 size={14} />}
             variant="ghost"
             onClick={() => onDelete(account.id)}
@@ -233,12 +240,13 @@ function AccountCards({
   onLogout: (account: Account) => void
   onDelete: (id: string) => void
 }) {
+  const { t } = useI18n()
   if (accounts.length === 0) {
     return <div className="account-grid account-grid--empty">{empty}</div>
   }
 
   return (
-    <div className="account-grid" role="list" aria-label="Vendor accounts">
+    <div className="account-grid" role="list" aria-label={t('accounts.listAria')}>
       {accounts.map((account) => (
         <AccountCard
           key={account.id}
@@ -256,8 +264,9 @@ function AccountCards({
 }
 
 function AccountCardsSkeleton() {
+  const { t } = useI18n()
   return (
-    <div className="account-grid" aria-busy="true" aria-label="Loading accounts">
+    <div className="account-grid" aria-busy="true" aria-label={t('accounts.loadingAria')}>
       {Array.from({ length: 6 }, (_, index) => (
         <div className="account-card account-card--skeleton" key={index}>
           <div className="account-card__head">
@@ -277,6 +286,7 @@ export default function Accounts() {
   const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const [params, setParams] = useSearchParams()
   const { push } = useToast()
+  const { lang, t } = useI18n()
   const [query, setQuery] = useParamQuery(params.get('q'))
   const [stateFilter, setStateFilter] = useState<'all' | AccountState>('all')
   const [platformFilter, setPlatformFilter] = useState<'all' | Platform>('all')
@@ -337,9 +347,9 @@ export default function Accounts() {
     try {
       await api.testAccount(account.id)
       accounts.reload()
-      push(`Login test passed for ${account.label}`, 'success')
+      push(t('accounts.toastTestPassed', { name: account.label }), 'success')
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Login test failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('accounts.toastTestFailed'), 'danger')
     }
   }
 
@@ -348,9 +358,12 @@ export default function Accounts() {
     try {
       await api.setAccountState(account.id, next)
       accounts.reload()
-      push(`${account.label} ${next === 'paused' ? 'paused' : 'resumed'}`, 'success')
+      push(
+        t(next === 'paused' ? 'accounts.toastPaused' : 'accounts.toastResumed', { name: account.label }),
+        'success',
+      )
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Could not update account', 'danger')
+      push(cause instanceof Error ? cause.message : t('accounts.errorUpdate'), 'danger')
     }
   }
 
@@ -358,10 +371,10 @@ export default function Accounts() {
     try {
       await Promise.all(selected.map((id) => api.setAccountState(id, 'paused')))
       accounts.reload()
-      push(`${selected.length} account${selected.length === 1 ? '' : 's'} paused`, 'success')
+      push(t('accounts.toastBulkPaused', { count: selected.length }), 'success')
       setSelected([])
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Bulk pause failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('accounts.errorBulkPause'), 'danger')
     }
   }
 
@@ -371,10 +384,10 @@ export default function Accounts() {
       await api.deleteAccounts(deleteIds)
       accounts.reload()
       setSelected((current) => current.filter((id) => !deleteIds.includes(id)))
-      push(`${deleteIds.length} account${deleteIds.length === 1 ? '' : 's'} deleted`, 'success')
+      push(t('accounts.toastDeleted', { count: deleteIds.length }), 'success')
       setDeleteIds([])
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Delete failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('accounts.errorDelete'), 'danger')
     } finally {
       setDeleting(false)
     }
@@ -387,10 +400,10 @@ export default function Accounts() {
     try {
       await api.logoutAccount(logoutId)
       accounts.reload()
-      push(`${account?.label ?? logoutId} logged out · nodes drained`, 'success')
+      push(t('accounts.toastLoggedOut', { name: account?.label ?? logoutId }), 'success')
       setLogoutId(null)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Logout failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('accounts.errorLogout'), 'danger')
     } finally {
       setLoggingOut(false)
     }
@@ -399,15 +412,15 @@ export default function Accounts() {
   const submitForm = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const errors: Record<string, string> = {}
-    if (!form.label.trim()) errors.label = 'Label is required'
-    if (!form.username.trim()) errors.username = 'Username is required'
-    if (!form.password.trim()) errors.password = 'Password is required'
+    if (!form.label.trim()) errors.label = t('accounts.errorLabel')
+    if (!form.username.trim()) errors.username = t('accounts.errorUsername')
+    if (!form.password.trim()) errors.password = t('accounts.errorPassword')
     const concurrency = Number(form.concurrency)
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 2000) {
-      errors.concurrency = 'Use a whole number between 1 and 2000'
+      errors.concurrency = t('accounts.errorConcurrency')
     }
     if ((accounts.data ?? []).some((account) => account.label.toLowerCase() === form.label.trim().toLowerCase())) {
-      errors.label = 'This label is already in use'
+      errors.label = t('accounts.errorDuplicate')
     }
     setFormErrors(errors)
     if (Object.keys(errors).length > 0) return
@@ -428,10 +441,10 @@ export default function Accounts() {
     try {
       await api.createAccount(input)
       accounts.reload()
-      push(`Account ${input.label} created`, 'success')
+      push(t('accounts.toastCreated', { name: input.label }), 'success')
       closeCreate()
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : 'Could not create account')
+      setFormError(cause instanceof Error ? cause.message : t('accounts.errorCreate'))
     } finally {
       setSaving(false)
     }
@@ -442,7 +455,7 @@ export default function Accounts() {
       key: 'select',
       label: (
         <Checkbox
-          aria-label="Select all visible accounts"
+          aria-label={t('accounts.selectAll')}
           checked={allVisibleSelected}
           indeterminate={!allVisibleSelected && someVisibleSelected}
           onChange={toggleAllVisible}
@@ -451,7 +464,7 @@ export default function Accounts() {
       width: '36px',
       render: (account) => (
         <Checkbox
-          aria-label={`Select ${account.label}`}
+          aria-label={t('accounts.selectAccount', { name: account.label })}
           checked={selected.includes(account.id)}
           onChange={() => toggleSelected(account.id)}
         />
@@ -459,7 +472,7 @@ export default function Accounts() {
     },
     {
       key: 'account',
-      label: 'Account',
+      label: t('accounts.columnAccount'),
       render: (account) => (
         <div className="cell-stack">
           <span className="cell-strong">{account.label}</span>
@@ -469,25 +482,25 @@ export default function Accounts() {
     },
     {
       key: 'platform',
-      label: 'Platform',
+      label: t('accounts.columnPlatform'),
       render: (account) => <span className="cell-mono">{account.platform}</span>,
     },
     {
       key: 'state',
-      label: 'State',
+      label: t('accounts.columnState'),
       render: (account) => {
         const state = ACCOUNT_STATE[account.state]
         return (
           <span className="state-cell">
             <StatusDot tone={state.tone} pulse={account.state === 'active'} />
-            <Badge tone={state.tone}>{state.label}</Badge>
+            <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
           </span>
         )
       },
     },
     {
       key: 'nodes',
-      label: 'Nodes',
+      label: t('accounts.columnNodes'),
       align: 'right',
       render: (account) => (
         <span className="cell-mono">
@@ -497,23 +510,23 @@ export default function Accounts() {
     },
     {
       key: 'concurrency',
-      label: 'Concurrency',
+      label: t('accounts.columnConcurrency'),
       align: 'right',
       render: (account) => <span className="cell-mono">{account.concurrency}</span>,
     },
     {
       key: 'usage',
-      label: 'Usage',
+      label: t('accounts.columnUsage'),
       align: 'right',
       render: (account) => <span className="cell-mono">{formatBytes(account.usageBytes)}</span>,
     },
     {
       key: 'expiry',
-      label: 'Expires',
+      label: t('accounts.columnExpires'),
       render: (account) => (
         <span className="cell-stack">
           <span>{formatDate(account.expiresAt)}</span>
-          <span className="cell-sub">{formatRelative(account.expiresAt)}</span>
+          <span className="cell-sub">{formatRelative(account.expiresAt, Date.now(), lang)}</span>
         </span>
       ),
     },
@@ -525,22 +538,24 @@ export default function Accounts() {
       render: (account) => (
         <span className="row-actions">
           <IconButton
-            label={`Test login for ${account.label}`}
+            label={t('accounts.testLogin', { name: account.label })}
             icon={<Play size={14} />}
             onClick={() => void runTest(account)}
           />
           <IconButton
-            label={`${account.state === 'paused' ? 'Resume' : 'Pause'} ${account.label}`}
+            label={t(account.state === 'paused' ? 'accounts.resumeAccount' : 'accounts.pauseAccount', {
+              name: account.label,
+            })}
             icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => void togglePause(account)}
           />
           <IconButton
-            label={`Logout ${account.label}`}
+            label={t('accounts.logoutAccount', { name: account.label })}
             icon={<LogOut size={14} />}
             onClick={() => setLogoutId(account.id)}
           />
           <IconButton
-            label={`Delete ${account.label}`}
+            label={t('accounts.deleteAccount', { name: account.label })}
             icon={<Trash2 size={14} />}
             variant="ghost"
             onClick={() => setDeleteIds([account.id])}
@@ -552,8 +567,8 @@ export default function Accounts() {
 
   const emptyState = (
     <EmptyState
-      title="No accounts match these filters"
-      description="Adjust the search or clear the state and platform filters."
+      title={t('accounts.emptyTitle')}
+      description={t('accounts.emptyDesc')}
       action={
         <Button
           variant="secondary"
@@ -563,7 +578,7 @@ export default function Accounts() {
             setPlatformFilter('all')
           }}
         >
-          Clear filters
+          {t('common.clearFilters')}
         </Button>
       }
     />
@@ -572,8 +587,8 @@ export default function Accounts() {
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Accounts"
-        subtitle="Vendor logins, concurrency ceilings and entitlement windows."
+        title={t('accounts.title')}
+        subtitle={t('accounts.subtitle')}
         refresh={summarizeRefresh([accounts])}
       />
 
@@ -582,12 +597,8 @@ export default function Accounts() {
           <Pause size={18} aria-hidden="true" />
         </span>
         <div>
-          <p className="callout__title">Pause does not stop gates or the vendor session</p>
-          <p className="callout__text">
-            Pause only changes the stored account state; LIVE nodes, gates and the FV session stay up.
-            Use <strong>Logout</strong> to drain the account's nodes and end its session. Pausing an
-            account that still owns LIVE nodes leaves the two states contradictory.
-          </p>
+          <p className="callout__title">{t('accounts.pauseCalloutTitle')}</p>
+          <p className="callout__text">{t('accounts.pauseCalloutText')}</p>
         </div>
       </div>
 
@@ -596,29 +607,29 @@ export default function Accounts() {
           <div className="toolbar__search">
             <Search size={14} aria-hidden="true" />
             <Input
-              aria-label="Search accounts"
-              placeholder="Search label, username or region"
+              aria-label={t('accounts.searchAria')}
+              placeholder={t('accounts.searchPlaceholder')}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
           <Select
-            aria-label="Filter by state"
+            aria-label={t('accounts.filterState')}
             value={stateFilter}
             onChange={(event) => setStateFilter(event.target.value as 'all' | AccountState)}
           >
-            <option value="all">All states</option>
-            <option value="active">Active</option>
-            <option value="paused">Paused</option>
-            <option value="auth_failed">Auth failed</option>
-            <option value="expired">Expired</option>
+            <option value="all">{t('accounts.allStates')}</option>
+            <option value="active">{t('state.active')}</option>
+            <option value="paused">{t('state.paused')}</option>
+            <option value="auth_failed">{t('state.auth_failed')}</option>
+            <option value="expired">{t('state.expired')}</option>
           </Select>
           <Select
-            aria-label="Filter by platform"
+            aria-label={t('accounts.filterPlatform')}
             value={platformFilter}
             onChange={(event) => setPlatformFilter(event.target.value as 'all' | Platform)}
           >
-            <option value="all">All platforms</option>
+            <option value="all">{t('accounts.allPlatforms')}</option>
             {PLATFORMS.map((platform) => (
               <option key={platform} value={platform}>
                 {platform}
@@ -627,16 +638,16 @@ export default function Accounts() {
           </Select>
           <AccountViewSwitch value={view} onChange={changeView} />
           <span className="toolbar__count">
-            {filtered.length} of {accounts.data?.length ?? 0}
+            {t('common.of', { shown: filtered.length, total: accounts.data?.length ?? 0 })}
           </span>
         </div>
 
         {selected.length > 0 ? (
           <div className="bulkbar">
-            <span className="bulkbar__count">{selected.length} selected</span>
+            <span className="bulkbar__count">{t('accounts.selected', { count: selected.length })}</span>
             <div className="bulkbar__actions">
               <Button size="sm" variant="secondary" icon={<Pause size={13} />} onClick={() => void bulkPause()}>
-                Pause
+                {t('accounts.pause')}
               </Button>
               <Button
                 size="sm"
@@ -644,17 +655,17 @@ export default function Accounts() {
                 icon={<Trash2 size={13} />}
                 onClick={() => setDeleteIds(selected)}
               >
-                Delete
+                {t('accounts.delete')}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
-                Clear
+                {t('accounts.clear')}
               </Button>
             </div>
           </div>
         ) : null}
 
         {accounts.status === 'error' ? (
-          <ErrorState message={accounts.error ?? 'Unknown error'} onRetry={accounts.reload} />
+          <ErrorState message={accounts.error ?? t('common.unknownError')} onRetry={accounts.reload} />
         ) : accounts.status === 'loading' && !accounts.data ? (
           view === 'cards' ? (
             <AccountCardsSkeleton />
@@ -674,7 +685,7 @@ export default function Accounts() {
           />
         ) : (
           <DataTable
-            caption="Vendor accounts"
+            caption={t('accounts.caption')}
             columns={columns}
             rows={filtered}
             rowKey={(account) => account.id}
@@ -685,51 +696,47 @@ export default function Accounts() {
 
       <Drawer
         open={drawerOpen}
-        title="New account"
+        title={t('accounts.newTitle')}
         subtitle={
-          isMockMode()
-            ? 'Mock mode creates an in-memory account; no vendor call is made.'
-            : 'ajs-accountd validates the credentials and adds the account to its store.'
+          isMockMode() ? t('accounts.newSubtitleMock') : t('accounts.newSubtitleLive')
         }
         onClose={closeCreate}
         footer={
           <>
             <Button variant="ghost" onClick={closeCreate} disabled={saving}>
-              Cancel
+              {t('common.cancel')}
             </Button>
             <Button type="submit" form="create-account-form" variant="primary" loading={saving}>
-              Create account
+              {t('accounts.create')}
             </Button>
           </>
         }
       >
         <form id="create-account-form" className="form" onSubmit={submitForm} noValidate>
-          <Field label="Label" htmlFor="account-label" error={formErrors.label}>
+          <Field label={t('accounts.label')} htmlFor="account-label" error={formErrors.label}>
             <Input
               id="account-label"
               value={form.label}
               onChange={(event) => setForm({ ...form, label: event.target.value })}
-              placeholder="e.g. Northwind Ops"
+              placeholder={t('accounts.labelPlaceholder')}
               autoComplete="off"
             />
           </Field>
-          <Field label="Username" htmlFor="account-username" error={formErrors.username}>
+          <Field label={t('accounts.username')} htmlFor="account-username" error={formErrors.username}>
             <Input
               id="account-username"
               value={form.username}
               onChange={(event) => setForm({ ...form, username: event.target.value })}
-              placeholder="demo-account"
+              placeholder={t('accounts.usernamePlaceholder')}
               autoComplete="off"
             />
           </Field>
           <Field
-            label="Password"
+            label={t('accounts.password')}
             htmlFor="account-password"
             error={formErrors.password}
             hint={
-              isMockMode()
-                ? 'Mock only — never stored, logged or sent.'
-                : 'Sent to ajs-accountd over the loopback API; never kept in this browser.'
+              isMockMode() ? t('accounts.passwordHintMock') : t('accounts.passwordHintLive')
             }
           >
             <Input
@@ -737,12 +744,12 @@ export default function Accounts() {
               type="password"
               value={form.password}
               onChange={(event) => setForm({ ...form, password: event.target.value })}
-              placeholder="placeholder-password"
+              placeholder={t('accounts.passwordPlaceholder')}
               autoComplete="new-password"
             />
           </Field>
           <div className="form-grid">
-            <Field label="Platform" htmlFor="account-platform">
+            <Field label={t('accounts.platform')} htmlFor="account-platform">
               <Select
                 id="account-platform"
                 value={form.platform}
@@ -755,7 +762,7 @@ export default function Accounts() {
                 ))}
               </Select>
             </Field>
-            <Field label="Concurrency" htmlFor="account-concurrency" error={formErrors.concurrency}>
+            <Field label={t('accounts.concurrency')} htmlFor="account-concurrency" error={formErrors.concurrency}>
               <Input
                 id="account-concurrency"
                 inputMode="numeric"
@@ -764,12 +771,12 @@ export default function Accounts() {
               />
             </Field>
           </div>
-          <Field label="Regions" htmlFor="account-regions" hint="Comma-separated tags, e.g. cn-zj, hk">
+          <Field label={t('accounts.regions')} htmlFor="account-regions" hint={t('accounts.regionsHint')}>
             <Input
               id="account-regions"
               value={form.regions}
               onChange={(event) => setForm({ ...form, regions: event.target.value })}
-              placeholder="cn-zj, hk"
+              placeholder={t('accounts.regionsPlaceholder')}
             />
           </Field>
           {formError ? (
@@ -782,9 +789,17 @@ export default function Accounts() {
 
       <ConfirmDialog
         open={deleteIds.length > 0}
-        title={deleteIds.length > 1 ? `Delete ${deleteIds.length} accounts?` : 'Delete account?'}
-        description="Nodes and leases tied to the selected account are removed with it. This cannot be undone."
-        confirmLabel={deleteIds.length > 1 ? `Delete ${deleteIds.length} accounts` : 'Delete account'}
+        title={
+          deleteIds.length > 1
+            ? t('accounts.deleteTitleMany', { count: deleteIds.length })
+            : t('accounts.deleteTitleOne')
+        }
+        description={t('accounts.deleteDesc')}
+        confirmLabel={
+          deleteIds.length > 1
+            ? t('accounts.deleteConfirmMany', { count: deleteIds.length })
+            : t('accounts.deleteConfirmOne')
+        }
         busy={deleting}
         onConfirm={() => void confirmDelete()}
         onCancel={() => setDeleteIds([])}
@@ -792,13 +807,15 @@ export default function Accounts() {
 
       <ConfirmDialog
         open={logoutId !== null}
-        title="Logout account?"
+        title={t('accounts.logoutTitle')}
         description={
           logoutId
-            ? `${accounts.data?.find((account) => account.id === logoutId)?.label ?? logoutId} will be paused, its LIVE nodes drained and its vendor session ended. This is the action that stops gates; Pause does not.`
+            ? t('accounts.logoutDesc', {
+                name: accounts.data?.find((account) => account.id === logoutId)?.label ?? logoutId,
+              })
             : ''
         }
-        confirmLabel="Logout and drain"
+        confirmLabel={t('accounts.logoutConfirm')}
         tone="primary"
         busy={loggingOut}
         onConfirm={() => void confirmLogout()}

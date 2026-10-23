@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { CheckCircle2, Info, X, XCircle } from 'lucide-react'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useI18n } from '../lib/i18n'
 
 export type ToastTone = 'default' | 'success' | 'danger'
 
@@ -18,6 +19,7 @@ interface ToastContextValue {
 const ToastContext = createContext<ToastContextValue | null>(null)
 
 export function ToastProvider({ children }: { children: ReactNode }) {
+  const { t } = useI18n()
   const [items, setItems] = useState<ToastItem[]>([])
   const timers = useRef<number[]>([])
   const sequence = useRef(0)
@@ -64,7 +66,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <button
               type="button"
               className="toast__close"
-              aria-label="Dismiss notification"
+              aria-label={t('common.dismissNotification')}
               onClick={() => dismiss(item.id)}
             >
               <X size={13} />

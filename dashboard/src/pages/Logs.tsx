@@ -2,6 +2,7 @@ import { Download, RefreshCw, ScrollText, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDateTime, formatRelative } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import { SEVERITY } from '../lib/labels'
 import type { AuditEvent, Severity } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
@@ -24,6 +25,7 @@ import {
 export default function Logs() {
   const audit = useAsync(() => api.listAudit(20), [], { intervalMs: 15_000 })
   const { push } = useToast()
+  const { lang, t } = useI18n()
   const [severity, setSeverity] = useState<'all' | Severity>('all')
   const [actor, setActor] = useState('all')
   const [query, setQuery] = useState('')
@@ -44,46 +46,46 @@ export default function Logs() {
   }, [actor, audit.data, query, severity])
 
   const exportLog = () => {
-    push('Export is a placeholder — no file was written', 'default')
+    push(t('audit.exportPlaceholder'), 'default')
   }
 
   const columns: Array<Column<AuditEvent>> = [
     {
       key: 'time',
-      label: 'Time',
+      label: t('audit.columnTime'),
       render: (event) => (
         <div className="cell-stack">
           <span className="cell-mono">{formatDateTime(event.ts)}</span>
-          <span className="cell-sub">{formatRelative(event.ts)}</span>
+          <span className="cell-sub">{formatRelative(event.ts, Date.now(), lang)}</span>
         </div>
       ),
     },
     {
       key: 'severity',
-      label: 'Severity',
+      label: t('audit.columnSeverity'),
       render: (event) => {
         const level = SEVERITY[event.severity]
-        return <Badge tone={level.tone}>{level.label}</Badge>
+        return <Badge tone={level.tone}>{t(level.labelKey)}</Badge>
       },
     },
     {
       key: 'actor',
-      label: 'Actor',
+      label: t('audit.columnActor'),
       render: (event) => <span className="cell-mono">{event.actor}</span>,
     },
     {
       key: 'action',
-      label: 'Action',
+      label: t('audit.columnAction'),
       render: (event) => <span className="cell-mono">{event.action}</span>,
     },
     {
       key: 'target',
-      label: 'Target',
+      label: t('audit.columnTarget'),
       render: (event) => <span>{event.target}</span>,
     },
     {
       key: 'detail',
-      label: 'Detail',
+      label: t('audit.columnDetail'),
       render: (event) => <span className="cell-sub cell-detail">{event.detail}</span>,
     },
   ]
@@ -91,16 +93,16 @@ export default function Logs() {
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Logs"
-        subtitle="Control-plane audit trail. Secrets and request bodies are redacted by design."
+        title={t('audit.title')}
+        subtitle={t('audit.subtitle')}
         refresh={summarizeRefresh([audit])}
         actions={
           <>
             <Button variant="ghost" icon={<Download size={14} />} onClick={exportLog}>
-              Export
+              {t('audit.export')}
             </Button>
             <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={audit.reload}>
-              Refresh
+              {t('common.refresh')}
             </Button>
           </>
         }
@@ -111,25 +113,25 @@ export default function Logs() {
           <div className="toolbar__search">
             <Search size={14} aria-hidden="true" />
             <Input
-              aria-label="Search audit events"
-              placeholder="Search action, target or detail"
+              aria-label={t('audit.searchAria')}
+              placeholder={t('audit.searchPlaceholder')}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
           <SegmentedControl
-            label="Filter by severity"
+            label={t('audit.filterSeverity')}
             value={severity}
             onChange={setSeverity}
             options={[
-              { value: 'all', label: 'All' },
-              { value: 'info', label: 'Info' },
-              { value: 'warn', label: 'Warn' },
-              { value: 'error', label: 'Error' },
+              { value: 'all', label: t('common.all') },
+              { value: 'info', label: t('state.info') },
+              { value: 'warn', label: t('state.warn') },
+              { value: 'error', label: t('state.error') },
             ]}
           />
-          <Select aria-label="Filter by actor" value={actor} onChange={(event) => setActor(event.target.value)}>
-            <option value="all">All actors</option>
+          <Select aria-label={t('audit.filterActor')} value={actor} onChange={(event) => setActor(event.target.value)}>
+            <option value="all">{t('audit.allActors')}</option>
             {actors.map((name) => (
               <option key={name} value={name}>
                 {name}
@@ -137,24 +139,24 @@ export default function Logs() {
             ))}
           </Select>
           <span className="toolbar__count">
-            {filtered.length} of {audit.data?.length ?? 0}
+            {t('common.of', { shown: filtered.length, total: audit.data?.length ?? 0 })}
           </span>
         </div>
 
         {audit.status === 'error' ? (
-          <ErrorState message={audit.error ?? 'Unknown error'} onRetry={audit.reload} />
+          <ErrorState message={audit.error ?? t('common.unknownError')} onRetry={audit.reload} />
         ) : audit.status === 'loading' && !audit.data ? (
           <TableSkeleton rows={10} columns={6} />
         ) : (
           <DataTable
-            caption="Audit log"
+            caption={t('audit.caption')}
             columns={columns}
             rows={filtered}
             rowKey={(event) => event.id}
             empty={
               <EmptyState
-                title="No events match these filters"
-                description="Try another severity or actor, or clear the search."
+                title={t('audit.emptyTitle')}
+                description={t('audit.emptyDesc')}
                 icon={<ScrollText size={20} aria-hidden="true" />}
                 action={
                   <Button
@@ -165,7 +167,7 @@ export default function Logs() {
                       setQuery('')
                     }}
                   >
-                    Clear filters
+                    {t('common.clearFilters')}
                   </Button>
                 }
               />
@@ -174,10 +176,7 @@ export default function Logs() {
         )}
       </Card>
 
-      <p className="page-note">
-        Export is a UI placeholder in this build. A production panel would stream the audit table as
-        NDJSON from <code className="mono">GET /v1/audit?format=ndjson</code>.
-      </p>
+      <p className="page-note">{t('audit.note')}</p>
     </div>
   )
 }

@@ -3,6 +3,7 @@ import { Database, ExternalLink, Moon, RefreshCw, Save, Sun } from 'lucide-react
 import { useEffect, useRef, useState } from 'react'
 import { api, apiEndpointLabel, hasPanelToken, isMockMode, setPanelToken } from '../lib/api'
 import { CopyButton } from '../components/CopyButton'
+import { useI18n } from '../lib/i18n'
 import { useTheme } from '../lib/theme'
 import type { AccentName } from '../lib/theme'
 import type { PanelSettings, UpdateInfo } from '../lib/types'
@@ -23,11 +24,11 @@ import {
   Skeleton,
 } from '../components/primitives'
 
-const ACCENTS: ReadonlyArray<{ value: AccentName; label: string }> = [
-  { value: 'mint', label: 'Mint' },
-  { value: 'indigo', label: 'Indigo' },
-  { value: 'violet', label: 'Violet' },
-  { value: 'orange', label: 'Orange' },
+const ACCENTS: ReadonlyArray<{ value: AccentName; labelKey: string }> = [
+  { value: 'mint', labelKey: 'settings.appearance.mint' },
+  { value: 'indigo', labelKey: 'settings.appearance.indigo' },
+  { value: 'violet', labelKey: 'settings.appearance.violet' },
+  { value: 'orange', labelKey: 'settings.appearance.orange' },
 ]
 
 export default function Settings() {
@@ -35,6 +36,7 @@ export default function Settings() {
   const settings = useAsync(() => api.getSettings(), [])
   const overview = useAsync(() => api.getLabOverview(), [], { intervalMs: 30_000 })
   const { push } = useToast()
+  const { t, lang, setLang } = useI18n()
   const { theme, setTheme, accent, setAccent } = useTheme()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
@@ -64,11 +66,11 @@ export default function Settings() {
   const save = async () => {
     if (!draft) return
     if (draft.healthIntervalSec < 10 || draft.healthIntervalSec > 600) {
-      push('Health interval must be between 10 and 600 seconds', 'danger')
+      push(t('settings.toast.healthRange'), 'danger')
       return
     }
     if (draft.subscriptionRefreshSec < 5 || draft.subscriptionRefreshSec > 300) {
-      push('Subscription refresh must be between 5 and 300 seconds', 'danger')
+      push(t('settings.toast.subscriptionRange'), 'danger')
       return
     }
     setSaving(true)
@@ -77,9 +79,9 @@ export default function Settings() {
       setDraft({ ...saved, theme })
       setTheme(saved.theme)
       settings.reload()
-      push('Settings saved', 'success')
+      push(t('settings.toast.saved'), 'success')
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Could not save settings', 'danger')
+      push(cause instanceof Error ? cause.message : t('settings.toast.saveFailed'), 'danger')
     } finally {
       setSaving(false)
     }
@@ -91,10 +93,10 @@ export default function Settings() {
       await api.resetMock()
       settings.reload()
       window.dispatchEvent(new Event('ajs:refresh'))
-      push('Mock dataset reset to its initial state', 'success')
+      push(t('settings.toast.resetDone'), 'success')
       setResetOpen(false)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Reset failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('settings.toast.resetFailed'), 'danger')
     } finally {
       setResetting(false)
     }
@@ -106,7 +108,7 @@ export default function Settings() {
     try {
       setUpdateInfo(await api.getUpdate())
     } catch (cause) {
-      setUpdateError(cause instanceof Error ? cause.message : 'Update check failed')
+      setUpdateError(cause instanceof Error ? cause.message : t('settings.toast.updateFailed'))
     } finally {
       setUpdateChecking(false)
     }
@@ -121,23 +123,18 @@ export default function Settings() {
   const clearToken = () => {
     setPanelToken(null)
     setTokenSet(false)
-    push('Session token cleared', 'default')
+    push(t('settings.toast.tokenCleared'), 'default')
   }
 
   const daemonVersion = overview.data?.version || '0.1.0'
 
   const deployCommand = (tag: string) => `cd deploy && ./update.sh --tag ${tag}`
 
-
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Settings"
-        subtitle={
-          mock
-            ? 'Panel defaults. Mock mode keeps changes in this browser only.'
-            : 'Panel defaults. Changes are saved to ajs-accountd.'
-        }
+        title={t('settings.title')}
+        subtitle={mock ? t('settings.subtitleMock') : t('settings.subtitleLive')}
         actions={
           <Button
             variant="primary"
@@ -146,19 +143,19 @@ export default function Settings() {
             loading={saving}
             disabled={!dirty}
           >
-            Save changes
+            {t('settings.save')}
           </Button>
         }
       />
 
       {settings.status === 'error' ? (
         <Card>
-          <ErrorState message={settings.error ?? 'Unknown error'} onRetry={settings.reload} />
+          <ErrorState message={settings.error ?? t('common.unknownError')} onRetry={settings.reload} />
         </Card>
       ) : !draft ? (
         <div className="settings-grid">
           {Array.from({ length: 4 }, (_, index) => (
-            <Card key={index} title="Loading">
+            <Card key={index} title={t('settings.loading')}>
               <Skeleton height={16} />
               <Skeleton height={32} />
               <Skeleton height={12} width="60%" />
@@ -167,28 +164,27 @@ export default function Settings() {
         </div>
       ) : (
         <div className="settings-grid">
-          <Card title="Transport" subtitle="How ajsproxy reaches the vendor FV endpoint.">
+          <Card title={t('settings.transport.title')} subtitle={t('settings.transport.subtitle')}>
             <SegmentedControl
-              label="Transport"
+              label={t('settings.transport.title')}
               value={draft.transport}
               onChange={(value) => update('transport', value)}
               options={[
-                { value: 'httpupgrade', label: 'HTTP upgrade' },
-                { value: 'rawtcp', label: 'Raw TCP' },
+                { value: 'httpupgrade', label: t('settings.transport.httpupgrade') },
+                { value: 'rawtcp', label: t('settings.transport.rawtcp') },
               ]}
             />
             <p className="setting-note">
-              <code className="mono">httpupgrade</code> matches the 4.x client default. Switch to{' '}
-              <code className="mono">rawtcp</code> only for a version profile that requires it; the
-              choice applies to new sessions, not running ones.
+              <code className="mono">httpupgrade</code> {t('settings.transport.notePrefix')}{' '}
+              <code className="mono">rawtcp</code> {t('settings.transport.noteMiddle')}
             </p>
           </Card>
 
-          <Card title="Health checks" subtitle="Canary cadence for LIVE nodes.">
+          <Card title={t('settings.health.title')} subtitle={t('settings.health.subtitle')}>
             <Field
-              label="Interval"
+              label={t('settings.health.interval')}
               htmlFor="health-interval"
-              hint="10–600 seconds. Each probe exits through the gate and verifies the egress IP."
+              hint={t('settings.health.hint')}
             >
               <div className="input-affix">
                 <Input
@@ -199,31 +195,35 @@ export default function Settings() {
                   value={draft.healthIntervalSec}
                   onChange={(event) => update('healthIntervalSec', Number(event.target.value))}
                 />
-                <span className="input-affix__unit">sec</span>
+                <span className="input-affix__unit">{t('common.sec')}</span>
               </div>
             </Field>
           </Card>
 
-          <Card title="Leases" subtitle="Default TTL for new user assignments.">
-            <Field label="Lease TTL" htmlFor="lease-ttl" hint="Existing leases keep their original TTL.">
+          <Card title={t('settings.leases.title')} subtitle={t('settings.leases.subtitle')}>
+            <Field
+              label={t('settings.leases.ttl')}
+              htmlFor="lease-ttl"
+              hint={t('settings.leases.hint')}
+            >
               <Select
                 id="lease-ttl"
                 value={draft.leaseTtl}
                 onChange={(event) => update('leaseTtl', event.target.value)}
               >
-                <option value="1h">1 hour</option>
-                <option value="4h">4 hours</option>
-                <option value="8h">8 hours</option>
-                <option value="24h">24 hours</option>
+                <option value="1h">{t('settings.leases.1h')}</option>
+                <option value="4h">{t('settings.leases.4h')}</option>
+                <option value="8h">{t('settings.leases.8h')}</option>
+                <option value="24h">{t('settings.leases.24h')}</option>
               </Select>
             </Field>
           </Card>
 
-          <Card title="Subscription" subtitle="How often ajs-accountd republishes ajs-live.">
+          <Card title={t('settings.subscription.title')} subtitle={t('settings.subscription.subtitle')}>
             <Field
-              label="Refresh interval"
+              label={t('settings.subscription.interval')}
               htmlFor="subscription-interval"
-              hint="5–300 seconds. Publishes are coalesced to one PATCH per window."
+              hint={t('settings.subscription.hint')}
             >
               <div className="input-affix">
                 <Input
@@ -234,27 +234,27 @@ export default function Settings() {
                   value={draft.subscriptionRefreshSec}
                   onChange={(event) => update('subscriptionRefreshSec', Number(event.target.value))}
                 />
-                <span className="input-affix__unit">sec</span>
+                <span className="input-affix__unit">{t('common.sec')}</span>
               </div>
             </Field>
           </Card>
 
-          <Card title="Appearance" subtitle="Theme and accent, stored in this browser.">
+          <Card title={t('settings.appearance.title')} subtitle={t('settings.appearance.subtitle')}>
             <SegmentedControl
-              label="Theme"
+              label={t('settings.appearance.theme')}
               value={theme}
               onChange={(value) => {
                 setTheme(value)
                 update('theme', value)
               }}
               options={[
-                { value: 'dark', label: 'Dark', icon: <Moon size={13} /> },
-                { value: 'light', label: 'Light', icon: <Sun size={13} /> },
+                { value: 'dark', label: t('settings.appearance.dark'), icon: <Moon size={13} /> },
+                { value: 'light', label: t('settings.appearance.light'), icon: <Sun size={13} /> },
               ]}
             />
             <div className="accent-field">
               <span className="accent-field__label" id="accent-group-label">
-                Accent
+                {t('settings.appearance.accent')}
               </span>
               <div className="accent-picker" role="group" aria-labelledby="accent-group-label">
                 {ACCENTS.map((option) => (
@@ -269,59 +269,72 @@ export default function Settings() {
                       className={clsx('accent-picker__dot', `accent-picker__dot--${option.value}`)}
                       aria-hidden="true"
                     />
-                    {option.label}
+                    {t(option.labelKey)}
                   </button>
                 ))}
               </div>
             </div>
-            <p className="setting-note">
-              The theme and accent are stored per browser (<code className="mono">ajs.theme</code>,{' '}
-              <code className="mono">ajs.accent</code>) and are not sent to the daemon. Dark is the
-              reference palette; light is a derived variant for bright rooms.
-            </p>
+            <p className="setting-note">{t('settings.appearance.note')}</p>
+          </Card>
+
+          <Card title={t('settings.language.title')} subtitle={t('settings.language.subtitle')}>
+            <SegmentedControl
+              label={t('settings.language.label')}
+              value={lang}
+              onChange={setLang}
+              options={[
+                { value: 'zh', label: t('settings.language.zh') },
+                { value: 'en', label: t('settings.language.en') },
+              ]}
+            />
+            <p className="setting-note">{t('settings.language.note')}</p>
           </Card>
 
           <Card
-            title="Daemon"
-            subtitle="Connection facts reported by the running process."
+            title={t('settings.daemon.title')}
+            subtitle={t('settings.daemon.subtitle')}
             actions={
               !mock ? (
                 <Button size="sm" variant="secondary" onClick={() => window.dispatchEvent(new Event('ajs:token-required'))}>
-                  {tokenSet ? 'Replace token' : 'Set token'}
+                  {tokenSet ? t('settings.daemon.replaceToken') : t('settings.daemon.setToken')}
                 </Button>
               ) : null
             }
           >
             <dl className="facts facts--compact">
               <div>
-                <dt>Endpoint</dt>
+                <dt>{t('settings.daemon.endpoint')}</dt>
                 <dd className="mono">{apiEndpointLabel()}</dd>
               </div>
               <div>
-                <dt>Mode</dt>
+                <dt>{t('settings.daemon.mode')}</dt>
                 <dd>
                   <Badge tone={mock ? 'mint' : 'info'}>
-                    {mock ? 'mock data' : 'live API'}
+                    {mock ? t('shell.envMock') : t('shell.envLive')}
                   </Badge>
                 </dd>
               </div>
               <div>
-                <dt>Version</dt>
+                <dt>{t('settings.daemon.version')}</dt>
                 <dd className="mono">{daemonVersion}</dd>
               </div>
               <div>
-                <dt>Commit</dt>
-                <dd className="mono">{overview.data?.commit || 'not embedded'}</dd>
+                <dt>{t('settings.daemon.commit')}</dt>
+                <dd className="mono">{overview.data?.commit || t('common.notEmbedded')}</dd>
               </div>
               <div>
-                <dt>Transport</dt>
+                <dt>{t('settings.daemon.transport')}</dt>
                 <dd className="mono">{draft.transport}</dd>
               </div>
               <div>
-                <dt>Token</dt>
+                <dt>{t('settings.daemon.token')}</dt>
                 <dd>
                   <Badge tone={mock ? 'neutral' : tokenSet ? 'success' : 'warning'}>
-                    {mock ? 'not required' : tokenSet ? 'set (session)' : 'not set'}
+                    {mock
+                      ? t('settings.daemon.tokenNotRequired')
+                      : tokenSet
+                        ? t('settings.daemon.tokenSet')
+                        : t('settings.daemon.tokenMissing')}
                   </Badge>
                 </dd>
               </div>
@@ -330,20 +343,18 @@ export default function Settings() {
               <Database size={12} aria-hidden="true" />{' '}
               {mock ? (
                 <>
-                  Set <code className="mono">VITE_USE_MOCK=false</code> and{' '}
-                  <code className="mono">VITE_API_BASE</code> to target a real daemon. No credentials are
-                  bundled in this build.
+                  {t('settings.daemon.mockNotePrefix')} <code className="mono">VITE_USE_MOCK=false</code>{' '}
+                  {t('settings.daemon.mockNoteMiddle')} <code className="mono">VITE_API_BASE</code>{' '}
+                  {t('settings.daemon.mockNoteSuffix')}
                 </>
               ) : (
                 <>
-                  The panel talks to ajs-accountd at this endpoint. The token comes from{' '}
-                  <code className="mono">VITE_PANEL_TOKEN</code> or the runtime gate, is kept in this tab's
-                  sessionStorage, and is never rendered here.
+                  {t('settings.daemon.liveNote')}
                   {tokenSet ? (
                     <>
                       {' '}
                       <button type="button" className="link-button" onClick={clearToken}>
-                        Clear session token
+                        {t('settings.daemon.clearToken')}
                       </button>
                     </>
                   ) : null}
@@ -352,10 +363,10 @@ export default function Settings() {
             </p>
           </Card>
 
-          <Card title="Updates" subtitle="Read-only GitHub release check.">
+          <Card title={t('settings.updates.title')} subtitle={t('settings.updates.subtitle')}>
             <dl className="facts facts--compact">
               <div>
-                <dt>Current</dt>
+                <dt>{t('settings.updates.current')}</dt>
                 <dd className="mono">{daemonVersion}</dd>
               </div>
             </dl>
@@ -366,35 +377,36 @@ export default function Settings() {
                 onClick={() => void checkUpdate()}
                 loading={updateChecking}
               >
-                Check
+                {t('settings.updates.check')}
               </Button>
               {updateInfo && updateInfo.enabled && updateInfo.latest ? (
                 <Badge tone={updateInfo.updateAvailable ? 'warning' : 'success'}>
-                  {updateInfo.updateAvailable ? 'Update available' : 'Up to date'}
+                  {updateInfo.updateAvailable
+                    ? t('settings.updates.available')
+                    : t('settings.updates.upToDate')}
                 </Badge>
               ) : null}
             </div>
             {updateError ? (
               <p className="setting-note" role="alert">
-                Update check failed: {updateError}
+                {t('settings.updates.failed', { error: updateError })}
               </p>
             ) : null}
             {!updateChecking && !updateError && updateInfo && !updateInfo.enabled ? (
               <p className="setting-note">
-                Update checks are disabled: <code className="mono">AJS_UPDATE_REPO</code> is not
-                configured on the daemon. The daemon never updates itself; the host runs{' '}
-                <code className="mono">deploy/update.sh</code>.
+                {t('settings.updates.disabledPrefix')} <code className="mono">AJS_UPDATE_REPO</code>{' '}
+                {t('settings.updates.disabledSuffix')}
               </p>
             ) : null}
             {updateInfo && updateInfo.enabled && updateInfo.latest ? (
               <dl className="facts facts--compact">
                 <div>
-                  <dt>Latest</dt>
+                  <dt>{t('settings.updates.latest')}</dt>
                   <dd className="mono">{updateInfo.latest}</dd>
                 </div>
                 {updateInfo.publishedAt ? (
                   <div>
-                    <dt>Published</dt>
+                    <dt>{t('settings.updates.published')}</dt>
                     <dd>{formatDateTime(updateInfo.publishedAt)}</dd>
                   </div>
                 ) : null}
@@ -405,8 +417,8 @@ export default function Settings() {
                 <code className="mono">{deployCommand(updateInfo.latest)}</code>
                 <CopyButton
                   value={deployCommand(updateInfo.latest)}
-                  label="Copy deploy command"
-                  toastMessage="Deploy command copied"
+                  label={t('settings.updates.copyCommand')}
+                  toastMessage={t('settings.updates.copied')}
                   withLabel
                 />
                 {updateInfo.url ? (
@@ -416,27 +428,26 @@ export default function Settings() {
                     target="_blank"
                     rel="noreferrer noopener"
                   >
-                    <ExternalLink size={12} aria-hidden="true" /> Release notes
+                    <ExternalLink size={12} aria-hidden="true" /> {t('settings.updates.releaseNotes')}
                   </a>
                 ) : null}
               </div>
             ) : null}
             {updateInfo?.checkedAt ? (
-              <p className="setting-note">Checked {formatDateTime(updateInfo.checkedAt)}</p>
+              <p className="setting-note">
+                {t('settings.updates.checked', { time: formatDateTime(updateInfo.checkedAt) })}
+              </p>
             ) : null}
           </Card>
         </div>
       )}
 
       {mock ? (
-        <Card className="danger-card" title="Reset mock data" subtitle="Restore accounts, nodes, leases, keys and logs.">
+        <Card className="danger-card" title={t('settings.reset.title')} subtitle={t('settings.reset.subtitle')}>
           <div className="danger-card__row">
-            <p className="setting-note">
-              This only affects the in-browser mock store. It does not touch a daemon, database or
-              vendor account.
-            </p>
+            <p className="setting-note">{t('settings.reset.note')}</p>
             <Button variant="danger" icon={<RefreshCw size={14} />} onClick={() => setResetOpen(true)}>
-              Reset dataset
+              {t('settings.reset.button')}
             </Button>
           </div>
         </Card>
@@ -445,9 +456,9 @@ export default function Settings() {
       {mock ? (
         <ConfirmDialog
           open={resetOpen}
-          title="Reset mock data?"
-          description="Every change made in this session — created accounts, rotated leases, revoked keys — is discarded. Settings are preserved."
-          confirmLabel="Reset dataset"
+          title={t('settings.reset.confirmTitle')}
+          description={t('settings.reset.confirmDescription')}
+          confirmLabel={t('settings.reset.button')}
           busy={resetting}
           onConfirm={() => void resetMock()}
           onCancel={() => setResetOpen(false)}

@@ -5,6 +5,8 @@ import type { KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import { api } from '../lib/api'
+import { translate, useI18n } from '../lib/i18n'
+import type { Language } from '../lib/i18n'
 import { NAV_ITEMS } from '../lib/nav'
 import { useTheme } from '../lib/theme'
 import type { Account, ProxyNode } from '../lib/types'
@@ -14,7 +16,10 @@ import { useToast } from './Toast'
 interface PaletteEntry {
   id: string
   label: string
+  /** The same entry in the other language, so one query matches both. */
+  altLabel: string
   section: string
+  altSection: string
   keywords: string
   icon: LucideIcon
   run: () => void
@@ -26,7 +31,8 @@ function scoreEntry(query: string, entry: PaletteEntry): number {
   const label = entry.label.toLowerCase()
   if (label.startsWith(needle)) return 100
   if (label.includes(needle)) return 80
-  const haystack = `${label} ${entry.keywords} ${entry.section}`.toLowerCase()
+  const haystack =
+    `${label} ${entry.altLabel} ${entry.keywords} ${entry.section} ${entry.altSection}`.toLowerCase()
   if (haystack.includes(needle)) return 60
   let cursor = 0
   for (const character of haystack) {
@@ -49,6 +55,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const navigate = useNavigate()
   const { push } = useToast()
   const { theme, toggle } = useTheme()
+  const { lang, t } = useI18n()
+  const other: Language = lang === 'zh' ? 'en' : 'zh'
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
   const [data, setData] = useState<PaletteData>(NO_DATA)
@@ -114,8 +122,10 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const entries = useMemo<PaletteEntry[]>(() => {
     const navigation: PaletteEntry[] = NAV_ITEMS.map((item) => ({
       id: `nav-${item.to}`,
-      label: item.label,
-      section: 'Navigate',
+      label: t(item.labelKey),
+      altLabel: translate(other, item.labelKey),
+      section: t('palette.section.navigate'),
+      altSection: translate(other, 'palette.section.navigate'),
       keywords: item.keywords,
       icon: item.icon,
       run: () => navigate(item.to),
@@ -123,37 +133,47 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const actions: PaletteEntry[] = [
       {
         id: 'action-new-account',
-        label: 'New account',
-        section: 'Action',
-        keywords: 'create add vendor login',
+        label: t('palette.actionNewAccount'),
+        altLabel: translate(other, 'palette.actionNewAccount'),
+        section: t('palette.section.action'),
+        altSection: translate(other, 'palette.section.action'),
+        keywords: 'create add vendor login 新建 添加 厂商 登录 账户',
         icon: Plus,
         run: () => navigate('/accounts?new=1'),
       },
       {
         id: 'action-refresh',
-        label: 'Refresh data',
-        section: 'Action',
-        keywords: 'reload sync fetch',
+        label: t('palette.actionRefresh'),
+        altLabel: translate(other, 'palette.actionRefresh'),
+        section: t('palette.section.action'),
+        altSection: translate(other, 'palette.section.action'),
+        keywords: 'reload sync fetch 重新加载 同步 获取 刷新',
         icon: RefreshCw,
         run: () => {
           window.dispatchEvent(new Event('ajs:refresh'))
-          push('Refreshing panel data')
+          push(t('shell.refreshing'))
         },
       },
       {
         id: 'action-theme',
-        label: theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
-        section: 'Action',
-        keywords: 'appearance dark light',
+        label: t(theme === 'dark' ? 'shell.toLightTheme' : 'shell.toDarkTheme'),
+        altLabel: translate(other, theme === 'dark' ? 'shell.toLightTheme' : 'shell.toDarkTheme'),
+        section: t('palette.section.action'),
+        altSection: translate(other, 'palette.section.action'),
+        keywords: 'appearance dark light 外观 主题 深色 浅色',
         icon: theme === 'dark' ? Sun : Moon,
         run: toggle,
       },
     ]
     if (query.replace(/\s/g, '').length < DATA_QUERY_MIN) return [...navigation, ...actions]
+    const accountSection = t('palette.section.account')
+    const nodeSection = t('palette.section.node')
     const accountEntries: PaletteEntry[] = data.accounts.map((account) => ({
       id: `account-${account.id}`,
       label: account.label,
-      section: 'Account',
+      altLabel: account.label,
+      section: accountSection,
+      altSection: translate(other, 'palette.section.account'),
       keywords: `${account.username} ${account.platform} ${account.regions.join(' ')}`,
       icon: Wallet,
       run: () => navigate(`/accounts?q=${encodeURIComponent(account.label)}`),
@@ -161,13 +181,15 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const nodeEntries: PaletteEntry[] = data.nodes.map((node) => ({
       id: `node-${node.id}`,
       label: node.label,
-      section: 'Node',
+      altLabel: node.label,
+      section: nodeSection,
+      altSection: translate(other, 'palette.section.node'),
       keywords: `${node.accountLabel} ${node.region} ${node.city} ${node.egressIp}`,
       icon: Server,
       run: () => navigate(`/nodes?q=${encodeURIComponent(node.label)}`),
     }))
     return [...navigation, ...actions, ...accountEntries, ...nodeEntries]
-  }, [data, navigate, push, query, theme, toggle])
+  }, [data, navigate, other, push, query, t, theme, toggle])
 
   const filtered = useMemo(
     () =>
@@ -218,18 +240,18 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         className="palette"
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t('palette.title')}
         tabIndex={-1}
       >
         <div className="palette__search">
           <Search size={16} aria-hidden="true" />
           <input
             className="palette__input"
-            placeholder="Search pages and actions…"
+            placeholder={t('palette.placeholder')}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            aria-label="Command palette search"
+            aria-label={t('palette.search')}
             aria-controls="palette-list"
             aria-activedescendant={filtered.length ? `palette-option-${selected}` : undefined}
             autoFocus
@@ -237,7 +259,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
           <kbd className="kbd">Esc</kbd>
         </div>
 
-        <ul className="palette__list" id="palette-list" role="listbox" aria-label="Results">
+        <ul className="palette__list" id="palette-list" role="listbox" aria-label={t('palette.results')}>
           {filtered.map((entry, index) => (
             <li
               key={entry.id}
@@ -257,20 +279,20 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
             </li>
           ))}
           {filtered.length === 0 ? (
-            <li className="palette__empty">No pages or actions match “{query}”.</li>
+            <li className="palette__empty">{t('palette.empty', { query })}</li>
           ) : null}
         </ul>
 
         <footer className="palette__foot">
           <span>
             <kbd className="kbd">↑</kbd>
-            <kbd className="kbd">↓</kbd> navigate
+            <kbd className="kbd">↓</kbd> {t('palette.navigateHint')}
           </span>
           <span>
-            <kbd className="kbd">↵</kbd> open
+            <kbd className="kbd">↵</kbd> {t('palette.openHint')}
           </span>
           <span>
-            <kbd className="kbd">Esc</kbd> close
+            <kbd className="kbd">Esc</kbd> {t('palette.closeHint')}
           </span>
         </footer>
       </div>

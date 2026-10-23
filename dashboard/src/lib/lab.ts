@@ -61,15 +61,15 @@ export function isLogLevel(value: string): value is LabLogLevel {
  * Secret flags never expose their value. `set` is the only state the daemon
  * serialises for them, and the UI must not invent anything else.
  */
-export function flagDisplay(flag: FlagView): string {
+export function flagDisplay(flag: FlagView, t: (key: string) => string): string {
   if (flag.secret) {
-    if (flag.set === true) return 'set'
-    if (flag.set === false) return 'not set'
-    return 'redacted'
+    if (flag.set === true) return t('common.set')
+    if (flag.set === false) return t('common.notSet')
+    return t('common.redacted')
   }
   if (flag.value !== undefined && flag.value !== '') return flag.value
-  if (flag.set === true) return 'set'
-  if (flag.set === false) return 'not set'
+  if (flag.set === true) return t('common.set')
+  if (flag.set === false) return t('common.notSet')
   return '—'
 }
 
@@ -88,22 +88,25 @@ export function serverStatusTone(status: string): Tone {
   }
 }
 
-export function serverFlagLabel(server: ServerView): string {
-  if (server.skippedByLimit) return 'skipped by limit'
-  if (server.selected) return 'selected'
-  return 'not selected'
+export function serverFlagLabel(server: ServerView, t: (key: string) => string): string {
+  if (server.skippedByLimit) return t('lab.server.skippedByLimit')
+  if (server.selected) return t('lab.server.selected')
+  return t('lab.server.notSelected')
 }
 
-export function certPinLabel(mode: string): string {
-  if (mode === 'pinned') return 'pin · pinned'
-  if (mode === 'default') return 'default TLS'
-  return mode || 'unknown'
+export function certPinLabel(mode: string, t: (key: string) => string): string {
+  if (mode === 'pinned') return t('lab.certPin.pinned')
+  if (mode === 'default') return t('lab.certPin.default')
+  return mode || t('lab.certPin.unknown')
 }
 
-const NODE_STATE_BY_NAME: Partial<Record<string, { label: string; tone: Tone }>> = NODE_STATE
+const NODE_STATE_BY_NAME: Partial<Record<string, { labelKey: string; tone: Tone }>> = NODE_STATE
 
-export function nodeStateMeta(state: string): { label: string; tone: Tone } {
-  return NODE_STATE_BY_NAME[state] ?? { label: state || 'unknown', tone: 'neutral' }
+/** Known node states carry a translation key; unknown states surface the raw value. */
+export function nodeStateMeta(state: string): { labelKey: string | null; label: string; tone: Tone } {
+  const known = NODE_STATE_BY_NAME[state]
+  if (known) return { labelKey: known.labelKey, label: state, tone: known.tone }
+  return { labelKey: null, label: state || 'unknown', tone: 'neutral' }
 }
 
 export function healthTone(value: string): Tone {

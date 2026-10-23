@@ -9,7 +9,8 @@ is opt-in through build-time environment variables (see [Modes](#modes) and
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 97 tests in 13 files.
+- Tests: Vitest + React Testing Library + jsdom, 105 tests in 14 files.
+- Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings language card.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
 
@@ -26,6 +27,31 @@ The shell reports the active mode: the topbar pill reads `mock data` or `live AP
 version reads `v0.1.0 · mock` or `v0.1.0 · live`. The Lab page works in both modes: deterministic
 fixtures in mock, `/v1/lab/*` in live; a live 401 opens the runtime token gate described below.
 
+## Language
+
+The console ships in English and Chinese. Both switches are always visible:
+
+| Surface | Control |
+|---|---|
+| Sidebar footer | `中` / `EN` segmented switch (`role="group"`, `aria-pressed` on the active choice) next to the version and theme button |
+| Settings | **Language** card with a `中文` / `English` segmented control and a note that the choice is per browser |
+
+- **Default.** On first load the stored choice wins; with no stored value the browser hint decides —
+  `navigator.language` starting with `zh` selects Chinese, everything else selects English.
+- **Persistence.** Every switch writes `localStorage["ajs.lang"]` (`"zh"` or `"en"`). The choice is
+  per browser and is never sent to the daemon; when storage is unavailable the in-memory choice
+  still applies for the session.
+- **Document language.** The provider sets `<html lang>` to `zh-CN` or `en`, so assistive
+  technology and the browser see the active language.
+- **Coverage.** Every user-visible string — shell, pages, Lab, dialogs, empty/error states — is
+  translated; English is the source dictionary and Chinese must mirror every key. Account labels,
+  server names, IPs and API field values are data and are never translated. The command palette
+  still finds pages in either language.
+- **Tests.** `tests/i18n.test.tsx` asserts dictionary parity and non-empty values, interpolation
+  and English/key fallback, switching the sidebar and Lab to Chinese plus `document.lang`, restoring
+  a stored choice on a fresh mount, the `zh*` browser default, switching back to English from
+  Settings, and palette page search in both directions.
+
 ## Quick start
 
 ```bash
@@ -33,7 +59,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 97 tests in 13 files
+npm test           # Vitest, 105 tests in 14 files
 npm run typecheck  # tsc -b
 ```
 
@@ -364,8 +390,12 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 97 Vitest tests in 13 files (65 at the 2026-10-23 record; see
+- 105 Vitest tests in 14 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
+  `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
+  interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
+  stored choice, the `zh*` browser default, the Settings language card, and palette page search in
+  both languages.
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
@@ -439,7 +469,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/requests` | Requests | request log, status/method/source filters, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, audit table, export placeholder |
 | `/lab` | Lab | tabs: Overview, Gates & sessions, Egress (guarded check), Servers, Protocol, Device, Logs, Diagnostics; environment badges; account picker for Servers/Device |
-| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, **Updates** check card, daemon/token card, reset |
+| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, language, **Updates** check card, daemon/token card, reset |
 
 `*` redirects to `/`.
 
@@ -456,6 +486,7 @@ src/
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
     format.ts             bytes, dates, TTL, proxy URL helpers
+    i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
     labels.ts             account/node/severity tone maps
     nav.tsx               navigation + command registry metadata
     theme.tsx             theme + accent provider, localStorage persistence
@@ -469,6 +500,7 @@ src/
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
+  i18n.test.tsx           dictionary parity, zh/en switching, browser default, ajs.lang, document.lang
   token-gate.test.tsx     401 → runtime token dialog → sessionStorage token + retry
   update-card.test.tsx    Settings Updates card states and deploy command
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid

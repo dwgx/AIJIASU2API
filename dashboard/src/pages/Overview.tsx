@@ -12,6 +12,7 @@ import {
 } from 'recharts'
 import { api } from '../lib/api'
 import { formatBytes, formatCompact, formatDateTime, formatNumber, formatRelative, formatTime } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import { ACCOUNT_STATE, SEVERITY } from '../lib/labels'
 import type { MetricRange } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
@@ -29,6 +30,7 @@ import {
 } from '../components/primitives'
 
 function TrafficChart({ range, series }: { range: MetricRange; series: Array<{ t: string; ingress: number; egress: number }> }) {
+  const { t } = useI18n()
   return (
     <div className="chart">
       <ResponsiveContainer width="100%" height={196}>
@@ -75,7 +77,10 @@ function TrafficChart({ range, series }: { range: MetricRange; series: Array<{ t
             }}
             labelStyle={{ color: 'var(--text-2)', marginBottom: 4 }}
             labelFormatter={(value) => formatDateTime(String(value))}
-            formatter={(value, name) => [formatBytes(Number(value)), name === 'egress' ? 'Egress' : 'Ingress']}
+            formatter={(value, name) => [
+              formatBytes(Number(value)),
+              name === 'egress' ? t('overview.egress') : t('overview.ingress'),
+            ]}
           />
           <Area
             type="monotone"
@@ -102,6 +107,7 @@ function TrafficChart({ range, series }: { range: MetricRange; series: Array<{ t
 }
 
 function OverviewSkeleton() {
+  const { t } = useI18n()
   return (
     <div className="stack-lg" aria-busy="true">
       <div className="metric-grid">
@@ -114,10 +120,10 @@ function OverviewSkeleton() {
         ))}
       </div>
       <div className="grid-2-1">
-        <Card title="Traffic">
+        <Card title={t('overview.traffic')}>
           <Skeleton height={196} />
         </Card>
-        <Card title="Account health">
+        <Card title={t('overview.accountHealth')}>
           <div className="stack">
             {Array.from({ length: 5 }, (_, index) => (
               <Skeleton key={index} height={32} />
@@ -132,6 +138,7 @@ function OverviewSkeleton() {
 export default function Overview() {
   const [range, setRange] = useState<MetricRange>('24h')
   const navigate = useNavigate()
+  const { lang, t } = useI18n()
   const metrics = useAsync(() => api.getMetrics(range), [range], { intervalMs: 10_000 })
   const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const nodes = useAsync(() => api.listNodes(), [], { intervalMs: 15_000 })
@@ -156,21 +163,21 @@ export default function Overview() {
   const spark = metrics.data?.series.slice(-16).map((point) => point.egress) ?? []
 
   const quickActions = [
-    { label: 'Add account', hint: 'Login + concurrency', icon: Plus, to: '/accounts?new=1' },
-    { label: 'Review leases', hint: 'Sticky egress', icon: Ticket, to: '/leases' },
-    { label: 'Inspect requests', hint: 'Targets & latency', icon: Waypoints, to: '/requests' },
-    { label: 'Open logs', hint: 'Audit trail', icon: ScrollText, to: '/logs' },
+    { label: t('overview.addAccount'), hint: t('overview.addAccountHint'), icon: Plus, to: '/accounts?new=1' },
+    { label: t('overview.reviewLeases'), hint: t('overview.reviewLeasesHint'), icon: Ticket, to: '/leases' },
+    { label: t('overview.inspectRequests'), hint: t('overview.inspectRequestsHint'), icon: Waypoints, to: '/requests' },
+    { label: t('overview.openLogs'), hint: t('overview.openLogsHint'), icon: ScrollText, to: '/logs' },
   ]
 
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Overview"
-        subtitle="Fleet health, traffic and recent operator activity."
+        title={t('overview.title')}
+        subtitle={t('overview.subtitle')}
         refresh={summarizeRefresh(states)}
         actions={
           <SegmentedControl
-            label="Traffic range"
+            label={t('overview.range')}
             value={range}
             onChange={setRange}
             options={[
@@ -183,7 +190,7 @@ export default function Overview() {
 
       {failure ? (
         <Card>
-          <ErrorState message={failure.error ?? 'Unknown error'} onRetry={reloadAll} />
+          <ErrorState message={failure.error ?? t('common.unknownError')} onRetry={reloadAll} />
         </Card>
       ) : loading ? (
         <OverviewSkeleton />
@@ -191,25 +198,28 @@ export default function Overview() {
         <>
           <div className="metric-grid">
             <MetricTile
-              label="Live nodes"
+              label={t('overview.liveNodes')}
               value={`${liveNodes}/${totalNodes}`}
-              hint={`${nodes.data?.filter((node) => node.state === 'DRAINING').length ?? 0} draining · ${nodes.data?.filter((node) => node.state === 'READY').length ?? 0} ready`}
+              hint={t('overview.drainingReady', {
+                draining: nodes.data?.filter((node) => node.state === 'DRAINING').length ?? 0,
+                ready: nodes.data?.filter((node) => node.state === 'READY').length ?? 0,
+              })}
               icon={<Server size={15} />}
               spark={spark}
               tone="mint"
             />
             <MetricTile
-              label="Active leases"
+              label={t('overview.activeLeases')}
               value={formatNumber(leases.data?.length ?? 0)}
-              hint={`${stickyLeases} sticky · IP-anchored`}
-              delta="2 new"
+              hint={t('overview.stickyHint', { count: stickyLeases })}
+              delta={t('overview.deltaNew')}
               trend="up"
               icon={<Ticket size={15} />}
               spark={spark.map((value) => value * 0.92)}
               tone="info"
             />
             <MetricTile
-              label={`Requests · ${range}`}
+              label={t('overview.requestsRange', { range })}
               value={formatCompact(metrics.data?.totals.requests ?? 0)}
               hint={`p95 ${metrics.data?.totals.p95LatencyMs ?? 0} ms`}
               delta="12.4%"
@@ -219,9 +229,9 @@ export default function Overview() {
               tone="success"
             />
             <MetricTile
-              label={`Egress · ${range}`}
+              label={t('overview.egressRange', { range })}
               value={formatBytes(metrics.data?.totals.egressBytes ?? 0)}
-              hint={`${formatBytes(metrics.data?.totals.ingressBytes ?? 0)} ingress`}
+              hint={t('overview.ingressHint', { bytes: formatBytes(metrics.data?.totals.ingressBytes ?? 0) })}
               delta="8.1%"
               trend="up"
               icon={<ArrowUpRight size={15} />}
@@ -232,15 +242,15 @@ export default function Overview() {
 
           <div className="grid-2-1">
             <Card
-              title="Traffic"
-              subtitle="Ingress and egress through the proxy gates."
+              title={t('overview.traffic')}
+              subtitle={t('overview.trafficSubtitle')}
               actions={
                 <div className="legend">
                   <span className="legend__item">
-                    <span className="legend__swatch legend__swatch--mint" /> Egress
+                    <span className="legend__swatch legend__swatch--mint" /> {t('overview.egress')}
                   </span>
                   <span className="legend__item">
-                    <span className="legend__swatch legend__swatch--info" /> Ingress
+                    <span className="legend__swatch legend__swatch--info" /> {t('overview.ingress')}
                   </span>
                 </div>
               }
@@ -249,11 +259,11 @@ export default function Overview() {
             </Card>
 
             <Card
-              title="Account health"
-              subtitle="Composite of login state and node liveness."
+              title={t('overview.accountHealth')}
+              subtitle={t('overview.accountHealthSubtitle')}
               actions={
                 <Link className="link" to="/accounts">
-                  Manage
+                  {t('overview.manage')}
                 </Link>
               }
             >
@@ -270,9 +280,9 @@ export default function Overview() {
                         <ProgressBar
                           value={entry.score}
                           tone={state.tone}
-                          label={`${entry.label} health`}
+                          label={t('overview.healthLabel', { name: entry.label })}
                         />
-                        <Badge tone={state.tone}>{state.label}</Badge>
+                        <Badge tone={state.tone}>{t(state.labelKey)}</Badge>
                       </div>
                     </li>
                   )
@@ -283,11 +293,11 @@ export default function Overview() {
 
           <div className="grid-2-1">
             <Card
-              title="Activity"
-              subtitle="Latest control-plane events."
+              title={t('overview.activity')}
+              subtitle={t('overview.activitySubtitle')}
               actions={
                 <Link className="link" to="/logs">
-                  View all
+                  {t('overview.viewAll')}
                 </Link>
               }
             >
@@ -299,18 +309,18 @@ export default function Overview() {
                       <span className="activity-row__action mono">{event.action}</span>
                       <span className="activity-row__target">{event.target}</span>
                     </div>
-                    <span className="activity-row__time">{formatRelative(event.ts)}</span>
+                    <span className="activity-row__time">{formatRelative(event.ts, Date.now(), lang)}</span>
                   </li>
                 ))}
               </ul>
             </Card>
 
             <Card
-              title="Quick actions"
-              subtitle="Common operator paths."
+              title={t('overview.quickActions')}
+              subtitle={t('overview.quickActionsSubtitle')}
               actions={
                 <IconButton
-                  label="Refresh snapshot"
+                  label={t('overview.refreshSnapshot')}
                   icon={<RefreshCw size={14} />}
                   onClick={reloadAll}
                 />

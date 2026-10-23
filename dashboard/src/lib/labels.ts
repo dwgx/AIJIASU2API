@@ -1,24 +1,25 @@
+import type { TranslationKey } from './i18n'
 import type { AccountState, NodeState, Severity, Tone } from './types'
 
-export const ACCOUNT_STATE: Record<AccountState, { label: string; tone: Tone }> = {
-  active: { label: 'Active', tone: 'success' },
-  paused: { label: 'Paused', tone: 'warning' },
-  auth_failed: { label: 'Auth failed', tone: 'danger' },
-  expired: { label: 'Expired', tone: 'danger' },
+export const ACCOUNT_STATE: Record<AccountState, { labelKey: TranslationKey; tone: Tone }> = {
+  active: { labelKey: 'state.active', tone: 'success' },
+  paused: { labelKey: 'state.paused', tone: 'warning' },
+  auth_failed: { labelKey: 'state.auth_failed', tone: 'danger' },
+  expired: { labelKey: 'state.expired', tone: 'danger' },
 }
 
-export const NODE_STATE: Record<NodeState, { label: string; tone: Tone }> = {
-  LIVE: { label: 'Live', tone: 'success' },
-  READY: { label: 'Ready', tone: 'info' },
-  STARTING: { label: 'Starting', tone: 'warning' },
-  DRAINING: { label: 'Draining', tone: 'warning' },
-  DOWN: { label: 'Down', tone: 'danger' },
+export const NODE_STATE: Record<NodeState, { labelKey: TranslationKey; tone: Tone }> = {
+  LIVE: { labelKey: 'state.LIVE', tone: 'success' },
+  READY: { labelKey: 'state.READY', tone: 'info' },
+  STARTING: { labelKey: 'state.STARTING', tone: 'warning' },
+  DRAINING: { labelKey: 'state.DRAINING', tone: 'warning' },
+  DOWN: { labelKey: 'state.DOWN', tone: 'danger' },
 }
 
-export const SEVERITY: Record<Severity, { label: string; tone: Tone }> = {
-  info: { label: 'Info', tone: 'info' },
-  warn: { label: 'Warn', tone: 'warning' },
-  error: { label: 'Error', tone: 'danger' },
+export const SEVERITY: Record<Severity, { labelKey: TranslationKey; tone: Tone }> = {
+  info: { labelKey: 'state.info', tone: 'info' },
+  warn: { labelKey: 'state.warn', tone: 'warning' },
+  error: { labelKey: 'state.error', tone: 'danger' },
 }
 
 export function statusTone(status: number): Tone {

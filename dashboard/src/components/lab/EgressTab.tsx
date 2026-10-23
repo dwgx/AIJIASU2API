@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 import { ApiError } from '../../lib/errors'
 import { formatDateTime, formatNumber } from '../../lib/format'
+import { useI18n } from '../../lib/i18n'
 import { nodeStateMeta } from '../../lib/lab'
 import type { EgressCheckResult, EgressView } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
@@ -22,41 +23,44 @@ import { DisabledCallout, LabFacts } from './shared'
 const CHECK_COOLDOWN_MS = 5_000
 
 function MatchBadge({ match }: { match: boolean | null }) {
-  if (match === null) return <Badge tone="neutral">unknown</Badge>
-  return <Badge tone={match ? 'success' : 'danger'}>{match ? 'match' : 'mismatch'}</Badge>
+  const { t } = useI18n()
+  if (match === null) return <Badge tone="neutral">{t('common.unknown')}</Badge>
+  return <Badge tone={match ? 'success' : 'danger'}>{match ? t('lab.match') : t('lab.mismatch')}</Badge>
 }
 
 function EgressTable({ egress }: { egress: EgressView[] }) {
+  const { t } = useI18n()
   const columns: Array<Column<EgressView>> = [
-    { key: 'node', label: 'Node', render: (row) => <span className="cell-mono">{row.nodeId}</span> },
-    { key: 'claimed', label: 'Claimed', render: (row) => <span className="cell-mono">{row.claimed || '—'}</span> },
+    { key: 'node', label: t('lab.sessions.node'), render: (row) => <span className="cell-mono">{row.nodeId}</span> },
+    { key: 'claimed', label: t('lab.egress.claimed'), render: (row) => <span className="cell-mono">{row.claimed || '—'}</span> },
     {
       key: 'verified',
-      label: 'Verified',
+      label: t('lab.egress.verified'),
       render: (row) =>
-        row.verified ? <span className="cell-mono">{row.verified}</span> : <Badge tone="warning">never checked</Badge>,
+        row.verified ? <span className="cell-mono">{row.verified}</span> : <Badge tone="warning">{t('lab.neverChecked')}</Badge>,
     },
-    { key: 'match', label: 'Match', render: (row) => <MatchBadge match={row.match} /> },
-    { key: 'source', label: 'Source', render: (row) => <span className="cell-sub">{row.source}</span> },
+    { key: 'match', label: t('lab.egress.match'), render: (row) => <MatchBadge match={row.match} /> },
+    { key: 'source', label: t('lab.egress.source'), render: (row) => <span className="cell-sub">{row.source}</span> },
     {
       key: 'checked',
-      label: 'Checked',
+      label: t('lab.egress.checked'),
       render: (row) => <span className="cell-sub">{row.checkedAt ? formatDateTime(row.checkedAt) : '—'}</span>,
     },
   ]
 
   return (
     <DataTable
-      caption="Egress claimed versus verified"
+      caption={t('lab.egress.caption')}
       columns={columns}
       rows={egress}
       rowKey={(row) => row.nodeId}
-      empty={<EmptyState title="No egress records" />}
+      empty={<EmptyState title={t('lab.egress.empty')} />}
     />
   )
 }
 
 export function EgressTab() {
+  const { t } = useI18n()
   const egress = useAsync(() => api.listLabEgress(), [], { intervalMs: 15_000 })
   const gates = useAsync(() => api.listLabGates(), [], { intervalMs: 5_000 })
   const [nodeId, setNodeId] = useState('')
@@ -153,20 +157,17 @@ export function EgressTab() {
   }
 
   const checkTitle = !selectedGate
-    ? 'No running gate for the selected node'
+    ? t('lab.egress.checkTitleNoGate')
     : coolingDown
-      ? 'One egress check per node every 5 seconds'
-      : 'Dial the selected node SOCKS5 gate and read https://ifconfig.me/ip'
+      ? t('lab.egress.checkTitleCooldown')
+      : t('lab.egress.checkTitleReady')
 
   return (
     <div className="stack-lg">
       <div className="lab-tab-head">
         <div>
-          <h2 className="lab-tab-title">Egress claim vs observed</h2>
-          <p className="lab-tab-subtitle">
-            The vendor claim is not an observation. A guarded check dials the selected node loopback SOCKS5 gate and
-            reads https://ifconfig.me/ip; no vendor host and no credential is used.
-          </p>
+          <h2 className="lab-tab-title">{t('lab.egress.title')}</h2>
+          <p className="lab-tab-subtitle">{t('lab.egress.subtitle')}</p>
         </div>
         <div className="lab-tab-actions">
           <Button
@@ -177,43 +178,46 @@ export function EgressTab() {
               gates.reload()
             }}
           >
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </div>
 
       {disabled ? (
         <DisabledCallout
-          title="Egress telemetry is disabled"
+          title={t('lab.egress.disabled')}
           reason={String(reason)}
           flag="AJS_ACCOUNT_LOGIN=1"
         />
       ) : (
         <>
           <Card
-            title="Check egress"
-            subtitle="One node per check with a 5 s cooldown. The daemon refuses a node without a running gate (409)."
-            actions={<Badge tone="warning">guarded</Badge>}
+            title={t('lab.egress.checkTitle')}
+            subtitle={t('lab.egress.checkSubtitle')}
+            actions={<Badge tone="warning">{t('lab.egress.guarded')}</Badge>}
           >
             {gates.status === 'error' ? (
-              <ErrorState message={gates.error ?? 'Unknown error'} onRetry={gates.reload} />
+              <ErrorState message={gates.error ?? t('common.unknownError')} onRetry={gates.reload} />
             ) : gates.status === 'loading' && !gates.data ? (
               <TableSkeleton rows={3} columns={2} />
             ) : (
               <>
                 <div className="lab-tab-actions">
                   <Select
-                    aria-label="Egress check node"
+                    aria-label={t('lab.egress.nodeAria')}
                     value={nodeId}
                     onChange={(event) => chooseNode(event.target.value)}
                     disabled={gateRows.length === 0 || checking}
                   >
-                    {gateRows.length === 0 ? <option value="">No running gate</option> : null}
-                    {gateRows.map((gate) => (
-                      <option key={gate.nodeId} value={gate.nodeId}>
-                        {gate.nodeId} · {gate.accountId} · {nodeStateMeta(gate.state).label}
-                      </option>
-                    ))}
+                    {gateRows.length === 0 ? <option value="">{t('lab.egress.noGateOption')}</option> : null}
+                    {gateRows.map((gate) => {
+                      const meta = nodeStateMeta(gate.state)
+                      return (
+                        <option key={gate.nodeId} value={gate.nodeId}>
+                          {gate.nodeId} · {gate.accountId} · {meta.labelKey ? t(meta.labelKey) : meta.label}
+                        </option>
+                      )
+                    })}
                   </Select>
                   <Button
                     variant="primary"
@@ -223,14 +227,14 @@ export function EgressTab() {
                     disabled={!canCheck}
                     title={checkTitle}
                   >
-                    Check egress
+                    {t('lab.egress.checkTitle')}
                   </Button>
                 </div>
 
                 {!selectedGate ? (
                   <EmptyState
-                    title="No running gate"
-                    description="A node must be LIVE or DRAINING before the daemon can dial its SOCKS5 gate."
+                    title={t('lab.egress.noRunningGate')}
+                    description={t('lab.egress.noRunningGateDesc')}
                     icon={<Network size={20} aria-hidden="true" />}
                   />
                 ) : null}
@@ -241,19 +245,19 @@ export function EgressTab() {
                       <AlertTriangle size={18} aria-hidden="true" />
                     </span>
                     <div>
-                      <p className="callout__title">Egress check failed</p>
+                      <p className="callout__title">{t('lab.egress.failed')}</p>
                       <p className="callout__text">{error}</p>
                     </div>
                   </div>
                 ) : null}
 
                 {shown ? (
-                  <div role="region" aria-label="Selected node egress">
+                  <div role="region" aria-label={t('lab.egress.selectedRegion')}>
                     <LabFacts
                       rows={[
-                        { label: 'Node', value: <span className="mono">{shown.nodeId}</span> },
+                        { label: t('lab.sessions.node'), value: <span className="mono">{shown.nodeId}</span> },
                         {
-                          label: 'Claimed',
+                          label: t('lab.egress.claimed'),
                           value: shown.claimed ? (
                             <span className="mono">{shown.claimed}</span>
                           ) : (
@@ -261,16 +265,16 @@ export function EgressTab() {
                           ),
                         },
                         {
-                          label: 'Verified',
+                          label: t('lab.egress.verified'),
                           value: shown.verified ? (
                             <span className="mono">{shown.verified}</span>
                           ) : (
-                            <Badge tone="warning">not observed</Badge>
+                            <Badge tone="warning">{t('lab.notObserved')}</Badge>
                           ),
                         },
-                        { label: 'Match', value: <MatchBadge match={shown.match} /> },
+                        { label: t('lab.egress.match'), value: <MatchBadge match={shown.match} /> },
                         {
-                          label: 'Latency',
+                          label: t('lab.egress.latency'),
                           value:
                             latencyMs === null ? (
                               <span className="cell-sub">—</span>
@@ -279,10 +283,10 @@ export function EgressTab() {
                             ),
                         },
                         {
-                          label: 'Checked',
+                          label: t('lab.egress.checked'),
                           value: shown.checkedAt ? formatDateTime(shown.checkedAt) : <span className="cell-sub">—</span>,
                         },
-                        { label: 'Source', value: <span className="mono">{shown.source}</span> },
+                        { label: t('lab.egress.source'), value: <span className="mono">{shown.source}</span> },
                       ]}
                     />
                   </div>
@@ -294,7 +298,7 @@ export function EgressTab() {
                       <AlertTriangle size={18} aria-hidden="true" />
                     </span>
                     <div>
-                      <p className="callout__title">Probe failed</p>
+                      <p className="callout__title">{t('lab.egress.probeFailed')}</p>
                       <p className="callout__text">{probeError}</p>
                     </div>
                   </div>
@@ -304,13 +308,13 @@ export function EgressTab() {
           </Card>
 
           <Card
-            title="Claimed vs verified"
-            subtitle="Verified stays empty until a check observes the exit through the gate. A vendor claim alone is not evidence."
-            actions={<Badge tone={egressRows.some((row) => row.verified) ? 'success' : 'warning'}>claim vs echo</Badge>}
+            title={t('lab.egress.tableTitle')}
+            subtitle={t('lab.egress.tableSubtitle')}
+            actions={<Badge tone={egressRows.some((row) => row.verified) ? 'success' : 'warning'}>{t('lab.egress.claimVsEcho')}</Badge>}
             bodyClassName="card__body--flush"
           >
             {egress.status === 'error' ? (
-              <ErrorState message={egress.error ?? 'Unknown error'} onRetry={egress.reload} />
+              <ErrorState message={egress.error ?? t('common.unknownError')} onRetry={egress.reload} />
             ) : egress.status === 'loading' && !egress.data ? (
               <TableSkeleton rows={5} columns={6} />
             ) : (
@@ -323,13 +327,8 @@ export function EgressTab() {
               <Globe size={18} aria-hidden="true" />
             </span>
             <div>
-              <p className="callout__title">What the check observes</p>
-              <p className="callout__text">
-                <code className="mono">source=echo</code> means the IP was read from{' '}
-                <code className="mono">https://ifconfig.me/ip</code> after dialing the node loopback SOCKS5 gate. A
-                probe error still returns <code className="mono">verified=&quot;&quot;</code> and{' '}
-                <code className="mono">match=null</code>; the UI never fills the gap with the vendor claim.
-              </p>
+              <p className="callout__title">{t('lab.egress.whatTitle')}</p>
+              <p className="callout__text">{t('lab.egress.whatText')}</p>
             </div>
           </div>
         </>

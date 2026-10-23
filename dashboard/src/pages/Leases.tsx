@@ -2,6 +2,7 @@ import { Pin, RotateCw, ShieldAlert, ShieldCheck, Ticket, Trash2 } from 'lucide-
 import { useState } from 'react'
 import { api } from '../lib/api'
 import { formatDate, formatNumber, formatTtl, proxyUrl } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import type { Lease } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
@@ -23,6 +24,7 @@ export default function Leases() {
   const leases = useAsync(() => api.listLeases(), [], { intervalMs: 15_000 })
   const lab = useAsync(() => api.getLabOverview(), [], { intervalMs: 30_000 })
   const { push } = useToast()
+  const { t } = useI18n()
   const [releaseId, setReleaseId] = useState<string | null>(null)
   const [releasing, setReleasing] = useState(false)
 
@@ -36,15 +38,15 @@ export default function Leases() {
 
   const rotate = async (lease: Lease) => {
     if (rotateDisabled) {
-      push('Rotate is disabled: Resin is not configured on the daemon', 'danger')
+      push(t('leases.toastRotateDisabled'), 'danger')
       return
     }
     try {
       const updated = await api.rotateLease(lease.id)
       leases.reload()
-      push(`Lease rotated · ${lease.userName} now egresses ${updated.egressIp}`, 'success')
+      push(t('leases.toastRotated', { name: lease.userName, ip: updated.egressIp }), 'success')
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Rotation failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('leases.toastRotateFailed'), 'danger')
     }
   }
 
@@ -54,10 +56,10 @@ export default function Leases() {
     try {
       await api.releaseLease(releaseId)
       leases.reload()
-      push('Lease released', 'success')
+      push(t('leases.toastReleased'), 'success')
       setReleaseId(null)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Release failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('leases.toastReleaseFailed'), 'danger')
     } finally {
       setReleasing(false)
     }
@@ -66,7 +68,7 @@ export default function Leases() {
   const columns: Array<Column<Lease>> = [
     {
       key: 'user',
-      label: 'User',
+      label: t('leases.columnUser'),
       render: (lease) => (
         <div className="cell-stack">
           <span className="cell-strong">{lease.userName}</span>
@@ -76,7 +78,7 @@ export default function Leases() {
     },
     {
       key: 'node',
-      label: 'Account / node',
+      label: t('leases.columnNode'),
       render: (lease) => (
         <div className="cell-stack">
           <span>{lease.accountLabel}</span>
@@ -86,49 +88,49 @@ export default function Leases() {
     },
     {
       key: 'egress',
-      label: 'Egress IP',
+      label: t('leases.columnEgress'),
       render: (lease) => (
         <span className="inline-copy">
           <span className="cell-mono">{lease.egressIp}</span>
           <CopyButton
             value={lease.egressIp}
-            label={`Copy egress IP for ${lease.userName}`}
-            toastMessage="Egress IP copied"
+            label={t('leases.copyEgress', { name: lease.userName })}
+            toastMessage={t('leases.egressCopied')}
           />
         </span>
       ),
     },
     {
       key: 'protocol',
-      label: 'Protocol',
+      label: t('leases.columnProtocol'),
       render: (lease) => <Badge tone={lease.protocol === 'socks5' ? 'info' : 'neutral'}>{lease.protocol}</Badge>,
     },
     {
       key: 'ttl',
-      label: 'TTL',
+      label: t('leases.columnTtl'),
       render: (lease) => (
         <div className="cell-stack">
-          <span className="cell-mono">{formatTtl(lease.expiresAt)}</span>
+          <span className="cell-mono">{formatTtl(lease.expiresAt, Date.now(), t('leases.expired'))}</span>
           <span className="cell-sub">{formatDate(lease.expiresAt)}</span>
         </div>
       ),
     },
     {
       key: 'requests',
-      label: 'Requests',
+      label: t('leases.columnRequests'),
       align: 'right',
       render: (lease) => <span className="cell-mono">{formatNumber(lease.requests)}</span>,
     },
     {
       key: 'sticky',
-      label: 'Mode',
+      label: t('leases.columnMode'),
       render: (lease) =>
         lease.sticky ? (
           <Badge tone="mint">
-            <Pin size={10} aria-hidden="true" /> sticky
+            <Pin size={10} aria-hidden="true" /> {t('leases.sticky')}
           </Badge>
         ) : (
-          <Badge tone="neutral">rotating</Badge>
+          <Badge tone="neutral">{t('leases.rotating')}</Badge>
         ),
     },
     {
@@ -140,22 +142,22 @@ export default function Leases() {
         <span className="row-actions">
           <CopyButton
             value={proxyUrl(lease.gatePort, lease.region, lease.protocol)}
-            label={`Copy proxy URL for ${lease.userName}`}
-            toastMessage="Proxy URL copied"
+            label={t('leases.copyProxy', { name: lease.userName })}
+            toastMessage={t('leases.proxyCopied')}
             withLabel
           />
           <IconButton
             label={
               rotateDisabled
-                ? 'Rotate disabled: Resin is not configured on the daemon'
-                : `Rotate lease for ${lease.userName}`
+                ? t('leases.rotateDisabledLabel')
+                : t('leases.rotateLease', { name: lease.userName })
             }
             icon={<RotateCw size={14} />}
             disabled={rotateDisabled}
             onClick={() => void rotate(lease)}
           />
           <IconButton
-            label={`Release lease for ${lease.userName}`}
+            label={t('leases.releaseLease', { name: lease.userName })}
             icon={<Trash2 size={14} />}
             onClick={() => setReleaseId(lease.id)}
           />
@@ -167,8 +169,11 @@ export default function Leases() {
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Leases"
-        subtitle={`${leases.data?.length ?? 0} active assignments · ${stickyCount} sticky on egress IP.`}
+        title={t('leases.title')}
+        subtitle={t('leases.subtitle', {
+          count: leases.data?.length ?? 0,
+          sticky: stickyCount,
+        })}
         refresh={summarizeRefresh([leases])}
       />
 
@@ -177,12 +182,8 @@ export default function Leases() {
           <ShieldCheck size={18} aria-hidden="true" />
         </span>
         <div>
-          <p className="callout__title">Sticky leases are anchored on egress IP</p>
-          <p className="callout__text">
-            A lease keeps one user pinned to one node until its TTL expires. Rotating picks a new
-            egress IP and restarts the TTL; releasing drops the assignment immediately. Proxy URLs
-            are loopback-only and carry no credentials.
-          </p>
+          <p className="callout__title">{t('leases.stickyCalloutTitle')}</p>
+          <p className="callout__text">{t('leases.stickyCalloutText')}</p>
         </div>
       </div>
 
@@ -192,32 +193,27 @@ export default function Leases() {
             <ShieldAlert size={18} aria-hidden="true" />
           </span>
           <div>
-            <p className="callout__title">Rotate is disabled — Resin is not configured</p>
-            <p className="callout__text">
-              Without <code className="mono">AJS_RESIN_ADMIN_TOKEN</code> the daemon has no way to
-              change the real egress. The store would only rewrite the recorded IP and add 17
-              synthetic requests, so the button is disabled instead of reporting a rotation that did
-              not happen.
-            </p>
+            <p className="callout__title">{t('leases.rotateDisabledTitle')}</p>
+            <p className="callout__text">{t('leases.rotateDisabledText')}</p>
           </div>
         </div>
       ) : null}
 
       <Card bodyClassName="card__body--flush">
         {leases.status === 'error' ? (
-          <ErrorState message={leases.error ?? 'Unknown error'} onRetry={leases.reload} />
+          <ErrorState message={leases.error ?? t('common.unknownError')} onRetry={leases.reload} />
         ) : leases.status === 'loading' && !leases.data ? (
           <TableSkeleton rows={7} columns={7} />
         ) : (
           <DataTable
-            caption="Active leases"
+            caption={t('leases.caption')}
             columns={columns}
             rows={leases.data ?? []}
             rowKey={(lease) => lease.id}
             empty={
               <EmptyState
-                title="No active leases"
-                description="Leases appear here after a user platform requests a node."
+                title={t('leases.emptyTitle')}
+                description={t('leases.emptyDesc')}
                 icon={<Ticket size={20} aria-hidden="true" />}
               />
             }
@@ -227,13 +223,17 @@ export default function Leases() {
 
       <ConfirmDialog
         open={releaseTarget !== null}
-        title="Release lease?"
+        title={t('leases.releaseTitle')}
         description={
           releaseTarget
-            ? `${releaseTarget.userName} loses the assignment to ${releaseTarget.nodeLabel} (${releaseTarget.egressIp}). The next request will be allocated a new node.`
+            ? t('leases.releaseDesc', {
+                name: releaseTarget.userName,
+                node: releaseTarget.nodeLabel,
+                ip: releaseTarget.egressIp,
+              })
             : ''
         }
-        confirmLabel="Release lease"
+        confirmLabel={t('leases.releaseConfirm')}
         busy={releasing}
         onConfirm={() => void confirmRelease()}
         onCancel={() => setReleaseId(null)}

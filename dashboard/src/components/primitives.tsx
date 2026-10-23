@@ -10,6 +10,7 @@ import type {
 } from 'react'
 import type { Tone } from '../lib/types'
 import { formatTime } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import type { RefreshSummary } from '../lib/useAsync'
 
 export type { Tone }
@@ -304,6 +305,7 @@ export function ProgressBar({
   label?: string
 }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0
+  const { t } = useI18n()
   return (
     <div className={clsx('progress', `progress--${tone}`)}>
       <div
@@ -312,7 +314,7 @@ export function ProgressBar({
         aria-valuenow={Math.round(pct)}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-label={label ?? 'progress'}
+        aria-label={label ?? t('common.progress')}
       >
         <span className="progress__fill" style={{ width: `${pct}%` }} />
       </div>
@@ -331,8 +333,9 @@ export function Skeleton({ width, height = 12, className }: { width?: number | s
 }
 
 export function TableSkeleton({ rows = 6, columns = 6 }: { rows?: number; columns?: number }) {
+  const { t } = useI18n()
   return (
-    <div className="table-skeleton" aria-busy="true" aria-label="Loading table">
+    <div className="table-skeleton" aria-busy="true" aria-label={t('common.loadingTable')}>
       {Array.from({ length: rows }, (_, rowIndex) => (
         <div className="table-skeleton__row" key={rowIndex}>
           {Array.from({ length: columns }, (_, columnIndex) => (
@@ -366,17 +369,18 @@ export function EmptyState({
 }
 
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  const { t } = useI18n()
   return (
     <div className="empty empty--error" role="alert">
       <span className="empty__icon">
         <X size={20} aria-hidden="true" />
       </span>
-      <p className="empty__title">Could not load this view</p>
+      <p className="empty__title">{t('common.couldNotLoad')}</p>
       <p className="empty__desc">{message}</p>
       {onRetry ? (
         <div className="empty__action">
           <Button variant="secondary" onClick={onRetry}>
-            Retry
+            {t('common.retry')}
           </Button>
         </div>
       ) : null}
@@ -397,10 +401,12 @@ export function PageHeader({
   eyebrow?: string
   refresh?: RefreshSummary
 }) {
+  const { t } = useI18n()
   const staleLabel = refresh?.stale
-    ? `Showing last-good data — last updated ${
-        refresh.updatedAt ? formatTime(new Date(refresh.updatedAt).toISOString()) : 'unknown'
-      }${refresh.error ? ` · ${refresh.error}` : ''}`
+    ? t(refresh.error ? 'common.staleWithError' : 'common.stale', {
+        time: refresh.updatedAt ? formatTime(new Date(refresh.updatedAt).toISOString()) : t('common.unknown'),
+        error: refresh.error ?? '',
+      })
     : ''
 
   return (

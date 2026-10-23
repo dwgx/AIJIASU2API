@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { hasPanelToken, isMockMode, setPanelToken } from '../lib/api'
+import { useI18n } from '../lib/i18n'
 import { Modal } from './Overlay'
 import { Button, Field, Input } from './primitives'
 
@@ -13,6 +14,7 @@ import { Button, Field, Input } from './primitives'
  * never rendered back.
  */
 export function TokenGate() {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const [token, setToken] = useState('')
   const [error, setError] = useState('')
@@ -42,7 +44,7 @@ export function TokenGate() {
     event.preventDefault()
     const value = token.trim()
     if (!value) {
-      setError('Enter the value of AJS_ADMIN_TOKEN')
+      setError(t('gate.emptyError'))
       return
     }
     setPanelToken(value)
@@ -56,30 +58,26 @@ export function TokenGate() {
   return (
     <Modal
       open={open}
-      title="Panel token required"
-      description={
-        hasPanelToken()
-          ? 'ajs-accountd rejected the stored token. Enter the current AJS_ADMIN_TOKEN to continue.'
-          : 'ajs-accountd requires a bearer token. Enter AJS_ADMIN_TOKEN to load live data.'
-      }
+      title={t('gate.title')}
+      description={hasPanelToken() ? t('gate.descriptionRejected') : t('gate.descriptionRequired')}
       onClose={close}
       footer={
         <>
           <Button variant="ghost" onClick={close}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button type="submit" form="token-gate-form" variant="primary">
-            Use token
+            {t('gate.useToken')}
           </Button>
         </>
       }
     >
       <form id="token-gate-form" className="form" onSubmit={submit}>
         <Field
-          label="Admin token"
+          label={t('gate.adminToken')}
           htmlFor="panel-token"
           error={error}
-          hint="Kept in this tab's sessionStorage and sent only as the Authorization bearer header."
+          hint={t('gate.hint')}
         >
           <Input
             id="panel-token"
@@ -91,9 +89,7 @@ export function TokenGate() {
             placeholder="AJS_ADMIN_TOKEN"
           />
         </Field>
-        <p className="callout callout--muted">
-          The token is never displayed again, written to the URL, or included in a log line.
-        </p>
+        <p className="callout callout--muted">{t('gate.neverShown')}</p>
       </form>
     </Modal>
   )

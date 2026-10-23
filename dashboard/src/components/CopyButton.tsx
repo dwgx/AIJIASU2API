@@ -3,6 +3,7 @@ import { Check, Copy } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { useToast } from './Toast'
+import { useI18n } from '../lib/i18n'
 import { Button, IconButton } from './primitives'
 
 async function writeClipboard(value: string): Promise<void> {
@@ -25,7 +26,7 @@ async function writeClipboard(value: string): Promise<void> {
 export function CopyButton({
   value,
   label,
-  toastMessage = 'Copied to clipboard',
+  toastMessage,
   className,
   withLabel = false,
 }: {
@@ -36,6 +37,7 @@ export function CopyButton({
   withLabel?: boolean
 }) {
   const { push } = useToast()
+  const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const timer = useRef<number | undefined>(undefined)
 
@@ -49,11 +51,11 @@ export function CopyButton({
     try {
       await writeClipboard(value)
       setCopied(true)
-      push(toastMessage, 'success')
+      push(toastMessage ?? t('common.copiedToClipboard'), 'success')
       if (timer.current) window.clearTimeout(timer.current)
       timer.current = window.setTimeout(() => setCopied(false), 1600)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Clipboard is unavailable', 'danger')
+      push(cause instanceof Error ? cause.message : t('common.clipboardUnavailable'), 'danger')
     }
   }
 
@@ -68,19 +70,19 @@ export function CopyButton({
       <Button
         size="sm"
         variant="ghost"
-        aria-label={copied ? 'Copied' : label}
+        aria-label={copied ? t('common.copied') : label}
         icon={icon}
         onClick={handleClick}
         className={clsx('copy-btn', copied && 'is-copied', className)}
       >
-        {copied ? 'Copied' : 'Copy'}
+        {copied ? t('common.copied') : t('common.copy')}
       </Button>
     )
   }
 
   return (
     <IconButton
-      label={copied ? 'Copied' : label}
+      label={copied ? t('common.copied') : label}
       icon={icon}
       onClick={handleClick}
       className={clsx('copy-btn', copied && 'is-copied', className)}

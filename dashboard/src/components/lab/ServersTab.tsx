@@ -1,6 +1,7 @@
 import { RefreshCw, Server } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/format'
+import { useI18n } from '../../lib/i18n'
 import { nodeStateMeta, serverFlagLabel, serverStatusTone } from '../../lib/lab'
 import type { ServerView } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
@@ -18,6 +19,7 @@ import {
 import { DisabledCallout } from './shared'
 
 export function ServersTab({ accountId, accountLabel }: { accountId: string; accountLabel: string }) {
+  const { t } = useI18n()
   const servers = useAsync(() => api.getAccountServers(accountId), [accountId], { intervalMs: 15_000 })
 
   const disabled = servers.data?.enabled === false
@@ -26,7 +28,7 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
   const columns: Array<Column<ServerView>> = [
     {
       key: 'server',
-      label: 'Server',
+      label: t('lab.sessions.server'),
       render: (server) => (
         <div className="cell-stack">
           <span className="cell-strong">{server.title}</span>
@@ -36,12 +38,12 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
     },
     {
       key: 'region',
-      label: 'Region',
+      label: t('lab.servers.region'),
       render: (server) => <span className="cell-mono">{server.region}</span>,
     },
     {
       key: 'host',
-      label: 'Endpoint',
+      label: t('lab.servers.endpoint'),
       render: (server) => (
         <span className="cell-mono">
           {server.host}:{server.port}
@@ -50,14 +52,14 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
     },
     {
       key: 'status',
-      label: 'Status',
+      label: t('lab.servers.status'),
       render: (server) => <Badge tone={serverStatusTone(server.status)}>{server.status}</Badge>,
     },
     {
       key: 'node',
-      label: 'Node',
+      label: t('lab.servers.node'),
       render: (server) => {
-        if (!server.nodeId) return <span className="cell-sub">not linked</span>
+        if (!server.nodeId) return <span className="cell-sub">{t('lab.servers.notLinked')}</span>
         const meta = server.nodeState ? nodeStateMeta(server.nodeState) : null
         return (
           <div className="cell-stack">
@@ -65,7 +67,7 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
             {meta ? (
               <span className="state-cell">
                 <StatusDot tone={meta.tone} pulse={meta.tone === 'success'} />
-                <span className="cell-sub">{meta.label}</span>
+                <span className="cell-sub">{meta.labelKey ? t(meta.labelKey) : meta.label}</span>
               </span>
             ) : null}
           </div>
@@ -74,30 +76,30 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
     },
     {
       key: 'selection',
-      label: 'Selection',
+      label: t('lab.servers.selection'),
       render: (server) => (
         <Badge tone={server.skippedByLimit ? 'warning' : server.selected ? 'success' : 'neutral'}>
-          {serverFlagLabel(server)}
+          {serverFlagLabel(server, t)}
         </Badge>
       ),
     },
     {
       key: 'flags',
-      label: 'Flags',
+      label: t('lab.servers.flags'),
       render: (server) => (
         <span className="inline-badges">
-          {server.fullLoad ? <Badge tone="warning">full load</Badge> : null}
-          {server.memberOnly === true ? <Badge tone="info">member only</Badge> : null}
+          {server.fullLoad ? <Badge tone="warning">{t('lab.servers.fullLoad')}</Badge> : null}
+          {server.memberOnly === true ? <Badge tone="info">{t('lab.servers.memberOnly')}</Badge> : null}
           {server.blockingMarks.length > 0 ? (
             <Badge tone="danger">{server.blockingMarks.join(', ')}</Badge>
           ) : null}
-          {server.hasPingSecret ? <Badge tone="neutral">ping secret</Badge> : null}
+          {server.hasPingSecret ? <Badge tone="neutral">{t('lab.servers.pingSecret')}</Badge> : null}
         </span>
       ),
     },
     {
       key: 'latency',
-      label: 'Latency',
+      label: t('lab.servers.latency'),
       align: 'right',
       render: (server) =>
         server.latencyMs === null ? (
@@ -112,22 +114,22 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
     <div className="stack-lg">
       <div className="lab-tab-head">
         <div>
-          <h2 className="lab-tab-title">Server catalog</h2>
+          <h2 className="lab-tab-title">{t('lab.servers.title')}</h2>
           <p className="lab-tab-subtitle">
-            Vendor catalog snapshot for {accountLabel || accountId}. Read-only; no vendor call is made here.
+            {t('lab.servers.subtitle', { account: accountLabel || accountId })}
           </p>
         </div>
         <div className="lab-tab-actions">
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={servers.reload}>
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </div>
 
       {disabled ? (
         <DisabledCallout
-          title="Server catalog is disabled"
-          reason={servers.data?.reason ?? 'Account login is not enabled.'}
+          title={t('lab.servers.disabled')}
+          reason={servers.data?.reason ?? t('lab.servers.disabledReason')}
           flag="AJS_ACCOUNT_LOGIN=1"
         />
       ) : (
@@ -139,14 +141,13 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
               </span>
               <div>
                 <p className="callout__title">
-                  {servers.data.stale ? 'Catalog snapshot is stale' : 'Catalog snapshot is fresh'}
+                  {servers.data.stale ? t('lab.servers.stale') : t('lab.servers.fresh')}
                 </p>
                 <p className="callout__text">
                   {servers.data.fetchedAt
-                    ? `Last login result held in memory since ${formatDateTime(servers.data.fetchedAt)}.`
-                    : 'No login result is held in memory.'}{' '}
-                  A daemon restart clears this catalog; this slice does not persist it and does not log in on
-                  your behalf.
+                    ? t('lab.servers.fetched', { time: formatDateTime(servers.data.fetchedAt) })
+                    : t('lab.servers.notFetched')}{' '}
+                  {t('lab.servers.restartNote')}
                 </p>
               </div>
             </div>
@@ -154,19 +155,19 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
 
           <Card bodyClassName="card__body--flush">
             {servers.status === 'error' ? (
-              <ErrorState message={servers.error ?? 'Unknown error'} onRetry={servers.reload} />
+              <ErrorState message={servers.error ?? t('common.unknownError')} onRetry={servers.reload} />
             ) : servers.status === 'loading' && !servers.data ? (
               <TableSkeleton rows={6} columns={8} />
             ) : (
               <DataTable
-                caption="Vendor server catalog"
+                caption={t('lab.servers.caption')}
                 columns={columns}
                 rows={rows}
                 rowKey={(server) => server.id}
                 empty={
                   <EmptyState
-                    title="No catalog in memory"
-                    description="A server catalog exists only after a successful login. This read-only slice never triggers one; use the Accounts page to test a login."
+                    title={t('lab.servers.emptyTitle')}
+                    description={t('lab.servers.emptyDesc')}
                     icon={<Server size={20} aria-hidden="true" />}
                   />
                 }

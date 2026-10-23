@@ -1,12 +1,14 @@
 import { RefreshCw, Stethoscope } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatBytes, formatDateTime } from '../../lib/format'
+import { useI18n } from '../../lib/i18n'
 import { healthTone } from '../../lib/lab'
 import { useAsync } from '../../lib/useAsync'
 import { Badge, Button, Card, ErrorState, TableSkeleton } from '../primitives'
 import { DisabledCallout, LabFacts, WarningList } from './shared'
 
 export function DiagnosticsTab() {
+  const { t } = useI18n()
   const diagnostics = useAsync(() => api.getLabDiagnostics(), [], { intervalMs: 15_000 })
   const data = diagnostics.data
 
@@ -14,34 +16,32 @@ export function DiagnosticsTab() {
     <div className="stack-lg">
       <div className="lab-tab-head">
         <div>
-          <h2 className="lab-tab-title">Diagnostics</h2>
-          <p className="lab-tab-subtitle">
-            Readiness of the API, store, secrets, pin, Resin, update, controller, log ring and PCAP.
-          </p>
+          <h2 className="lab-tab-title">{t('lab.diagnostics.title')}</h2>
+          <p className="lab-tab-subtitle">{t('lab.diagnostics.subtitle')}</p>
         </div>
         <div className="lab-tab-actions">
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={diagnostics.reload}>
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </div>
 
       {data?.enabled === false ? (
         <DisabledCallout
-          title="Diagnostics are unavailable"
-          reason={data.reason ?? 'The daemon did not wire a Lab reader.'}
+          title={t('lab.diagnostics.disabled')}
+          reason={data.reason ?? t('lab.overview.disabledReason')}
         />
       ) : diagnostics.status === 'error' ? (
         <Card>
-          <ErrorState message={diagnostics.error ?? 'Unknown error'} onRetry={diagnostics.reload} />
+          <ErrorState message={diagnostics.error ?? t('common.unknownError')} onRetry={diagnostics.reload} />
         </Card>
       ) : diagnostics.status === 'loading' && !data ? (
-        <Card title="Diagnostics">
+        <Card title={t('lab.diagnostics.title')}>
           <TableSkeleton rows={6} columns={4} />
         </Card>
       ) : data ? (
         <>
-          <Card title="Component health" subtitle="A single failure is not hidden behind an aggregate status.">
+          <Card title={t('lab.diagnostics.health')} subtitle={t('lab.diagnostics.healthSubtitle')}>
             <div className="lab-health-grid">
               {Object.entries(data.health).map(([component, value]) => (
                 <div className="lab-health" key={component}>
@@ -53,40 +53,39 @@ export function DiagnosticsTab() {
           </Card>
 
           <div className="grid-2-1">
-            <Card title="State snapshot" subtitle="Basename and size only; the full path stays on the host.">
+            <Card title={t('lab.diagnostics.state')} subtitle={t('lab.diagnostics.stateSubtitle')}>
               <LabFacts
                 rows={[
-                  { label: 'Path', value: <span className="mono">{data.state.path || '—'}</span> },
+                  { label: t('lab.diagnostics.path'), value: <span className="mono">{data.state.path || '—'}</span> },
                   {
-                    label: 'Last saved',
-                    value: data.state.lastSavedAt ? formatDateTime(data.state.lastSavedAt) : 'never',
+                    label: t('lab.diagnostics.lastSaved'),
+                    value: data.state.lastSavedAt ? formatDateTime(data.state.lastSavedAt) : t('common.never'),
                   },
                   {
-                    label: 'Size',
+                    label: t('lab.diagnostics.size'),
                     value: data.state.sizeBytes === null ? '—' : formatBytes(data.state.sizeBytes),
                   },
                 ]}
               />
             </Card>
 
-            <Card title="Build" subtitle="Values reported by the running daemon.">
+            <Card title={t('lab.diagnostics.build')} subtitle={t('lab.diagnostics.buildSubtitle')}>
               <LabFacts
                 rows={[
-                  { label: 'Version', value: <span className="mono">{data.build.version || 'unknown'}</span> },
-                  { label: 'Go', value: <span className="mono">{data.build.goVersion || 'unknown'}</span> },
-                  { label: 'Commit', value: <span className="mono">{data.build.commit || 'not embedded'}</span> },
+                  { label: t('lab.overview.version'), value: <span className="mono">{data.build.version || t('common.unknown')}</span> },
+                  { label: t('lab.diagnostics.go'), value: <span className="mono">{data.build.goVersion || t('common.unknown')}</span> },
+                  { label: t('lab.overview.commit'), value: <span className="mono">{data.build.commit || t('common.notEmbedded')}</span> },
                 ]}
               />
             </Card>
           </div>
 
-          <Card title="Warnings" subtitle="Posture findings from the same probe set.">
+          <Card title={t('lab.diagnostics.warnings')} subtitle={t('lab.diagnostics.warningsSubtitle')}>
             <WarningList warnings={data.warnings} />
           </Card>
 
           <p className="callout callout--muted">
-            <Stethoscope size={12} aria-hidden="true" /> Diagnostics export is a phase-2 guarded action. This page
-            never writes a file or exposes a path beyond a basename.
+            <Stethoscope size={12} aria-hidden="true" /> {t('lab.diagnostics.note')}
           </p>
         </>
       ) : null}

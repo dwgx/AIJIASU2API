@@ -2,6 +2,7 @@ import { Pause, Play, RefreshCw, ScrollText } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../../lib/api'
 import { formatDateTime, formatRelative } from '../../lib/format'
+import { useI18n } from '../../lib/i18n'
 import { logTone } from '../../lib/lab'
 import type { LogEntry } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
@@ -37,6 +38,7 @@ const COMPONENTS = [
 ] as const
 
 export function LogsTab() {
+  const { lang, t } = useI18n()
   const [level, setLevel] = useState<string>('all')
   const [component, setComponent] = useState<string>('all')
   const [paused, setPaused] = useState(false)
@@ -53,27 +55,27 @@ export function LogsTab() {
   const columns: Array<Column<LogEntry>> = [
     {
       key: 'ts',
-      label: 'Time',
+      label: t('lab.logs.time'),
       render: (entry) => (
         <div className="cell-stack">
           <span className="cell-mono">{formatDateTime(entry.ts)}</span>
-          <span className="cell-sub">{formatRelative(entry.ts)}</span>
+          <span className="cell-sub">{formatRelative(entry.ts, Date.now(), lang)}</span>
         </div>
       ),
     },
     {
       key: 'level',
-      label: 'Level',
+      label: t('lab.logs.level'),
       render: (entry) => <Badge tone={logTone(entry.level)}>{entry.level}</Badge>,
     },
     {
       key: 'component',
-      label: 'Component',
+      label: t('lab.logs.component'),
       render: (entry) => <span className="cell-mono">{entry.component}</span>,
     },
     {
       key: 'message',
-      label: 'Message',
+      label: t('lab.logs.message'),
       render: (entry) => (
         <div className="cell-stack">
           <span>{entry.msg}</span>
@@ -83,12 +85,12 @@ export function LogsTab() {
     },
     {
       key: 'account',
-      label: 'Account',
+      label: t('lab.logs.account'),
       render: (entry) => <span className="cell-sub mono">{entry.accountId ?? '—'}</span>,
     },
     {
       key: 'node',
-      label: 'Node',
+      label: t('lab.logs.node'),
       render: (entry) => <span className="cell-sub mono">{entry.nodeId ?? '—'}</span>,
     },
   ]
@@ -97,10 +99,8 @@ export function LogsTab() {
     <div className="stack-lg">
       <div className="lab-tab-head">
         <div>
-          <h2 className="lab-tab-title">Runtime logs</h2>
-          <p className="lab-tab-subtitle">
-            Bounded, redacted daemon ring. Polling stops while paused; hidden tabs stop polling too.
-          </p>
+          <h2 className="lab-tab-title">{t('lab.logs.title')}</h2>
+          <p className="lab-tab-subtitle">{t('lab.logs.subtitle')}</p>
         </div>
         <div className="lab-tab-actions">
           <Button
@@ -108,61 +108,64 @@ export function LogsTab() {
             icon={paused ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => setPaused((value) => !value)}
           >
-            {paused ? 'Resume' : 'Pause'}
+            {paused ? t('lab.logs.resume') : t('lab.logs.pause')}
           </Button>
           <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={logs.reload}>
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </div>
 
       {disabled ? (
         <DisabledCallout
-          title="Runtime log ring is unavailable"
-          reason={logs.data?.reason ?? 'The daemon did not attach a log ring.'}
+          title={t('lab.logs.disabled')}
+          reason={logs.data?.reason ?? t('lab.overview.flagsUnavailableReason')}
         />
       ) : (
         <>
           <Card bodyClassName="card__body--flush">
             <div className="toolbar">
-              <Select aria-label="Filter by log level" value={level} onChange={(event) => setLevel(event.target.value)}>
+              <Select aria-label={t('lab.logs.levelFilter')} value={level} onChange={(event) => setLevel(event.target.value)}>
                 {LEVELS.map((option) => (
                   <option key={option} value={option}>
-                    {option === 'all' ? 'All levels' : option}
+                    {option === 'all' ? t('lab.logs.allLevels') : option}
                   </option>
                 ))}
               </Select>
               <Select
-                aria-label="Filter by component"
+                aria-label={t('lab.logs.componentFilter')}
                 value={component}
                 onChange={(event) => setComponent(event.target.value)}
               >
                 {COMPONENTS.map((option) => (
                   <option key={option} value={option}>
-                    {option === 'all' ? 'All components' : option}
+                    {option === 'all' ? t('lab.logs.allComponents') : option}
                   </option>
                 ))}
               </Select>
-              <Badge tone={paused ? 'warning' : 'success'}>{paused ? 'paused' : 'live · 2s'}</Badge>
+              <Badge tone={paused ? 'warning' : 'success'}>
+                {paused ? t('lab.paused') : t('lab.livePolling')}
+              </Badge>
               <span className="toolbar__count">
-                {entries.length} entries{logs.data && logs.data.dropped > 0 ? ` · ${logs.data.dropped} dropped` : ''}
+                {t('lab.entriesCount', { count: entries.length })}
+                {logs.data && logs.data.dropped > 0 ? t('lab.droppedCount', { count: logs.data.dropped }) : ''}
               </span>
             </div>
 
             {logs.status === 'error' ? (
-              <ErrorState message={logs.error ?? 'Unknown error'} onRetry={logs.reload} />
+              <ErrorState message={logs.error ?? t('common.unknownError')} onRetry={logs.reload} />
             ) : logs.status === 'loading' && !logs.data ? (
               <TableSkeleton rows={8} columns={6} />
             ) : (
               <DataTable
-                caption="Runtime log entries"
+                caption={t('lab.logs.caption')}
                 columns={columns}
                 rows={entries}
                 rowKey={(entry) => `${entry.ts}-${entry.component}-${entry.msg}`}
                 empty={
                   <EmptyState
-                    title="No log entries match these filters"
-                    description="Clear the level or component filter; the ring is bounded to 2000 entries."
+                    title={t('lab.logs.emptyTitle')}
+                    description={t('lab.logs.emptyDesc')}
                     icon={<ScrollText size={20} aria-hidden="true" />}
                   />
                 }
@@ -170,10 +173,7 @@ export function LogsTab() {
             )}
           </Card>
 
-          <p className="callout callout--muted">
-            Messages are redacted server-side. Passwords, tokens, session keys and full device identifiers
-            never enter the ring.
-          </p>
+          <p className="callout callout--muted">{t('lab.logs.note')}</p>
         </>
       )}
     </div>

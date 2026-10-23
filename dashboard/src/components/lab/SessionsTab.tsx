@@ -1,6 +1,7 @@
 import { Activity, Gauge, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatBytes, formatDateTime, formatNumber, formatRelative } from '../../lib/format'
+import { useI18n } from '../../lib/i18n'
 import { formatAge, nodeStateMeta } from '../../lib/lab'
 import type { GateView, SessionView } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
@@ -18,10 +19,11 @@ import {
 import { DisabledCallout } from './shared'
 
 function GateTable({ gates }: { gates: GateView[] }) {
+  const { lang, t } = useI18n()
   const columns: Array<Column<GateView>> = [
     {
       key: 'node',
-      label: 'Node',
+      label: t('lab.sessions.node'),
       render: (gate) => (
         <div className="cell-stack">
           <span className="cell-strong mono">{gate.nodeId}</span>
@@ -31,21 +33,21 @@ function GateTable({ gates }: { gates: GateView[] }) {
     },
     {
       key: 'state',
-      label: 'State',
+      label: t('lab.sessions.state'),
       render: (gate) => {
         const meta = nodeStateMeta(gate.state)
         return (
           <span className="state-cell">
             <StatusDot tone={meta.tone} pulse={gate.state === 'LIVE'} />
-            <Badge tone={meta.tone}>{meta.label}</Badge>
-            {gate.draining ? <Badge tone="warning">draining</Badge> : null}
+            <Badge tone={meta.tone}>{meta.labelKey ? t(meta.labelKey) : meta.label}</Badge>
+            {gate.draining ? <Badge tone="warning">{t('lab.draining')}</Badge> : null}
           </span>
         )
       },
     },
     {
       key: 'active',
-      label: 'Active / limit',
+      label: t('lab.sessions.activeLimit'),
       align: 'right',
       render: (gate) => (
         <span className="cell-mono">
@@ -55,13 +57,13 @@ function GateTable({ gates }: { gates: GateView[] }) {
     },
     {
       key: 'accepted',
-      label: 'Accepted',
+      label: t('lab.sessions.accepted'),
       align: 'right',
       render: (gate) => <span className="cell-mono">{formatNumber(gate.accepted)}</span>,
     },
     {
       key: 'rejected',
-      label: 'Rejected',
+      label: t('lab.sessions.rejected'),
       align: 'right',
       render: (gate) => (
         <span className="cell-mono">
@@ -71,23 +73,23 @@ function GateTable({ gates }: { gates: GateView[] }) {
     },
     {
       key: 'ingress',
-      label: 'Ingress',
+      label: t('lab.sessions.ingress'),
       align: 'right',
       render: (gate) => <span className="cell-mono">{formatBytes(gate.ingressBytes)}</span>,
     },
     {
       key: 'egress',
-      label: 'Egress',
+      label: t('lab.sessions.egress'),
       align: 'right',
       render: (gate) => <span className="cell-mono">{formatBytes(gate.egressBytes)}</span>,
     },
     {
       key: 'started',
-      label: 'Started',
+      label: t('lab.sessions.started'),
       render: (gate) =>
         gate.startedAt ? (
           <span className="cell-sub" title={formatDateTime(gate.startedAt)}>
-            {formatRelative(gate.startedAt)}
+            {formatRelative(gate.startedAt, Date.now(), lang)}
           </span>
         ) : (
           <span className="cell-sub">—</span>
@@ -97,20 +99,21 @@ function GateTable({ gates }: { gates: GateView[] }) {
 
   return (
     <DataTable
-      caption="Gate counters per node"
+      caption={t('lab.sessions.gateCaption')}
       columns={columns}
       rows={gates}
       rowKey={(gate) => gate.nodeId}
-      empty={<EmptyState title="No listening gates" description="A gate appears after a node reaches LIVE or DRAINING." />}
+      empty={<EmptyState title={t('lab.sessions.gateEmptyTitle')} description={t('lab.sessions.gateEmptyDesc')} />}
     />
   )
 }
 
 function SessionTable({ sessions }: { sessions: SessionView[] }) {
+  const { lang, t } = useI18n()
   const columns: Array<Column<SessionView>> = [
     {
       key: 'node',
-      label: 'Node',
+      label: t('lab.sessions.node'),
       render: (session) => (
         <div className="cell-stack">
           <span className="cell-strong mono">{session.nodeId}</span>
@@ -120,57 +123,59 @@ function SessionTable({ sessions }: { sessions: SessionView[] }) {
     },
     {
       key: 'server',
-      label: 'Server',
+      label: t('lab.sessions.server'),
       render: (session) => <span className="cell-mono">{session.serverId}</span>,
     },
     {
       key: 'health',
-      label: 'Health',
+      label: t('lab.sessions.health'),
       render: (session) => (
         <span className="state-cell">
           <StatusDot tone={session.healthy ? 'success' : 'danger'} pulse={session.healthy} />
-          <Badge tone={session.healthy ? 'success' : 'danger'}>{session.healthy ? 'healthy' : 'unhealthy'}</Badge>
+          <Badge tone={session.healthy ? 'success' : 'danger'}>
+            {session.healthy ? t('lab.healthy') : t('lab.unhealthy')}
+          </Badge>
           {session.errorClass ? <Badge tone="warning">{session.errorClass}</Badge> : null}
         </span>
       ),
     },
     {
       key: 'sid',
-      label: 'SID (redacted)',
+      label: t('lab.sessions.sid'),
       render: (session) => <span className="cell-mono">{session.sid}</span>,
     },
     {
       key: 'age',
-      label: 'Age',
+      label: t('lab.sessions.age'),
       align: 'right',
       render: (session) => <span className="cell-mono">{formatAge(session.ageSec)}</span>,
     },
     {
       key: 'egress',
-      label: 'Egress claim',
+      label: t('lab.sessions.egressClaim'),
       render: (session) => (
         <span className="inline-badges">
           <span className="cell-mono">{session.egressClaimed || '—'}</span>
-          <Badge tone="warning">unverified</Badge>
+          <Badge tone="warning">{t('lab.unverified')}</Badge>
         </span>
       ),
     },
     {
       key: 'keepalive',
-      label: 'Keepalive',
+      label: t('lab.sessions.keepalive'),
       render: (session) => (
         <Badge tone={session.keepalive.supported ? 'info' : 'neutral'}>
-          {session.keepalive.supported ? 'supported' : 'not implemented'}
+          {session.keepalive.supported ? t('lab.supported') : t('lab.notImplemented')}
         </Badge>
       ),
     },
     {
       key: 'lastFlow',
-      label: 'Last flow',
+      label: t('lab.sessions.lastFlow'),
       render: (session) =>
         session.lastFlowAt ? (
           <span className="cell-sub" title={formatDateTime(session.lastFlowAt)}>
-            {formatRelative(session.lastFlowAt)}
+            {formatRelative(session.lastFlowAt, Date.now(), lang)}
           </span>
         ) : (
           <span className="cell-sub">—</span>
@@ -180,14 +185,14 @@ function SessionTable({ sessions }: { sessions: SessionView[] }) {
 
   return (
     <DataTable
-      caption="Vendor sessions"
+      caption={t('lab.sessions.sessionCaption')}
       columns={columns}
       rows={sessions}
       rowKey={(session) => session.nodeId}
       empty={
         <EmptyState
-          title="No vendor session in memory"
-          description="Sessions exist only after a successful login and are lost on daemon restart."
+          title={t('lab.sessions.sessionEmptyTitle')}
+          description={t('lab.sessions.sessionEmptyDesc')}
         />
       }
     />
@@ -195,6 +200,7 @@ function SessionTable({ sessions }: { sessions: SessionView[] }) {
 }
 
 export function SessionsTab() {
+  const { t } = useI18n()
   const sessions = useAsync(() => api.listLabSessions(), [], { intervalMs: 5_000 })
   const gates = useAsync(() => api.listLabGates(), [], { intervalMs: 5_000 })
 
@@ -214,8 +220,8 @@ export function SessionsTab() {
     <div className="stack-lg">
       <div className="lab-tab-head">
         <div>
-          <h2 className="lab-tab-title">Sessions &amp; gates</h2>
-          <p className="lab-tab-subtitle">Read-only counters and vendor session state, joined by nodeId.</p>
+          <h2 className="lab-tab-title">{t('lab.sessions.title')}</h2>
+          <p className="lab-tab-subtitle">{t('lab.sessions.subtitle')}</p>
         </div>
         <div className="lab-tab-actions">
           <Button
@@ -226,27 +232,27 @@ export function SessionsTab() {
               gates.reload()
             }}
           >
-            Refresh
+            {t('common.refresh')}
           </Button>
         </div>
       </div>
 
       {disabled ? (
         <DisabledCallout
-          title="Session telemetry is disabled"
+          title={t('lab.sessions.disabled')}
           reason={String(reason)}
           flag="AJS_ACCOUNT_LOGIN=1"
         />
       ) : (
         <>
       <Card
-        title="Gates"
-        subtitle="Accepted/rejected flows and byte counters from the in-memory gate state."
-        actions={<Badge tone="info">{gateRows.length} gates</Badge>}
+        title={t('lab.sessions.gates')}
+        subtitle={t('lab.sessions.gatesSubtitle')}
+        actions={<Badge tone="info">{t('lab.gatesCount', { count: gateRows.length })}</Badge>}
         bodyClassName="card__body--flush"
       >
         {gates.status === 'error' ? (
-          <ErrorState message={gates.error ?? 'Unknown error'} onRetry={gates.reload} />
+          <ErrorState message={gates.error ?? t('common.unknownError')} onRetry={gates.reload} />
         ) : gates.status === 'loading' && !gates.data ? (
           <TableSkeleton rows={5} columns={8} />
         ) : (
@@ -255,13 +261,13 @@ export function SessionsTab() {
       </Card>
 
       <Card
-        title="Sessions"
-        subtitle="SIDs are redacted server-side; the browser never receives the full value."
-        actions={<Badge tone="info">{sessionRows.length} sessions</Badge>}
+        title={t('lab.sessions.sessions')}
+        subtitle={t('lab.sessions.sessionsSubtitle')}
+        actions={<Badge tone="info">{t('lab.sessionsCount', { count: sessionRows.length })}</Badge>}
         bodyClassName="card__body--flush"
       >
         {sessions.status === 'error' ? (
-          <ErrorState message={sessions.error ?? 'Unknown error'} onRetry={sessions.reload} />
+          <ErrorState message={sessions.error ?? t('common.unknownError')} onRetry={sessions.reload} />
         ) : sessions.status === 'loading' && !sessions.data ? (
           <TableSkeleton rows={5} columns={8} />
         ) : (
@@ -274,17 +280,16 @@ export function SessionsTab() {
           <Activity size={18} aria-hidden="true" />
         </span>
         <div>
-          <p className="callout__title">Keepalive fields are not implemented</p>
+          <p className="callout__title">{t('lab.sessions.keepaliveTitle')}</p>
           <p className="callout__text">
             <code className="mono">ka</code>, <code className="mono">kat</code> and{' '}
-            <code className="mono">kapf</code> are reported as <code className="mono">null</code> with{' '}
-            <code className="mono">supported:false</code>. The UI does not invent values.
+            <code className="mono">kapf</code> {t('lab.sessions.keepaliveText')}
           </p>
         </div>
       </div>
 
       <p className="cell-sub">
-        <Gauge size={12} aria-hidden="true" /> Gate counters reset when a node restarts.
+        <Gauge size={12} aria-hidden="true" /> {t('lab.sessions.resetNote')}
       </p>
         </>
       )}

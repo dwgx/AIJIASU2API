@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { Skeleton } from './components/primitives'
 import { ToastProvider } from './components/Toast'
+import { LanguageProvider, useI18n } from './lib/i18n'
 import { ThemeProvider } from './lib/theme'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
@@ -16,8 +17,9 @@ const Settings = lazy(() => import('./pages/Settings'))
 const Users = lazy(() => import('./pages/Users'))
 
 function RouteFallback() {
+  const { t } = useI18n()
   return (
-    <div className="stack-lg" aria-busy="true" aria-label="Loading page">
+    <div className="stack-lg" aria-busy="true" aria-label={t('shell.loadingPage')}>
       <Skeleton width={180} height={24} />
       <Skeleton height={320} />
     </div>
@@ -26,27 +28,29 @@ function RouteFallback() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <ToastProvider>
-        <BrowserRouter>
-          <AppShell>
-            <Suspense fallback={<RouteFallback />}>
-              <Routes>
-                <Route path="/" element={<Overview />} />
-                <Route path="/accounts" element={<Accounts />} />
-                <Route path="/nodes" element={<Nodes />} />
-                <Route path="/leases" element={<Leases />} />
-                <Route path="/users" element={<Users />} />
-                <Route path="/requests" element={<Requests />} />
-                <Route path="/logs" element={<Logs />} />
-                <Route path="/lab" element={<Lab />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </Suspense>
-          </AppShell>
-        </BrowserRouter>
-      </ToastProvider>
-    </ThemeProvider>
+    <LanguageProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <BrowserRouter>
+            <AppShell>
+              <Suspense fallback={<RouteFallback />}>
+                <Routes>
+                  <Route path="/" element={<Overview />} />
+                  <Route path="/accounts" element={<Accounts />} />
+                  <Route path="/nodes" element={<Nodes />} />
+                  <Route path="/leases" element={<Leases />} />
+                  <Route path="/users" element={<Users />} />
+                  <Route path="/requests" element={<Requests />} />
+                  <Route path="/logs" element={<Logs />} />
+                  <Route path="/lab" element={<Lab />} />
+                  <Route path="/settings" element={<Settings />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </Suspense>
+            </AppShell>
+          </BrowserRouter>
+        </ToastProvider>
+      </ThemeProvider>
+    </LanguageProvider>
   )
 }

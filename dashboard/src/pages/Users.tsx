@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api } from '../lib/api'
 import { formatBytes, formatDate, formatRelative, percent } from '../lib/format'
+import { useI18n } from '../lib/i18n'
 import type { ApiKey, CreateKeyResult, PanelUser } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
@@ -31,6 +32,7 @@ export default function Users() {
   const users = useAsync(() => api.listUsers(), [], { intervalMs: 15_000 })
   const keys = useAsync(() => api.listKeys(), [], { intervalMs: 15_000 })
   const { push } = useToast()
+  const { lang, t } = useI18n()
   const [createOpen, setCreateOpen] = useState(false)
   const [createUserId, setCreateUserId] = useState('')
   const [createLabel, setCreateLabel] = useState('')
@@ -73,7 +75,7 @@ export default function Users() {
   const submitCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!createUserId) {
-      setCreateError('Choose a user for this key')
+      setCreateError(t('users.chooseUserError'))
       return
     }
     setCreating(true)
@@ -82,9 +84,9 @@ export default function Users() {
       const result = await api.createKey({ userId: createUserId, label: createLabel })
       setCreated(result)
       keys.reload()
-      push('API key created · copy it now', 'success')
+      push(t('users.toastCreated'), 'success')
     } catch (cause) {
-      setCreateError(cause instanceof Error ? cause.message : 'Could not create key')
+      setCreateError(cause instanceof Error ? cause.message : t('users.createError'))
     } finally {
       setCreating(false)
     }
@@ -94,9 +96,12 @@ export default function Users() {
     try {
       await api.setUserEnabled(user.id, !user.enabled)
       users.reload()
-      push(`${user.name} ${user.enabled ? 'suspended' : 'enabled'}`, 'success')
+      push(
+        t(user.enabled ? 'users.toastUserSuspended' : 'users.toastUserEnabled', { name: user.name }),
+        'success',
+      )
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Could not update user', 'danger')
+      push(cause instanceof Error ? cause.message : t('users.toastUserFailed'), 'danger')
     }
   }
 
@@ -106,10 +111,10 @@ export default function Users() {
     try {
       await api.revokeKey(revokeId)
       keys.reload()
-      push('API key revoked', 'success')
+      push(t('users.toastRevoked'), 'success')
       setRevokeId(null)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Revoke failed', 'danger')
+      push(cause instanceof Error ? cause.message : t('users.toastRevokeFailed'), 'danger')
     } finally {
       setRevoking(false)
     }
@@ -130,10 +135,10 @@ export default function Users() {
         .filter(Boolean)
       await api.updateAllowlist(allowlistUser.id, entries)
       users.reload()
-      push(`Allowlist updated for ${allowlistUser.name}`, 'success')
+      push(t('users.toastAllowlist', { name: allowlistUser.name }), 'success')
       setAllowlistUser(null)
     } catch (cause) {
-      push(cause instanceof Error ? cause.message : 'Could not update allowlist', 'danger')
+      push(cause instanceof Error ? cause.message : t('users.toastAllowlistFailed'), 'danger')
     } finally {
       setSavingAllowlist(false)
     }
@@ -142,7 +147,7 @@ export default function Users() {
   const columns: Array<Column<ApiKey>> = [
     {
       key: 'label',
-      label: 'Label',
+      label: t('users.columnLabel'),
       render: (key) => (
         <div className="cell-stack">
           <span className="cell-strong">{key.label}</span>
@@ -152,29 +157,31 @@ export default function Users() {
     },
     {
       key: 'user',
-      label: 'User',
+      label: t('users.columnUser'),
       render: (key) => <span>{key.userName}</span>,
     },
     {
       key: 'created',
-      label: 'Created',
+      label: t('users.columnCreated'),
       render: (key) => <span className="cell-sub">{formatDate(key.createdAt)}</span>,
     },
     {
       key: 'used',
-      label: 'Last used',
+      label: t('users.columnLastUsed'),
       render: (key) => (
-        <span className="cell-sub">{key.lastUsedAt ? formatRelative(key.lastUsedAt) : 'never'}</span>
+        <span className="cell-sub">
+          {key.lastUsedAt ? formatRelative(key.lastUsedAt, Date.now(), lang) : t('common.never')}
+        </span>
       ),
     },
     {
       key: 'status',
-      label: 'Status',
+      label: t('users.columnStatus'),
       render: (key) =>
         key.revokedAt ? (
-          <Badge tone="danger">Revoked</Badge>
+          <Badge tone="danger">{t('users.revoked')}</Badge>
         ) : (
-          <Badge tone="success">Active</Badge>
+          <Badge tone="success">{t('users.active')}</Badge>
         ),
     },
     {
@@ -185,7 +192,7 @@ export default function Users() {
       render: (key) =>
         key.revokedAt ? null : (
           <IconButton
-            label={`Revoke key ${key.label}`}
+            label={t('users.revokeKey', { label: key.label })}
             icon={<Trash2 size={14} />}
             onClick={() => setRevokeId(key.id)}
           />
@@ -199,8 +206,8 @@ export default function Users() {
   return (
     <div className="stack-lg">
       <PageHeader
-        title="Users"
-        subtitle="Panel identities, API keys and source allowlists."
+        title={t('users.title')}
+        subtitle={t('users.subtitle')}
         refresh={summarizeRefresh([users, keys])}
         actions={
           <Button
@@ -209,9 +216,9 @@ export default function Users() {
             onClick={openCreate}
             disabled={!usersReady}
             aria-disabled={!usersReady}
-            title={usersReady ? undefined : 'Waiting for users to load'}
+            title={usersReady ? undefined : t('users.waitingForUsers')}
           >
-            Create API key
+            {t('users.createKey')}
           </Button>
         }
       />
@@ -252,44 +259,46 @@ export default function Users() {
                   <Switch
                     checked={user.enabled}
                     onChange={() => void toggleUser(user)}
-                    label={`${user.enabled ? 'Suspend' : 'Enable'} ${user.name}`}
+                    label={t(user.enabled ? 'users.suspend' : 'users.enable', { name: user.name })}
                   />
                 </div>
 
                 <div className="user-card__usage">
                   <div className="user-card__usage-head">
-                    <span className="label">Monthly usage</span>
+                    <span className="label">{t('users.monthlyUsage')}</span>
                     <span className="mono">
                       {formatBytes(user.usedBytes)}
-                      {user.quotaBytesMonth ? ` / ${formatBytes(user.quotaBytesMonth, 0)}` : ' · no quota'}
+                      {user.quotaBytesMonth
+                        ? ` / ${formatBytes(user.quotaBytesMonth, 0)}`
+                        : t('users.noQuota')}
                     </span>
                   </div>
                   {user.quotaBytesMonth ? (
                     <ProgressBar
                       value={usage}
                       tone={usage > 90 ? 'danger' : usage > 75 ? 'warning' : 'mint'}
-                      label={`${user.name} monthly quota`}
+                      label={t('users.monthlyQuota', { name: user.name })}
                     />
                   ) : (
-                    <p className="user-card__unlimited">Unlimited · advisory only</p>
+                    <p className="user-card__unlimited">{t('users.unlimited')}</p>
                   )}
                 </div>
 
                 <dl className="facts facts--compact">
                   <div>
-                    <dt>Sticky TTL</dt>
+                    <dt>{t('users.stickyTtl')}</dt>
                     <dd className="mono">{user.stickyTtl}</dd>
                   </div>
                   <div>
-                    <dt>API keys</dt>
+                    <dt>{t('users.apiKeys')}</dt>
                     <dd className="mono">{keyCount}</dd>
                   </div>
                   <div>
-                    <dt>Allowlist</dt>
+                    <dt>{t('users.allowlist')}</dt>
                     <dd className="mono">{user.allowlist.length} CIDR</dd>
                   </div>
                   <div>
-                    <dt>Created</dt>
+                    <dt>{t('users.created')}</dt>
                     <dd>{formatDate(user.createdAt)}</dd>
                   </div>
                 </dl>
@@ -301,10 +310,10 @@ export default function Users() {
                     icon={<ShieldCheck size={13} />}
                     onClick={() => openAllowlist(user)}
                   >
-                    Allowlist
+                    {t('users.allowlistButton')}
                   </Button>
                   <Badge tone={user.enabled ? 'success' : 'warning'}>
-                    {user.enabled ? 'Enabled' : 'Suspended'}
+                    {user.enabled ? t('users.enabled') : t('users.suspended')}
                   </Badge>
                 </div>
               </Card>
@@ -314,28 +323,28 @@ export default function Users() {
       )}
 
       <Card
-        title="API keys"
-        subtitle="Hashed at rest by ajs-accountd. Secrets are shown once at creation."
+        title={t('users.keysTitle')}
+        subtitle={t('users.keysSubtitle')}
         bodyClassName="card__body--flush"
       >
         {keys.status === 'error' ? (
-          <ErrorState message={keys.error ?? 'Unknown error'} onRetry={keys.reload} />
+          <ErrorState message={keys.error ?? t('common.unknownError')} onRetry={keys.reload} />
         ) : keys.status === 'loading' && !keys.data ? (
           <TableSkeleton rows={5} columns={6} />
         ) : (
           <DataTable
-            caption="Panel API keys"
+            caption={t('users.keysCaption')}
             columns={columns}
             rows={keys.data ?? []}
             rowKey={(key) => key.id}
             empty={
               <EmptyState
-                title="No API keys yet"
-                description="Create a key to let a client talk to the panel API."
+                title={t('users.emptyKeysTitle')}
+                description={t('users.emptyKeysDesc')}
                 icon={<KeyRound size={20} aria-hidden="true" />}
                 action={
                   <Button variant="primary" icon={<Plus size={14} />} onClick={openCreate}>
-                    Create API key
+                    {t('users.createKey')}
                   </Button>
                 }
               />
@@ -346,25 +355,21 @@ export default function Users() {
 
       <Modal
         open={createOpen}
-        title={created ? 'API key created' : 'Create API key'}
-        description={
-          created
-            ? 'This secret is shown once. Store it before closing this dialog.'
-            : 'The key inherits the user’s platform, sticky TTL and quota.'
-        }
+        title={created ? t('users.createdTitle') : t('users.createTitle')}
+        description={created ? t('users.createdDesc') : t('users.createDesc')}
         onClose={closeCreate}
         footer={
           created ? (
             <Button variant="primary" onClick={closeCreate}>
-              Done
+              {t('users.done')}
             </Button>
           ) : (
             <>
               <Button variant="ghost" onClick={closeCreate} disabled={creating}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button type="submit" form="create-key-form" variant="primary" loading={creating}>
-                Create key
+                {t('users.createKeyButton')}
               </Button>
             </>
           )
@@ -376,32 +381,31 @@ export default function Users() {
               <code className="secret__value mono">{created.secret}</code>
               <CopyButton
                 value={created.secret}
-                label="Copy API key"
-                toastMessage="API key copied"
+                label={t('users.copyKey')}
+                toastMessage={t('users.keyCopied')}
               />
             </div>
             <p className="callout callout--warning">
-              <ShieldCheck size={14} aria-hidden="true" /> Copy this value now. The panel stores only a
-              hash and prefix; it cannot be recovered.
+              <ShieldCheck size={14} aria-hidden="true" /> {t('users.secretWarning')}
             </p>
             <dl className="facts facts--compact">
               <div>
-                <dt>Label</dt>
+                <dt>{t('users.label')}</dt>
                 <dd>{created.key.label}</dd>
               </div>
               <div>
-                <dt>User</dt>
+                <dt>{t('users.columnUser')}</dt>
                 <dd>{created.key.userName}</dd>
               </div>
               <div>
-                <dt>Prefix</dt>
+                <dt>{t('users.prefix')}</dt>
                 <dd className="mono">{created.key.prefix}</dd>
               </div>
             </dl>
           </div>
         ) : (
           <form id="create-key-form" className="form" onSubmit={submitCreate}>
-            <Field label="User" htmlFor="key-user">
+            <Field label={t('users.columnUser')} htmlFor="key-user">
               <Select
                 id="key-user"
                 value={createUserId}
@@ -414,12 +418,12 @@ export default function Users() {
                 ))}
               </Select>
             </Field>
-            <Field label="Label" htmlFor="key-label" hint="Where will this key be used?">
+            <Field label={t('users.label')} htmlFor="key-label" hint={t('users.labelHint')}>
               <Input
                 id="key-label"
                 value={createLabel}
                 onChange={(event) => setCreateLabel(event.target.value)}
-                placeholder="e.g. CI runner"
+                placeholder={t('users.labelPlaceholder')}
                 autoComplete="off"
               />
             </Field>
@@ -434,21 +438,25 @@ export default function Users() {
 
       <Modal
         open={allowlistUser !== null}
-        title={allowlistUser ? `Allowlist · ${allowlistUser.name}` : 'Allowlist'}
-        description="One CIDR per line. Loopback is implied; empty means deny all remote sources."
+        title={
+          allowlistUser
+            ? t('users.allowlistTitle', { name: allowlistUser.name })
+            : t('users.allowlistButton')
+        }
+        description={t('users.allowlistDesc')}
         onClose={() => setAllowlistUser(null)}
         footer={
           <>
             <Button variant="ghost" onClick={() => setAllowlistUser(null)} disabled={savingAllowlist}>
-              Cancel
+              {t('common.cancel')}
             </Button>
             <Button variant="primary" onClick={() => void saveAllowlist()} loading={savingAllowlist}>
-              Save allowlist
+              {t('users.saveAllowlist')}
             </Button>
           </>
         }
       >
-        <Field label="Allowed CIDRs" htmlFor="allowlist-input">
+        <Field label={t('users.allowedCidrs')} htmlFor="allowlist-input">
           <Textarea
             id="allowlist-input"
             rows={6}
@@ -462,13 +470,17 @@ export default function Users() {
 
       <ConfirmDialog
         open={revokeTarget !== null}
-        title="Revoke API key?"
+        title={t('users.revokeTitle')}
         description={
           revokeTarget
-            ? `${revokeTarget.label} (${revokeTarget.prefix}…) for ${revokeTarget.userName} stops working immediately.`
+            ? t('users.revokeDesc', {
+                label: revokeTarget.label,
+                prefix: revokeTarget.prefix,
+                user: revokeTarget.userName,
+              })
             : ''
         }
-        confirmLabel="Revoke key"
+        confirmLabel={t('users.revokeConfirm')}
         busy={revoking}
         onConfirm={() => void confirmRevoke()}
         onCancel={() => setRevokeId(null)}

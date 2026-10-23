@@ -40,7 +40,7 @@ export function formatDate(value: string): string {
   )
 }
 
-export function formatRelative(value: string, now = Date.now()): string {
+export function formatRelative(value: string, now = Date.now(), lang: 'zh' | 'en' = 'en'): string {
   const delta = now - new Date(value).getTime()
   const future = delta < 0
   const seconds = Math.abs(delta) / 1000
@@ -49,12 +49,13 @@ export function formatRelative(value: string, now = Date.now()): string {
   else if (seconds < 3600) text = `${Math.round(seconds / 60)}m`
   else if (seconds < 86_400) text = `${Math.round(seconds / 3600)}h`
   else text = `${Math.round(seconds / 86_400)}d`
+  if (lang === 'zh') return future ? `${text}后` : `${text}前`
   return future ? `in ${text}` : `${text} ago`
 }
 
-export function formatTtl(expiresAt: string, now = Date.now()): string {
+export function formatTtl(expiresAt: string, now = Date.now(), expiredLabel = 'expired'): string {
   const seconds = Math.max(0, Math.round((new Date(expiresAt).getTime() - now) / 1000))
-  if (seconds === 0) return 'expired'
+  if (seconds === 0) return expiredLabel
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   if (hours >= 24) return `${Math.floor(hours / 24)}d ${hours % 24}h`
