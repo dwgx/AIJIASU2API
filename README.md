@@ -30,7 +30,7 @@ As of 2026-10-23:
 - `dashboard/` — operator console: React 19, Vite 6, TypeScript, 8 pages (Overview, Accounts,
   Nodes, Leases, Users, Requests, Logs, Settings) in the Obsidian Mint design, with a table/cards
   switch for Accounts. Mock data is the default; a live mode against `ajs-accountd` is opt-in at
-  build time. 48 Vitest tests. HMC serves the mock build on `18081` and the live build on `18082`.
+  build time. 50 Vitest tests. HMC serves the mock build on `18081` and the live build on `18082`.
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
@@ -129,7 +129,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (48 Vitest tests), `cd daemon && go test ./...` (needs
+Tests: `cd dashboard && npm test` (50 Vitest tests), `cd daemon && go test ./...` (needs
 `../emulator`), `cd emulator && go test ./...`. All three suites run offline. The last recorded
 dashboard and daemon runs are on HMC, alongside the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
