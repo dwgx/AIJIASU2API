@@ -1,0 +1,10 @@
+services:
+  dashboard:
+    build:
+      context: .
+    image: loveplus-dashboard:local
+    container_name: loveplus-dashboard
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:18081:80"
+    restart: unless-stopped
