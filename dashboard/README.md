@@ -8,9 +8,9 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 50 tests.
+- Tests: Vitest + React Testing Library + jsdom, 58 tests.
 - Package manager: npm.
-- Status: `v0.1.0` implementation slice. No git commits, no credentials, no vendor calls.
+- Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
 
 ## Modes
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 50 tests
+npm test           # Vitest, 58 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -109,7 +109,7 @@ The HMC build host serves three loopback-only endpoints:
 |---|---|---|
 | `127.0.0.1:18081` | mock dashboard | `docker compose up -d` in `dashboard/`; nginx image built from the default (mock) source, rebuilt after the live/mock copy fixes |
 | `127.0.0.1:18082` | live dashboard | `npx vite preview` over a `dist/` built with the live environment |
-| `127.0.0.1:2261` | `ajs-accountd` | `go build -o ajs-accountd ./cmd/ajs-accountd` then `./ajs-accountd` with the env above; in-memory store |
+| `127.0.0.1:2261` | `ajs-accountd` | `go build -o ajs-accountd ./cmd/ajs-accountd` then `./ajs-accountd` with the env above; JSON snapshot store (`AJS_STATE_FILE`) |
 
 Nothing is exposed beyond HMC loopback. From Windows, forward the ports:
 
@@ -146,9 +146,13 @@ Backend check with `curl -H 'Authorization: Bearer local-test-token'` confirmed 
 created from the dashboard. `GET /healthz` returned
 `{"status":"ok","service":"ajs-accountd","version":"0.1.0"}`.
 
-**Backend limitation:** `ajs-accountd` is an in-memory skeleton. It reseeds from the dashboard mock
-on every start, so all of the state above lives only as long as the process. No Resin publisher,
-vendor login, SQLite store or gate is wired in yet, and no vendor request was made.
+**Backend limitation (historical, 2026-10-23 — checked against the earlier skeleton and its
+7-account seed):** at that point `ajs-accountd` was an in-memory skeleton that reseeded from the
+dashboard mock on every start, with no Resin publisher, vendor login, SQLite store or gate wired
+in, and no vendor request made. Current HEAD no longer matches that note: the daemon persists a
+versioned JSON snapshot (`AJS_STATE_FILE`), the Resin publisher/runtime and the node
+controller/gate are wired, and vendor login is default-off (`AJS_ACCOUNT_LOGIN=1` opts in);
+SQLite remains the target schema (`docs/PANEL.md` §6), not the current storage.
 
 ## Verification (recorded 2026-10-23)
 
@@ -375,10 +379,11 @@ contract only):
 | Requests | `GET /v1/requests`, `POST /v1/requests/mutations` | `[PROPOSED]` |
 | Audit | `GET /v1/audit?limit=` | `[SPEC]` |
 | Metrics | `GET /v1/metrics?range=24h\|7d` | `[PROPOSED]` |
-| Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by the `ajs-accountd` skeleton |
+| Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by `ajs-accountd` |
 
-Every path in this table is served by the in-memory `ajs-accountd` skeleton in `daemon/`; `[SPEC]` /
-`[PROPOSED]` describe where the contract is defined, not whether it is implemented.
+Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
+as a versioned JSON snapshot); `[SPEC]` / `[PROPOSED]` describe where the contract is defined,
+not whether it is implemented.
 
 The mock store is module-level and mutable: create/pause/delete accounts, drain nodes, rotate and
 release leases, create/revoke keys, edit allowlists, add mutation-lab requests, save settings and
