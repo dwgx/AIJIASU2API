@@ -54,6 +54,7 @@ IP.
 | 11 | Node-limit 3 behavior | `AJS_NODE_LIMIT=3` | first two gates answered SOCKS5 `0x05`; daemon logged `fv: data channel rejected ... fm=disconnected by another connection` (`emulator/internal/fv/binary.go:374`); third gate worked, egress `58.221.59.68` |
 | 12 | Captures | HMC scratch, not committed | `/srv/dwgxhomecloud/scratch/ajs-live-20261023/cap/app-login2.pcap` (177 packets), `daemon-login5.pcap` (300 packets) |
 | 13 | State hygiene | HMC scratch | `state.json` / `secrets.json` mode 600/700; no credentials in the repo |
+| 14 | Daemon second login (B5) | 2026-10-23 14:37:05 UTC, `AJS_NODE_LIMIT=1`, pin set | HTTP 200; same one node `acc-07:vvn-2076-264` LIVE and gate `127.0.0.1:13012`; persisted device identity hash prefixes (UID/OSDID/CUID/CSEID/OSP/OSD/OSV/DIM) byte-identical before and after |
 
 ## Findings
 
@@ -113,7 +114,8 @@ account = one live FV session, so:
   self-DOSed them — the same self-inflicted outage the README warns about (~165 listeners,
   `daemon/README.md:847`);
 - per-account "concurrency" cannot come from parallel FV sessions on one account; multi-node
-  accounts need multiple vendor accounts (untested — see below).
+  accounts need multiple vendor accounts (multi-account coexistence itself is untested — see
+  "What remains").
 
 ### F4 — Egress parity: daemon ≡ original app
 
@@ -123,6 +125,16 @@ real request/response sizes, the daemon's carrier — `[16B K][CTR(K,0)(len||tex
 RSA-OAEP-SHA1 session key, AES-128-CTR, per-flow data channel with `s=<sid>`/`n=<div>` — is
 behaviorally indistinguishable from the shipping client on this path. Gap-report rows 10–14's
 live half and B3/B4 are resolved by this run.
+
+### F5 — B5 resolved for one account: device identity is stable across logins
+
+A second daemon login on the same account at 2026-10-23 14:37:05 UTC returned HTTP 200 and
+rebuilt exactly the same state: one node `acc-07:vvn-2076-264` LIVE, gate `127.0.0.1:13012`.
+The persisted device identity (gap-report B5's four fields plus the profile fields — UID,
+OSDID, CUID, CSEID, OSP, OSD, OSV, DIM) was hashed before and after the second login: the
+hash prefixes were byte-identical, so the daemon is no longer regenerating identity per
+login on this path. This closes gap-report row 6 / B5 **for one account**; the raw identity
+values stay in HMC scratch — only the equality of hashes is recorded here.
 
 ### Command shapes (redacted)
 
@@ -173,10 +185,6 @@ the gate port is allocated from `127.0.0.1:13000` upward
 - **B2 — signing.** The live backend accepted the unsigned `linux-4.2.3.0` profile. Whether
   signing (`X-Sig`/`X-Timestamp`) is accepted, required for other profiles, or rejected was
   not tested; the OpenAJS secret remains unused.
-- **B5 — two-login stability.** Only one successful daemon login sequence was exercised in the
-  limit-1 run (plus the failed shape-fix attempts). Consecutive logins regenerating device
-  identity (gap-report row 6) were not observed to trigger vendor-side action, but the
-  anti-abuse risk of repeated re-logins is unmeasured.
 - **Hot update.** Dynamic API host refresh (`ApiUrls`, `FetchedUrlHosts`, `SyncVersion`,
   gap-report U9) did not occur in the window; all traffic stayed on
   `login.mmegg.com:4443`/`43.198.116.181`.
@@ -203,8 +211,9 @@ the gate port is allocated from `127.0.0.1:13000` upward
 2. Add a live-shape regression fixture: a `client.php` recording with string
    `ExpireTime`/`par.fv.u/p`/`vsid`/`loc.o` (values only, no account data) so the F2 fixes stay
    pinned by tests.
-3. Two-login stability test (B5) on a scratch account: consecutive logins, diffing device
-   identity fields, before enabling any scheduled re-login.
+3. **Done for one account** (row 14 / F5): the second login (2026-10-23 14:37:05 UTC) returned
+   HTTP 200 with identical node/gate state and byte-identical device-identity hash prefixes.
+   Remaining: repeat on a scratch account before enabling scheduled re-login.
 4. A second account to test multi-account coexistence (node/gate accounting, per-account
    session isolation).
 5. Long-idle session with keepalive observation to resolve `ka/kat/kapf`.
