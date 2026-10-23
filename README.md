@@ -44,9 +44,10 @@ As of 2026-10-23:
 
 **Not implemented — the status above must not be read as more than it is:**
 
-- **Live AJiaSu login and smoke test.** Blocked on an Owner-supplied account; the account-control
-  client and FV session factory have only run against local fakes, and no vendor host was
-  contacted.
+- **Live AJiaSu login and smoke test.** The login path is wired behind `AJS_ACCOUNT_LOGIN=1`
+  (`POST /v1/accounts/{id}/actions/login` calls the vendor control API), but it has only run
+  against local fakes. A live login and smoke test are `[UNVERIFIED]` and remain blocked on an
+  Owner-supplied account: no vendor host has been contacted from this tree.
 - **The gate and `ajsproxy` per-node supervision.** No gate listener and no per-`(account,
   server)` process management exist.
 - **SQLite / full persistence.** The daemon store is in memory and reseeded on every start; only

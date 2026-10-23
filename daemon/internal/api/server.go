@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
 )
@@ -49,6 +50,13 @@ var DefaultCORSOrigins = []string{
 // mutation methods cannot drift from the implementation.
 type Panel = runtime.Panel
 
+// LoginService is the optional vendor login path. When nil the login handler
+// keeps the store-only session refresh, so the daemon never contacts a vendor
+// host unless AJS_ACCOUNT_LOGIN=1 wires an implementation.
+type LoginService interface {
+	Login(ctx context.Context, accountID string) (model.Account, error)
+}
+
 // Config is the runtime configuration of the HTTP server.
 type Config struct {
 	AdminToken    string
@@ -59,6 +67,10 @@ type Config struct {
 	// Panel is set when AJS_RESIN_ADMIN_TOKEN is configured; it makes
 	// /v1/topology report the live Resin view and enables /v1/reconcile.
 	Panel Panel
+	// LoginService is set when AJS_ACCOUNT_LOGIN=1; POST
+	// /v1/accounts/{id}/actions/login then performs a vendor login instead
+	// of the store-only session refresh.
+	LoginService LoginService
 }
 
 // Server wires the store to an http.Handler.

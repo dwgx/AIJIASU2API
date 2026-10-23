@@ -11,7 +11,10 @@ rotate/release plus node drain/undrain write through Resin. Without the token it
 keeps the store-derived view and the in-memory mutation behavior, and logs
 `resin_disabled`. With `AJS_MASTER_KEY` set, created account passwords are
 sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
-validated and discarded. There is still no live vendor login, SQLite or gate.
+validated and discarded. Vendor login is wired but default-off:
+`AJS_ACCOUNT_LOGIN=1` makes `POST /v1/accounts/{id}/actions/login` call the
+control API; without it the handler only refreshes the store, and no vendor
+host is contacted. There is still no SQLite, session factory wiring or gate.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -33,7 +36,8 @@ internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
 internal/publisher/          subscription render, coalesced publish, rotation
 internal/runtime/            startup wiring, panel topology/reconcile and mutations
-internal/account/            FV protocol seam + account control client (Secret, Device, Control)
+internal/account/            FV protocol seam + account control client (Secret, Device, Control, LoginService)
+internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
 internal/api/server.go       router, auth, CORS, logging, JSON helpers
 internal/api/*.go            account, node/lease, user/key and ops handlers
 internal/api/server_test.go  httptest coverage
@@ -144,6 +148,7 @@ emulator/fvfacade/facade.go         FV protocol aliases + function variables
 daemon/internal/account/secret.go   Secret: fmt/slog/JSON redaction
 daemon/internal/account/device.go   device profiles + non-secret identity summary
 daemon/internal/account/control.go  Login / LoginSync / Servers wrapper
+daemon/internal/account/login_service.go  store-backed login path (default-off)
 daemon/internal/account/session.go  VersionProfile, SessionRequest, FlowSession, Factory
 ```
 
@@ -171,9 +176,11 @@ no live request has been made from this tree. Whether the vendor backend accepts
 a signed request from that profile is therefore `[UNVERIFIED]`;
 `Options.NoSigning` omits both headers for it. Signing is on by default (the
 zero `Options` signs), so the daemon cannot send an unsigned request by
-accident. The only emulator change is a `NoSign` field on
-`emulator/internal/api.Client`, which skips both headers; `NewClient` and the
-zero value still sign.
+accident. `LoginService` is the deliberate exception: it maps the profile's
+`SigningMode` (`none` for Linux 4.2.3.0) onto `NoSigning`, so the default
+login path sends unsigned requests. The only emulator change is a `NoSign`
+field on `emulator/internal/api.Client`, which skips both headers; `NewClient`
+and the zero value still sign.
 
 ### Control client
 
@@ -205,6 +212,45 @@ servers, err := control.Servers(ctx)                  // map[string]apifacade.Se
 - `Control` keeps the last session and is not safe for concurrent use; the
   session factory owns one per account. `Close` releases idle HTTP connections;
   the emulated surface has no logout command.
+
+### Login service (AJS-38)
+
+`login_service.go` is the only daemon path that can contact a control API host.
+`cmd/ajs-accountd` builds it only when `AJS_ACCOUNT_LOGIN=1`; construction
+performs no I/O, so a disabled daemon and a freshly started one make no vendor
+call. The default profile is `linux-4.2.3.0` (the tested `Linux423Binary`),
+whose `SigningMode` is `none`, so its requests are unsigned.
+
+```go
+service, err := account.NewLoginService(st, account.LoginConfig{
+    Hosts:   hosts,                 // empty → DefaultLoginHosts (four hosts)
+    Profile: account.Linux423Binary, // zero → Linux423Binary
+    Enabled: true,                  // false → Login returns ErrDisabled
+    Logger:  logger,
+})
+defer service.Close()
+
+updated, err := service.Login(ctx, "acc-01")
+result, ok := service.Result("acc-01") // in memory, for the future session factory
+```
+
+- `Login` reads the account and its sealed password with
+  `store.AccountSecret`, builds a fresh device identity and `Control`, and
+  calls `ClientApiLogin/Login`. The password is a `Secret`; the plaintext byte
+  slice is cleared after conversion.
+- Success: `store.MarkLogin` sets `active` (or `expired` when the vendor says
+  so), updates `lastLoginAt`, adopts the vendor user name, and appends
+  `account.login`. The `LoginResult` is retained in a mutex-protected map;
+  `Result` returns a copy. `Close` releases idle connections and drops it.
+- Auth rejection (`*account.AuthError`): `store.MarkAuthFailed` sets
+  `auth_failed` and appends `account.auth_failed` with the sanitized vendor
+  message (one bounded line, no newlines). `Login` returns
+  `ErrAuthRejected`.
+- Transport/protocol failure: the account is left untouched (no audit state
+  change), a warning is logged, and `Login` returns `ErrUpstream`. A missing
+  account is `store.ErrNotFound`; a missing sealed password is `ErrNoSecret`.
+- No log line, error or stored value contains the password, login token or
+  connect password.
 
 ### Secret handling
 
@@ -284,6 +330,9 @@ package is imported and no emulator test changed.
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth (loopback only) |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
+| `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path; anything else logs `account_login_disabled` and keeps the store-only refresh |
+| `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order |
+| `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile; only the tested Linux 4.2.3.0 profile is accepted, and an unknown value fails startup when login is enabled |
 | `AJS_RESIN_URL` | `-resin-url` | `http://127.0.0.1:2260` | Resin admin API base |
 | `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
 | `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
@@ -490,7 +539,7 @@ All `/v1/*` routes require `Authorization: Bearer $AJS_ADMIN_TOKEN`.
 | GET | `/v1/accounts/{id}` | single account |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
 | DELETE | `/v1/accounts/{id}` | remove account, its nodes, its leases and its sealed secret; keep audit |
-| POST | `/v1/accounts/{id}/actions/login` | refresh `lastLoginAt`, clear `auth_failed` |
+| POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login, then `active`/`expired` and a retained `LoginResult`; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | pause the account and drain its nodes |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
 | POST | `/v1/nodes/{id}/actions/drain` | → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
@@ -530,6 +579,20 @@ Errors are always `{"error":{"code":"…","message":"…"}}`:
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure |
 
+With `AJS_ACCOUNT_LOGIN=1`, the login handler maps the vendor outcome onto the
+same contract:
+
+| Condition | HTTP | Code |
+|---|---|---|
+| vendor rejects the credentials (`ErrAuthRejected`) | 401 | `UNAUTHORIZED` |
+| account has no sealed password (`ErrNoSecret`) | 409 | `CONFLICT` |
+| transport or protocol failure (`ErrUpstream`) | 503 | `UPSTREAM_UNAVAILABLE` |
+| unknown account | 404 | `NOT_FOUND` |
+
+The 503 body is generic (`account login upstream unavailable`); the transport
+detail stays in the log. A rejection marks the account `auth_failed`; a
+transport failure leaves the state and `lastLoginAt` untouched.
+
 Other contract details:
 
 - Timestamps are RFC 3339 (nanosecond precision), byte counts are integers.
@@ -539,7 +602,8 @@ Other contract details:
 - Middleware adds `X-Request-Id`, logs one `slog` line per request (never
   headers, so `Authorization` cannot leak), limits bodies to 1 MiB, and answers
   CORS preflight for the two configured origins.
-- Account passwords are validated then discarded; no credential is persisted.
+- Account passwords are validated and discarded unless `AJS_MASTER_KEY` seals
+  them; the login token and connect password never leave memory.
 
 ## Seed
 
@@ -618,6 +682,21 @@ omitting both signature headers, a non-OK `AuthResult` as `*AuthError`,
 `ErrNoLoginToken` before login, transport failover to the second host, no
 failover on HTTP 500 or on a response without a `Login` object, the two device
 profiles, and redaction through every `fmt` verb, JSON and slog.
+
+`internal/account/login_service_test.go` drives the same fake `/client.php`
+through `LoginService` and covers: success (`active`, fresh `lastLoginAt`,
+vendor user name, `account.login` audit, retained `Result` with token/connect
+password), an expired membership (`expired`), auth rejection (`auth_failed`,
+unchanged `lastLoginAt`, sanitized one-line `account.auth_failed`, no retained
+result), a transport error (no state or audit change), a missing sealed secret
+(`ErrNoSecret`, no request), an unknown account (`store.ErrNotFound`, no
+request), the disabled switch (`ErrDisabled`, no request), redaction of the
+password/token/connect password through `%v`/`%+v`/`%#v` and the service log,
+and the default hosts/profile/signing mode. `internal/api/server_test.go`
+adds the API mapping test: the optional service answers 200, and wrapped
+`ErrNoSecret`/`store.ErrNotFound`/`ErrAuthRejected`/`ErrUpstream`/`ErrDisabled`
+map to 409/404/401/503/503; the existing nil-service test keeps the
+store-only fallback.
 
 ## HMC evidence
 
@@ -747,6 +826,69 @@ ok  	ajsaccountd/internal/account	0.017s
 Both runs are in-process only: the mock listens on `127.0.0.1`, no vendor host
 is contacted and no credential is involved.
 
+### Account login wiring (AJS-38)
+
+The two sibling trees were copied into the scratch root that already holds the
+capture fixtures; no other worker's tree was touched:
+
+```bash
+scp -r daemon emulator hmc:/srv/dwgxhomecloud/scratch/ajs-multimodule/
+```
+
+On HMC (`go1.25.14 linux/amd64`, `GOTOOLCHAIN=auto`):
+
+```console
+$ cd /srv/dwgxhomecloud/scratch/ajs-multimodule/daemon && go test -count=1 ./... && go build ./... && echo BUILD_OK && go vet ./... && echo VET_OK
+?   	ajsaccountd/cmd/ajs-accountd	[no test files]
+ok  	ajsaccountd/internal/account	0.060s
+ok  	ajsaccountd/internal/api	0.033s
+?   	ajsaccountd/internal/model	[no test files]
+ok  	ajsaccountd/internal/publisher	0.012s
+ok  	ajsaccountd/internal/resin	0.213s
+ok  	ajsaccountd/internal/runtime	0.033s
+ok  	ajsaccountd/internal/secret	0.003s
+ok  	ajsaccountd/internal/store	0.004s
+BUILD_OK
+VET_OK
+```
+
+Startup proves the switch and the no-contact boundary: with an unreachable
+`AJS_API_HOSTS` the daemon still starts and logs the enabled state, and without
+the switch it logs the disabled state:
+
+```console
+$ AJS_ALLOW_INSECURE=1 AJS_ACCOUNT_LOGIN=1 AJS_API_HOSTS=http://127.0.0.1:1 \
+    AJS_LISTEN=127.0.0.1:22692 timeout 2s /tmp/ajs-accountd-login
+level=INFO msg=account_login_enabled hosts=1 profile=linux-4.2.3.0-binary
+level=INFO msg="ajs-accountd listening" addr=127.0.0.1:22692 auth=insecure
+
+$ AJS_ALLOW_INSECURE=1 AJS_LISTEN=127.0.0.1:22691 timeout 2s /tmp/ajs-accountd-login
+level=INFO msg=account_login_disabled reason="AJS_ACCOUNT_LOGIN is not 1"
+level=INFO msg="ajs-accountd listening" addr=127.0.0.1:22691 auth=insecure
+```
+
+Every login test uses an in-process `httptest` `/client.php`; no vendor host was
+contacted and no credential exists in the tree. A process-level smoke with
+`AJS_MASTER_KEY` set (so the password is sealed) and a localhost fake
+`/client.php` created an account and logged in through the API:
+
+```console
+$ curl -s -X POST http://127.0.0.1:22693/v1/accounts -d '{...}'
+{"id":"acc-07","label":"login-smoke","username":"smoke@example.com","state":"active",...}
+$ curl -s -X POST http://127.0.0.1:22693/v1/accounts/acc-07/actions/login
+{"id":"acc-07","label":"login-smoke","username":"user","state":"active",
+ "lastLoginAt":"2026-10-23T04:16:25.873823903Z",...}
+$ curl -s 'http://127.0.0.1:22693/v1/audit?limit=2'
+[{"action":"account.login","target":"login-smoke",
+  "detail":"Session established · membership vip",...},
+ {"action":"account.create",...}]
+level=INFO msg=account_login account=acc-07 state=active membership=vip
+```
+
+The daemon and fake vendor were stopped afterward; both ports were free and no
+process was left running. Live vendor acceptance of the `linux-4.2.3.0`
+profile is still `[UNVERIFIED]`.
+
 ### Panel smoke (fake Resin, dev host)
 
 The process-level wiring was also exercised on the dev host against a
@@ -851,10 +993,16 @@ returned nothing, and port 2261 was free afterward. No process was left running.
 ## Limitations / next
 
 - State is lost on restart; there is no persistence, SQLite, or secret store.
-- Login/logout only update timestamps and state. Lease rotate/release and node
-  drain/undrain write through Resin when a panel is configured; account, user,
-  key and settings mutations remain store-only, and `/v1/reconcile` is the only
-  path that re-renders the whole subscription on demand.
+- Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
+  With it, login calls the control API, but the session factory and gate are
+  still not wired: the `LoginResult` stays in process memory and is lost on
+  restart. Lease rotate/release and node drain/undrain write through Resin when
+  a panel is configured; account, user, key and settings mutations remain
+  store-only, and `/v1/reconcile` is the only path that re-renders the whole
+  subscription on demand.
+- The login path has never contacted a live vendor host. The default
+  `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
+  `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`.
 - Rotation restores the platform filters before reading the new lease (the
   publisher owns that sequence). The M1 spike recommends restoring only after
   the new lease is observed; changing that needs a publisher change outside

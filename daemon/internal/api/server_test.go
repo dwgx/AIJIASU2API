@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
 )
@@ -386,6 +389,67 @@ func TestAccountLoginLogout(t *testing.T) {
 	resp, body = apiCall(t, ts, http.MethodPost, "/v1/accounts/missing/actions/login", nil)
 	requireStatus(t, resp, http.StatusNotFound)
 	requireErrorCode(t, body, CodeNotFound)
+}
+
+// stubLoginService is the api.LoginService seam without a vendor call.
+type stubLoginService struct {
+	account model.Account
+	err     error
+	lastID  string
+}
+
+func (s *stubLoginService) Login(_ context.Context, accountID string) (model.Account, error) {
+	s.lastID = accountID
+	if s.err != nil {
+		return model.Account{}, s.err
+	}
+	out := s.account
+	if out.ID == "" {
+		out.ID = accountID
+	}
+	return out, nil
+}
+
+func TestAccountLoginServiceStatusMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "success", status: http.StatusOK},
+		{name: "missing secret", err: fmt.Errorf("wrapped: %w", account.ErrNoSecret), status: http.StatusConflict, code: CodeConflict},
+		{name: "unknown account", err: fmt.Errorf("wrapped: %w", store.ErrNotFound), status: http.StatusNotFound, code: CodeNotFound},
+		{name: "rejected", err: fmt.Errorf("wrapped: %w", account.ErrAuthRejected), status: http.StatusUnauthorized, code: CodeUnauthorized},
+		{name: "upstream", err: fmt.Errorf("wrapped: %w", account.ErrUpstream), status: http.StatusServiceUnavailable, code: CodeUpstreamUnavailable},
+		{name: "disabled", err: account.ErrDisabled, status: http.StatusServiceUnavailable, code: CodeUpstreamUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &stubLoginService{
+				account: model.Account{ID: "acc-01", Label: "Northwind Ops", State: model.AccountActive},
+				err:     tc.err,
+			}
+			server := New(Config{AdminToken: testToken, LoginService: svc}, store.New(),
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			ts := httptest.NewServer(server)
+			t.Cleanup(ts.Close)
+
+			resp, body := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/login", nil)
+			requireStatus(t, resp, tc.status)
+			if svc.lastID != "acc-01" {
+				t.Fatalf("Login account id = %q, want acc-01", svc.lastID)
+			}
+			if tc.code == "" {
+				account := decodeBody[model.Account](t, body)
+				if account.ID != "acc-01" || account.State != model.AccountActive {
+					t.Fatalf("login body = %+v, want the service account", account)
+				}
+				return
+			}
+			requireErrorCode(t, body, tc.code)
+		})
+	}
 }
 
 func TestNodeDrainUndrainProbe(t *testing.T) {

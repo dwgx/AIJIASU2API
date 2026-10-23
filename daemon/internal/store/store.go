@@ -525,6 +525,59 @@ func (s *Store) LoginAccount(id string) (model.Account, error) {
 	return cloneAccount(*account), nil
 }
 
+// MarkLogin records a successful vendor login. The state becomes active, or
+// expired when the vendor reports an expired membership; LastLoginAt is now,
+// the vendor's canonical user name replaces the stored one when non-empty, and
+// an account.login audit event records the membership. It never stores a token
+// or connect password.
+func (s *Store) MarkLogin(id, userName, membership string, expired bool) (model.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.accountIndexLocked(id)
+	if idx < 0 {
+		return model.Account{}, notFoundf("account %q not found", id)
+	}
+	account := &s.accounts[idx]
+	account.LastLoginAt = iso(s.now())
+	if userName = clientMessage(userName); userName != "" {
+		account.Username = userName
+	}
+	detail := "Session established"
+	if membership = clientMessage(membership); membership != "" {
+		detail += " · membership " + membership
+	}
+	if expired {
+		account.State = model.AccountExpired
+		detail += " · expired"
+	} else {
+		account.State = model.AccountActive
+	}
+	s.addAuditLocked(model.SeverityInfo, "operator", "account.login", account.Label, detail)
+	return cloneAccount(*account), nil
+}
+
+// MarkAuthFailed records a vendor authentication rejection. The state becomes
+// auth_failed; message is reduced to one bounded line, so a caller must pass
+// only the vendor's AuthResult/AuthMessage and never a password or token.
+func (s *Store) MarkAuthFailed(id, message string) (model.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.accountIndexLocked(id)
+	if idx < 0 {
+		return model.Account{}, notFoundf("account %q not found", id)
+	}
+	account := &s.accounts[idx]
+	account.State = model.AccountAuthFailed
+	detail := clientMessage(message)
+	if detail == "" {
+		detail = "Authentication rejected"
+	}
+	s.addAuditLocked(model.SeverityError, "operator", "account.auth_failed", account.Label, detail)
+	return cloneAccount(*account), nil
+}
+
 // LogoutAccount stops the account's sessions by pausing it and draining every
 // node that belongs to it.
 func (s *Store) LogoutAccount(id string) (model.Account, error) {
@@ -628,6 +681,19 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 		Detail:   detail,
 	}
 	s.audit = append([]model.AuditEvent{event}, s.audit...)
+}
+
+// clientMessage reduces a vendor-provided string to one bounded line for an
+// audit detail. It removes line breaks and control spacing but does not guess
+// at secrets: callers must pass only a result code or message, never a
+// credential.
+func clientMessage(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	const maxRunes = 200
+	if runes := []rune(value); len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "…"
+	}
+	return value
 }
 
 func cloneAccount(account model.Account) model.Account {

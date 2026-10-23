@@ -1,9 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
+	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/store"
 )
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
@@ -67,12 +70,44 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
-	account, err := s.store.LoginAccount(pathParam(r, "id"))
-	if err != nil {
-		s.writeStoreError(w, err)
+	id := pathParam(r, "id")
+	if s.cfg.LoginService == nil {
+		updated, err := s.store.LoginAccount(id)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 		return
 	}
-	writeJSON(w, http.StatusOK, account)
+	updated, err := s.cfg.LoginService.Login(r.Context(), id)
+	if err != nil {
+		s.writeLoginError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// writeLoginError maps the account login errors onto the dashboard contract.
+// A rejected credential is 401, a missing sealed password is 409, and a
+// transport/protocol failure is 503 with the detail kept in the log.
+func (s *Server) writeLoginError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, account.ErrNoSecret):
+		writeError(w, http.StatusConflict, CodeConflict, err.Error())
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+	case errors.Is(err, account.ErrAuthRejected):
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, err.Error())
+	case errors.Is(err, account.ErrUpstream):
+		s.logger.Warn("account_login_upstream_error", "error", err)
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "account login upstream unavailable")
+	case errors.Is(err, account.ErrDisabled), errors.Is(err, account.ErrClosed):
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "account login is not available")
+	default:
+		s.logger.Error("account_login_error", "error", err)
+		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
+	}
 }
 
 func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {

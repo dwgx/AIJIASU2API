@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
 	"ajsaccountd/internal/publisher"
 	"ajsaccountd/internal/resin"
@@ -73,11 +74,20 @@ func run() error {
 		defer func() { _ = resinPanel.Close() }()
 	}
 
+	var loginService api.LoginService
+	if service, err := startAccountLogin(st, logger); err != nil {
+		return err
+	} else if service != nil {
+		defer service.Close()
+		loginService = service
+	}
+
 	server := api.New(api.Config{
 		AdminToken:    *token,
 		AllowInsecure: *insecure,
-		CORSOrigins:   splitOrigins(*corsOrigins),
+		CORSOrigins:   splitList(*corsOrigins),
 		Panel:         panel,
+		LoginService:  loginService,
 	}, st, logger)
 
 	httpServer := &http.Server{
@@ -208,15 +218,58 @@ func startResinPanel(ctx context.Context, st *store.Store, logger *slog.Logger, 
 	return panel, nil
 }
 
-func splitOrigins(value string) []string {
+// startAccountLogin builds the optional vendor login path. AJS_ACCOUNT_LOGIN=1
+// is the only switch: without it the daemon logs account_login_disabled and
+// the handler keeps the store-only refresh. Construction performs no I/O and
+// contacts no host. The returned *account.LoginService satisfies
+// api.LoginService; a nil value means disabled.
+func startAccountLogin(st *store.Store, logger *slog.Logger) (*account.LoginService, error) {
+	if os.Getenv("AJS_ACCOUNT_LOGIN") != "1" {
+		logger.Info("account_login_disabled", "reason", "AJS_ACCOUNT_LOGIN is not 1")
+		return nil, nil
+	}
+	profile, err := loginProfile(envOr("AJS_ACCOUNT_PROFILE", "linux-4.2.3.0"))
+	if err != nil {
+		return nil, err
+	}
+	hosts := splitList(os.Getenv("AJS_API_HOSTS"))
+	if len(hosts) == 0 {
+		hosts = append([]string(nil), account.DefaultLoginHosts...)
+	}
+	service, err := account.NewLoginService(st, account.LoginConfig{
+		Hosts:   hosts,
+		Profile: profile,
+		Enabled: true,
+		Logger:  logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("account login: %w", err)
+	}
+	logger.Info("account_login_enabled", "hosts", len(hosts), "profile", profile.Name)
+	return service, nil
+}
+
+// loginProfile maps AJS_ACCOUNT_PROFILE to a version profile. Only the tested
+// Linux 4.2.3.0 profile is accepted; an unknown value fails startup instead of
+// silently logging in as a different client.
+func loginProfile(name string) (account.VersionProfile, error) {
+	switch strings.TrimSpace(name) {
+	case "", "linux-4.2.3.0", account.Linux423Binary.Name:
+		return account.Linux423Binary, nil
+	default:
+		return account.VersionProfile{}, fmt.Errorf("AJS_ACCOUNT_PROFILE %q is not supported (want linux-4.2.3.0)", name)
+	}
+}
+
+func splitList(value string) []string {
 	parts := strings.Split(value, ",")
-	origins := make([]string, 0, len(parts))
+	items := make([]string, 0, len(parts))
 	for _, part := range parts {
-		if origin := strings.TrimSpace(part); origin != "" {
-			origins = append(origins, origin)
+		if item := strings.TrimSpace(part); item != "" {
+			items = append(items, item)
 		}
 	}
-	return origins
+	return items
 }
 
 func parseLevel(value string) slog.Level {
