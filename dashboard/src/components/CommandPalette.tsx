@@ -1,11 +1,13 @@
 import clsx from 'clsx'
-import { Moon, Plus, RefreshCw, Search, Sun } from 'lucide-react'
+import { Moon, Plus, RefreshCw, Search, Server, Sun, Wallet } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
+import { api } from '../lib/api'
 import { NAV_ITEMS } from '../lib/nav'
 import { useTheme } from '../lib/theme'
+import type { Account, ProxyNode } from '../lib/types'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { useToast } from './Toast'
 
@@ -33,12 +35,23 @@ function scoreEntry(query: string, entry: PaletteEntry): number {
   return cursor === needle.length ? 30 : -1
 }
 
+interface PaletteData {
+  accounts: Account[]
+  nodes: ProxyNode[]
+}
+
+const NO_DATA: PaletteData = { accounts: [], nodes: [] }
+
+/** At least 2 non-space characters are required before account/node entries join the palette. */
+const DATA_QUERY_MIN = 2
+
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate()
   const { push } = useToast()
   const { theme, toggle } = useTheme()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
+  const [data, setData] = useState<PaletteData>(NO_DATA)
   const containerRef = useFocusTrap<HTMLDivElement>(open, onClose)
   const restoreTargetRef = useRef<HTMLElement | null>(null)
   const wasOpenRef = useRef(false)
@@ -82,6 +95,22 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     setSelected(0)
   }, [query])
 
+  // Fetch accounts and nodes once per open, in parallel. Failures are ignored: navigation and
+  // action entries keep working. Results that land after close are dropped via the cancelled flag.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    Promise.all([
+      api.listAccounts().catch(() => [] as Account[]),
+      api.listNodes().catch(() => [] as ProxyNode[]),
+    ]).then(([accounts, nodes]) => {
+      if (!cancelled) setData({ accounts, nodes })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
   const entries = useMemo<PaletteEntry[]>(() => {
     const navigation: PaletteEntry[] = NAV_ITEMS.map((item) => ({
       id: `nav-${item.to}`,
@@ -120,8 +149,25 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         run: toggle,
       },
     ]
-    return [...navigation, ...actions]
-  }, [navigate, push, theme, toggle])
+    if (query.replace(/\s/g, '').length < DATA_QUERY_MIN) return [...navigation, ...actions]
+    const accountEntries: PaletteEntry[] = data.accounts.map((account) => ({
+      id: `account-${account.id}`,
+      label: account.label,
+      section: 'Account',
+      keywords: `${account.username} ${account.platform} ${account.regions.join(' ')}`,
+      icon: Wallet,
+      run: () => navigate(`/accounts?q=${encodeURIComponent(account.label)}`),
+    }))
+    const nodeEntries: PaletteEntry[] = data.nodes.map((node) => ({
+      id: `node-${node.id}`,
+      label: node.label,
+      section: 'Node',
+      keywords: `${node.accountLabel} ${node.region} ${node.city} ${node.egressIp}`,
+      icon: Server,
+      run: () => navigate(`/nodes?q=${encodeURIComponent(node.label)}`),
+    }))
+    return [...navigation, ...actions, ...accountEntries, ...nodeEntries]
+  }, [data, navigate, push, query, theme, toggle])
 
   const filtered = useMemo(
     () =>

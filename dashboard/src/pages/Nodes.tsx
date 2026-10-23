@@ -1,5 +1,6 @@
 import { Power, RefreshCw, Search, Server, ShieldCheck } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { formatDateTime, formatRelative, percent } from '../lib/format'
 import { NODE_STATE } from '../lib/labels'
@@ -26,6 +27,23 @@ import {
   TableSkeleton,
 } from '../components/primitives'
 
+/**
+ * Seeds the search box from the `q` param and follows later `q` changes (the command palette
+ * can navigate here while the page is mounted) without clobbering a query the user typed on
+ * re-renders that leave `q` alone.
+ */
+function useParamQuery(paramValue: string | null): [string, (value: string) => void] {
+  const [query, setQuery] = useState(paramValue ?? '')
+  const lastParamRef = useRef(paramValue)
+  useEffect(() => {
+    if (paramValue !== lastParamRef.current) {
+      lastParamRef.current = paramValue
+      setQuery(paramValue ?? '')
+    }
+  }, [paramValue])
+  return [query, setQuery]
+}
+
 function latencyHistory(latency: number): number[] {
   return Array.from({ length: 14 }, (_, index) => {
     const wave = Math.sin(index / 2.4) * 0.18 + Math.sin(index / 5.1) * 0.1
@@ -35,8 +53,9 @@ function latencyHistory(latency: number): number[] {
 
 export default function Nodes() {
   const nodes = useAsync(() => api.listNodes(), [], { intervalMs: 15_000 })
+  const [params] = useSearchParams()
   const { push } = useToast()
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useParamQuery(params.get('q'))
   const [regionFilter, setRegionFilter] = useState('all')
   const [stateFilter, setStateFilter] = useState<'all' | NodeState>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)

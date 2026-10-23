@@ -1,6 +1,6 @@
 import clsx from 'clsx'
 import { LayoutGrid, Pause, Play, Rows3, Search, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, isMockMode } from '../lib/api'
@@ -28,6 +28,23 @@ import {
   StatusDot,
   TableSkeleton,
 } from '../components/primitives'
+
+/**
+ * Seeds the search box from the `q` param and follows later `q` changes (the command palette
+ * can navigate here while the page is mounted) without clobbering a query the user typed on
+ * re-renders that leave `q` alone — e.g. opening `?new=1` or closing the drawer.
+ */
+function useParamQuery(paramValue: string | null): [string, (value: string) => void] {
+  const [query, setQuery] = useState(paramValue ?? '')
+  const lastParamRef = useRef(paramValue)
+  useEffect(() => {
+    if (paramValue !== lastParamRef.current) {
+      lastParamRef.current = paramValue
+      setQuery(paramValue ?? '')
+    }
+  }, [paramValue])
+  return [query, setQuery]
+}
 
 const PLATFORMS: Platform[] = ['android', 'ios', 'windows', 'linux']
 const EMPTY_FORM = {
@@ -251,7 +268,7 @@ export default function Accounts() {
   const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const [params, setParams] = useSearchParams()
   const { push } = useToast()
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useParamQuery(params.get('q'))
   const [stateFilter, setStateFilter] = useState<'all' | AccountState>('all')
   const [platformFilter, setPlatformFilter] = useState<'all' | Platform>('all')
   const [view, setView] = useState<AccountView>(readAccountView)

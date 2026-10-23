@@ -8,7 +8,7 @@ environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 58 tests.
+- Tests: Vitest + React Testing Library + jsdom, 65 tests.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
 
@@ -31,7 +31,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 58 tests
+npm test           # Vitest, 65 tests
 npm run typecheck  # tsc -b
 ```
 
@@ -100,6 +100,48 @@ Rules shared by every polling hook:
 `tests/useAsync.test.tsx` drives the hook with Vitest fake timers — interval, hidden pause, visible
 resume, unmount, overlapping polls, failed poll, manual reload, dependency change and
 `enabled: false` — and asserts the stale dot renders only while stale.
+
+## Command palette data search
+
+`Ctrl/Cmd+K` searches more than pages and actions: once the palette opens it also searches the
+live **Accounts** and **Nodes** datasets.
+
+- **Load on open.** Each open fetches `api.listAccounts()` and `api.listNodes()` once, in
+  parallel. Failures are swallowed — navigation and action entries keep working — and results
+  that resolve after the palette closes are dropped, so a slow response never leaks into the
+  next session.
+- **Two-character threshold.** Account and Node entries join only when the query has at least
+  2 non-space characters; empty and one-character queries look exactly like the pages/actions-only
+  palette. The score/order behaviour (`scoreEntry`) is unchanged — data entries compete with
+  pages and actions on the same scale, so exact label matches outrank fuzzy keyword hits and
+  every page/action stays reachable.
+- **Entry shape.** Account entries show the account `label` with a `Wallet` icon in the
+  `Account` section; keywords are `username platform regions…`. Node entries show the node
+  `label` with a `Server` icon in the `Node` section; keywords are `accountLabel region city
+  egressIp`. Credentials and full egress IPs never appear in a label — they only feed keyword
+  matching.
+- **Navigation contract.** Selecting an account navigates to
+  `/accounts?q=<label>`; selecting a node navigates to `/nodes?q=<label>` (both
+  `encodeURIComponent`-encoded). No destructive or mutating actions were added to the palette.
+
+### `?q=` search-param contract
+
+Accounts and Nodes read a `q` search param and use it to prefill their search box:
+
+- On first mount, `query` is initialized from `?q=` (empty when absent).
+- When `q` changes while the page is mounted — e.g. the palette navigates from
+  `/accounts?q=Field Lab` to `/nodes?q=jp-tyo-01` — the search box follows the new value, so
+  the table filter updates without a remount.
+- Re-renders that leave `q` alone never clobber a query typed into the box: opening or closing
+  the Accounts create drawer (`?new=1`, which is preserved independently) does not touch the
+  search.
+- The filter itself is unchanged: Accounts matches label, username and regions; Nodes matches
+  node label, account label, city and egress IP.
+
+`tests/palette-search.test.tsx` covers the account and node round-trips (palette → URL →
+prefilled table), the two-character threshold (empty and one-character queries show no data
+entries), palette resilience when both list APIs reject, and the mounted-page `q` update plus
+the typed-query preservation on unrelated param changes.
 
 ## HMC layout
 
@@ -173,7 +215,8 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=local-test-token npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
-`npm test` — exit 0, `Test Files 9 passed (9)`, `Tests 58 passed (58)` (accent slice included):
+`npm test` — exit 0, `Test Files 10 passed (10)`, `Tests 65 passed (65)` (palette data search
+slice included):
 
 | File | Tests |
 |---|---|
@@ -183,10 +226,11 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | `tests/interactions.test.tsx` | 9 |
 | `tests/live-mode.test.tsx` | 1 |
 | `tests/palette-focus.test.tsx` | 3 |
+| `tests/palette-search.test.tsx` | 7 |
 | `tests/theme-accent.test.tsx` | 8 |
 | `tests/theme-contrast.test.ts` | 2 |
 | `tests/useAsync.test.tsx` | 13 |
-| **Total** | **58** |
+| **Total** | **65** |
 
 The contrast pass re-ran the computed-style audit on the built SPA at `/accounts` (1440×900, both
 themes): `.kbd` (`Ctrl K`) and the inactive `.segmented__item` measure 4.91:1 on `#f4f7f5` in light
@@ -234,9 +278,17 @@ and `--on-mint` at 4.5:1 or better on both `--mint` and `--mint-strong` (indigo 
 violet `10.06` / `6.82`, orange `7.82` / `6.31`). Full audit: `screenshots/accent-audit.json`
 (empty `failures`).
 
+The palette data-search slice re-ran the same HMC flow: source copied to the scratch tree,
+`npm test` → exit 0 (`Test Files 10 passed (10)`, `Tests 65 passed (65)`), `npm run build` →
+exit 0. `vite preview` served the fresh mock `dist` to headless Chromium over CDP; typing
+`Northwind` into the palette produced the Account entry (`Northwind Ops`, section `Account`),
+and clicking it navigated to `/accounts?q=Northwind%20Ops` with the table filtered to the one
+matching row — captured as `screenshots/palette-data-search.png` (palette open, 1440×900) and
+`screenshots/palette-data-search-accounts.png` (filtered Accounts page, 1440×900).
+
 ## Tests and QA
 
-- 58 Vitest tests in 9 files (see [Verification](#verification-recorded-2026-10-23)).
+- 65 Vitest tests in 10 files (see [Verification](#verification-recorded-2026-10-23)).
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
@@ -253,6 +305,12 @@ violet `10.06` / `6.82`, orange `7.82` / `6.31`). Full audit: `screenshots/accen
   the eight accent blocks, recomputes `--on-mint` on `--mint` and `--mint-strong` (≥4.5:1, 16 pairs),
   rejects any accent equal to `--info` or `--warning`, and verifies the live cascade plus the four
   swatches and `aria-pressed` state.
+  `tests/palette-search.test.tsx` covers the command palette data search end to end: typing an
+  account label or a node keyword surfaces the Account/Node entry, clicking it navigates with
+  `?q=` and the target page's table filters to the match; empty and one-character queries keep
+  data entries out; both list APIs rejecting leaves pages and actions intact; and the `?q=`
+  prefill updates a mounted Accounts/Nodes page without clobbering a typed query on unrelated
+  param changes.
 - Route sweep on the mock build: all 8 routes at 1440×900 and 390×844.
 
 | Viewport | Routes checked | `scrollWidth` | Console/page errors |
@@ -269,7 +327,8 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | File | Interaction |
 |---|---|
 | `screenshots/palette.png` | `Ctrl+K`, type `leases`, palette filtered and Leases selected |
-| `screenshots/account-drawer.png` | open `/accounts?new=1`, fill Label / Username / Password / Regions |
+| `screenshots/palette-data-search.png` | `Ctrl+K`, type `Northwind`, Account entry `Northwind Ops` listed under section Account |
+| `screenshots/palette-data-search-accounts.png` | click the Account entry → `/accounts?q=Northwind%20Ops`, table filtered to the one matching row |
 | `screenshots/api-key-modal.png` | `/users` → **Create API key** → wait for users → fill Label → **Create key** (show-once secret) |
 | `screenshots/toast.png` | `/leases` → first **Copy** → toast `Proxy URL copied` |
 | `screenshots/mobile-nav.png` | 390×844 → **Open navigation** → sidebar drawer |
@@ -318,6 +377,7 @@ tests/
   api.test.ts             seed counts, metrics, CRUD, reset, settings persistence
   live-mode.test.tsx      live shell labels, no reset card when VITE_USE_MOCK=false
   palette-focus.test.tsx  command palette focus trap and focus restoration
+  palette-search.test.tsx palette Account/Node search, ?q= prefill, API-failure resilience
   theme-accent.test.tsx   accent switch, persistence, tokens, 8-way WCAG contrast
   useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
 ```
@@ -455,7 +515,9 @@ both fills, checks the status-hue distinctness, and verifies the live cascade, t
 
 ## Keyboard and accessibility
 
-- `Ctrl/Cmd+K` opens the command palette (fuzzy filter, ↑/↓, Enter, Esc, Tab trap).
+- `Ctrl/Cmd+K` opens the command palette (fuzzy filter, ↑/↓, Enter, Esc, Tab trap). Queries of
+  2+ non-space characters also match Accounts and Nodes entries (see
+  [Command palette data search](#command-palette-data-search)).
 - Sidebar links, table actions and form controls are keyboard reachable with visible focus.
 - Drawers/modals trap focus, close on Esc/backdrop, and restore the previous focus.
 - Tables use real `<table>` semantics with an accessible caption; status is dot **and** label.
