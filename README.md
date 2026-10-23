@@ -33,23 +33,36 @@ As of 2026-10-24:
 - `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
   live calls and holds no credentials.
-- `dashboard/` — operator console: React 19, Vite 6, TypeScript, 8 pages (Overview, Accounts,
-  Nodes, Leases, Users, Requests, Logs, Settings) in the Obsidian Mint design, with accent themes
-  (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and command-palette search for
-  accounts and nodes. Mock data is the default; a live mode against `ajs-accountd` is opt-in at
-  build time. 71 Vitest tests in 11 files. HMC serves the mock build on `18081` and the live
-  build on `18082`.
+- `dashboard/` — operator console: React 19, Vite 6, TypeScript, 9 pages (Overview, Accounts,
+  Nodes, Leases, Users, Requests, Logs, Settings, Lab) in the Obsidian Mint design, with accent
+  themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and command-palette
+  search for accounts and nodes. Mock data is the default; a live mode against `ajs-accountd` is
+  opt-in at build time. 97 Vitest tests in 13 files. HMC serves the mock build on `18081` and the
+  live build on `18082`, the latter published on the LAN at `http://192.168.11.4:18082` against
+  the daemon API at `http://192.168.11.4:2261`, where the bearer token is required (insecure
+  mode is refused off loopback).
+  The **Lab** page (`/lab`) is an instrument with eight tabs — Overview, Gates & sessions, Egress,
+  Servers, Protocol, Device, Logs, Diagnostics — fed by `/v1/lab/*` plus the per-account
+  servers/device reads. Every GET is read-only and makes no vendor call; the only non-GET action is
+  the guarded egress check (`POST /v1/lab/egress-check`) through the selected node's own loopback
+  gate — a real SOCKS5 dial plus HTTPS echo, rate-limited by a 5 s per-node cooldown, answering 409
+  when no gate is running and 429 on a repeat within the cooldown. A disabled mode answers
+  `enabled:false` with the switch that is off. The build-time token is optional: on a live 401 the
+  runtime token gate asks for the admin token and keeps it in `sessionStorage` for that tab only.
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
   exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, a
-  Prometheus `/metrics` endpoint, and the account control, FV session factory, node controller,
+  Prometheus `/metrics` endpoint, a Lab telemetry view (`/v1/lab/*`: overview, flags, gates,
+  sessions, egress, profiles, bounded redacted log ring, diagnostics, plus per-account
+  servers/device; the GETs are read-only and one POST (`/v1/lab/egress-check`) runs an explicit
+  egress probe that stores nothing), and the account control, FV session factory, node controller,
   SOCKS5 gate and process-group kill with `WaitDelay` supervisor seams.
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. 277 Go test
-  functions — 241 in `daemon/`, 36 in `emulator/` — mostly `httptest` fakes; the tests use no
+  a second login on the same account) and again on 2026-10-24 after the rebuild. 312 Go test
+  functions — 271 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -82,6 +95,13 @@ As of 2026-10-24:
   **third login on 2026-10-24**, from the rebuilt `2261`, again produced the same node, gate
   `13012` and egress `222.186.57.63`. Redacted report:
   [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md).
+- **New client samples are static triage only.** [`research/84-ajs-496/`](research/84-ajs-496/)
+  inventories the Windows 4.9.6.0, macOS 4.9.6.0, Linux 4.3.0.1 and Android 4.12.2.0 builds
+  (six artefacts, SHA-256 per sample, packer/signature/endpoint/version diff). Nothing in that
+  slice was executed — no installer, driver, tunnel or login, and no vendor host was contacted —
+  so the live evidence above still rests on the Linux 4.2.3.0 profile and **one account**. The
+  newer request shape and signing (`X-Sig` in 4.3.0.1, `_v=4.12.2.0` on Android) remain
+  `[UNVERIFIED]` against the vendor.
 - **The `supervisor` package is not used by the controller.** `NodeController`
   (`daemon/internal/runtime/nodes.go`) now wires login → session factory → per-node gate,
   with drain/undrain/delete/logout hooks, so the gate is production-wired. The separate
@@ -156,30 +176,37 @@ resin`, health checks, backup/restore and the honest limitations are in
 loopback, and the daemon then accepts `/v1/*` without a bearer token. For a real deployment,
 generate a token with `openssl rand -hex 32` — startup refuses the documented placeholders and
 anything shorter than 32 characters — and pass the same value as `AJS_ADMIN_TOKEN` and
-`VITE_PANEL_TOKEN`. `VITE_*` values are baked into `dist/` at build time, so the live token is
-readable by anyone who can fetch the bundle: keep `ajs-accountd` bound to `127.0.0.1` and terminate
-real authentication in a BFF or reverse proxy.
+`VITE_PANEL_TOKEN`. `VITE_*` values are baked into `dist/` at build time, so a live token in the
+bundle is readable by anyone who can fetch it: either keep `ajs-accountd` bound to `127.0.0.1`
+and terminate real authentication in a BFF or reverse proxy, or serve a token-free bundle and
+let the runtime token gate collect the token per browser tab.
 
-The HMC build host serves loopback-only endpoints: `18081` mock dashboard
-(`docker compose up -d` in `dashboard/`), `18082` live dashboard (`vite preview` over a live
-build), and `2261` `ajs-accountd`, rebuilt from HEAD on 2026-10-24 with login enabled. Account
-`acc-07` (`live-ajs-01`, the only account with a real vendor session; seeded demo accounts
-remain) is `active` with one `LIVE` node, `acc-07:vvn-2076-264`, behind gate
-`127.0.0.1:13012`; SOCKS5 through that gate egresses `222.186.57.63`, the same address as the
+The HMC build host serves the mock dashboard on loopback `18081`
+(`docker compose up -d` in `dashboard/`) and the live pair on the LAN:
+`http://192.168.11.4:18082` (live `vite preview` build) against `http://192.168.11.4:2261`
+(`ajs-accountd`, rebuilt from HEAD on 2026-10-24 with login enabled). The LAN daemon runs with
+bearer auth — `AJS_ALLOW_INSECURE` is not set, so every `/v1/*` call needs the token and a
+token-less request answers 401 — and the LAN build bakes no `VITE_PANEL_TOKEN`, so the
+dashboard's runtime token gate prompts on the first 401 and keeps the value in `sessionStorage`
+for that tab. Account `acc-07` (`live-ajs-01`, the only account with a real vendor session;
+seeded demo accounts remain) is `active` with one `LIVE` node, `acc-07:vvn-2076-264`, behind gate
+`127.0.0.1:13013`; SOCKS5 through that gate egresses `222.186.57.63`, the same address as the
 original app. The `18082` dashboard was rebuilt against `2261`. `/v1/system/update` answers 200
 with `enabled:false` because `AJS_UPDATE_REPO` is empty. The separate lab `ajs-accountd` on
-`2262` is stopped: its gate on `13012` died with it, and `13012` now belongs to the `2261` node.
+`2262` is stopped: its gate on `13012` died with it, and the `2261` node's gate has since
+been reallocated to `13013`.
 Resin listens on `2260` when running. `deploy/` packages the same pair
 as one stack and reuses `18081`, so run either it or the standalone dashboard compose,
-not both. From Windows, forward the ports:
+not both. The LAN URL is reachable directly from Windows; the tunnels below still work for the
+loopback-only mock build and for hosts that cannot route to `192.168.11.4`:
 
 ```bash
 ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (71 Vitest tests in 11 files), `cd daemon && go test ./...`
-(241 test functions, needs `../emulator`), `cd emulator && go test ./...` (36 test functions).
+Tests: `cd dashboard && npm test` (97 Vitest tests in 13 files), `cd daemon && go test ./...`
+(271 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
@@ -202,6 +229,7 @@ research/10-* .. 90-*      per-slice research output (later waves)
 research/70-panel/         panel research: candidate matrix, sources, validation script
 research/77-m1-spike/      Resin v1.3.0 M1 spike report (PASS) and measurements
 research/82-live-20261023/  first live-account run: original app vs daemon egress parity (redacted)
+research/84-ajs-496/       static triage of the 4.9.6.0 / 4.3.0.1 / 4.12.2.0 samples (not executed)
 ```
 
 ## Legal and terms-of-service caution
