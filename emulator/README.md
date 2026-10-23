@@ -152,6 +152,25 @@ the surrounding response. `TestLoginResultExpireTimeShapes`,
 `TestLoginResultExpireTimeErrors`, and `TestLoginDecodesStringExpireTime`
 pin these behaviours.
 
+The server numeric fields (`par.fv.u`, `par.fv.p`, `vsid`, `loc[].o`) keep
+their public `int` semantics through `api.FlexInt`, which decodes both shapes
+the vendor sends: the legacy JSON number or a numeric string. A live loginSync
+(AJS-97) discovered the string shape: the response carried
+`"u":"123","p":"443"`, which the stock decoder rejected with
+`cannot unmarshal string into Go struct field ServerFV.Servers.par.fv.u of
+type int`. A fraction or exponent is rejected; an empty string, `null`, or an
+absent field decodes to `0` (and `Addr()` returns `""` when the port is 0).
+An unsupported value fails the decode with a `*json.UnmarshalTypeError` the
+decoder decorates with the failing field path (e.g.
+`ServerFV.Servers.par.fv.p`), the offending value, and the accepted shapes —
+the same message shape as the original live failure; no error ever echoes the
+per-server secret or the session credentials. `Port()` casts back to `int`
+and `Addr()` is unchanged; FlexInt marshals as a bare JSON number, so
+re-encoded server listings stay numeric. `TestServerFlexIntShapes`,
+`TestServerFlexIntErrors`, `TestServerFlexIntErrorNamesField`,
+`TestLoginSyncDecodesStringServerNumbers`, and `TestFlexIntMarshalsAsNumber`
+pin these behaviours.
+
 The config contains a password: keep it outside the repository, never commit
 it, and do not put real credentials in issues or reports.
 
@@ -274,6 +293,11 @@ semantics, `s`/`n` generation, and first-packet placement remain `[INFERENCE]`.
 | `TestLoginResultExpireTimeShapes` | Every accepted `ExpireTime` shape (number, numeric string, zoneless datetimes in `time.Local`, RFC3339 with offset, empty/null/absent → 0) decodes to int64 Unix milliseconds; the surrounding fields still decode |
 | `TestLoginResultExpireTimeErrors` | An unsupported value fails with an error naming only the ExpireTime value and the accepted shapes — never `LoginToken`/`ConnectPassword` |
 | `TestLoginDecodesStringExpireTime` | End-to-end `Login` against a fake server that returns the live-discovered date-string shape |
+| `TestServerFlexIntShapes` | Every accepted server-numeric shape (JSON number, numeric string, negative, empty string/null/absent → 0) decodes; `Port()`/`Addr()` behave identically; `vsid`/`loc[].o` share the path |
+| `TestServerFlexIntErrors` | A non-numeric, fractional, exponent, overflow, array, object, or bool value fails with an error naming the failing field path, the value, and the accepted shapes — never the per-server secret |
+| `TestServerFlexIntErrorNamesField` | Each FlexInt field reports its own path: `par.fv.u`, `par.fv.p`, `vsid`, and `loc[].o` fail independently |
+| `TestLoginSyncDecodesStringServerNumbers` | End-to-end `LoginSync` against a fake server returning the live-discovered string-numerics shape; `Addr()` = `svr.example:443` |
+| `TestFlexIntMarshalsAsNumber` | `FlexInt` encodes as a bare JSON number, so re-encoded server listings stay numeric |
 
 Only the first eight are in the metric allowlist.
 

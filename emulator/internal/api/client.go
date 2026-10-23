@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -171,14 +172,75 @@ func parseExpireTimeString(text string) (int64, error) {
 	return 0, fmt.Errorf("api: Login.ExpireTime: unsupported value %q: want %s", text, expireTimeShapes)
 }
 
+// FlexInt is an int that decodes both shapes the vendor sends for the server
+// numeric fields: a JSON number (a fraction or exponent is rejected) or a
+// numeric string ("443"). null and the empty string decode to 0, so a live
+// response can omit them the way the offline fixtures do. MarshalJSON is the
+// default, so FlexInt still encodes as a bare JSON number.
+type FlexInt int
+
+// flexIntShapes lists the accepted FlexInt JSON shapes for error messages.
+const flexIntShapes = `a JSON number (no fraction) or a numeric string`
+
+// UnmarshalJSON decodes one FlexInt value. A value matching no shape returns
+// a *json.UnmarshalTypeError, which the decoder decorates with the failing
+// field path (e.g. ServerFV.Servers.par.fv.p) — the same shape as the live
+// failure message. The Value names the offending value and the accepted
+// shapes; no error ever echoes the per-server secret or the session
+// credentials.
+func (f *FlexInt) UnmarshalJSON(data []byte) error {
+	value := bytes.TrimSpace(data)
+	if len(value) == 0 || string(value) == "null" {
+		*f = 0
+		return nil
+	}
+	unsupported := func(v string) error {
+		return &json.UnmarshalTypeError{
+			Value: v + " (want " + flexIntShapes + ")",
+			Type:  flexIntType,
+		}
+	}
+	if value[0] == '"' {
+		var text string
+		if err := json.Unmarshal(value, &text); err != nil {
+			return unsupported(fmt.Sprintf("string %s", value))
+		}
+		if text == "" {
+			*f = 0
+			return nil
+		}
+		n, err := strconv.ParseInt(text, 10, 0)
+		if err != nil {
+			return unsupported(fmt.Sprintf("string %q", text))
+		}
+		*f = FlexInt(n)
+		return nil
+	}
+	// A bare number: json.Number rejects trailing garbage, then ParseInt
+	// rejects fractions and exponents the default int decoder would round.
+	var num json.Number
+	if err := json.Unmarshal(value, &num); err != nil {
+		return unsupported(string(value))
+	}
+	n, err := strconv.ParseInt(num.String(), 10, 0)
+	if err != nil {
+		return unsupported(string(value))
+	}
+	*f = FlexInt(n)
+	return nil
+}
+
+// flexIntType is the reflect.Type UnmarshalTypeError reports for FlexInt.
+var flexIntType = reflect.TypeOf(FlexInt(0))
+
 // ServerFV is the par.fv object of a VpnServer.
 //
 // OpenAJS ignores u and ps and authenticates with Login.UserName /
 // Login.ConnectPassword; their purpose is [UNKNOWN].
 type ServerFV struct {
-	U  int    `json:"u"`
-	P  int    `json:"p"`
-	PS string `json:"ps"`
+	U  FlexInt `json:"u"`
+	P  FlexInt `json:"p"`
+	PS string  `json:"ps"`
 }
 
 // ServerPar is the par object of a VpnServer.
@@ -188,15 +250,15 @@ type ServerPar struct {
 
 // ServerLoc is one entry of VpnServer.loc.
 type ServerLoc struct {
-	C string `json:"c"`
-	N string `json:"n"`
-	O int    `json:"o"`
+	C string  `json:"c"`
+	N string  `json:"n"`
+	O FlexInt `json:"o"`
 }
 
 // Server is one entry of the Servers map.
 type Server struct {
 	ID   string      `json:"id"`
-	Vsid int         `json:"vsid"`
+	Vsid FlexInt     `json:"vsid"`
 	Ctry string      `json:"ctry"`
 	Svr  string      `json:"svr"`
 	Tit  string      `json:"tit"`
@@ -209,7 +271,7 @@ type Server struct {
 }
 
 // Port returns par.fv.p, the FV TCP port.
-func (s Server) Port() int { return s.Par.FV.P }
+func (s Server) Port() int { return int(s.Par.FV.P) }
 
 // Addr returns the FV endpoint as host:port.
 func (s Server) Addr() string {
