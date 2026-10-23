@@ -14,13 +14,16 @@ do not require a vendor account.
 
 It is **not** a client, not a proxy service, and not a distribution of vendor software. No vendor
 binaries, drivers, installers, packet captures, or memory dumps are committed here; `.gitignore`
-blocks them at the repository root. Nothing in this tree has contacted a live AJiaSu endpoint.
+blocks them at the repository root. Live vendor contact has happened exactly once (2026-10-23,
+Owner-supplied account; see [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md)),
+and no vendor artifact or credential from that run is committed.
 
 ## Current status
 
 **Offline emulator, dashboard and daemon, plus a control-plane compose stack in `deploy/`; the
-Resin M1 integration spike is PASS. No live vendor call, no gate; panel state survives a restart
-only as a versioned JSON snapshot, not SQLite.**
+Resin M1 integration spike is PASS. One live vendor run, 2026-10-23: original app and daemon
+egress parity through one node; panel state survives a restart only as a versioned JSON
+snapshot, not SQLite.**
 
 As of 2026-10-23:
 
@@ -39,14 +42,16 @@ As of 2026-10-23:
   Prometheus `/metrics` endpoint, and the account control, FV session factory, node controller,
   SOCKS5 gate and process-group kill with `WaitDelay` supervisor seams.
   After a successful login the node controller starts one loopback gate per usable server and
-  reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and remains
-  `[UNVERIFIED]` live. 232 Go test functions, mostly `httptest` fakes; the tests use no Resin
-  process, no vendor account and no network. The Linux 4.2.3.0 request
-  shape (B1), stable per-account device identity (B5) and binary-carrier mapping (C3) are covered
-  by offline conformance tests; live acceptance remains `[UNVERIFIED]`.
+  reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
+  live-verified once, on 2026-10-23 (one account, one node, egress parity with the original
+  app). 232 Go test functions, mostly `httptest` fakes; the tests use no Resin process, no
+  vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable per-account
+  device identity (B5), binary-carrier mapping (C3) and the live response shapes are covered
+  by offline conformance tests; B1/B3/B4 carry one live confirmation, B2/B5 and multi-account
+  remain `[UNVERIFIED]`.
 - `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
   on `127.0.0.1:18081`, and Resin v1.3.0 behind the optional `resin` profile. Both images build
-  from this tree; the stack does not include the gate or node supervision. See
+  from this tree; the stack includes no node supervision and has not run the live login path. See
   [`deploy/README.md`](deploy/README.md).
 - Resin M1 — **PASS** on HMC against `ghcr.io/resinat/resin:1.3.0`
   (`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`): loopback SOCKS5 dial,
@@ -55,27 +60,36 @@ As of 2026-10-23:
   re-route at 12.6 s), and full state across a Resin restart. Measurements and caveats:
   [`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
 
-**Not implemented — the status above must not be read as more than it is:**
+**Not verified or not implemented — the status above must not be read as more than it is:**
 
-- **Live AJiaSu login and smoke test.** The login path is wired behind `AJS_ACCOUNT_LOGIN=1`
-  (`POST /v1/accounts/{id}/actions/login` calls the vendor control API), but it has only run
-  against local fakes. A live login and smoke test are `[UNVERIFIED]` and remain blocked on an
-  Owner-supplied account: no vendor host has been contacted from this tree.
-- **The gate and `ajsproxy` per-node supervision.** Standalone `daemon/internal/gate` (SOCKS5
-  CONNECT, admission, byte counters, drain/undrain) and `daemon/internal/supervisor` (per-node
-  child start, readiness, events, stop) packages exist, but they are not wired together and
-  there is no per-`(account, server)` node lifecycle yet.
+- **Live AJiaSu login and smoke test — verified once, 2026-10-23.** With `AJS_ACCOUNT_LOGIN=1`,
+  the original Linux app and the daemon both logged in and egressed the identical
+  `222.186.57.63` through the same vendor node `vvn-2076-264` (镇江 #1); the daemon's gate
+  was `127.0.0.1:13012`. The control hosts present a self-signed `CN=localhost` certificate,
+  so `AJS_CONTROL_CERT_SHA256` (the pinned fingerprint) is required. The vendor allows one
+  active FV data session per account, so `AJS_NODE_LIMIT` defaults to `1`. Redacted report:
+  [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md).
+- **The `supervisor` package is not used by the controller.** `NodeController`
+  (`daemon/internal/runtime/nodes.go`) now wires login → session factory → per-node gate,
+  with drain/undrain/delete/logout hooks, so the gate is production-wired. The separate
+  `daemon/internal/supervisor` (per-node child start, readiness, events, stop) is still a
+  seam the controller does not call — no `ajsproxy` child is started or supervised.
+- **Still unverified after the 2026-10-23 run.** Multi-account coexistence on one daemon,
+  Resin + gate live publish, B2 signed requests, B5 two-login stability, hot update
+  (dynamic API host refresh) and deployment beyond this repository's HMC/Docker hosts
+  (no GitHub or packaged deployment exists) are `[UNVERIFIED]`.
 - **SQLite / the full schema.** The daemon persists a versioned JSON snapshot (`AJS_STATE_FILE`,
   every 30s + shutdown) including sealed secrets, but it is not the SQLite schema in
   `docs/PANEL.md`; the snapshot is a v0.1 stopgap.
 - **Packaged deployment beyond the control plane.** `deploy/compose.yml` builds and runs
-  `ajs-accountd` + the dashboard (Resin optional), but the gate/supervisor node lifecycle is still
-  absent, so the stack proxies no traffic; there is no macOS or Windows build.
+  `ajs-accountd` + the dashboard (Resin optional), but the supervisor node lifecycle is still
+  absent and the stack has not run the live login path, so it proxies no traffic; there is no
+  macOS or Windows build.
 - **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;
   probes are bookkeeping canaries, not network probes.
 
-The product layer above the daemon — multi-account sessions, lease allocation, per-user access
-and the gate — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
+The product layer above the daemon — multi-account sessions, lease allocation and per-user
+access — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
 sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the candidate analysis
 behind it.
 
@@ -153,6 +167,7 @@ research/00-plan/          question tree, master index, ledger
 research/10-* .. 90-*      per-slice research output (later waves)
 research/70-panel/         panel research: candidate matrix, sources, validation script
 research/77-m1-spike/      Resin v1.3.0 M1 spike report (PASS) and measurements
+research/82-live-20261023/  first live-account run: original app vs daemon egress parity (redacted)
 ```
 
 ## Legal and terms-of-service caution
