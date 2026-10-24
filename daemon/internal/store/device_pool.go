@@ -788,6 +788,18 @@ func (s *Store) DeviceMaterialPresent(id string) bool {
 	return ok
 }
 
+// DeviceAccountLabel resolves the operator label of a bound account for the
+// pool view. A missing account falls back to its id, matching the audit
+// convention; it never returns a username.
+func (s *Store) DeviceAccountLabel(accountID string) string {
+	if accountID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deviceAccountLabelLocked(accountID)
+}
+
 // DevicePoolQuery filters ListDevicePool.
 type DevicePoolQuery struct {
 	State     DeviceState
