@@ -35,6 +35,12 @@ const (
 	NodeStarting NodeState = "STARTING"
 	NodeDraining NodeState = "DRAINING"
 	NodeDown     NodeState = "DOWN"
+	// NodeStale marks a persisted node whose gate did not survive the last
+	// process: the row exists, but no listener is bound and no lease is open.
+	// Startup recovery writes it; a later login sync moves the node back to
+	// LIVE (or DRAINING). It never claims traffic, so the console shows it
+	// without the LIVE badge.
+	NodeStale NodeState = "STALE"
 )
 
 // ProxyProtocol is the protocol exposed by a proxy node.

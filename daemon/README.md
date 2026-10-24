@@ -824,6 +824,67 @@ catalog/probe research over the 100+ servers a live account exposes
 (~165 listeners observed without a cap); it is not live-safe, because the
 vendor disconnects every FV data session after the first per account.
 
+### Startup recovery (AJS-239)
+
+A node row is persisted; a gate is a process resource. After a restart the
+snapshot used to reload rows that still read `LIVE` while no listener was
+bound, and the console claimed a session that did not exist until someone
+pressed login. `runtime.RecoverOnStartup` closes that gap before anything can
+observe it:
+
+- Every `LIVE` or `DRAINING` node that no in-process gate serves is demoted to
+  `STALE` by `store.DemoteNode`: `gatePort` and `egressIp` are cleared,
+  `inUse` is zeroed (those flows died with the process) and every lease of the
+  node is removed. Exactly one `node.recovered_stale` audit row per node
+  (actor `system`, severity `warn`, meta `previousState`/`leasesClosed`).
+- It runs in `run()` right after the snapshot is loaded (and after
+  `AJS_DROP_DEMO`), before the Resin panel's startup reconcile and before the
+  listener: the panel renders `LIVE` rows, so demoting afterwards would
+  publish a gate that does not exist. The demoted state is saved immediately
+  (`startup-recovery`).
+- It is idempotent: only `LIVE`/`DRAINING` rows are considered, so a second
+  boot (or a crash-loop) writes no extra audit row and closes no extra lease.
+  A `READY` or `DOWN` row never claimed a gate and is left untouched.
+- `RecoverOnStartup` takes a `GateSource` (`*NodeController` implements it).
+  A node a gate still serves keeps its state, which keeps the function safe
+  outside the first boot; the daemon passes `nil` because a fresh process owns
+  no gate yet.
+
+`STALE` is part of the node vocabulary in `model.NodeState`, `docs/openapi.json`
+(and its byte-identical embed), `dashboard/src/lib/types.ts`, the
+`NODE_STATE` label map and both i18n dictionaries, so the console renders a
+`Stale` badge instead of an empty cell. It is deliberately not `LIVE`:
+`liveNodeCount`, the Resin render set, the health watcher, the catalog
+`connected`/`serving` overlays and the scheduler's current-server lookup all
+skip it. `POST /v1/nodes/{id}/actions/undrain` on a `STALE` row returns it to
+`READY` (not `LIVE`), because only a login can reopen a gate;
+`TestUndrainStaleNodeDoesNotClaimLive` pins that.
+
+Optional auto-login (`AJS_AUTO_LOGIN=1`, default off, requires
+`AJS_ACCOUNT_LOGIN=1`) reopens the sessions in the background after startup:
+
+- Eligible account: a sealed password (`Store.AccountSecret` succeeds) and
+  either a persisted node row or a persisted selection; `paused` (the operator
+  logged it out) and `expired` accounts are skipped. The check never logs a
+  password and clears the plaintext it opened for the test.
+- One `Login` per account per process start, serialized under one lock, in
+  store order. A success runs the same `NodeController.SyncAccount` hook the
+  HTTP login uses and emits the same `account.login` event
+  (`accountId`/`label`/`state`).
+- A failure pauses `DefaultAutoLoginBackoff` (60s, jittered ±20% so a fleet
+  restart does not hit the vendor in lockstep) before the next account and is
+  never retried in that process: no retry loop, no repeated vendor traffic.
+- `TestAutoLoginEnabled` pins the default-off switch;
+  `TestAutoLoginLogsInOncePerAccount`, `TestAutoLoginSingleAttemptOnFailure`,
+  `TestAutoLoginSkipsIneligibleAccounts`, `TestAutoLoginRequiresSealedPassword`,
+  `TestAutoLoginUsesSelectionWithoutNode` and
+  `TestAutoLoginSerializesConcurrentRuns` cover the runner, and
+  `TestRecoverOnStartupDemotesUngatedNodes`, `TestRecoverOnStartupIsIdempotent`,
+  `TestRecoverOnStartupKeepsGatedNode`, `TestRecoverOnStartupStaleInNodesView`
+  and `TestDemoteNodeGuards` cover the demotion (state, cleared gate/egress,
+  closed leases, one audit row per node, unchanged `READY`/`DOWN` rows, and
+  the `STALE` value in `GET /v1/nodes`).
+
 ## Catalog selection and connect
 
 `internal/runtime/catalog_connect.go` is the guarded switch path behind the selection and
@@ -995,6 +1056,7 @@ test binary as the child.
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
+| `AJS_AUTO_LOGIN` | — | `0` | `1` runs the startup auto-login after the snapshot is loaded: at most one vendor `Login` per account per process start for accounts with a sealed password and a current node or selection (`paused`/`expired` skipped), serialized in store order, followed by the normal `SyncAccount` gate sync and one `account.login` event. A failure pauses a jittered 60s (`48–72s`) before the next account and is never retried. Requires `AJS_ACCOUNT_LOGIN=1`; otherwise startup logs `auto_login_disabled`. Off by default, so a boot contacts no vendor host |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile: `linux-4.2.3.0` (default, live-tested) or `linux-4.3.0.1` (static analysis only; unsigned live acceptance unverified); an unknown value fails startup when login is enabled |
 | `AJS_NODE_LIMIT` | — | `1` | per-account cap on the usable servers the node controller starts (`NodeControllerConfig.MaxServers`): the deterministic server-ID sort keeps the first N, the rest are skipped with a `node_limit_skipped` log; explicit `0` = all (catalog/probe research only, not live-safe). Negative or non-integer fails startup. Default `1` because the vendor allows **one active FV data session per account** (live 2026-10-23: with limit `3` the first two gates answered SOCKS5 `0x05` and the daemon logged `fv: data channel rejected ... fm=disconnected by another connection`, the third worked); with limit `1` the gate egress matched the original app (`222.186.57.63`). Keep `1` for live use — one node per account, not one per vendor server |
@@ -3221,8 +3283,12 @@ header or credential). No live vendor call was made.
   `0` = all serves catalog/probe research only, and a live account can
   expose 100+ usable servers, ~165 listeners observed). The `LoginResult` and the
   controller's gate map still live in process memory: a restart keeps the
-  persisted nodes but no gate is bound until the next login, and the node
-  supervisor is not wired. Lease rotate/release and node drain/undrain write
+  persisted rows but no gate is bound. Startup recovery now says so instead of
+  claiming `LIVE` — every unserved `LIVE`/`DRAINING` node becomes `STALE` with
+  its gate port/egress cleared and its leases closed (see “Startup recovery
+  (AJS-239)”) — and `AJS_AUTO_LOGIN=1` optionally reopens the sessions with one
+  guarded login per account; the node supervisor is not wired. Lease
+  rotate/release and node drain/undrain write
   through Resin when a panel is configured; account, user, key and settings
   mutations remain store-only, and `/v1/reconcile` is the only path that
   re-renders the whole subscription on demand.

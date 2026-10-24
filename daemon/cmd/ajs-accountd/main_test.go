@@ -336,3 +336,25 @@ func TestFlowMeterEnabled(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoLoginEnabled pins AJS_AUTO_LOGIN: only the exact "1" enables the
+// startup auto-login, so an unset or misspelled value never contacts a vendor
+// host on boot.
+func TestAutoLoginEnabled(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "", want: false},
+		{raw: "0", want: false},
+		{raw: "true", want: false},
+		{raw: "yes", want: false},
+		{raw: "1", want: true},
+		{raw: " 1 ", want: true},
+	}
+	for _, tc := range cases {
+		if got := autoLoginEnabled(tc.raw); got != tc.want {
+			t.Fatalf("autoLoginEnabled(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}

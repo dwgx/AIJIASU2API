@@ -4744,12 +4744,14 @@
       },
       "NodeState": {
         "type": "string",
+        "description": "LIVE and DRAINING claim a running gate. STALE means the row survived a restart with no gate: gatePort is 0, egressIp is empty and its lease is closed until a login sync reopens it.",
         "enum": [
           "LIVE",
           "READY",
           "STARTING",
           "DRAINING",
-          "DOWN"
+          "DOWN",
+          "STALE"
         ]
       },
       "ProxyProtocol": {

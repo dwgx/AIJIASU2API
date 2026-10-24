@@ -148,6 +148,21 @@ func run() error {
 	}
 	pruneSecrets(secrets, st, logger)
 
+	// A gate is a process resource, so every node the snapshot still calls
+	// LIVE or DRAINING is stale until a login sync reopens it. Demote before
+	// the panel's startup reconcile (which renders LIVE rows) and before the
+	// listener, so neither Resin nor the console can observe the old claim.
+	recovered, err := runtime.RecoverOnStartup(st, nil, logger)
+	if err != nil {
+		// The rows are already demoted; a per-node failure is reported and the
+		// daemon still starts, because refusing to serve is worse than a row
+		// that stays LIVE until the next login sync.
+		logger.Error("startup_recovery_failed", "error", err)
+	}
+	if len(recovered.Demoted) > 0 {
+		saveState(st, statePath, logger, "startup-recovery")
+	}
+
 	snapshotEvery, err := snapshotInterval()
 	if err != nil {
 		return err
@@ -301,6 +316,25 @@ func run() error {
 		if healthWatches != nil {
 			go runHealthReconciler(ctx, controller, healthWatches, logger)
 		}
+		if autoLoginEnabled(os.Getenv("AJS_AUTO_LOGIN")) {
+			// Off by default. The runner is serialized and makes at most one
+			// attempt per account, so it never turns startup into a retry
+			// loop; it runs in the background so a slow vendor cannot delay
+			// the listener.
+			autoLogin, err := runtime.NewAutoLogin(runtime.AutoLoginConfig{
+				Store:  st,
+				Logins: service,
+				Sync:   controller.SyncAccount,
+				Events: events,
+				Logger: logger,
+			})
+			if err != nil {
+				return err
+			}
+			go func() { autoLogin.Run(ctx) }()
+		}
+	} else if autoLoginEnabled(os.Getenv("AJS_AUTO_LOGIN")) {
+		logger.Warn("auto_login_disabled", "reason", "AJS_AUTO_LOGIN=1 requires AJS_ACCOUNT_LOGIN=1")
 	}
 
 	scheduleService, stopScheduler, err := startScheduler(ctx, st, logger, statePath, controller, nodeLimitValue, events)
@@ -928,6 +962,14 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// autoLoginEnabled reports whether AJS_AUTO_LOGIN turns the startup auto-login
+// on. Only the exact value "1" (surrounding whitespace allowed) enables it,
+// matching AJS_SCHEDULES and AJS_DROP_DEMO; every other value, including the
+// unset default, keeps the daemon from contacting a vendor host on boot.
+func autoLoginEnabled(raw string) bool {
+	return strings.TrimSpace(raw) == "1"
 }
 
 // placeholderAdminTokens are the values the repository itself ships or prints

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,11 +183,52 @@ func validNodeLabel(label string) bool {
 // vocabulary.
 func validNodeState(state model.NodeState) bool {
 	switch state {
-	case model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown:
+	case model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown, model.NodeStale:
 		return true
 	default:
 		return false
 	}
+}
+
+// DemoteNode records that no in-process gate serves a persisted node after a
+// restart: the state becomes STALE, the gate port and egress address are
+// cleared, the flow count is zeroed (those flows died with the process) and
+// every lease of the node is closed. Only a LIVE or DRAINING row is demoted,
+// so a repeated boot is a no-op that writes no second audit row. Exactly one
+// node.recovered_stale audit row (actor "system") is written when the row
+// changes.
+func (s *Store) DemoteNode(id string) (model.ProxyNode, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.nodeIndexLocked(id)
+	if idx < 0 {
+		return model.ProxyNode{}, false, notFoundf("node %q not found", id)
+	}
+	node := &s.nodes[idx]
+	if node.State != model.NodeLive && node.State != model.NodeDraining {
+		return *node, false, nil
+	}
+	previous := node.State
+	node.State = model.NodeStale
+	node.GatePort = 0
+	node.EgressIP = ""
+	node.InUse = 0
+	closed := 0
+	kept := s.leases[:0]
+	for _, lease := range s.leases {
+		if lease.NodeID == id {
+			closed++
+			continue
+		}
+		kept = append(kept, lease)
+	}
+	s.leases = kept
+	s.syncAccountCountsLocked()
+	s.addAuditLocked(model.SeverityWarn, "system", "node.recovered_stale", node.Label,
+		fmt.Sprintf("Restart recovery · no gate bound · %s → STALE · %d leases closed", previous, closed),
+		map[string]string{"previousState": string(previous), "leasesClosed": strconv.Itoa(closed)})
+	return *node, true, nil
 }
 
 // DrainNode moves a node to DRAINING. In-flight flows are left untouched; this
@@ -212,7 +254,9 @@ func (s *Store) DrainNode(id string) (model.ProxyNode, error) {
 }
 
 // UndrainNode returns a node to service. A node that was DOWN comes back as
-// READY because no session is known to be alive; every other node returns LIVE.
+// READY because no session is known to be alive, and a STALE node does too:
+// startup recovery closed its gate and its lease, so only a login can make it
+// LIVE again. Every other node returns LIVE.
 func (s *Store) UndrainNode(id string) (model.ProxyNode, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -222,7 +266,7 @@ func (s *Store) UndrainNode(id string) (model.ProxyNode, error) {
 		return model.ProxyNode{}, notFoundf("node %q not found", id)
 	}
 	node := &s.nodes[idx]
-	if node.State == model.NodeDown {
+	if node.State == model.NodeDown || node.State == model.NodeStale {
 		node.State = model.NodeReady
 	} else {
 		node.State = model.NodeLive

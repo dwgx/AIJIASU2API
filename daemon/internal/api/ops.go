@@ -70,6 +70,7 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 		model.NodeStarting: 0,
 		model.NodeDraining: 0,
 		model.NodeDown:     0,
+		model.NodeStale:    0,
 	}
 	for _, node := range s.store.Nodes() {
 		nodes[node.State]++
@@ -88,7 +89,7 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	}
 	b.WriteString("# HELP ajs_nodes Nodes by state.\n")
 	b.WriteString("# TYPE ajs_nodes gauge\n")
-	for _, state := range []model.NodeState{model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown} {
+	for _, state := range []model.NodeState{model.NodeLive, model.NodeReady, model.NodeStarting, model.NodeDraining, model.NodeDown, model.NodeStale} {
 		fmt.Fprintf(&b, "ajs_nodes{state=%q} %d\n", state, nodes[state])
 	}
 	b.WriteString("# HELP ajs_leases_total Leases.\n")
