@@ -337,6 +337,12 @@ func (s *Server) handleAccountServers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The dashboard echoes this id on selection/connect writes so the daemon
+	// can reject a stale catalog. It is the same identity the selection route
+	// checks, and stays empty when this account retains no catalog to guard.
+	if s.cfg.Catalog != nil && !view.Stale {
+		view.SnapshotID = s.cfg.Catalog.SnapshotID()
+	}
 	writeJSON(w, http.StatusOK, applyServerCatalogQuery(view, query))
 }
 

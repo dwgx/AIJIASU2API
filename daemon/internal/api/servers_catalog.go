@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"ajsaccountd/internal/catalog"
 	"ajsaccountd/internal/model"
 )
 
@@ -36,21 +37,25 @@ type serverCatalogQuery struct {
 	region   string
 	status   string
 	selected *bool
+	province string
+	city     string
 	offset   int
 	limit    int
 	sort     string
 }
 
-// parseServerCatalogQuery validates q/region/status/selected/offset/limit/sort.
-// A non-empty message means the request is invalid and the handler must answer
-// 400 instead of silently widening the window.
+// parseServerCatalogQuery validates q/region/status/selected/province/city/
+// offset/limit/sort. A non-empty message means the request is invalid and the
+// handler must answer 400 instead of silently widening the window.
 func parseServerCatalogQuery(values url.Values) (serverCatalogQuery, string) {
 	query := serverCatalogQuery{
-		q:      strings.TrimSpace(values.Get("q")),
-		region: strings.ToLower(strings.TrimSpace(values.Get("region"))),
-		status: strings.ToLower(strings.TrimSpace(values.Get("status"))),
-		limit:  serverCatalogDefaultLimit,
-		sort:   "order",
+		q:        strings.TrimSpace(values.Get("q")),
+		region:   strings.ToLower(strings.TrimSpace(values.Get("region"))),
+		status:   strings.ToLower(strings.TrimSpace(values.Get("status"))),
+		province: strings.TrimSpace(values.Get("province")),
+		city:     strings.TrimSpace(values.Get("city")),
+		limit:    serverCatalogDefaultLimit,
+		sort:     "order",
 	}
 
 	if raw := strings.TrimSpace(values.Get("offset")); raw != "" {
@@ -97,11 +102,23 @@ func parseServerCatalogQuery(values url.Values) (serverCatalogQuery, string) {
 // runtime builds the catalog per request, so sorting its slice in place is
 // safe and avoids a full copy of a 2,814-row catalog.
 //
-// total counts every row matching the filters; regions summarizes those same
-// rows, not just the current page. nextOffset is offset+len(Servers), equal to
-// total on the last page.
+// The geography summary is computed over the q/region/status scope, before the
+// province/city filter narrows the table, so the map keeps showing every
+// province the current search matches. total counts every row matching all
+// filters; regions summarizes those same rows, not just the current page.
+// nextOffset is offset+len(Servers), equal to total on the last page.
 func applyServerCatalogQuery(view model.ServersView, query serverCatalogQuery) model.ServersView {
-	servers := filterServerCatalog(view.Servers, query)
+	full := view.Servers
+	scopeQuery := query
+	scopeQuery.province = ""
+	scopeQuery.city = ""
+	scope := filterServerCatalog(full, scopeQuery)
+	view.Geo = summarizeServerGeo(scope, full)
+
+	servers := scope
+	if query.province != "" || query.city != "" {
+		servers = filterServerGeo(scope, query.province, query.city)
+	}
 	sortServerCatalog(servers, query.sort)
 
 	total := len(servers)
@@ -126,6 +143,104 @@ func applyServerCatalogQuery(view model.ServersView, query serverCatalogQuery) m
 	view.HasMore = view.NextOffset < total
 	view.Regions = summarizeServerRegions(servers)
 	return view
+}
+
+// filterServerGeo narrows rows to one province (or the unresolved `00`
+// bucket) and optionally one city code. Resolution is the same exact match
+// the dashboard uses, so the server and the client fallback agree.
+func filterServerGeo(servers []model.ServerView, province, city string) []model.ServerView {
+	out := make([]model.ServerView, 0, len(servers))
+	for _, server := range servers {
+		resolved, ok := catalog.ResolveTitle(server.Title)
+		if province != "" {
+			if province == catalog.UnknownProvince {
+				if ok {
+					continue
+				}
+			} else if !ok || resolved.ProvinceCode != province {
+				continue
+			}
+		}
+		if city != "" && (!ok || resolved.Code != city) {
+			continue
+		}
+		out = append(out, server)
+	}
+	return out
+}
+
+// summarizeServerGeo builds the map aggregate. scope is the q/region/status
+// filtered catalog; full is every retained row, so a running node stays named
+// even when the current search or status filter hides it.
+func summarizeServerGeo(scope, full []model.ServerView) *model.CatalogGeo {
+	geo := &model.CatalogGeo{
+		Total:     len(scope),
+		Provinces: []model.CatalogGeoProvince{},
+		Live:      []model.CatalogGeoRow{},
+	}
+	provinceIndex := make(map[string]int, 31)
+	cityIndex := make(map[string]map[string]int, 31)
+	for _, server := range scope {
+		resolved, ok := catalog.ResolveTitle(server.Title)
+		if !ok {
+			geo.Unknown++
+			continue
+		}
+		bucket, exists := provinceIndex[resolved.ProvinceCode]
+		if !exists {
+			bucket = len(geo.Provinces)
+			provinceIndex[resolved.ProvinceCode] = bucket
+			geo.Provinces = append(geo.Provinces, model.CatalogGeoProvince{
+				Code:   resolved.ProvinceCode,
+				Cities: []model.CatalogGeoCity{},
+			})
+		}
+		province := &geo.Provinces[bucket]
+		province.Count++
+		if server.NodeState == model.NodeLive || server.NodeState == model.NodeDraining {
+			province.Connected++
+		}
+		cities := cityIndex[resolved.ProvinceCode]
+		if cities == nil {
+			cities = map[string]int{}
+			cityIndex[resolved.ProvinceCode] = cities
+		}
+		if city, seen := cities[resolved.Code]; seen {
+			province.Cities[city].Count++
+		} else {
+			cities[resolved.Code] = len(province.Cities)
+			province.Cities = append(province.Cities, model.CatalogGeoCity{
+				Code:  resolved.Code,
+				Label: catalog.ParseTitle(server.Title),
+				Count: 1,
+			})
+		}
+	}
+	sort.Slice(geo.Provinces, func(i, j int) bool { return geo.Provinces[i].Code < geo.Provinces[j].Code })
+	for index := range geo.Provinces {
+		cities := geo.Provinces[index].Cities
+		sort.Slice(cities, func(i, j int) bool { return cities[i].Label < cities[j].Label })
+	}
+
+	for _, server := range full {
+		if server.NodeState != model.NodeLive {
+			continue
+		}
+		resolved, _ := catalog.ResolveTitle(server.Title)
+		row := model.CatalogGeoRow{
+			ID:           server.ID,
+			Title:        server.Title,
+			NodeState:    server.NodeState,
+			CityCode:     resolved.Code,
+			ProvinceCode: resolved.ProvinceCode,
+		}
+		if geo.Current == nil {
+			current := row
+			geo.Current = &current
+		}
+		geo.Live = append(geo.Live, row)
+	}
+	return geo
 }
 
 // filterServerCatalog applies q, region, status and selected. It returns the

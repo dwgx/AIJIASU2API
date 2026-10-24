@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -562,5 +564,125 @@ func TestServerCatalogNeverExposesPingSecret(t *testing.T) {
 	}
 	if strings.Contains(string(body), secret) {
 		t.Fatalf("catalog leaked par.fv.ps: %s", body)
+	}
+}
+
+func geoFixture() model.ServersView {
+	return model.ServersView{
+		Enabled:   true,
+		AccountID: "acc-01",
+		FetchedAt: "2026-10-24T12:00:00Z",
+		Servers: []model.ServerView{
+			{ID: "srv-1", Title: "镇江 #1", Region: "cn", Status: "ok", NodeState: model.NodeLive},
+			{ID: "srv-2", Title: "南京 #1", Region: "cn", Status: "ok", NodeState: model.NodeDraining},
+			{ID: "srv-3", Title: "杭州 #1", Region: "cn", Status: "ok"},
+			// A province short name is not a city: this row stays unresolved.
+			{ID: "srv-4", Title: "海南 #1", Region: "cn", Status: "ok"},
+			{ID: "srv-5", Title: "海南藏族自治州 #1", Region: "cn", Status: "ok"},
+		},
+	}
+}
+
+func TestServerCatalogGeoSummary(t *testing.T) {
+	ts := newLabTestServer(t, &catalogLab{view: geoFixture()}, store.New())
+
+	view := catalogGET(t, ts, "/v1/accounts/acc-01/servers?limit=2")
+	geo := view.Geo
+	if geo == nil {
+		t.Fatal("servers response has no geo summary")
+	}
+	if geo.Total != 5 || geo.Unknown != 1 {
+		t.Fatalf("geo total/unknown = %d/%d, want 5/1", geo.Total, geo.Unknown)
+	}
+	if len(geo.Live) != 1 || geo.Current == nil || geo.Current.Title != "镇江 #1" {
+		t.Fatalf("geo current/live = %+v/%+v, want 镇江 #1", geo.Current, geo.Live)
+	}
+	byCode := make(map[string]model.CatalogGeoProvince, len(geo.Provinces))
+	for _, province := range geo.Provinces {
+		byCode[province.Code] = province
+	}
+	if jiangsu := byCode["32"]; jiangsu.Count != 2 || jiangsu.Connected != 2 ||
+		len(jiangsu.Cities) != 2 {
+		t.Fatalf("province 32 = %+v, want count 2 connected 2 cities 2", jiangsu)
+	}
+	if zhejiang := byCode["33"]; zhejiang.Count != 1 {
+		t.Fatalf("province 33 = %+v, want count 1", zhejiang)
+	}
+	if qinghai := byCode["63"]; qinghai.Count != 1 || qinghai.Cities[0].Code != "632500" {
+		t.Fatalf("province 63 = %+v, want 海南藏族自治州", qinghai)
+	}
+	// The page is two rows; the map keeps counting the whole scope.
+	if len(view.Servers) != 2 || view.Total != 5 {
+		t.Fatalf("page = rows:%d total:%d, want 2/5", len(view.Servers), view.Total)
+	}
+}
+
+func TestServerCatalogGeoFilters(t *testing.T) {
+	ts := newLabTestServer(t, &catalogLab{view: geoFixture()}, store.New())
+
+	jiangsu := catalogGET(t, ts, "/v1/accounts/acc-01/servers?province=32")
+	if jiangsu.Total != 2 || len(jiangsu.Servers) != 2 {
+		t.Fatalf("province=32 = total:%d rows:%d, want 2/2", jiangsu.Total, len(jiangsu.Servers))
+	}
+	for _, server := range jiangsu.Servers {
+		if server.Title != "镇江 #1" && server.Title != "南京 #1" {
+			t.Fatalf("province=32 returned %q", server.Title)
+		}
+	}
+	// The geo summary stays scoped to the search, not the province filter.
+	if jiangsu.Geo == nil || jiangsu.Geo.Total != 5 {
+		t.Fatalf("province=32 geo total = %+v, want 5", jiangsu.Geo)
+	}
+
+	nanjing := catalogGET(t, ts, "/v1/accounts/acc-01/servers?province=32&city=320100")
+	if nanjing.Total != 1 || nanjing.Servers[0].Title != "南京 #1" {
+		t.Fatalf("city filter = %+v", nanjing.Servers)
+	}
+
+	other := catalogGET(t, ts, "/v1/accounts/acc-01/servers?province=00")
+	if other.Total != 1 || other.Servers[0].Title != "海南 #1" {
+		t.Fatalf("province=00 = %+v, want the unresolved row", other.Servers)
+	}
+
+	hainan := catalogGET(t, ts, "/v1/accounts/acc-01/servers?province=46")
+	if hainan.Total != 0 || len(hainan.Servers) != 0 {
+		t.Fatalf("province=46 = %+v, want no rows (海南 #1 is not Hainan)", hainan.Servers)
+	}
+
+	combined := catalogGET(t, ts, "/v1/accounts/acc-01/servers?q=南京&province=32")
+	if combined.Total != 1 || combined.Servers[0].ID != "srv-2" {
+		t.Fatalf("q+province = %+v", combined.Servers)
+	}
+}
+
+func TestAccountServersSnapshotID(t *testing.T) {
+	lab := &catalogLab{view: geoFixture()}
+	connector := &fakeCatalog{snapshotID: "cat-live"}
+	server := New(Config{AdminToken: testToken, Lab: lab, Catalog: connector}, store.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	view := catalogGET(t, ts, "/v1/accounts/acc-01/servers?limit=1")
+	if view.SnapshotID != "cat-live" {
+		t.Fatalf("snapshotId = %q, want cat-live", view.SnapshotID)
+	}
+
+	// No connector (login disabled) means nothing can guard a write.
+	plain := newLabTestServer(t, lab, store.New())
+	if view := catalogGET(t, plain, "/v1/accounts/acc-01/servers?limit=1"); view.SnapshotID != "" {
+		t.Fatalf("snapshotId without connector = %q, want empty", view.SnapshotID)
+	}
+
+	// A stale catalog retains no result to guard.
+	stale := &catalogLab{view: model.ServersView{
+		Enabled: true, AccountID: "acc-01", Stale: true, Servers: []model.ServerView{},
+	}}
+	server = New(Config{AdminToken: testToken, Lab: stale, Catalog: connector}, store.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	staleTS := httptest.NewServer(server)
+	t.Cleanup(staleTS.Close)
+	if view := catalogGET(t, staleTS, "/v1/accounts/acc-01/servers"); view.SnapshotID != "" {
+		t.Fatalf("stale snapshotId = %q, want empty", view.SnapshotID)
 	}
 }

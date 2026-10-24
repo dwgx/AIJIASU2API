@@ -216,6 +216,46 @@ type RegionCount struct {
 	Count int    `json:"count"`
 }
 
+// CatalogGeoCity is one resolved city inside a province bucket, labelled with
+// the vendor title prefix so the city filter can show what the operator sees.
+type CatalogGeoCity struct {
+	Code  string `json:"code"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+// CatalogGeoProvince is the map's per-province aggregate over the rows that
+// match q/region/status, before the province/city filter narrows the table.
+type CatalogGeoProvince struct {
+	Code      string           `json:"code"`
+	Count     int              `json:"count"`
+	Connected int              `json:"connected"`
+	Cities    []CatalogGeoCity `json:"cities"`
+}
+
+// CatalogGeoRow names one running catalog row. CityCode is empty when the
+// title does not resolve.
+type CatalogGeoRow struct {
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	NodeState    NodeState `json:"nodeState"`
+	CityCode     string    `json:"cityCode,omitempty"`
+	ProvinceCode string    `json:"provinceCode,omitempty"`
+}
+
+// CatalogGeo is the server-side geography summary for the catalog page. It
+// lets the dashboard draw the map and the city filter without downloading the
+// whole retained catalog: Provinces counts the rows that match the search and
+// region/status filters, while Current and Live describe every running row in
+// the account regardless of those filters.
+type CatalogGeo struct {
+	Total     int                  `json:"total"`
+	Unknown   int                  `json:"unknown"`
+	Provinces []CatalogGeoProvince `json:"provinces"`
+	Current   *CatalogGeoRow       `json:"current"`
+	Live      []CatalogGeoRow      `json:"live"`
+}
+
 // ServersView is the GET /v1/accounts/{id}/servers response. Stale is true
 // when the daemon has no in-memory login result (for example after a
 // restart); the catalog is then empty rather than invented.
@@ -224,10 +264,15 @@ type RegionCount struct {
 // matches the filters, Regions summarizes those same rows, and NextOffset is
 // the offset to request next (offset+len(Servers), equal to Total on the last
 // page). HasMore is true when another page exists.
+//
+// SnapshotID is the same identity the selection/connect guard compares; it is
+// empty when no catalog connector is configured. Geo is the map aggregate and
+// is always present (empty when the catalog is empty).
 type ServersView struct {
 	Enabled    bool          `json:"enabled"`
 	Reason     string        `json:"reason,omitempty"`
 	AccountID  string        `json:"accountId"`
+	SnapshotID string        `json:"snapshotId,omitempty"`
 	FetchedAt  string        `json:"fetchedAt"`
 	Stale      bool          `json:"stale"`
 	Total      int           `json:"total"`
@@ -236,6 +281,7 @@ type ServersView struct {
 	NextOffset int           `json:"nextOffset"`
 	HasMore    bool          `json:"hasMore"`
 	Regions    []RegionCount `json:"regions"`
+	Geo        *CatalogGeo   `json:"geo,omitempty"`
 	Servers    []ServerView  `json:"servers"`
 }
 
