@@ -40,24 +40,29 @@ As of 2026-10-24:
   table/cards switch for Accounts, and command-palette search for accounts and nodes. The sidebar
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
-  2,814 servers for the live `acc-07` account, with region names localised (`cn` → China / 中国)
-  and the raw vendor code kept as secondary text. It merges each account's login-retained
-  `/v1/accounts/{id}/servers` with the running node marked current; Requests is the real gate-flow
-  table fed by `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab
-  history; Overview draws no synthetic traffic curve — when the daemon reports
-  `telemetryAvailable:false` it shows a no-telemetry empty state beside the real counts. Mock data
-  is the default; a live mode against `ajs-accountd` is opt-in at build time. Form controls are one
-  custom combobox (`dashboard/src/components/Select.tsx`, no native `<select>`) with filter, form,
-  settings, log and region variants; the Nodes drawer leads with the localised region, renders an
-  unmeasured success rate as *Not measured*, flags a far-future probe stamp as clock skew, labels
-  the egress IP as a vendor claim and offers a guarded **Verify egress** check. 154 Vitest tests in
-  21 files. The UI is bilingual: a `中` / `EN` switch in the sidebar footer and a Language card in
-  Settings switch every page, default to the browser language, persist in
-  `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account labels, server names,
-  IPs and API values are data and are never translated. HMC serves the mock build on `18081` and
-  the live build on `18082`, the latter published on the LAN at `http://192.168.11.4:18082` against
-  the daemon API at `http://192.168.11.4:2261`, where the bearer token is required (insecure mode
-  is refused off loopback).
+  2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
+  `/v1/accounts/{id}/servers` (`q`, `region`, `status`, `sort`, `offset`, `limit`; 50 rows by
+  default, 500 max) with region names localised (`cn` → China / 中国) and the raw vendor code kept
+  as secondary text. The Catalog also draws an offline China map — 31 provinces from committed
+  DataV GeoAtlas-derived assets, so no map or tile service is contacted at runtime — and a
+  province click filters the table. It merges each account's login-retained catalog with the
+  running node marked current; Requests is the real gate-flow table fed by
+  `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab history, and
+  Requests, Logs and the Lab tables share a pagination footer. Overview draws no synthetic
+  traffic curve — when the daemon reports `telemetryAvailable:false` it shows a no-telemetry empty
+  state beside the real counts. Mock data is the default; a live mode against `ajs-accountd` is
+  opt-in at build time.
+  Form controls are one custom combobox (`dashboard/src/components/Select.tsx`, no native
+  `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
+  localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
+  stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
+  **Verify egress** check. 182 Vitest tests in 25 files. The UI is bilingual: a `中` / `EN` switch
+  in the sidebar footer and a Language card in Settings switch every page, default to the browser
+  language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
+  labels, server names, IPs and API values are data and are never translated. HMC serves the mock
+  build on `18081` and the live build on `18082`, the latter published on the LAN at
+  `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
+  bearer token is required (insecure mode is refused off loopback).
   The **Lab** page (`/lab`) is an instrument with eight tabs — Overview, Gates & sessions, Egress,
   Servers, Protocol, Device, Logs, Diagnostics — fed by `/v1/lab/*` plus the per-account
   servers/device reads. Every GET is read-only and makes no vendor call; the only non-GET action is
@@ -72,8 +77,10 @@ As of 2026-10-24:
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
-  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file, a
-  Prometheus `/metrics` endpoint, a Lab telemetry view (`/v1/lab/*`: overview, flags, gates,
+  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file that
+  `DELETE /v1/accounts/{id}` prunes from both the snapshot map and `secrets.json` before the
+  in-memory cascade (a sealer failure answers 503 and leaves the account and its secret in place),
+  a Prometheus `/metrics` endpoint, a Lab telemetry view (`/v1/lab/*`: overview, flags, gates,
   sessions, egress, profiles, bounded redacted log ring, diagnostics, plus per-account
   servers/device; the GETs are read-only and one POST (`/v1/lab/egress-check`) runs an explicit
   egress probe that stores nothing), and the account control, FV session factory, node controller,
@@ -81,8 +88,8 @@ As of 2026-10-24:
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. 327 Go test
-  functions — 286 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  a second login on the same account) and again on 2026-10-24 after the rebuild. 347 Go test
+  functions — 306 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -214,10 +221,10 @@ accounts, nodes, leases, users, keys, requests and seed audit rows from the snap
 switch was then unset. What remains is exactly one account, `acc-07` (`live-ajs-01`, `active`), and
 one node, `acc-07:vvn-2076-264` (`LIVE`); `GET /healthz` reports one active account. The retained
 login result is a 2,814-server vendor catalog, all in region `cn` (rendered as one *China* group),
-so the Nodes catalog lists 2,814 rows with that one node marked current and no demo names. Gate
-listeners are allocated per node from `127.0.0.1:13000` upward, so read the current listener and
-state from `GET /v1/lab/gates` rather than assuming a fixed port (the purge deployment reported
-`13000`).
+so the Nodes catalog totals 2,814 rows, paged 50 at a time, with that one node marked current and
+no demo names. Gate listeners are allocated per node from `127.0.0.1:13000` upward, so read the
+current listener and state from `GET /v1/lab/gates` rather than assuming a fixed port (the purge
+deployment reported `13000`).
 SOCKS5 through that gate egresses `222.186.57.63`, the same address as the original app; the
 vendor's claimed egress is a per-session RFC1918 value — `10.98.206.1` on the current session,
 `10.78.248.1` on the purge run — so the Lab egress check renders `match:false` (verified vs
@@ -234,8 +241,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (154 Vitest tests in 21 files), `cd daemon && go test ./...`
-(286 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (182 Vitest tests in 25 files), `cd daemon && go test ./...`
+(306 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
