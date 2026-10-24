@@ -98,6 +98,7 @@ func TestScopedKeyValidation(t *testing.T) {
 		{"empty region", func(in *model.ScopedKeyCreateRequest) { in.Regions = []string{" "} }, ErrInvalid},
 		{"malformed expiry", func(in *model.ScopedKeyCreateRequest) { in.ExpiresAt = "tomorrow" }, ErrInvalid},
 		{"past expiry", func(in *model.ScopedKeyCreateRequest) { in.ExpiresAt = past }, ErrInvalid},
+		{"negative rate limit", func(in *model.ScopedKeyCreateRequest) { negative := -1; in.RateLimitPerMin = &negative }, ErrInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,6 +111,64 @@ func TestScopedKeyValidation(t *testing.T) {
 	}
 	if got := len(st.ScopedKeys()); got != 0 {
 		t.Fatalf("invalid creates left %d keys", got)
+	}
+}
+
+func TestScopedKeyRateLimitDefaultExplicitAndPersistence(t *testing.T) {
+	st := New()
+
+	defaulted, _, err := st.CreateScopedKey(scopedKeyInput(""))
+	if err != nil {
+		t.Fatalf("CreateScopedKey default: %v", err)
+	}
+	if defaulted.RateLimitPerMin != model.DefaultScopedKeyRateLimitPerMin {
+		t.Fatalf("default rateLimitPerMin = %d, want %d", defaulted.RateLimitPerMin, model.DefaultScopedKeyRateLimitPerMin)
+	}
+
+	limited := 120
+	in := scopedKeyInput("")
+	in.Label = "rate limited"
+	in.RateLimitPerMin = &limited
+	key, _, err := st.CreateScopedKey(in)
+	if err != nil {
+		t.Fatalf("CreateScopedKey limited: %v", err)
+	}
+	if key.RateLimitPerMin != 120 {
+		t.Fatalf("explicit rateLimitPerMin = %d, want 120", key.RateLimitPerMin)
+	}
+
+	unlimited := 0
+	in = scopedKeyInput("")
+	in.Label = "unlimited"
+	in.RateLimitPerMin = &unlimited
+	unlimitedKey, _, err := st.CreateScopedKey(in)
+	if err != nil {
+		t.Fatalf("CreateScopedKey unlimited: %v", err)
+	}
+	if unlimitedKey.RateLimitPerMin != 0 {
+		t.Fatalf("explicit zero rateLimitPerMin = %d, want 0", unlimitedKey.RateLimitPerMin)
+	}
+
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	fresh := NewEmpty()
+	if err := fresh.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for id, want := range map[string]int{
+		defaulted.ID:    model.DefaultScopedKeyRateLimitPerMin,
+		key.ID:          120,
+		unlimitedKey.ID: 0,
+	} {
+		got, ok := fresh.ScopedKey(id)
+		if !ok {
+			t.Fatalf("restored store has no key %q", id)
+		}
+		if got.RateLimitPerMin != want {
+			t.Fatalf("restored %q rateLimitPerMin = %d, want %d", id, got.RateLimitPerMin, want)
+		}
 	}
 }
 

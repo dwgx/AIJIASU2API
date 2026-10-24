@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/ratelimit"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
 	"ajsaccountd/internal/usage"
@@ -160,6 +161,10 @@ type Config struct {
 	// Events receives customer-visible events (login/logout, node and schedule
 	// transitions). Nil drops them.
 	Events EventSink
+	// RateLimitClock is the clock the per-scoped-key token bucket reads. Nil
+	// uses time.Now; tests inject a fake to prove refill and GC without
+	// sleeping.
+	RateLimitClock func() time.Time
 	// StateDir is the directory holding state.json, secrets.json and
 	// device-secrets.json (AJS_STATE_DIR). Empty disables the /v1/backup
 	// routes with 503 BACKUP_UNAVAILABLE.
@@ -193,6 +198,10 @@ type Server struct {
 	// secret.Store is configured. With a sealer the map stays empty.
 	webhookMu      sync.Mutex
 	webhookSecrets map[string]string
+
+	// rateLimiter enforces each scoped key's rateLimitPerMin. The admin token
+	// never consults it.
+	rateLimiter *ratelimit.Limiter
 
 	// backupMu serializes backup and restore: both read or replace the same
 	// state-directory files. TryLock turns a concurrent request into 409
@@ -229,6 +238,7 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 	if cfg.WebhookSecrets == nil {
 		s.webhookSecrets = make(map[string]string)
 	}
+	s.rateLimiter = ratelimit.New(ratelimit.WithClock(cfg.RateLimitClock))
 	s.handler = s.buildHandler()
 	return s
 }
@@ -439,7 +449,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
 				w.Header().Set("Access-Control-Expose-Headers",
-					"X-Request-Id, Retry-After, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, X-Truncated, ETag, X-APC-Server-Time")
+					"X-Request-Id, Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, X-Truncated, ETag, X-APC-Server-Time")
 			}
 		}
 		if r.Method == http.MethodOptions {
@@ -510,6 +520,12 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
 			return
 		}
+		// The limit is charged before the account restriction check so a
+		// refused read still carries the X-RateLimit headers and a key cannot
+		// probe account ids for free.
+		if !s.allowScopedKeyRequest(w, key) {
+			return
+		}
 		if s.scopedKeyDeniesRequest(key, r) {
 			writeError(w, http.StatusForbidden, CodeForbidden,
 				"scoped key is not allowed to read this account")
@@ -518,6 +534,44 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		s.store.MarkScopedKeyUsed(key.ID)
 		next.ServeHTTP(w, withAuthIdentity(r, authIdentity{key: key}))
 	})
+}
+
+// allowScopedKeyRequest charges one request against the key's per-minute
+// bucket and writes the X-RateLimit headers on every scoped-key response. A
+// refused request gets 429 RATE_LIMITED plus Retry-After, set to one refill
+// interval so a retry at that point is guaranteed to find a token. limit 0 is
+// unlimited and still reports the headers.
+func (s *Server) allowScopedKeyRequest(w http.ResponseWriter, key model.ScopedKey) bool {
+	limit := key.RateLimitPerMin
+	if limit < 0 {
+		// Store validation rejects negatives; a snapshot written by hand may
+		// still carry one, so treat it as unlimited rather than fail closed.
+		limit = 0
+	}
+	ok, remaining, reset := s.rateLimiter.Allow(key.ID, limit)
+	w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limit))
+	w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+	if reset.IsZero() {
+		w.Header().Set("X-RateLimit-Reset", "0")
+	} else {
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+	}
+	if ok {
+		return true
+	}
+	retryAfter := 1
+	if limit > 0 {
+		retryAfter = 60 / limit
+		if 60%limit != 0 {
+			retryAfter++
+		}
+	}
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeError(w, http.StatusTooManyRequests, CodeRateLimited, "scoped key rate limit exceeded")
+	return false
 }
 
 func newRequestID() string {

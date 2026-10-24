@@ -198,33 +198,42 @@ const (
 	ScopeAdmin         Scope = "admin"
 )
 
+// DefaultScopedKeyRateLimitPerMin is the per-minute request budget assigned to
+// a new scoped key when the create request omits rateLimitPerMin. Zero means
+// unlimited and must be requested explicitly.
+const DefaultScopedKeyRateLimitPerMin = 60
+
 // ScopedKey is a least-privilege API key. AccountIDs and Regions are
 // restrictions on the accounts the key may read; empty means every account or
 // every region. The secret is never part of this type.
 type ScopedKey struct {
-	ID         string   `json:"id"`
-	UserID     string   `json:"userId"`
-	UserName   string   `json:"userName"`
-	Label      string   `json:"label"`
-	Prefix     string   `json:"prefix"`
-	Scopes     []Scope  `json:"scopes"`
-	AccountIDs []string `json:"accountIds"`
-	Regions    []string `json:"regions"`
-	CreatedAt  string   `json:"createdAt"`
-	ExpiresAt  *string  `json:"expiresAt"`
-	LastUsedAt *string  `json:"lastUsedAt"`
-	RevokedAt  *string  `json:"revokedAt"`
+	ID              string   `json:"id"`
+	UserID          string   `json:"userId"`
+	UserName        string   `json:"userName"`
+	Label           string   `json:"label"`
+	Prefix          string   `json:"prefix"`
+	Scopes          []Scope  `json:"scopes"`
+	AccountIDs      []string `json:"accountIds"`
+	Regions         []string `json:"regions"`
+	RateLimitPerMin int      `json:"rateLimitPerMin"`
+	CreatedAt       string   `json:"createdAt"`
+	ExpiresAt       *string  `json:"expiresAt"`
+	LastUsedAt      *string  `json:"lastUsedAt"`
+	RevokedAt       *string  `json:"revokedAt"`
 }
 
 // ScopedKeyCreateRequest is the POST /v1/scoped-keys body. ExpiresAt is an
-// RFC 3339 timestamp; empty means the key does not expire.
+// RFC 3339 timestamp; empty means the key does not expire. RateLimitPerMin is
+// a pointer so an omitted field can take the default while an explicit 0
+// selects unlimited.
 type ScopedKeyCreateRequest struct {
-	UserID     string   `json:"userId"`
-	Label      string   `json:"label"`
-	Scopes     []Scope  `json:"scopes"`
-	AccountIDs []string `json:"accountIds"`
-	Regions    []string `json:"regions"`
-	ExpiresAt  string   `json:"expiresAt"`
+	UserID          string   `json:"userId"`
+	Label           string   `json:"label"`
+	Scopes          []Scope  `json:"scopes"`
+	AccountIDs      []string `json:"accountIds"`
+	Regions         []string `json:"regions"`
+	RateLimitPerMin *int     `json:"rateLimitPerMin"`
+	ExpiresAt       string   `json:"expiresAt"`
 }
 
 // ScopedKeyCreated is the one-time create response. Secret is returned exactly

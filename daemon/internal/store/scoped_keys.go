@@ -46,6 +46,10 @@ func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest) (model.ScopedKe
 	if err != nil {
 		return model.ScopedKey{}, "", err
 	}
+	rateLimit, err := normalizeRateLimit(in.RateLimitPerMin)
+	if err != nil {
+		return model.ScopedKey{}, "", err
+	}
 	expiresAt, err := normalizeExpiresAt(in.ExpiresAt, s.now())
 	if err != nil {
 		return model.ScopedKey{}, "", err
@@ -61,16 +65,17 @@ func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest) (model.ScopedKe
 	now := s.now()
 	s.scopedKeySeq++
 	key := model.ScopedKey{
-		ID:         fmt.Sprintf("sk-%02d", s.scopedKeySeq),
-		UserID:     s.users[userIdx].ID,
-		UserName:   s.users[userIdx].Name,
-		Label:      label,
-		Prefix:     secret[:16],
-		Scopes:     scopes,
-		AccountIDs: accountIDs,
-		Regions:    regions,
-		CreatedAt:  iso(now),
-		ExpiresAt:  expiresAt,
+		ID:              fmt.Sprintf("sk-%02d", s.scopedKeySeq),
+		UserID:          s.users[userIdx].ID,
+		UserName:        s.users[userIdx].Name,
+		Label:           label,
+		Prefix:          secret[:16],
+		Scopes:          scopes,
+		AccountIDs:      accountIDs,
+		Regions:         regions,
+		RateLimitPerMin: rateLimit,
+		CreatedAt:       iso(now),
+		ExpiresAt:       expiresAt,
 	}
 	s.scopedKeys = append([]model.ScopedKey{key}, s.scopedKeys...)
 	s.scopedKeyHashes[key.ID] = hex.EncodeToString(sum[:])
@@ -247,6 +252,18 @@ func normalizeStringList(in []string, field string) ([]string, error) {
 		out = append(out, value)
 	}
 	return out, nil
+}
+
+// normalizeRateLimit resolves the optional create field. Omitted means the
+// default budget; an explicit 0 means unlimited; a negative value is invalid.
+func normalizeRateLimit(in *int) (int, error) {
+	if in == nil {
+		return model.DefaultScopedKeyRateLimitPerMin, nil
+	}
+	if *in < 0 {
+		return 0, invalidf("rateLimitPerMin must be zero (unlimited) or positive")
+	}
+	return *in, nil
 }
 
 func normalizeExpiresAt(value string, now time.Time) (*string, error) {
