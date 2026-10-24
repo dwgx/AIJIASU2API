@@ -182,6 +182,22 @@ describe('lab fixtures', () => {
     const catalog = await api.getAccountServers('acc-01')
     expect(catalog.servers).toHaveLength(3)
     expect(catalog.servers.every((server) => !('pingSecret' in server))).toBe(true)
+    expect(catalog).toMatchObject({
+      total: 3,
+      offset: 0,
+      limit: 50,
+      nextOffset: 3,
+      hasMore: false,
+    })
+    expect(catalog.regions.map((region) => region.code)).toEqual(['cn-sh', 'cn-zj', 'hk'])
+
+    const second = await api.getAccountServers('acc-01', { limit: 1, offset: 1, sort: 'title' })
+    expect(second.servers).toHaveLength(1)
+    expect(second).toMatchObject({ total: 3, offset: 1, limit: 1, nextOffset: 2, hasMore: true })
+
+    const hongKong = await api.getAccountServers('acc-01', { region: 'hk' })
+    expect(hongKong.total).toBe(1)
+    expect(hongKong.servers[0]?.region).toBe('hk')
   })
 
   it('filters the runtime log ring server-side', async () => {

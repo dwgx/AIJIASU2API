@@ -1,4 +1,4 @@
-import { Fingerprint, RefreshCw } from 'lucide-react'
+import { Fingerprint, Lock, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
@@ -69,16 +69,29 @@ export function DeviceTab({ accountId, accountLabel }: { accountId: string; acco
               </p>
             </Card>
 
-            <Card title={t('lab.device.hashes')} subtitle={t('lab.device.hashesSubtitle')}>
+            <Card
+              title={t('lab.device.hashes')}
+              subtitle={t('lab.device.hashesSubtitle')}
+              actions={
+                <Badge tone={device.data.stable ? 'success' : 'warning'}>
+                  {device.data.stable ? t('lab.stable') : t('lab.unstable')}
+                </Badge>
+              }
+            >
               {Object.keys(device.data.hashes).length === 0 ? (
                 <EmptyState title={t('lab.device.noHashes')} />
               ) : (
-                <LabFacts
-                  rows={Object.entries(device.data.hashes).map(([key, value]) => ({
-                    label: key,
-                    value: <span className="mono cell-truncate">{value}</span>,
-                  }))}
-                />
+                <>
+                  <LabFacts
+                    rows={Object.entries(device.data.hashes).map(([key, value]) => ({
+                      label: t('lab.device.hashLabel', { key: key.toUpperCase() }),
+                      value: <span className="mono cell-truncate">{value}</span>,
+                    }))}
+                  />
+                  <p className="setting-note">
+                    <Lock size={12} aria-hidden="true" /> {t('lab.device.poolNote')}
+                  </p>
+                </>
               )}
             </Card>
 

@@ -63,7 +63,7 @@ describe('command palette data search', () => {
     expect(search).toHaveValue('kr-sel-01')
 
     await waitFor(() => {
-      expect(screen.getByText('1 of 12')).toBeInTheDocument()
+      expect(screen.getByText('1–1 of 1')).toBeInTheDocument()
     })
     expect(screen.getByText('kr-sel-01')).toBeInTheDocument()
     expect(screen.queryByText('cn-zj-01')).not.toBeInTheDocument()
@@ -155,7 +155,7 @@ describe('search param prefill on pages', () => {
       expect(screen.getByRole('textbox', { name: 'Search nodes' })).toHaveValue('jp-tyo-01')
     })
     await waitFor(() => {
-      expect(screen.getByText('1 of 12')).toBeInTheDocument()
+      expect(screen.getByText('1–1 of 1')).toBeInTheDocument()
     })
   })
 

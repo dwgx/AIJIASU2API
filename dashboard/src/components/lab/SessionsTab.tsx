@@ -7,6 +7,7 @@ import type { GateView, SessionView } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
 import { DataTable } from '../DataTable'
 import type { Column } from '../DataTable'
+import { Pagination, usePagination } from '../Pagination'
 import {
   Badge,
   Button,
@@ -20,6 +21,7 @@ import { DisabledCallout } from './shared'
 
 function GateTable({ gates }: { gates: GateView[] }) {
   const { lang, t } = useI18n()
+  const pagination = usePagination({ total: gates.length, initialPageSize: 25 })
   const columns: Array<Column<GateView>> = [
     {
       key: 'node',
@@ -98,18 +100,29 @@ function GateTable({ gates }: { gates: GateView[] }) {
   ]
 
   return (
-    <DataTable
-      caption={t('lab.sessions.gateCaption')}
-      columns={columns}
-      rows={gates}
-      rowKey={(gate) => gate.nodeId}
-      empty={<EmptyState title={t('lab.sessions.gateEmptyTitle')} description={t('lab.sessions.gateEmptyDesc')} />}
-    />
+    <>
+      <DataTable
+        caption={t('lab.sessions.gateCaption')}
+        columns={columns}
+        rows={pagination.slice(gates)}
+        rowKey={(gate) => gate.nodeId}
+        empty={<EmptyState title={t('lab.sessions.gateEmptyTitle')} description={t('lab.sessions.gateEmptyDesc')} />}
+      />
+      <Pagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={gates.length}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+        label={t('lab.sessions.gatePagination')}
+      />
+    </>
   )
 }
 
 function SessionTable({ sessions }: { sessions: SessionView[] }) {
   const { lang, t } = useI18n()
+  const pagination = usePagination({ total: sessions.length, initialPageSize: 25 })
   const columns: Array<Column<SessionView>> = [
     {
       key: 'node',
@@ -184,18 +197,28 @@ function SessionTable({ sessions }: { sessions: SessionView[] }) {
   ]
 
   return (
-    <DataTable
-      caption={t('lab.sessions.sessionCaption')}
-      columns={columns}
-      rows={sessions}
-      rowKey={(session) => session.nodeId}
-      empty={
-        <EmptyState
-          title={t('lab.sessions.sessionEmptyTitle')}
-          description={t('lab.sessions.sessionEmptyDesc')}
-        />
-      }
-    />
+    <>
+      <DataTable
+        caption={t('lab.sessions.sessionCaption')}
+        columns={columns}
+        rows={pagination.slice(sessions)}
+        rowKey={(session) => session.nodeId}
+        empty={
+          <EmptyState
+            title={t('lab.sessions.sessionEmptyTitle')}
+            description={t('lab.sessions.sessionEmptyDesc')}
+          />
+        }
+      />
+      <Pagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={sessions.length}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+        label={t('lab.sessions.sessionPagination')}
+      />
+    </>
   )
 }
 

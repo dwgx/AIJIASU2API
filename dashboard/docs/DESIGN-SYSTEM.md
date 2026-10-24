@@ -707,6 +707,32 @@ Container: Card with 0 padding, radius 12, `overflow: hidden` only on the header
 Accessibility: real `<table>` with `<caption class="sr-only">`, `<th scope="col">`, `aria-rowcount`
 when virtualised. Row actions are reachable by Tab in DOM order; the row itself is not a link.
 
+### 13.14.1 Pagination
+
+`components/Pagination.tsx` exports `usePagination` (state + slice) and the `Pagination` footer.
+Pages keep filters, search and sort; the footer only swaps the visible slice.
+
+| Part | Value |
+|---|---|
+| Footer | 44 px, 1 px top rule, `--font-xs` mono range `1–50 of 1,284`, wraps below 760 px |
+| Controls | first / previous / next / last IconButtons, page position `Page 3 of 26` between the arrows |
+| Jump | 58 px numeric text input + Go; rejects anything outside `1..pages`, disables Go and shows the bound |
+| Page size | custom Select (log/sm variant) with 25 / 50 / 100 / 200; changing it returns to page 1 |
+| Default | 25 rows; Requests starts at 200 because the gate ring itself is capped at 200 |
+| Empty | no footer at 0 rows — the table's EmptyState carries the message |
+| Loading | no footer until the first page of data exists; TableSkeleton owns the body |
+
+| State | Behaviour |
+|---|---|
+| filter/search/sort change | `resetKey` identity changes → page 1 immediately (render-phase), never a flash of the old page |
+| poll / refresh | data identity changes but `resetKey` does not → current page stays |
+| result shrinks | page clamps to the last page instead of rendering an empty slice |
+| compact (<760 px) | first/last and the visible size label drop; prev/next, jump and size remain |
+
+Accessibility: `<nav>` with a surface-specific `aria-label`; the range is `aria-live="polite"`;
+edge buttons are `disabled`; the jump input has a real label, `aria-invalid` and
+`aria-describedby` on the inline bound message; the size picker is the shared combobox.
+
 ### 13.15 Tabs
 
 Underline style (not pills). Height 36 px, gap 24 px, no horizontal padding, `--font-body-strong`

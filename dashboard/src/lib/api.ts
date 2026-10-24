@@ -24,6 +24,7 @@ import type {
   AccountState,
   ApiKey,
   AuditEvent,
+  CatalogSnapshot,
   CreateAccountInput,
   CreateKeyInput,
   CreateKeyResult,
@@ -48,6 +49,7 @@ import type {
   PanelUser,
   ProxyNode,
   RequestLog,
+  ServerCatalogQuery,
   SessionView,
   UpdateInfo,
 } from './types'
@@ -171,6 +173,118 @@ function nextEgressIp(current: string): string {
   const pool = ['203.0.113.24', '198.51.100.44', '192.0.2.77', '203.0.113.88', '198.51.100.91']
   const index = pool.indexOf(current)
   return pool[(index + 1) % pool.length] ?? pool[0]
+}
+
+const SNAPSHOT_PAGE_SIZE = 500
+const SNAPSHOT_MAX_PAGES = 50
+const snapshotCache = new Map<string, CatalogSnapshot>()
+const snapshotInFlight = new Map<string, Promise<CatalogSnapshot>>()
+/** Bumped whenever a cached/in-flight snapshot is invalidated. */
+let snapshotEpoch = 0
+
+async function requestAccountServers(
+  id: string,
+  query: ServerCatalogQuery = {},
+): Promise<AccountServers> {
+  const params = new URLSearchParams()
+  if (query.q?.trim()) params.set('q', query.q.trim())
+  if (query.region) params.set('region', query.region)
+  if (query.status) params.set('status', query.status)
+  if (query.selected !== undefined) params.set('selected', String(query.selected))
+  params.set('offset', String(Math.max(0, Math.trunc(query.offset ?? 0))))
+  params.set('limit', String(Math.min(500, Math.max(1, Math.trunc(query.limit ?? 50)))))
+  if (query.sort) params.set('sort', query.sort)
+  if (!USE_MOCK) return http<AccountServers>(`/v1/accounts/${id}/servers?${params.toString()}`)
+  await wait()
+  return clone(buildAccountServers(getDb(), id, Date.now(), query))
+}
+
+/**
+ * Reads every page of one account's retained catalog. The map and the
+ * province filter need the whole set, while the table keeps using the server's
+ * page envelope. A cached snapshot is reused when it is at least as new as the
+ * caller's known `fetchedAt`, so a catalog poll that did not refresh the vendor
+ * snapshot costs no extra requests; concurrent callers share one in-flight
+ * fetch, and an invalidation epoch stops a stale pass from repopulating the
+ * cache after a reset or an explicit refresh.
+ */
+async function requestCatalogSnapshot(
+  id: string,
+  knownFetchedAt?: string | null,
+): Promise<CatalogSnapshot> {
+  const cached = snapshotCache.get(id)
+  if (cached) {
+    // `undefined` means "the caller has not read the catalog timestamp yet".
+    if (knownFetchedAt === undefined) return cached
+    if (knownFetchedAt === null) {
+      // An explicit null means the daemon reports no snapshot; only a cached
+      // no-snapshot may answer it, never an older map.
+      if (cached.fetchedAt === null) return cached
+    } else if (cached.fetchedAt !== null) {
+      // The snapshot pass can observe a newer daemon snapshot than the
+      // catalog response that triggered it; newer-or-equal is current enough.
+      // Refetch only when the cache is older than the caller's known snapshot.
+      const cachedAt = Date.parse(cached.fetchedAt)
+      const knownAt = Date.parse(knownFetchedAt)
+      if (Number.isNaN(cachedAt) || Number.isNaN(knownAt)) {
+        if (cached.fetchedAt === knownFetchedAt) return cached
+      } else if (cachedAt >= knownAt) {
+        return cached
+      }
+    }
+  }
+  const inFlight = snapshotInFlight.get(id)
+  if (inFlight) return inFlight
+
+  const epoch = snapshotEpoch
+  let request: Promise<CatalogSnapshot>
+  request = (async (): Promise<CatalogSnapshot> => {
+    const first = await requestAccountServers(id, { offset: 0, limit: SNAPSHOT_PAGE_SIZE })
+    const servers = [...first.servers]
+    let offset = first.nextOffset
+    let hasMore = first.hasMore
+    let pages = 1
+    while (hasMore) {
+      if (pages >= SNAPSHOT_MAX_PAGES) {
+        throw new Error(
+          `catalog snapshot for ${id} exceeds ${SNAPSHOT_MAX_PAGES * SNAPSHOT_PAGE_SIZE} servers`,
+        )
+      }
+      const page = await requestAccountServers(id, { offset, limit: SNAPSHOT_PAGE_SIZE })
+      if (page.servers.length === 0 || page.nextOffset <= offset) break
+      servers.push(...page.servers)
+      offset = page.nextOffset
+      hasMore = page.hasMore
+      pages += 1
+    }
+    // The catalog can change between pages. Rather than showing counts that
+    // silently miss or duplicate rows, fail the read: the map card offers a
+    // retry and the table keeps its server-paged view.
+    const unique = new Map(servers.map((server) => [server.id, server]))
+    if (unique.size !== first.total) {
+      throw new Error(
+        `catalog snapshot for ${id} returned ${unique.size} of ${first.total} servers`,
+      )
+    }
+    const snapshot: CatalogSnapshot = {
+      enabled: first.enabled !== false,
+      reason: first.reason,
+      accountId: id,
+      fetchedAt: first.fetchedAt,
+      stale: first.stale,
+      total: first.total,
+      servers: [...unique.values()],
+    }
+    // A reset/invalidate during the pass makes this result stale; do not let
+    // it repopulate the cache or evict a newer in-flight request.
+    if (epoch === snapshotEpoch) snapshotCache.set(id, snapshot)
+    return snapshot
+  })().finally(() => {
+    if (snapshotInFlight.get(id) === request) snapshotInFlight.delete(id)
+  })
+
+  snapshotInFlight.set(id, request)
+  return request
 }
 
 export const api = {
@@ -559,16 +673,36 @@ export const api = {
     return clone(buildLabDevice(getDb(), id))
   },
 
-  async getAccountServers(id: string): Promise<AccountServers> {
-    if (!USE_MOCK) return http<AccountServers>(`/v1/accounts/${id}/servers`)
-    await wait()
-    return clone(buildAccountServers(getDb(), id))
+  async getAccountServers(id: string, query: ServerCatalogQuery = {}): Promise<AccountServers> {
+    return requestAccountServers(id, query)
+  },
+
+  /**
+   * The whole retained catalog for one account, paged 500 rows per request.
+   * `knownFetchedAt` lets a caller reuse the cached snapshot when the catalog
+   * has not changed. Not the table path: the table stays server-paged.
+   */
+  async getCatalogSnapshot(
+    id: string,
+    knownFetchedAt?: string | null,
+  ): Promise<CatalogSnapshot> {
+    return requestCatalogSnapshot(id, knownFetchedAt)
+  },
+
+  /** Drops the cached full catalog so the next read fetches every page again. */
+  invalidateCatalogSnapshot(id: string): void {
+    snapshotEpoch += 1
+    snapshotCache.delete(id)
+    snapshotInFlight.delete(id)
   },
 
   async resetMock(): Promise<void> {
     if (!USE_MOCK) return
     await wait()
     resetMockDb()
+    snapshotEpoch += 1
+    snapshotCache.clear()
+    snapshotInFlight.clear()
     getDb().settings = readSettings()
   },
 }

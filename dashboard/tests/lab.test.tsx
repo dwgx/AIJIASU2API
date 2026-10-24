@@ -66,6 +66,12 @@ describe('lab page', () => {
       accountId: 'acc-01',
       fetchedAt: null,
       stale: true,
+      total: 0,
+      offset: 0,
+      limit: 50,
+      nextOffset: 0,
+      hasMore: false,
+      regions: [],
       servers: [],
     })
 

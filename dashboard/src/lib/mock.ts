@@ -23,6 +23,7 @@ import type {
   ProfileView,
   ProxyNode,
   RequestLog,
+  ServerCatalogQuery,
   ServerView,
   SessionView,
   TrafficPoint,
@@ -712,11 +713,105 @@ export function buildLabDiagnostics(db: MockDb, now = Date.now()): DiagnosticsVi
   }
 }
 
-export function buildAccountServers(db: MockDb, accountId: string, now = Date.now()): AccountServers {
+/** Mirrors the daemon: empty region reads as "unknown", lowercase. */
+function catalogRegion(region: string): string {
+  return region.trim().toLowerCase() || 'unknown'
+}
+
+function catalogPage(
+  servers: ServerView[],
+  query: ServerCatalogQuery,
+): Pick<AccountServers, 'total' | 'offset' | 'limit' | 'nextOffset' | 'hasMore' | 'regions' | 'servers'> {
+  const limit = Math.min(500, Math.max(1, Math.trunc(query.limit ?? 50)))
+  const offset = Math.max(0, Math.trunc(query.offset ?? 0))
+  const needle = (query.q ?? '').trim().toLowerCase()
+  const region = (query.region ?? '').trim().toLowerCase()
+  const status = (query.status ?? '').trim().toLowerCase()
+
+  const filtered = servers.filter((server) => {
+    if (needle) {
+      const haystack = `${server.id} ${server.title} ${server.host} ${catalogRegion(server.region)}`.toLowerCase()
+      if (!haystack.includes(needle)) return false
+    }
+    if (region && catalogRegion(server.region) !== region) return false
+    if (status && server.status.trim().toLowerCase() !== status) return false
+    if (query.selected !== undefined && server.selected !== query.selected) return false
+    return true
+  })
+
+  const sort = query.sort ?? 'order'
+  const sorted =
+    sort === 'order'
+      ? filtered
+      : [...filtered].sort((left, right) => {
+          const field = (server: ServerView) => {
+            switch (sort) {
+              case 'title':
+                return server.title
+              case 'host':
+                return server.host
+              case 'status':
+                return server.status
+              case 'region':
+                return catalogRegion(server.region)
+              default:
+                return ''
+            }
+          }
+          return (
+            field(left).toLowerCase().localeCompare(field(right).toLowerCase()) ||
+            left.id.localeCompare(right.id)
+          )
+        })
+
+  const counts = new Map<string, number>()
+  for (const server of sorted) {
+    const code = catalogRegion(server.region)
+    counts.set(code, (counts.get(code) ?? 0) + 1)
+  }
+  const regions = [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([code, count]) => ({ code, count }))
+
+  const start = Math.min(offset, sorted.length)
+  const end = Math.min(start + limit, sorted.length)
+  const page = sorted.slice(start, end)
+
+  return {
+    total: sorted.length,
+    offset,
+    limit,
+    nextOffset: start + page.length,
+    hasMore: start + page.length < sorted.length,
+    regions,
+    servers: page,
+  }
+}
+
+export function buildAccountServers(
+  db: MockDb,
+  accountId: string,
+  now = Date.now(),
+  query: ServerCatalogQuery = {},
+): AccountServers {
   const account = db.accounts.find((item) => item.id === accountId)
   const nodes = db.nodes.filter((node) => node.accountId === accountId)
+  const limit = Math.min(500, Math.max(1, Math.trunc(query.limit ?? 50)))
+  const offset = Math.max(0, Math.trunc(query.offset ?? 0))
   if (!account) {
-    return { enabled: true, accountId, fetchedAt: null, stale: true, servers: [] }
+    return {
+      enabled: true,
+      accountId,
+      fetchedAt: null,
+      stale: true,
+      total: 0,
+      offset,
+      limit,
+      nextOffset: 0,
+      hasMore: false,
+      regions: [],
+      servers: [],
+    }
   }
   const servers: ServerView[] = nodes.map((node, index) => ({
     id: node.label,
@@ -738,8 +833,10 @@ export function buildAccountServers(db: MockDb, accountId: string, now = Date.no
   return {
     enabled: true,
     accountId,
-    fetchedAt: account.state === 'auth_failed' ? null : iso(now - 10 * MINUTE),
+    // Stable per retained login, like the daemon's snapshot timestamp: a poll
+    // must not look like a new vendor snapshot (the map cache keys on it).
+    fetchedAt: account.state === 'auth_failed' ? null : account.lastLoginAt,
     stale: account.state === 'auth_failed' || account.state === 'paused',
-    servers,
+    ...catalogPage(servers, query),
   }
 }

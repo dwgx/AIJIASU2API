@@ -1,15 +1,25 @@
 import clsx from 'clsx'
 import { Search, Server, ShieldAlert } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import { formatDateTime } from '../../lib/format'
+import { useEffect, useMemo } from 'react'
+import { formatDateTime, formatNumber } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
 import { nodeStateMeta, serverStatusTone } from '../../lib/lab'
 import { regionName } from '../../lib/regions'
-import { catalogRowKey, groupCatalogByRegion } from '../../lib/nodes'
-import type { CatalogRow, ServerCatalog } from '../../lib/nodes'
+import { parseServerTitle, resolveServerCity, summarizeCatalogGeo } from '../../lib/geo'
+import {
+  catalogRowKey,
+  filterCatalogRows,
+  groupCatalogByRegion,
+  sortCatalogRows,
+  summarizeCatalogRegions,
+} from '../../lib/nodes'
+import type { CatalogFilters, CatalogRow } from '../../lib/nodes'
+import type { Account, AccountServers, CatalogSnapshot, ServerCatalogSort } from '../../lib/types'
 import type { AsyncState } from '../../lib/useAsync'
 import { DataTable } from '../DataTable'
 import type { Column } from '../DataTable'
+import { Pagination } from '../Pagination'
+import { ChinaMap } from './ChinaMap'
 import {
   Badge,
   Button,
@@ -25,85 +35,199 @@ import {
 } from '../primitives'
 
 interface CatalogTabProps {
-  catalog: AsyncState<ServerCatalog>
+  catalog: AsyncState<AccountServers>
+  accountId: string
+  accountLabel: string
+  accounts: Account[]
+  accountsLoading: boolean
+  /** Server-side query state: offset/limit live here, not in the table. */
+  filters: CatalogFilters
+  onFiltersChange: (next: CatalogFilters) => void
   query: string
+  /** Debounced search actually applied to the rows; the map counts use it too. */
+  activeQuery: string
   onQueryChange: (value: string) => void
+  /** Every retained row for the account, from `GET /v1/accounts/{id}/servers`. */
+  snapshot: AsyncState<CatalogSnapshot>
   /** Selection is owned by the page so switching views does not drop it. */
   selected: string[]
   onSelectedChange: (keys: string[]) => void
 }
 
+const SORT_KEYS: ServerCatalogSort[] = ['order', 'title', 'host', 'status', 'region']
+
 /**
- * Read-only vendor catalog. Every row is a `ServerView` the daemon returned
- * from `GET /v1/accounts/{id}/servers`; nothing here is invented, so an empty
- * or stale snapshot is explained instead of filled with placeholder servers.
+ * Read-only vendor catalog. The daemon pages `GET /v1/accounts/{id}/servers`
+ * (default 50, max 500), so the page holds one window at a time: `total` and
+ * `regions` describe every filtered row, `servers` only this page. Grouping is
+ * applied to the page rows; the group header count comes from the server's
+ * region summary so it never understates a region that spans pages.
  */
-export function CatalogTab({ catalog, query, onQueryChange, selected, onSelectedChange }: CatalogTabProps) {
+export function CatalogTab({
+  catalog,
+  accountId,
+  accountLabel,
+  accounts,
+  accountsLoading,
+  filters,
+  onFiltersChange,
+  query,
+  activeQuery,
+  onQueryChange,
+  snapshot,
+  selected,
+  onSelectedChange,
+}: CatalogTabProps) {
   const { t, lang } = useI18n()
-  const [regionFilter, setRegionFilter] = useState<string[]>([])
-  const [statusFilter, setStatusFilter] = useState('all')
 
-  const rows = catalog.data?.rows ?? []
-  const staleAccounts = catalog.data?.staleAccounts ?? []
-  const failedAccounts = catalog.data?.failedAccounts ?? []
-  const disabledReason = catalog.data?.disabledReason ?? null
+  const total = catalog.data?.total ?? 0
+  const pageRows = catalog.data?.servers ?? []
+  const regionCounts = catalog.data?.regions ?? []
+  const stale = catalog.data?.stale ?? false
+  const page = Math.floor(filters.offset / filters.limit) + 1
 
-  const regions = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.region))).sort(),
-    [rows],
-  )
-  const statuses = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.status).filter(Boolean))).sort(),
-    [rows],
-  )
-
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    return rows.filter((row) => {
-      if (regionFilter.length > 0 && !regionFilter.includes(row.region)) return false
-      if (statusFilter !== 'all' && row.status !== statusFilter) return false
-      if (!needle) return true
-      return `${row.title} ${row.id} ${row.host} ${row.region} ${regionName(row.region, lang)} ${row.accountLabel}`
-        .toLowerCase()
-        .includes(needle)
-    })
-  }, [rows, query, regionFilter, statusFilter, lang])
-
-  // Group the picker by country so a long vendor catalog stays scannable.
-  const regionOptions = useMemo(
+  const pageCatalogRows = useMemo<CatalogRow[]>(
     () =>
-      regions
-        .map((region) => ({
-          value: region,
-          label: regionName(region, lang),
-          group: regionName(region.split('-')[0], lang),
-        }))
-        .sort(
-          (left, right) =>
-            left.group.localeCompare(right.group) || left.label.localeCompare(right.label),
-        ),
-    [lang, regions],
+      pageRows.map((server) => ({
+        ...server,
+        accountId,
+        accountLabel,
+        stale,
+      })),
+    [accountId, accountLabel, pageRows, stale],
   )
 
-  const groups = useMemo(() => groupCatalogByRegion(filtered), [filtered])
+  // The map and the province filter read the whole retained catalog. The
+  // server keeps paging the table; these rows are only the geo view's source.
+  // `useAsync` keeps the last good value while a new account loads, so a
+  // mismatched account id must read as "not loaded yet", not as the previous
+  // account's geography under the new label.
+  const snapshotLoaded = snapshot.data !== undefined && snapshot.data.accountId === accountId
+  const snapshotRows = useMemo<CatalogRow[]>(
+    () =>
+      (snapshotLoaded ? (snapshot.data?.servers ?? []) : []).map((server) => ({
+        ...server,
+        accountId,
+        accountLabel,
+        stale: snapshot.data?.stale ?? false,
+      })),
+    [accountId, accountLabel, snapshot.data, snapshotLoaded],
+  )
 
-  // A poll can drop the last server of a region or status; drop the filter too
-  // so the select never shows a value it no longer offers.
-  useEffect(() => {
-    setRegionFilter((current) => {
-      const next = current.filter((region) => regions.includes(region))
-      return next.length === current.length ? current : next
-    })
-    if (statusFilter !== 'all' && !statuses.includes(statusFilter)) setStatusFilter('all')
-  }, [regions, statusFilter, statuses])
+  const scopeRows = useMemo(
+    () =>
+      filterCatalogRows(snapshotRows, {
+        q: activeQuery,
+        status: filters.status,
+        region: filters.region,
+      }),
+    [activeQuery, filters.region, filters.status, snapshotRows],
+  )
 
-  // A poll can drop a server; keep the count honest instead of counting ghosts.
+  // The current node stays marked even when the search or a status filter
+  // excludes it from the table: the chip names it, the ring marks its province.
+  const currentRow = useMemo(
+    () => snapshotRows.find((row) => row.nodeState === 'LIVE') ?? null,
+    [snapshotRows],
+  )
+  const geo = useMemo(() => {
+    const summary = summarizeCatalogGeo(scopeRows)
+    if (!currentRow) return summary
+    const city = resolveServerCity(currentRow.title)
+    const provinceCode = city?.provinceCode ?? null
+    return {
+      ...summary,
+      current: currentRow,
+      currentCity: city,
+      currentProvince: provinceCode,
+      provinces: summary.provinces.map((province) => ({
+        ...province,
+        current: province.code === provinceCode,
+      })),
+    }
+  }, [currentRow, scopeRows])
+
+  const geoActive = filters.province !== '' || filters.city !== ''
+  const geoRows = useMemo(
+    () =>
+      geoActive
+        ? sortCatalogRows(
+            filterCatalogRows(scopeRows, { province: filters.province, city: filters.city }),
+            filters.sort,
+          )
+        : null,
+    [filters.city, filters.province, filters.sort, geoActive, scopeRows],
+  )
+
+  // In geo mode the browser is the source of the page envelope: total, region
+  // counts and the visible slice all describe the filtered snapshot.
+  const displayTotal = geoRows ? geoRows.length : total
+  const tableRows = useMemo(
+    () =>
+      geoRows
+        ? geoRows.slice(filters.offset, filters.offset + filters.limit)
+        : pageCatalogRows,
+    [filters.limit, filters.offset, geoRows, pageCatalogRows],
+  )
+  const groups = useMemo(() => groupCatalogByRegion(tableRows), [tableRows])
+  const effectiveRegionCounts = geoRows ? summarizeCatalogRegions(geoRows) : regionCounts
+
+  const regionOptions = useMemo(() => {
+    const options = [
+      { value: 'all', label: t('nodes.allRegions') },
+      ...regionCounts.map((region) => ({
+        value: region.code,
+        label: regionName(region.code, lang),
+      })),
+    ]
+    if (filters.region !== 'all' && !regionCounts.some((region) => region.code === filters.region)) {
+      options.push({ value: filters.region, label: regionName(filters.region, lang) })
+    }
+    return options
+  }, [filters.region, lang, regionCounts, t])
+
+  const statusOptions = useMemo(() => {
+    const statuses = new Set(['ok', 'offline'])
+    for (const row of pageRows) if (row.status) statuses.add(row.status)
+    if (filters.status !== 'all') statuses.add(filters.status)
+    return [
+      { value: 'all', label: t('nodes.allStatuses') },
+      ...[...statuses].sort().map((status) => ({ value: status, label: status })),
+    ]
+  }, [filters.status, pageRows, t])
+
+  // The table reads the server page normally, but the filtered snapshot when a
+  // province/city filter is active. One state pair drives the error/skeleton
+  // branches so a stale account's rows are never shown under a new label.
+  const tableError = geoActive
+    ? snapshotLoaded
+      ? undefined
+      : snapshot.error
+    : catalog.status === 'error'
+      ? (catalog.error ?? t('common.unknownError'))
+      : undefined
+  const tableLoading = geoActive
+    ? !snapshotLoaded && tableError === undefined
+    : catalog.status === 'loading' && !catalog.data
+
+  const filtersActive =
+    query.trim() !== '' ||
+    filters.region !== 'all' ||
+    filters.status !== 'all' ||
+    filters.province !== '' ||
+    filters.city !== ''
+
+  // The server clamps an offset past the end to an empty page; pull the
+  // operator back to the last real page instead of showing a blank table.
   useEffect(() => {
-    if (!catalog.data) return
-    const present = new Set(catalog.data.rows.map(catalogRowKey))
-    const next = selected.filter((key) => present.has(key))
-    if (next.length !== selected.length) onSelectedChange(next)
-  }, [catalog.data, selected, onSelectedChange])
+    if (displayTotal === 0) return
+    if (filters.offset >= displayTotal) {
+      onFiltersChange({
+        ...filters,
+        offset: Math.floor((displayTotal - 1) / filters.limit) * filters.limit,
+      })
+    }
+  }, [displayTotal, filters, onFiltersChange])
 
   const toggleSelected = (key: string) => {
     onSelectedChange(
@@ -123,9 +247,47 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
 
   const clearFilters = () => {
     onQueryChange('')
-    setRegionFilter([])
-    setStatusFilter('all')
+    onFiltersChange({
+      ...filters,
+      region: 'all',
+      status: 'all',
+      province: '',
+      city: '',
+      offset: 0,
+    })
   }
+
+  /** Clicking the selected province again clears the geo filter (design §1.4). */
+  const selectProvince = (code: string) => {
+    onFiltersChange({
+      ...filters,
+      province: filters.province === code ? '' : code,
+      city: '',
+      offset: 0,
+    })
+  }
+
+  const cityOptions = useMemo(() => {
+    if (!filters.province || filters.province === '00') return []
+    const cities = new Map<string, { label: string; count: number }>()
+    for (const row of scopeRows) {
+      const city = resolveServerCity(row.title)
+      if (!city || city.provinceCode !== filters.province) continue
+      const label = parseServerTitle(row.title)
+      const bucket = cities.get(city.code)
+      if (bucket) bucket.count += 1
+      else cities.set(city.code, { label, count: 1 })
+    }
+    return [...cities.entries()]
+      .sort(([, left], [, right]) => left.label.localeCompare(right.label))
+      .map(([code, bucket]) => ({
+        value: code,
+        label: t('nodes.catalog.cityOption', {
+          city: bucket.label,
+          count: formatNumber(bucket.count),
+        }),
+      }))
+  }, [filters.province, scopeRows, t])
 
   const columns: Array<Column<CatalogRow>> = [
     {
@@ -247,32 +409,50 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
   const emptyCatalog = (
     <EmptyState
       icon={<Server size={20} aria-hidden="true" />}
-      title={
-        catalog.data?.accounts === 0 ? t('nodes.catalog.noAccountsTitle') : t('nodes.catalog.emptyTitle')
-      }
-      description={
-        catalog.data?.accounts === 0
-          ? t('nodes.catalog.noAccountsDesc')
-          : t('nodes.catalog.emptyDesc')
-      }
+      title={t('nodes.catalog.emptyTitle')}
+      description={t('nodes.catalog.emptyDesc')}
     />
   )
 
+  const emptyState =
+    accounts.length === 0 ? (
+      <EmptyState
+        icon={<Server size={20} aria-hidden="true" />}
+        title={t('nodes.catalog.noAccountsTitle')}
+        description={t('nodes.catalog.noAccountsDesc')}
+      />
+    ) : filtersActive ? (
+      <EmptyState
+        icon={<Server size={20} aria-hidden="true" />}
+        title={t('nodes.catalog.noMatchTitle')}
+        description={t('nodes.catalog.noMatchDesc')}
+        action={
+          <Button variant="secondary" onClick={clearFilters}>
+            {t('common.clearFilters')}
+          </Button>
+        }
+      />
+    ) : (
+      emptyCatalog
+    )
+
   return (
     <div className="stack-lg">
-      {disabledReason !== null ? (
+      {catalog.data?.enabled === false ? (
         <div className="callout callout--warning">
           <span className="callout__icon">
             <ShieldAlert size={18} aria-hidden="true" />
           </span>
           <div>
             <p className="callout__title">{t('nodes.catalog.disabledTitle')}</p>
-            <p className="callout__text">{disabledReason || t('nodes.catalog.disabledText')}</p>
+            <p className="callout__text">
+              {catalog.data.reason || t('nodes.catalog.disabledText')}
+            </p>
           </div>
         </div>
       ) : null}
 
-      {staleAccounts.length > 0 ? (
+      {stale && catalog.data ? (
         <div className="callout callout--muted">
           <span className="callout__icon">
             <Server size={18} aria-hidden="true" />
@@ -280,33 +460,31 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
           <div>
             <p className="callout__title">{t('nodes.catalog.staleTitle')}</p>
             <p className="callout__text">
-              {t('nodes.catalog.staleText', {
-                time: catalog.data?.fetchedAt
+              {t('nodes.catalog.staleTextSingle', {
+                time: catalog.data.fetchedAt
                   ? formatDateTime(catalog.data.fetchedAt)
                   : t('common.never'),
-                accounts: staleAccounts.join(', '),
+                account: accountLabel || accountId,
               })}
             </p>
           </div>
         </div>
       ) : null}
 
-      {failedAccounts.length > 0 ? (
-        <div className="callout callout--warning">
-          <span className="callout__icon">
-            <ShieldAlert size={18} aria-hidden="true" />
-          </span>
-          <div>
-            <p className="callout__title">{t('nodes.catalog.failedTitle')}</p>
-            <p className="callout__text">
-              {t('nodes.catalog.failedText', { accounts: failedAccounts.join(', ') })}
-            </p>
-          </div>
-        </div>
-      ) : null}
+      <div className="catalog-layout">
+        <ChinaMap
+          geo={geo}
+          selected={filters.province}
+          onSelect={selectProvince}
+          loading={!snapshotLoaded && snapshot.error === undefined}
+          error={!snapshotLoaded ? (snapshot.error ?? null) : null}
+          onRetry={snapshot.reload}
+          fetchedAt={snapshot.data?.fetchedAt}
+          stale={snapshot.data?.stale === true || snapshot.staleAt !== undefined}
+        />
 
-      <Card bodyClassName="card__body--flush">
-        <div className="toolbar">
+        <Card bodyClassName="card__body--flush">
+          <div className="toolbar">
           <div className="toolbar__search">
             <Search size={14} aria-hidden="true" />
             <Input
@@ -318,27 +496,49 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
           </div>
           <Select
             variant="region"
-            multiple
             searchable
             aria-label={t('nodes.filterRegion')}
-            placeholder={t('nodes.allRegions')}
-            value={regionFilter}
-            onChange={setRegionFilter}
+            value={filters.region}
+            onChange={(value) => onFiltersChange({ ...filters, region: value, offset: 0 })}
             options={regionOptions}
           />
+          {cityOptions.length > 0 ? (
+            <Select
+              variant="filter"
+              searchable
+              aria-label={t('nodes.catalog.filterCity')}
+              value={filters.city || 'all'}
+              onChange={(value) =>
+                onFiltersChange({ ...filters, city: value === 'all' ? '' : value, offset: 0 })
+              }
+              options={[
+                { value: 'all', label: t('nodes.catalog.allCities') },
+                ...cityOptions,
+              ]}
+            />
+          ) : null}
           <Select
             variant="filter"
             aria-label={t('nodes.catalog.filterStatus')}
-            value={statusFilter}
-            onChange={setStatusFilter}
-            options={[
-              { value: 'all', label: t('nodes.allStatuses') },
-              ...statuses.map((status) => ({ value: status, label: status })),
-            ]}
+            value={filters.status}
+            onChange={(value) => onFiltersChange({ ...filters, status: value, offset: 0 })}
+            options={statusOptions}
           />
-          <span className="toolbar__count">
-            {t('common.of', { shown: filtered.length, total: rows.length })}
-          </span>
+          <Select
+            variant="filter"
+            aria-label={t('nodes.catalog.filterSort')}
+            value={filters.sort}
+            onChange={(value) =>
+              onFiltersChange({ ...filters, sort: value as ServerCatalogSort, offset: 0 })
+            }
+            options={SORT_KEYS.map((sort) => ({
+              value: sort,
+              label: t(`nodes.catalog.sort.${sort}`),
+            }))}
+          />
+          <Button variant="ghost" size="sm" onClick={clearFilters} disabled={!filtersActive}>
+            {t('common.clearFilters')}
+          </Button>
         </div>
 
         {selected.length > 0 ? (
@@ -355,23 +555,26 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
           </div>
         ) : null}
 
-        {catalog.status === 'error' ? (
+        {tableError !== undefined ? (
           <ErrorState
-            message={catalog.error ?? t('common.unknownError')}
-            onRetry={catalog.reload}
+            message={tableError}
+            onRetry={geoActive ? snapshot.reload : catalog.reload}
           />
-        ) : catalog.status === 'loading' && !catalog.data ? (
+        ) : tableLoading || accountsLoading ? (
           <TableSkeleton rows={8} columns={9} />
-        ) : rows.length === 0 ? (
-          emptyCatalog
-        ) : filtered.length === 0 ? (
+        ) : displayTotal === 0 ? (
+          emptyState
+        ) : groups.length === 0 ? (
           <EmptyState
             icon={<Server size={20} aria-hidden="true" />}
-            title={t('nodes.catalog.noMatchTitle')}
-            description={t('nodes.catalog.noMatchDesc')}
+            title={t('nodes.catalog.pageEmptyTitle')}
+            description={t('nodes.catalog.pageEmptyDesc')}
             action={
-              <Button variant="secondary" onClick={clearFilters}>
-                {t('common.clearFilters')}
+              <Button
+                variant="secondary"
+                onClick={() => onFiltersChange({ ...filters, offset: 0 })}
+              >
+                {t('pagination.first')}
               </Button>
             }
           />
@@ -379,6 +582,9 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
           groups.map((group) => {
             const groupSelected = group.rows.every((row) => selected.includes(catalogRowKey(row)))
             const groupPartial = group.rows.some((row) => selected.includes(catalogRowKey(row)))
+            const regionTotal = effectiveRegionCounts.find(
+              (region) => region.code === group.region,
+            )?.count
             return (
               <section
                 key={group.region}
@@ -392,11 +598,17 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
                   <span className="catalog-group__code mono">{group.region}</span>
                   <span className="catalog-group__count">
                     {t(
-                      group.rows.length === 1
+                      (regionTotal ?? group.rows.length) === 1
                         ? 'nodes.catalog.groupCountOne'
                         : 'nodes.catalog.groupCount',
-                      { count: group.rows.length },
+                      { count: formatNumber(regionTotal ?? group.rows.length) },
                     )}
+                    {regionTotal !== undefined && regionTotal > group.rows.length ? (
+                      <span className="catalog-group__slice">
+                        {' '}
+                        · {t('nodes.catalog.pageSlice', { shown: formatNumber(group.rows.length) })}
+                      </span>
+                    ) : null}
                   </span>
                 </div>
                 <DataTable
@@ -407,7 +619,7 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
                           ...column,
                           label: (
                             <Checkbox
-                              aria-label={t('nodes.catalog.selectAllIn', {
+                              aria-label={t('nodes.catalog.selectVisibleIn', {
                                 region: regionName(group.region, lang),
                               })}
                               checked={groupSelected}
@@ -431,7 +643,23 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
             )
           })
         )}
-      </Card>
+
+        {displayTotal > 0 ? (
+          <Pagination
+            page={page}
+            pageSize={filters.limit}
+            total={displayTotal}
+            onPageChange={(next) =>
+              onFiltersChange({ ...filters, offset: (next - 1) * filters.limit })
+            }
+            onPageSizeChange={(size) =>
+              onFiltersChange({ ...filters, limit: size, offset: 0 })
+            }
+            label={t('nodes.catalog.pagination')}
+          />
+        ) : null}
+        </Card>
+      </div>
     </div>
   )
 }

@@ -8,6 +8,7 @@ import type { AuditEvent, Severity } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
+import { Pagination, usePagination } from '../components/Pagination'
 import { useToast } from '../components/Toast'
 import {
   Button,
@@ -43,6 +44,12 @@ export default function Logs() {
       return `${event.action} ${event.target} ${event.detail}`.toLowerCase().includes(needle)
     })
   }, [actor, audit.data, query, severity])
+
+  const pagination = usePagination({
+    total: filtered.length,
+    initialPageSize: 25,
+    resetKey: JSON.stringify([severity, actor, query]),
+  })
 
   const exportLog = () => {
     push(t('audit.exportPlaceholder'), 'default')
@@ -140,9 +147,6 @@ export default function Logs() {
               ...actors.map((name) => ({ value: name, label: name })),
             ]}
           />
-          <span className="toolbar__count">
-            {t('common.of', { shown: filtered.length, total: audit.data?.length ?? 0 })}
-          </span>
         </div>
 
         {audit.status === 'error' ? (
@@ -150,31 +154,41 @@ export default function Logs() {
         ) : audit.status === 'loading' && !audit.data ? (
           <TableSkeleton rows={10} columns={6} />
         ) : (
-          <DataTable
-            caption={t('audit.caption')}
-            columns={columns}
-            rows={filtered}
-            rowKey={(event) => event.id}
-            empty={
-              <EmptyState
-                title={t('audit.emptyTitle')}
-                description={t('audit.emptyDesc')}
-                icon={<ScrollText size={20} aria-hidden="true" />}
-                action={
-                  <Button
-                    variant="secondary"
-                    onClick={() => {
-                      setSeverity('all')
-                      setActor('all')
-                      setQuery('')
-                    }}
-                  >
-                    {t('common.clearFilters')}
-                  </Button>
-                }
-              />
-            }
-          />
+          <>
+            <DataTable
+              caption={t('audit.caption')}
+              columns={columns}
+              rows={pagination.slice(filtered)}
+              rowKey={(event) => event.id}
+              empty={
+                <EmptyState
+                  title={t('audit.emptyTitle')}
+                  description={t('audit.emptyDesc')}
+                  icon={<ScrollText size={20} aria-hidden="true" />}
+                  action={
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        setSeverity('all')
+                        setActor('all')
+                        setQuery('')
+                      }}
+                    >
+                      {t('common.clearFilters')}
+                    </Button>
+                  }
+                />
+              }
+            />
+            <Pagination
+              page={pagination.page}
+              pageSize={pagination.pageSize}
+              total={filtered.length}
+              onPageChange={pagination.setPage}
+              onPageSizeChange={pagination.setPageSize}
+              label={t('audit.pagination')}
+            />
+          </>
         )}
       </Card>
 

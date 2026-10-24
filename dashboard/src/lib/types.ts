@@ -445,11 +445,57 @@ export interface ServerView {
   latencyMs: number | null
 }
 
+/** One entry of the catalog's per-region summary (all filtered rows). */
+export interface RegionCount {
+  code: string
+  count: number
+}
+
+export type ServerCatalogSort = 'order' | 'title' | 'host' | 'status' | 'region'
+
+/**
+ * Query accepted by `GET /v1/accounts/{id}/servers`. The daemon defaults to
+ * limit 50 (max 500); an empty field means "no filter".
+ */
+export interface ServerCatalogQuery {
+  q?: string
+  region?: string
+  status?: string
+  selected?: boolean
+  offset?: number
+  limit?: number
+  sort?: ServerCatalogSort
+}
+
 export interface AccountServers {
   enabled?: boolean
   reason?: string
   accountId: string
   fetchedAt: string | null
   stale: boolean
+  /** Every row matching the filters, not just this page. */
+  total: number
+  offset: number
+  limit: number
+  nextOffset: number
+  hasMore: boolean
+  /** Counts over all filtered rows, sorted by region code. */
+  regions: RegionCount[]
+  /** One page of the filtered catalog. */
+  servers: ServerView[]
+}
+
+/**
+ * Every retained row for one account, assembled from the paged endpoint by the
+ * dashboard. The China map and province filters need the whole catalog; the
+ * table keeps using the server's page envelope.
+ */
+export interface CatalogSnapshot {
+  enabled: boolean
+  reason?: string
+  accountId: string
+  fetchedAt: string | null
+  stale: boolean
+  total: number
   servers: ServerView[]
 }

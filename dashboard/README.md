@@ -9,7 +9,7 @@ is opt-in through build-time environment variables (see [Modes](#modes) and
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 154 tests in 21 files.
+- Tests: Vitest + React Testing Library + jsdom, 182 tests in 25 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings language card.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
@@ -73,7 +73,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 154 tests in 21 files
+npm test           # Vitest, 182 tests in 25 files
 npm run typecheck  # tsc -b
 ```
 
@@ -238,28 +238,60 @@ the typed-query preservation on unrelated param changes.
 
 `/nodes` has two views: **Catalog** (what could be served) and **Connected** (what is running).
 
-- **Catalog** merges `GET /v1/accounts/{id}/servers` for every account (`src/lib/nodes.ts`); each
-  row carries its account label because vendor server ids are unique only per account. Rows sort
-  by region, title and id and render in per-region groups with a group header, a group caption and
-  a per-region select-all. The live `acc-07` login result is **2,814 vendor servers**, all carrying
-  region `cn`, so the page shows one *China* group of 2,814 rows; region labels come from
-  `src/lib/regions.ts` (ISO 3166-1 alpha-2 plus a few city subdivisions, English and Chinese), and
-  the raw vendor code stays visible as secondary mono text rather than being the primary label.
+- **Catalog** reads one account at a time: the account picker in the page header selects the
+  retained login catalog, and `GET /v1/accounts/{id}/servers` is server-paged. The query carries
+  `q`, `region`, `status`, `sort` (`order|title|host|status|region`), `offset` and `limit`
+  (default 50, max 500); the response returns `total`, `regions:[{code,count}]`, `nextOffset` and
+  `hasMore`. The live `acc-07` login result is **2,814 vendor servers**, all carrying region `cn`,
+  so the footer reads `1–50 of 2,814` and the page shows one *China* group; region labels come
+  from `src/lib/regions.ts` (ISO 3166-1 alpha-2 plus a few city subdivisions, English and
+  Chinese), and the raw vendor code stays visible as secondary mono text.
+- Rows render in per-region groups with a group header, caption and a select-visible checkbox.
+  Group headers group the current page's rows but take their count from the server's `regions[]`
+  summary, so a region spanning pages never understates its total; the header notes how many rows
+  are on this page when the two differ.
 - Columns: server title/id, account, region (localised name + code), `host:port`, vendor status,
   runtime state (`Current` for a `LIVE` node, otherwise the node state or `not linked`), selection
   (`selected` / `not selected` / `skipped by node limit`) and flags (`full load`, `member only`,
   blocking marks, `ping secret`, `stale snapshot`).
-- Search matches title, id, host, region and account label; region and status selects narrow the
-  list. Selection is local UI state — the bulk bar says so and no daemon mutation is made.
+- Search is debounced 250 ms before it reaches the daemon; region, status and sort changes return
+  to offset 0, and the footer's page/size controls request the next window instead of slicing a
+  full list. Selection is local UI state keyed by account and server — the bulk bar says so and no
+  daemon mutation is made.
 - A retained-but-not-refreshed snapshot shows the `stale snapshot` badge plus a callout with the
-  fetch time and account labels; accounts whose request failed are named in a separate callout and
-  their rows are left missing, not filled with placeholders; a disabled login mode renders the
-  `{enabled:false}` reason. No demo or overseas rows are invented.
+  fetch time and account; a request failure renders the inline error with Retry; a disabled login
+  mode renders the `{enabled:false}` reason. No demo or overseas rows are invented.
 - The catalog polls every 30 s, the Connected tab every 15 s. Connected renders `/v1/nodes` with
   region/state filters, latency sparkline, success/capacity meters, drain/undrain, probe and a
   detail drawer.
-- Mock mode serves deterministic fixtures from `src/lib/mock.ts`, so the same layout is
-  reviewable offline.
+- Mock mode serves deterministic fixtures from `src/lib/mock.ts` (including the paging envelope),
+  so the same layout is reviewable offline.
+
+### China map and province filter
+
+- The Catalog tab renders a province choropleth beside the toolbar. Geometry is committed in
+  `src/assets/geo/cn-provinces.json` (31 mainland provinces, pre-projected SVG paths) and the
+  city lookup/points in `cn-cities.json`; the page never calls a map or tile service.
+- Province counts come from the whole retained catalog. `api.getCatalogSnapshot()` assembles it by
+  reading every 500-row page and caches it until the daemon's `fetchedAt` changes, so the 30 s
+  table poll does not re-download the catalog. The read starts only after that account's catalog
+  response settles (so the snapshot timestamp is known and one six-page pass is enough), and
+  concurrent callers share one in-flight pass (single-flight). An invalidation epoch keeps a pass
+  started before a reset or explicit refresh from repopulating the cache; the table itself stays
+  server-paged.
+- Vendor titles are the only geography key (`<city> #<n>`). `src/lib/geo.ts` resolves them with an
+  exact match, a one-directional prefix rule and the reviewed aliases (`济南 - 莱芜` → 济南,
+  `延吉` → 延边); `海南藏族自治州` resolves to Qinghai, not Hainan. Unresolved titles are counted
+  in **Other** and are never assigned a province.
+- Clicking a province filters the table to it and returns to page 1; clicking it again clears the
+  filter. A city Select appears for the selected province. Filtered pages are sliced from the
+  snapshot, while search, status, sort, pagination and the account picker keep working.
+- The current `LIVE` node keeps a mint ring and a city dot even when a filter excludes its row; the
+  header chip names it. The SVG is decorative (`aria-hidden`) and the province list under it is the
+  keyboard/screen-reader control. Transitions are disabled under `prefers-reduced-motion`.
+- Regenerate both assets with `node scripts/geo/build-cn-geo.mjs` (DataV GeoAtlas is contacted at
+  build time only; `--raw <dir>` reuses a cache and `--check` fails on drift). The committed asset
+  records the source URL and the sha256 of the national boundary file.
 
 ### Node detail drawer
 
@@ -311,6 +343,37 @@ actually observed; it never turns an absence of data into a measurement.
   rows with the stale marker (see [Polling and stale data](#polling-and-stale-data)).
 - **Mutation lab.** The separate drawer still appends a synthetic row to `/v1/requests`; those rows
   are labelled `Mutation lab` and need a `LIVE` node to target.
+- **Paging.** The shared footer pages the filtered rows (initial size 200, the whole gate ring;
+  25/50/100 are also offered). The five summary tiles stay computed over every filtered row, not
+  just the visible page, and the detail drawer works from any page.
+
+## Pagination
+
+Every long table shares one footer, `src/components/Pagination.tsx`, which exports the
+`usePagination` hook and the `Pagination` component; `DataTable` renders no paging of its own, so a
+page composes the two.
+
+- **Footer.** `1–50 of 2,814`, first/previous/page-of/next/last, a page jump whose invalid input
+  explains itself instead of failing silently, and a page-size Select (25/50/100/200). Labels come
+  from `i18n.tsx`, so the footer switches language with the rest of the UI. Below 760 px the
+  first/last buttons and the visible size label drop out, keeping the range and page controls on
+  one line beside the card-based table.
+- **State.** `usePagination({total, initialPageSize, resetKey})` returns the current page, size,
+  page count, 1-based `start`/`end` and a `slice(rows)` helper. `resetKey` is the filter identity:
+  a filter, search or sort change returns to page 1 during render (the old page's slice never
+  flashes), while a live poll does not move the operator. A shrinking result clamps to the last
+  page instead of stranding the table on an empty one.
+- **Server-paged.** The Nodes Catalog and the Lab **Servers** tab never slice locally: the footer's
+  page and size changes become `offset`/`limit` on `GET /v1/accounts/{id}/servers` (50 default,
+  500 max), and the total comes from the response envelope. A shrinking catalog walks the offset
+  back to the last page. When a province filter is active, Catalog pages are sliced from the cached
+  snapshot instead (see [China map and province filter](#china-map-and-province-filter)).
+- **Client-paged.** Requests (initial 200), Logs (25), and the Lab Logs and Gates & sessions tabs
+  (25) filter their bounded in-memory rows and slice locally; the page survives a poll but resets
+  when the filter identity changes. The Catalog's unfiltered view is server-paged as above.
+- **Tests.** `tests/pagination.test.tsx` covers the footer range/size/jump, the filter reset, the
+  compact layout and the page integrations; `tests/catalog-snapshot.test.ts` covers the paged
+  snapshot read and its cache, and `tests/nodes-catalog.test.tsx` the server-offset window.
 
 ## HMC layout
 
@@ -497,7 +560,7 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 154 Vitest tests in 21 files (65 at the 2026-10-23 record; see
+- 182 Vitest tests in 25 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -538,10 +601,11 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   surfaces a 409 without writing a result into the row. Its `honesty fixes` block also pins the
   real gate-flow Requests label, the probe relabel, rotation disabled without Resin, and the
   logout/pause copy.
-  `tests/nodes-catalog.test.tsx` covers the Catalog tab: grouping the real vendor catalog by
-  region with the live gate marked `Current`, rendering only the rows `getAccountServers`
-  returned, search/region/status filters, local multi-select with count and clear, the honest
-  empty state, the disabled reason, and the runtime actions on Connected.
+  `tests/nodes-catalog.test.tsx` covers the Catalog tab: grouping the selected account's catalog
+  by region with the live gate marked `Current`, server-side offset paging with the total and
+  region summary, q/region/status/sort query params, account scoping, rendering only the rows
+  `getAccountServers` returned, local multi-select with count and clear, the honest empty state,
+  the disabled reason, and the runtime actions on Connected.
   `tests/select.test.tsx` covers the custom combobox: click-open in a body portal,
   combobox/listbox/option ARIA with `aria-activedescendant`, Arrow/Home/End/Enter/Escape and Tab,
   typeahead, searchable filtering plus the no-match status and clear button, Enter from the search
@@ -600,12 +664,12 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay) |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select |
-| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, search/region/status filters, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
+| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map with province filter, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
-| `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, row detail drawer, mutation lab drawer |
-| `/logs` | Logs | severity/actor filters, audit table, export placeholder |
-| `/lab` | Lab | tabs: Overview, Gates & sessions, Egress (guarded check), Servers, Protocol, Device, Logs, Diagnostics; environment badges; account picker for Servers/Device |
+| `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
+| `/logs` | Logs | severity/actor filters, paginated audit table, export placeholder |
+| `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
 | `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, language, **Updates** check card, daemon/token card, reset |
 
 `*` redirects to `/`.
@@ -622,7 +686,8 @@ src/
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
-    nodes.ts              per-account vendor catalog merge + region grouping
+    nodes.ts              catalog query state + region grouping + client-side geo filters
+    geo.ts                offline province/city resolution and map aggregation
     format.ts             bytes, dates, TTL, proxy URL helpers
     i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
     labels.ts             account/node/severity tone maps
@@ -632,10 +697,10 @@ src/
     useFocusTrap.ts       Esc + Tab trap for palette/drawer/modal
   components/
     AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton, TokenGate
-    DataTable, Overlay (Drawer/Modal/ConfirmDialog), primitives
+    DataTable, Pagination, Overlay (Drawer/Modal/ConfirmDialog), primitives
     Select.tsx            custom combobox: variants, search, multi, groups, body portal
     icons/                APC brand, nav, status and shell glyphs (inline SVG)
-    nodes/                CatalogTab (grouped vendor catalog), ConnectedTab (runtime nodes)
+    nodes/                CatalogTab (grouped vendor catalog), ChinaMap (offline choropleth), ConnectedTab (runtime nodes)
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
   pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Lab, Settings
 tests/
@@ -648,9 +713,13 @@ tests/
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
   nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
+  china-map.test.tsx      map totals, province selection, city filter, Other, reduced motion, i18n
+  geo.test.ts             offline title→province resolution and map aggregation
+  catalog-snapshot.test.ts  full-catalog paging and snapshot cache
   nodes-drawer.test.tsx   drawer region, not-measured, clock skew, egress claim/verify, zh copy
   select.test.tsx         combobox ARIA/keys/search/multi/groups/portal/flip/motion
   requests.test.tsx       gate-flow rows, filters, detail, empty/error, host-only targets
+  pagination.test.tsx     footer range/size/jump, filter reset, compact layout, page integrations
   overview-telemetry.test.tsx no-telemetry empty state, no synthetic chart or zeroed KPI
   regions.test.ts          regionName(): ISO/city names, case, unknown fallback
   ui-quickfix.test.tsx    APC brand, sidebar collapse, add-account modal, Requests honesty fixes
@@ -722,7 +791,7 @@ contract only):
 | Metrics | `GET /v1/metrics?range=24h\|7d` | `[PROPOSED]` |
 | Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab telemetry (read-only) | `GET /v1/lab/{overview,flags,gates,flows,sessions,egress,profiles,logs,diagnostics}` | `[PROPOSED]`; served by `ajs-accountd` |
-| Lab account reads | `GET /v1/accounts/{id}/{servers,device}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab account reads | `GET /v1/accounts/{id}/{servers,device}` (`servers` takes `q/region/status/selected/offset/limit/sort`) | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
 Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
@@ -926,8 +995,11 @@ and reports healthy on `/healthz`.
   corresponding mode is off — the page shows the reason rather than fabricating rows.
 - Mock state is in memory; refreshing the tab discards edits (Settings → Reset dataset does the same
   explicitly).
-- Log export is a placeholder; SSE, pagination above 500 rows and server-side sorting are not
-  implemented in v1. Polling is implemented (see [Polling and stale data](#polling-and-stale-data)).
+- Log export is a placeholder, and SSE is not implemented in v1; polling is (see
+  [Polling and stale data](#polling-and-stale-data)). The vendor catalog is the only
+  server-paged, server-sorted list (500 rows per request max); every other table paginates a
+  bounded in-memory list locally, so a table can page but never query beyond what its poll
+  returned.
 - Documentation scope, not a limitation: `dashboard/docs/` is the AJS-20 design contract; the
   accent slice only adds §3.9 (accent table) to `DESIGN-SYSTEM.md` and leaves the rest of the
   contract unchanged.

@@ -25,6 +25,7 @@ import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { Drawer } from '../components/Overlay'
+import { Pagination, usePagination } from '../components/Pagination'
 import { useToast } from '../components/Toast'
 import {
   Badge,
@@ -361,6 +362,22 @@ export default function Requests() {
     }
     return { total: filtered.length, accepted, rejected, bytes, p95: p95(durations) }
   }, [filtered])
+
+  // The gate ring itself is capped at FLOW_LIMIT (200), so the default page
+  // shows the whole ring; operators can still step down to 25/50/100.
+  const pagination = usePagination({
+    total: filtered.length,
+    initialPageSize: 200,
+    resetKey: JSON.stringify([
+      query,
+      range,
+      statusFilter,
+      methodFilter,
+      nodeFilter,
+      sourceFilter,
+      errorFilter,
+    ]),
+  })
 
   const filtersActive =
     query.trim() !== '' ||
@@ -706,9 +723,6 @@ export default function Requests() {
           <Button variant="ghost" size="sm" onClick={clearFilters} disabled={!filtersActive}>
             {t('common.clearFilters')}
           </Button>
-          <span className="toolbar__count">
-            {t('common.of', { shown: filtered.length, total: allRows.length })}
-          </span>
         </div>
 
         {flows.status === 'error' && !flows.data ? (
@@ -737,7 +751,7 @@ export default function Requests() {
             <DataTable
               caption={t('requests.caption')}
               columns={columns}
-              rows={filtered}
+              rows={pagination.slice(filtered)}
               rowKey={(row) => `${row.source}:${row.id}`}
               onRowClick={(row) => setSelected(row)}
               empty={
@@ -759,6 +773,14 @@ export default function Requests() {
                   />
                 )
               }
+            />
+            <Pagination
+              page={pagination.page}
+              pageSize={pagination.pageSize}
+              total={filtered.length}
+              onPageChange={pagination.setPage}
+              onPageSizeChange={pagination.setPageSize}
+              label={t('requests.pagination')}
             />
           </>
         )}

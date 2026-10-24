@@ -1,10 +1,10 @@
-import { api } from './api'
-import type { ServerView } from './types'
+import { provinceCodeForTitle, resolveServerCity } from './geo'
+import type { RegionCount, ServerCatalogSort, ServerView } from './types'
 
 /**
  * One vendor server joined with the account whose login produced it. The
- * daemon answers per account, so the page merges the catalogs and every row
- * has to carry its account label.
+ * daemon answers per account, so a catalog view is scoped to one account and
+ * every row still carries its account label.
  */
 export interface CatalogRow extends ServerView {
   accountId: string
@@ -13,80 +13,36 @@ export interface CatalogRow extends ServerView {
   stale: boolean
 }
 
-export interface ServerCatalog {
-  rows: CatalogRow[]
-  /** Accounts the catalog was requested for. */
-  accounts: number
-  /** Accounts whose snapshot is retained but not refreshed. */
-  staleAccounts: string[]
-  /** Accounts whose request failed; their rows are missing, not empty. */
-  failedAccounts: string[]
-  /** First `{enabled:false}` reason; account login is off when set. */
-  disabledReason: string | null
-  /** Latest `fetchedAt` across accounts, null when nothing was retained. */
-  fetchedAt: string | null
-}
-
 /** Server ids are only unique per account, so selection keys are qualified. */
 export function catalogRowKey(row: CatalogRow): string {
   return `${row.accountId}:${row.id}`
 }
 
 /**
- * Reads every account's vendor catalog. A failing account does not blank the
- * page: its label is reported and the other catalogs still render.
+ * Server-side catalog query state. `region`/`status` use 'all' for "no
+ * filter"; offset and limit are sent to the daemon, so the page never holds
+ * more than one window of the catalog.
  */
-export async function loadServerCatalog(): Promise<ServerCatalog> {
-  const accounts = await api.listAccounts()
-  const results = await Promise.all(
-    accounts.map(async (account) => {
-      try {
-        return { account, catalog: await api.getAccountServers(account.id) }
-      } catch (cause) {
-        return { account, error: cause instanceof Error ? cause.message : String(cause) }
-      }
-    }),
-  )
+export interface CatalogFilters {
+  region: string
+  status: string
+  sort: ServerCatalogSort
+  offset: number
+  limit: number
+  /** GB/T 2260 two-digit province code, `00` for the Other bucket, '' for all. */
+  province: string
+  /** City code from the bundled geo asset, '' for all cities in the province. */
+  city: string
+}
 
-  const rows: CatalogRow[] = []
-  const staleAccounts: string[] = []
-  const failedAccounts: string[] = []
-  let disabledReason: string | null = null
-  let fetchedAt: string | null = null
-
-  for (const result of results) {
-    if ('error' in result) {
-      failedAccounts.push(result.account.label)
-      continue
-    }
-    const { account, catalog } = result
-    if (catalog.enabled === false && disabledReason === null) {
-      disabledReason = catalog.reason ?? ''
-    }
-    if (catalog.stale) staleAccounts.push(account.label)
-    if (catalog.fetchedAt && (fetchedAt === null || catalog.fetchedAt > fetchedAt)) {
-      fetchedAt = catalog.fetchedAt
-    }
-    for (const server of catalog.servers) {
-      rows.push({ ...server, accountId: account.id, accountLabel: account.label, stale: catalog.stale })
-    }
-  }
-
-  rows.sort(
-    (a, b) =>
-      a.region.localeCompare(b.region) ||
-      a.title.localeCompare(b.title) ||
-      a.id.localeCompare(b.id),
-  )
-
-  return {
-    rows,
-    accounts: accounts.length,
-    staleAccounts,
-    failedAccounts,
-    disabledReason,
-    fetchedAt,
-  }
+export const DEFAULT_CATALOG_FILTERS: CatalogFilters = {
+  region: 'all',
+  status: 'all',
+  sort: 'order',
+  offset: 0,
+  limit: 50,
+  province: '',
+  city: '',
 }
 
 /** Stable region order for the grouped catalog; rows keep their input order. */
@@ -102,4 +58,82 @@ export function groupCatalogByRegion(
   return Array.from(groups, ([region, groupRows]) => ({ region, rows: groupRows })).sort((a, b) =>
     a.region.localeCompare(b.region),
   )
+}
+
+/** Counts for the group headers when rows are filtered in the browser. */
+export function summarizeCatalogRegions(rows: readonly CatalogRow[]): RegionCount[] {
+  const counts = new Map<string, number>()
+  for (const row of rows) counts.set(row.region, (counts.get(row.region) ?? 0) + 1)
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([code, count]) => ({ code, count }))
+}
+
+export interface CatalogRowFilter {
+  q?: string
+  status?: string
+  region?: string
+  province?: string
+  city?: string
+}
+
+/**
+ * Client-side counterpart of the daemon's q/region/status filter, plus the
+ * province/city filters the backend does not have yet. The search fields are
+ * exactly the daemon's (id, title, host, region) so a filtered page and a
+ * snapshot-derived page agree. `province: '00'` selects the unresolved bucket.
+ */
+export function filterCatalogRows(
+  rows: readonly CatalogRow[],
+  filter: CatalogRowFilter,
+): CatalogRow[] {
+  const needle = (filter.q ?? '').trim().toLowerCase()
+  const status = filter.status && filter.status !== 'all' ? filter.status.toLowerCase() : ''
+  const region = filter.region && filter.region !== 'all' ? filter.region.toLowerCase() : ''
+  const province = filter.province ?? ''
+  const city = filter.city ?? ''
+  if (!needle && !status && !region && !province && !city) return [...rows]
+  return rows.filter((row) => {
+    if (
+      needle &&
+      ![row.id, row.title, row.host, row.region].join(' ').toLowerCase().includes(needle)
+    ) {
+      return false
+    }
+    if (status && row.status.toLowerCase() !== status) return false
+    if (region && row.region.toLowerCase() !== region) return false
+    if (province && provinceCodeForTitle(row.title) !== province) return false
+    if (city) {
+      const resolved = resolveServerCity(row.title)
+      if (!resolved || resolved.code !== city) return false
+    }
+    return true
+  })
+}
+
+/**
+ * Sorts a browser-held page with the same keys the daemon accepts. The server
+ * tie-breaks equal keys by id; doing the same keeps a filtered view stable
+ * across polls.
+ */
+export function sortCatalogRows(
+  rows: readonly CatalogRow[],
+  sort: ServerCatalogSort,
+): CatalogRow[] {
+  if (sort === 'order') return [...rows]
+  const compare = (left: CatalogRow, right: CatalogRow): number => {
+    switch (sort) {
+      case 'title':
+        return left.title.toLowerCase().localeCompare(right.title.toLowerCase())
+      case 'host':
+        return left.host.toLowerCase().localeCompare(right.host.toLowerCase())
+      case 'status':
+        return left.status.toLowerCase().localeCompare(right.status.toLowerCase())
+      case 'region':
+        return left.region.toLowerCase().localeCompare(right.region.toLowerCase())
+      default:
+        return 0
+    }
+  }
+  return [...rows].sort((left, right) => compare(left, right) || left.id.localeCompare(right.id))
 }

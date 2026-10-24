@@ -1,4 +1,5 @@
 import { RefreshCw, Server } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 import { formatDateTime } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
@@ -7,6 +8,7 @@ import type { ServerView } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
 import { DataTable } from '../DataTable'
 import type { Column } from '../DataTable'
+import { Pagination } from '../Pagination'
 import {
   Badge,
   Button,
@@ -20,10 +22,31 @@ import { DisabledCallout } from './shared'
 
 export function ServersTab({ accountId, accountLabel }: { accountId: string; accountLabel: string }) {
   const { t } = useI18n()
-  const servers = useAsync(() => api.getAccountServers(accountId), [accountId], { intervalMs: 15_000 })
+  const [offset, setOffset] = useState(0)
+  const [limit, setLimit] = useState(50)
+  const [lastAccountId, setLastAccountId] = useState(accountId)
+  if (lastAccountId !== accountId) {
+    setLastAccountId(accountId)
+    setOffset(0)
+  }
+  const servers = useAsync(
+    () => api.getAccountServers(accountId, { offset, limit }),
+    [accountId, offset, limit],
+    { intervalMs: 15_000 },
+  )
 
   const disabled = servers.data?.enabled === false
   const rows = servers.data?.servers ?? []
+  const total = servers.data?.total ?? 0
+  const page = Math.floor(offset / limit) + 1
+
+  // The daemon pages the catalog; a shrinking catalog never strands the table
+  // past its last page.
+  useEffect(() => {
+    if (total > 0 && offset >= total) {
+      setOffset(Math.floor((total - 1) / limit) * limit)
+    }
+  }, [limit, offset, total])
 
   const columns: Array<Column<ServerView>> = [
     {
@@ -159,19 +182,32 @@ export function ServersTab({ accountId, accountLabel }: { accountId: string; acc
             ) : servers.status === 'loading' && !servers.data ? (
               <TableSkeleton rows={6} columns={8} />
             ) : (
-              <DataTable
-                caption={t('lab.servers.caption')}
-                columns={columns}
-                rows={rows}
-                rowKey={(server) => server.id}
-                empty={
-                  <EmptyState
-                    title={t('lab.servers.emptyTitle')}
-                    description={t('lab.servers.emptyDesc')}
-                    icon={<Server size={20} aria-hidden="true" />}
-                  />
-                }
-              />
+              <>
+                <DataTable
+                  caption={t('lab.servers.caption')}
+                  columns={columns}
+                  rows={rows}
+                  rowKey={(server) => server.id}
+                  empty={
+                    <EmptyState
+                      title={t('lab.servers.emptyTitle')}
+                      description={t('lab.servers.emptyDesc')}
+                      icon={<Server size={20} aria-hidden="true" />}
+                    />
+                  }
+                />
+                <Pagination
+                  page={page}
+                  pageSize={limit}
+                  total={total}
+                  onPageChange={(next) => setOffset((next - 1) * limit)}
+                  onPageSizeChange={(size) => {
+                    setLimit(size)
+                    setOffset(0)
+                  }}
+                  label={t('lab.servers.pagination')}
+                />
+              </>
             )}
           </Card>
         </>

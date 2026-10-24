@@ -8,6 +8,7 @@ import type { LogEntry } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
 import { DataTable } from '../DataTable'
 import type { Column } from '../DataTable'
+import { Pagination, usePagination } from '../Pagination'
 import {
   Badge,
   Button,
@@ -51,6 +52,12 @@ export function LogsTab() {
 
   const disabled = logs.data?.enabled === false
   const entries = logs.data?.entries ?? []
+
+  const pagination = usePagination({
+    total: entries.length,
+    initialPageSize: 25,
+    resetKey: JSON.stringify([level, component]),
+  })
 
   const columns: Array<Column<LogEntry>> = [
     {
@@ -159,19 +166,29 @@ export function LogsTab() {
             ) : logs.status === 'loading' && !logs.data ? (
               <TableSkeleton rows={8} columns={6} />
             ) : (
-              <DataTable
-                caption={t('lab.logs.caption')}
-                columns={columns}
-                rows={entries}
-                rowKey={(entry) => `${entry.ts}-${entry.component}-${entry.msg}`}
-                empty={
-                  <EmptyState
-                    title={t('lab.logs.emptyTitle')}
-                    description={t('lab.logs.emptyDesc')}
-                    icon={<ScrollText size={20} aria-hidden="true" />}
-                  />
-                }
-              />
+              <>
+                <DataTable
+                  caption={t('lab.logs.caption')}
+                  columns={columns}
+                  rows={pagination.slice(entries)}
+                  rowKey={(entry) => `${entry.ts}-${entry.component}-${entry.msg}`}
+                  empty={
+                    <EmptyState
+                      title={t('lab.logs.emptyTitle')}
+                      description={t('lab.logs.emptyDesc')}
+                      icon={<ScrollText size={20} aria-hidden="true" />}
+                    />
+                  }
+                />
+                <Pagination
+                  page={pagination.page}
+                  pageSize={pagination.pageSize}
+                  total={entries.length}
+                  onPageChange={pagination.setPage}
+                  onPageSizeChange={pagination.setPageSize}
+                  label={t('lab.logs.pagination')}
+                />
+              </>
             )}
           </Card>
 
