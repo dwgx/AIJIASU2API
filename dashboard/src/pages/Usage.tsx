@@ -5,6 +5,7 @@ import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { UsageChart, fillUsageDays } from '../components/usage/UsageChart'
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -20,7 +21,7 @@ import {
 import { api } from '../lib/api'
 import { formatBytes, formatNumber } from '../lib/format'
 import { useI18n } from '../lib/i18n'
-import type { TranslationKey } from '../lib/i18n'
+import type { TranslationKey, TranslationParams } from '../lib/i18n'
 import type { UsageAccount, UsageBucket, UsageQuery, UsageSummary, UsageUser } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 
@@ -50,7 +51,11 @@ function windowQuery(days: number): UsageQuery {
   return { from: new Date(start).toISOString(), to: now.toISOString() }
 }
 
-/** The equal-length window immediately before `summary`, in whole UTC days. */
+/**
+ * The equal-length window immediately before `summary`, in whole UTC days.
+ * Bounds are RFC 3339 with an explicit end-of-day `to`: a date-only `to` is
+ * read as midnight by the daemon, which would drop the baseline's last day.
+ */
 function previousWindow(summary: UsageSummary): UsageQuery | null {
   const fromMs = Date.parse(summary.from)
   const toMs = Date.parse(summary.to)
@@ -60,9 +65,25 @@ function previousWindow(summary: UsageSummary): UsageQuery | null {
   const count = Math.round((end - start) / DAY_MS) + 1
   if (count < 1) return null
   return {
-    from: new Date(start - count * DAY_MS).toISOString().slice(0, 10),
-    to: new Date(start - DAY_MS).toISOString().slice(0, 10),
+    from: new Date(start - count * DAY_MS).toISOString(),
+    to: new Date(start - 1).toISOString(),
   }
+}
+
+type Translate = (key: string, params?: TranslationParams) => string
+
+/**
+ * Honest history label: the store keeps a bounded, newest-first history, so a
+ * wide window is never full coverage. Null when the daemon reports no cap.
+ */
+function retentionNoteFor(summary: UsageSummary, t: Translate): string | null {
+  const rows = summary.rowsRetained ?? 0
+  if (rows <= 0) return null
+  const days = summary.retentionDays ?? 0
+  const params = { rows: formatNumber(rows) }
+  if (days > 1) return t('usage.retentionNote', { ...params, days: formatNumber(days) })
+  if (days === 1) return t('usage.retentionNoteOne', params)
+  return t('usage.retentionNoteNoDays', params)
 }
 
 /** Request-weighted mean, matching the daemon's per-day averages. */
@@ -223,6 +244,10 @@ export default function Usage() {
   const avgLatency = weightedLatency(summary?.days ?? [])
   const errorRate = requests > 0 ? (errors / requests) * 100 : 0
 
+  // The store keeps a bounded history, so a wide window is not full coverage.
+  const retentionNote = summary ? retentionNoteFor(summary, t) : null
+  const quotaEnforced = summary?.quotaEnforced === true
+
   const deltaRequests = changePercent(requests, previous?.requests)
   const deltaBytes = changePercent(bytes, previous?.bytes)
   const deltaErrors = changePercent(errors, previous?.errors)
@@ -330,7 +355,13 @@ export default function Usage() {
     },
     {
       key: 'quota',
-      label: t('usage.columnQuota'),
+      label: quotaEnforced ? (
+        t('usage.quotaEnforced')
+      ) : (
+        <Badge tone="warning" title={t('usage.quotaAdvisoryTooltip')}>
+          {t('usage.quotaAdvisory')}
+        </Badge>
+      ),
       render: (row) => {
         if (row.quotaBytesMonth === null || row.quotaBytesMonth <= 0) {
           return <span className="cell-sub">{t('platform.usage.noQuota')}</span>
@@ -401,6 +432,12 @@ export default function Usage() {
         <UsageSkeleton />
       ) : summary ? (
         <>
+          {retentionNote ? (
+            <p className="page-note" role="note">
+              {retentionNote}
+            </p>
+          ) : null}
+
           {summary.truncated ? (
             <div className="callout callout--warning" role="note">
               <span className="callout__icon">

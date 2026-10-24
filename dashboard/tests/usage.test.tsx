@@ -190,12 +190,13 @@ describe('usage page', () => {
     await waitFor(() => {
       const spans = spy.mock.calls.map(([query]) => {
         const value = query as UsageQuery
-        return value.from && value.to
-          ? Math.round((Date.parse(value.to) - Date.parse(value.from)) / DAY_MS)
-          : -1
+        if (!value.from || !value.to) return -1
+        const fromDay = Math.floor(Date.parse(value.from) / DAY_MS)
+        const toDay = Math.floor(Date.parse(value.to) / DAY_MS)
+        return toDay - fromDay + 1
       })
-      expect(spans).toContain(29)
-      expect(spans).toContain(89)
+      expect(spans).toContain(30)
+      expect(spans).toContain(90)
     })
   })
 
@@ -275,9 +276,78 @@ describe('usage page', () => {
     expect(screen.getByRole('img', { name: /Daily requests/ })).toBeInTheDocument()
   })
 
+  it('requests the baseline with an explicit end-of-day RFC 3339 bound', async () => {
+    const spy = mockUsage()
+    await openUsage()
+    await screen.findByRole('img', { name: /Daily requests over 2 days/ })
+
+    const queries = spy.mock.calls.map(([query]) => query as UsageQuery)
+    const baseline = queries.find((query) => query.to?.endsWith('T23:59:59.999Z'))
+    expect(baseline).toBeDefined()
+    expect(baseline?.from).toBe('2026-09-29T00:00:00.000Z')
+    expect(baseline?.to).toBe('2026-09-30T23:59:59.999Z')
+    expect(baseline?.to).not.toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(Date.parse(baseline!.to!) - Date.parse(baseline!.from!)).toBe(2 * DAY_MS - 1)
+  })
+
+  it('labels the retained history cap instead of implying full coverage', async () => {
+    mockUsage({ ...CURRENT, rowsRetained: 10_000, retentionDays: 7 })
+    await openUsage()
+
+    expect(
+      await screen.findByText('History is capped at the newest 10,000 requests (~7 days).'),
+    ).toBeInTheDocument()
+  })
+
+  it('uses the singular day when only one day is retained', async () => {
+    mockUsage({ ...CURRENT, rowsRetained: 10_000, retentionDays: 1 })
+    await openUsage()
+
+    expect(
+      await screen.findByText('History is capped at the newest 10,000 requests (~1 day).'),
+    ).toBeInTheDocument()
+  })
+
+  it('omits the day estimate when the store reports no retained days', async () => {
+    mockUsage({ ...CURRENT, rowsRetained: 10_000, retentionDays: 0 })
+    await openUsage()
+
+    expect(
+      await screen.findByText('History is capped at the newest 10,000 requests.'),
+    ).toBeInTheDocument()
+  })
+
+  it('omits the retention note when the daemon reports no cap', async () => {
+    mockUsage()
+    await openUsage()
+    await screen.findAllByRole('article')
+
+    expect(screen.queryByText(/History is capped/)).not.toBeInTheDocument()
+  })
+
+  it('marks the quota column as advisory until the gate enforces quotas', async () => {
+    mockUsage()
+    await openUsage()
+
+    const table = await screen.findByRole('table', { name: 'Usage by user' })
+    const badge = within(table).getByText('Budget (advisory)')
+    expect(badge).toHaveAttribute('title', 'Quotas are not enforced by the gate yet')
+    expect(within(table).queryByText('Quota')).not.toBeInTheDocument()
+  })
+
+  it('drops the advisory badge once the daemon enforces quotas', async () => {
+    mockUsage({ ...CURRENT, quotaEnforced: true })
+    await openUsage()
+
+    const table = await screen.findByRole('table', { name: 'Usage by user' })
+    expect(within(table).getByText('Quota')).toBeInTheDocument()
+    expect(within(table).queryByText('Budget (advisory)')).not.toBeInTheDocument()
+    expect(within(table).queryByTitle('Quotas are not enforced by the gate yet')).toBeNull()
+  })
+
   it('renders the usage surface in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
-    mockUsage()
+    mockUsage({ ...CURRENT, rowsRetained: 10_000, retentionDays: 7 })
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '用量', level: 1 })).toBeInTheDocument()
@@ -285,6 +355,11 @@ describe('usage page', () => {
     expect(screen.getByRole('table', { name: '按账户用量' })).toBeInTheDocument()
     expect(screen.getAllByText('请求数').length).toBeGreaterThan(0)
     expect(screen.getByRole('progressbar', { name: 'ada.ops 月配额' })).toBeInTheDocument()
+    expect(screen.getByText('历史仅保留最新的 10,000 个请求（约 7 天）。')).toBeInTheDocument()
+    expect(screen.getByText('预算（仅供参考）')).toHaveAttribute(
+      'title',
+      '网关尚未强制执行配额',
+    )
   })
 
   it('renders the in-browser mock data without fabricating URLs', async () => {

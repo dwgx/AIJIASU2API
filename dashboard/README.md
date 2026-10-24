@@ -9,7 +9,7 @@ variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 323 tests in 37 files.
+- Tests: Vitest + React Testing Library + jsdom, 330 tests in 37 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 323 tests in 37 files
+npm test           # Vitest, 330 tests in 37 files
 npm run typecheck  # tsc -b
 ```
 
@@ -383,8 +383,11 @@ daemon's 30 s cadence), pause while the tab is hidden, and stop polling when the
   page's own successive polls (two samples minimum), with a link to `/nodes`.
 - **Honesty.** A failed poll keeps the last good table with the stale marker; `enabled:false`
   shows the daemon's reason (`AJS_HEALTH_PROBE=0`) instead of an empty table; an empty sampler
-  explains that no gate is being watched. The probe dials the daemon host's loopback gate port, so
-  the panel is a diagnostic for a running gate, never a vendor-reachability claim.
+  explains that no gate is being watched. The sampler keeps at most `AJS_HEALTH_MAX_NODES` node
+  rings (default 16), so with more live gates than that the panel shows only the watched subset
+  and the daemon re-arms an evicted watched gate on its next sweep. The probe dials the daemon
+  host's loopback gate port, so the panel is a diagnostic for a running gate, never a
+  vendor-reachability claim.
 
 ## Requests flows
 
@@ -442,26 +445,41 @@ page composes the two.
 
 ## Usage page
 
-`/usage` is the aggregation view over the daemon's request log (`GET /v1/usage`), not a traffic
-meter: the daemon sums the same rows `/v1/requests` serves, so the numbers reset with the request
-log's retention. `src/pages/Usage.tsx` loads once per filter change — no polling — with an explicit
+`/usage` is the aggregation view over the daemon's request log (`GET /v1/usage`), not a byte
+counter: the daemon sums the same rows `/v1/requests` serves — with gate metering on
+(`AJS_FLOW_METER`, default) every completed SOCKS5 flow appends one, alongside the mutation-lab
+and seed rows — so the numbers reset with the request log's 10 000-row retention.
+`src/pages/Usage.tsx` loads once per filter change — no polling — with an explicit
 **Refresh**.
 
 - **Window.** A segmented control selects 7, 30, 90 or 366 days; the client sends RFC 3339
   `from`/`to` bounds (the start is UTC midnight of the first day) and the daemon applies the limits
-  (absent = trailing 30 days, > 366 days → 400). The previous window is sent as bare `YYYY-MM-DD`
-  dates for the baseline request.
+  (absent = trailing 30 days, > 366 days → 400). The baseline is the equal-length window of whole
+  UTC days immediately before the current one: `from` is the current start minus N days and `to`
+  is one millisecond before the current start, both RFC 3339. It sends an explicit end-of-day
+  `to` on purpose — a date-only `to` would be read as midnight and drop the baseline's last day —
+  and repeats the active account filter.
+- **Retention.** The daemon reports `rowsRetained` (the request-log cap, 10 000 rows) and
+  `retentionDays` (the inclusive UTC-day span the retained rows actually cover; `0` = no rows).
+  When the cap is known the page shows *History is capped at the newest N requests (~D days)*
+  above the chart, so a 90- or 366-day window never reads as full coverage; the note is omitted
+  when the daemon reports no cap.
 - **Filters.** An account filter is populated from the current summary and sent as `account` (the
   daemon resolves an id or a label); the API also accepts `userId`, which the page does not expose
   yet.
 - **Summary.** Four tiles — requests, bytes, errors (with error rate) and average latency — each
   with the change against the immediately preceding window of the same length, computed from a
-  second `GET /v1/usage`. A failed baseline request drops the deltas instead of failing the page.
+  second `GET /v1/usage`. A zero baseline yields no percentage rather than an infinite change, and
+  a failed baseline request drops the deltas instead of failing the page.
+- **Advisory budget.** The daemon does not enforce quotas and sends no `quotaEnforced`, so each
+  user row labels its monthly quota **Budget (advisory)** with the tooltip *Quotas are not enforced
+  by the gate yet*; a `quotaEnforced:true` response would label it **Quota** instead. The meter
+  compares window bytes with `quotaBytesMonth`.
 - **Chart and tables.** A per-day bar/area chart fills missing days with zeros across the returned
   `from`–`to` window; the account and user tables are sortable and the user rows show the monthly
-  quota meter (`quotaBytesMonth` against `usedBytes`); a top-targets card lists the busiest
-  `host:port` targets. An empty window renders an explicit empty state, and `truncated:true` shows
-  a warning callout that the daemon clipped the aggregation.
+  quota meter (`quotaBytesMonth` against `usedBytes`, labelled advisory as above); a top-targets
+  card lists the busiest `host:port` targets. An empty window renders an explicit empty state, and
+  `truncated:true` shows a warning callout that the daemon clipped the aggregation.
 - **Mock.** Deterministic fixtures aggregate the seeded request rows, so the page is fully
   exercisable offline.
 
@@ -720,8 +738,12 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 - **Create.** The dialog takes URL, event subscription (none = every event), description and an
   initial enabled flag. `POST /v1/webhooks` returns the signing secret exactly once; the show-once
   panel renders it with a **Copy** button and it is never fetched again. The URL must be absolute
-  `https` unless it is loopback (the daemon's `AJS_WEBHOOK_ALLOW_HTTP` opens plain HTTP too) and
-  may not embed credentials; the dialog rejects those before the request.
+  `https` unless it is loopback (the daemon's `AJS_WEBHOOK_ALLOW_HTTP` opens plain HTTP too), must
+  not resolve to a loopback, RFC 1918, link-local or unique-local address unless the daemon runs
+  with `AJS_WEBHOOK_ALLOW_PRIVATE=1` (an unresolvable name is allowed at registration and
+  re-checked at delivery), and may not embed credentials; the dialog rejects those before the
+  request. The daemon repeats the address check at dial time (a DNS rebind between registration
+  and delivery is refused) and always rejects the cloud metadata host names.
 - **Rows.** URL, subscription, enabled switch, last delivery (status, HTTP status, attempt, time)
   and the edit/deliveries/delete actions. `PATCH /v1/webhooks/{id}` sends only `{enabled}`. A row
   whose `secretAvailable` is false is flagged *secret unavailable* and cannot be re-enabled (the
@@ -736,15 +758,21 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 - **Events.** The subscription list is the daemon's closed catalogue: `account.login`,
   `account.logout`, `account.expired`, `account.renewal_due`, `node.connected`,
   `node.disconnected`, `node.switched`, `schedule.fired`, `schedule.failed`, `device.retired`,
-  `audit.critical`. The daemon currently emits `account.login`, `account.logout`,
-  `node.connected`, `node.disconnected`, `node.switched`, `schedule.fired` and `schedule.failed`;
-  the other four are accepted but not emitted yet.
+  `audit.critical`. All eleven are emitted: the account actions produce login/logout,
+  `node.*` comes from the node controller, `schedule.fired`/`schedule.failed` follow a recorded
+  run, `account.renewal_due`/`account.expired` come from the once-per-local-day renewal sweep,
+  `device.retired` follows a retire, and `audit.critical` is emitted for every critical audit row
+  (the webhook's own `webhook.*` audit rows are skipped so a delivery cannot re-emit itself).
+- **Signature.** Every delivery carries `X-APC-Event`, `X-APC-Delivery`, `X-APC-Timestamp` and
+  `X-APC-Signature`. The receiver-side recipe — exact formula, raw-body rule, 5-minute timestamp
+  tolerance and Node/Go snippets — is in
+  [`daemon/README.md`](../daemon/README.md#verifying-webhook-signatures).
 - **Mock.** The mock store seeds one endpoint (`https://hooks.example.com/ajs`) and three
   deliveries so the panel is exercisable offline; create, toggle and delete mutate in memory only.
 
 ## Tests and QA
 
-- 323 Vitest tests in 37 files (65 at the 2026-10-23 record; see
+- 330 Vitest tests in 37 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -778,8 +806,10 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   (`cd deploy && ./update.sh --tag v0.2.0`), the release-notes link target, the up-to-date
   badge and the error state (alert, no badge, cleared by a later successful check).
   The platform wave adds five files. `tests/usage.test.tsx` drives the 7/30/90/366 window, the
-  account filter, the summary tiles with previous-window deltas, the zero-filled chart, the
-  empty and `truncated` states. `tests/schedules.test.tsx` covers the table, the create/edit
+  account filter, the baseline request with its explicit end-of-day bound, the summary tiles with
+  previous-window deltas, the zero-filled chart, the three retention-note variants plus the
+  no-cap case, the advisory→enforced quota label, and the empty and `truncated` states.
+  `tests/schedules.test.tsx` covers the table, the create/edit
   dialog and its pure preview, `ARM`/`RUN` confirmation, the stale-`If-Match` retry, run history
   and delete. `tests/health-panel.test.tsx` covers `ok`/`degraded`/`down`, the compact and full
   variants, `enabled:false`, an empty sampler and the stale poll. `tests/webhooks.test.tsx` covers
@@ -878,7 +908,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | Route | Page | Primary surfaces |
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay); a compact gate-health panel sits under the metric tiles |
-| `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas, per-day chart, per-account and per-user tables with quota meters, top targets; an explicit `truncated` callout when the request-log window is clipped |
+| `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account and per-user tables with advisory quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
@@ -961,7 +991,7 @@ tests/
   theme-accent.test.tsx   accent switch, persistence, tokens, 8-way WCAG contrast
   theme-contrast.test.ts  token contrast audit for both themes
   useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
-  usage.test.tsx          usage windows, account filter, tiles/deltas, chart, empty/truncated states
+  usage.test.tsx          usage windows, baseline bound, retention note, advisory quota, tiles/deltas, chart, empty/truncated states
   schedules.test.tsx      schedule table, dialog, preview, ARM/RUN confirm, If-Match retry, history
   health-panel.test.tsx   health states, compact/full variants, disabled reason, stale poll
   webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
@@ -1091,10 +1121,11 @@ Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory 
 as a versioned JSON snapshot); `[SPEC]` / `[PROPOSED]` describe where the contract is defined,
 not whether it is implemented.
 
-`GET /v1/metrics` also carries `telemetryAvailable`. `ajs-accountd` answers `false` — there is no
-traffic meter yet — so the Overview replaces the ingress/egress chart, the traffic KPI tiles and
-the range switch with a no-telemetry empty state that says exactly that; live node, lease and
-account-health facts still render, and no synthetic curve or zeroed KPI is drawn. A daemon that
+`GET /v1/metrics` also carries `telemetryAvailable`. `ajs-accountd` answers `false` — the gate
+meter feeds the request log (`/v1/usage`), not this traffic series — so the Overview replaces the
+ingress/egress chart, the traffic KPI tiles and the range switch with a no-telemetry empty state
+that says exactly that; live node, lease and account-health facts still render, and no synthetic
+curve or zeroed KPI is drawn. A daemon that
 reports `true` gets the chart and the `Requests · 24h` / `Egress · 24h` tiles back.
 
 The mock store is module-level and mutable: create/pause/delete accounts, drain nodes, rotate and
@@ -1303,12 +1334,14 @@ and reports healthy on `/healthz`.
   than faking success. Usage, schedules, gate health and webhooks are surfaced and degrade to an
   explicit disabled state when the daemon answers `enabled:false` or 503. The device pool has an
   HTTP API (`/v1/device-pool`) but no dashboard surface yet.
-- Usage aggregates the daemon's in-memory request log, not a traffic meter: its requests and bytes
-  are the recorded rows and reset with the log's retention. The page never extrapolates a missing
-  day; it fills the chart with zeros and shows `truncated:true` when the daemon clipped the window.
+- Usage aggregates the daemon's request log: with gate metering on (`AJS_FLOW_METER`, default)
+  each completed SOCKS5 flow appends one row, so the page reflects real proxy traffic, but its
+  requests and bytes are still recorded rows and reset with the 10 000-row retention. The
+  retention note labels the covered span, the page never extrapolates a missing day, and
+  `truncated:true` shows when the daemon clipped the window.
 - The gate-health panel is a diagnostic for loopback gates on the daemon host. It does not test
   vendor reachability, cannot see a node whose gate is not running, and keeps only one hour of
-  samples (120 at 30 s).
+  samples (120 at 30 s) for at most `AJS_HEALTH_MAX_NODES` nodes (default 16).
 - Webhooks are real daemon deliveries, but the delivery ring is in memory (last 200 attempts per
   endpoint, lost on a restart) and the signing secret survives a restart only with
   `AJS_MASTER_KEY`. The page never simulates a delivery or re-shows a secret.

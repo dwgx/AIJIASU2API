@@ -11,7 +11,7 @@ export type Severity = 'info' | 'warn' | 'error'
 export type ThemeName = 'dark' | 'light'
 export type Transport = 'httpupgrade' | 'rawtcp'
 export type MetricRange = '24h' | '7d'
-export type RequestSource = 'proxy' | 'mutation-lab'
+export type RequestSource = 'proxy' | 'gate' | 'mutation-lab'
 
 export interface Account {
   id: string
@@ -1087,6 +1087,16 @@ export interface UsageSummary {
   days: UsageBucket[]
   topTargets: UsageTarget[]
   truncated: boolean
+  /**
+   * Rows the daemon keeps for aggregation (newest first). Windows wider than
+   * this history read as partially empty; the UI must say so instead of
+   * implying the requested span is fully covered.
+   */
+  rowsRetained?: number
+  /** Whole days the retained rows cover, derived from the oldest retained row. */
+  retentionDays?: number
+  /** True once the gate enforces `quotaBytesMonth`; absent means advisory only. */
+  quotaEnforced?: boolean
 }
 
 /** Query for GET /v1/usage; empty fields are omitted from the request. */
