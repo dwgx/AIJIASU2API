@@ -316,6 +316,36 @@ export default function Usage() {
     },
   ]
 
+  // Enforced budgets add a live monthly meter per account. The wire numbers
+  // are month-to-date gate bytes, not the queried window, so the text is a
+  // plain used/budget pair rather than the window-labelled user copy.
+  if (quotaEnforced) {
+    accountColumns.push({
+      key: 'quota',
+      label: t('usage.quotaEnforced'),
+      render: (row) => {
+        if (row.trafficBudgetBytes == null) {
+          return <span className="cell-sub">{t('platform.usage.noQuota')}</span>
+        }
+        const used = row.usedBytes ?? 0
+        const percentUsed = (used / row.trafficBudgetBytes) * 100
+        return (
+          <div className="meter-cell">
+            <ProgressBar
+              value={used}
+              max={row.trafficBudgetBytes}
+              tone={percentUsed >= 90 ? 'danger' : percentUsed >= 70 ? 'warning' : 'mint'}
+              label={t('usage.quotaLabel', { name: row.account })}
+            />
+            <span className="cell-sub">
+              {formatBytes(used)} / {formatBytes(row.trafficBudgetBytes)}
+            </span>
+          </div>
+        )
+      },
+    })
+  }
+
   const userColumns: Array<Column<UsageUser>> = [
     {
       key: 'user',

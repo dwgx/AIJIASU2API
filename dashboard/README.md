@@ -474,10 +474,15 @@ and seed rows — so the numbers reset with the request log's 10 000-row retenti
   with the change against the immediately preceding window of the same length, computed from a
   second `GET /v1/usage`. A zero baseline yields no percentage rather than an infinite change, and
   a failed baseline request drops the deltas instead of failing the page.
-- **Advisory budget.** The daemon does not enforce quotas and sends no `quotaEnforced`, so each
-  user row labels its monthly quota **Budget (advisory)** with the tooltip *Quotas are not enforced
-  by the gate yet*; a `quotaEnforced:true` response would label it **Quota** instead. The meter
-  compares window bytes with `quotaBytesMonth`.
+- **Monthly account budgets.** `trafficBudgetBytes` on an account (PATCH
+  `/v1/accounts/{id}`; `null` clears it, zero refuses every byte) is enforced at the gate: once
+  the account's gate-metered bytes for the current UTC month reach the budget, new flows are
+  refused with SOCKS5 `0x02` and a `quota_exceeded` flow record, and one `quota.exceeded` audit
+  row is written per account per hour. When any visible account has a budget the daemon sends
+  `quotaEnforced:true`, the user table labels its quota column **Quota** instead of **Budget
+  (advisory)**, and the account table adds a monthly meter (`trafficBudgetBytes` against
+  `usedBytes`) with the remaining headroom. User quotas remain window-based advisory figures:
+  SOCKS5 flows carry no user identity, so the gate cannot attribute traffic to a panel user.
 - **Chart and tables.** A per-day bar/area chart fills missing days with zeros across the returned
   `from`–`to` window; the account and user tables are sortable and the user rows show the monthly
   quota meter (`quotaBytesMonth` against `usedBytes`, labelled advisory as above); a top-targets
@@ -815,7 +820,8 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   The platform wave adds five files. `tests/usage.test.tsx` drives the 7/30/90/366 window, the
   account filter, the baseline request with its explicit end-of-day bound, the summary tiles with
   previous-window deltas, the zero-filled chart, the three retention-note variants plus the
-  no-cap case, the advisory→enforced quota label, and the empty and `truncated` states.
+  no-cap case, the advisory→enforced quota label and the enforced per-account monthly meters, and
+  the empty and `truncated` states.
   `tests/schedules.test.tsx` covers the table, the create/edit
   dialog and its pure preview, `ARM`/`RUN` confirmation, the stale-`If-Match` retry, run history
   and delete. `tests/health-panel.test.tsx` covers `ok`/`degraded`/`down`, the compact and full
@@ -919,7 +925,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | Route | Page | Primary surfaces |
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay); a compact gate-health panel sits under the metric tiles |
-| `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account and per-user tables with advisory quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
+| `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account monthly budget meters and per-user quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |

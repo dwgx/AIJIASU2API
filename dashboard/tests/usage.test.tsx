@@ -92,6 +92,26 @@ const FILTERED: UsageSummary = {
   topTargets: [{ target: 'api.example.com', requests: 1, bytes: 500 }],
 }
 
+/** A daemon that enforces monthly account budgets. */
+const ENFORCED: UsageSummary = {
+  ...CURRENT,
+  quotaEnforced: true,
+  accounts: [
+    {
+      ...CURRENT.accounts[0],
+      trafficBudgetBytes: 2048,
+      usedBytes: 1024,
+      remainingBytes: 1024,
+    },
+    {
+      ...CURRENT.accounts[1],
+      trafficBudgetBytes: null,
+      usedBytes: 512,
+      remainingBytes: null,
+    },
+  ],
+}
+
 const ZERO_FILL: UsageSummary = {
   from: '2026-10-01T00:00:00Z',
   to: '2026-10-03T23:59:59Z',
@@ -343,6 +363,20 @@ describe('usage page', () => {
     expect(within(table).getByText('Quota')).toBeInTheDocument()
     expect(within(table).queryByText('Budget (advisory)')).not.toBeInTheDocument()
     expect(within(table).queryByTitle('Quotas are not enforced by the gate yet')).toBeNull()
+  })
+
+  it('renders per-account monthly meters when quotas are enforced', async () => {
+    mockUsage(ENFORCED)
+    await openUsage()
+
+    const table = await screen.findByRole('table', { name: 'Usage by account' })
+    expect(within(table).getByText('Quota')).toBeInTheDocument()
+    const meter = within(table).getByRole('progressbar', {
+      name: 'Northwind Ops monthly quota',
+    })
+    expect(meter).toHaveAttribute('aria-valuenow', '50')
+    expect(within(table).getByText('1.0 KiB / 2.0 KiB')).toBeInTheDocument()
+    expect(within(table).getByText('No monthly quota')).toBeInTheDocument()
   })
 
   it('renders the usage surface in Chinese', async () => {

@@ -24,6 +24,8 @@ export interface Account {
   nodeCount: number
   liveNodeCount: number
   usageBytes: number
+  /** Monthly gate-enforced traffic budget in bytes; null/absent is unlimited. */
+  trafficBudgetBytes?: number | null
   expiresAt: string
   lastLoginAt: string
   createdAt: string
@@ -1127,6 +1129,15 @@ export interface UsageAccount {
   errors: number
   avgLatencyMs: number
   buckets: UsageBucket[]
+  /**
+   * Monthly gate-enforced traffic budget in bytes; null means unlimited.
+   * Sent by a quota-aware daemon; absent on older ones.
+   */
+  trafficBudgetBytes?: number | null
+  /** Gate-metered bytes for the current UTC month, independent of the window. */
+  usedBytes?: number
+  /** Budget headroom for the current UTC month, clamped at zero; null if unlimited. */
+  remainingBytes?: number | null
 }
 
 /** Per-user roll-up; `usedBytes` is the byte total inside the window. */
@@ -1167,7 +1178,10 @@ export interface UsageSummary {
   rowsRetained?: number
   /** Whole days the retained rows cover, derived from the oldest retained row. */
   retentionDays?: number
-  /** Always sent by the daemon; false while the gate treats quotas as advisory. */
+  /**
+   * True when the gate enforces a monthly traffic budget for at least one
+   * account in the response. The account rows then carry live monthly meters.
+   */
   quotaEnforced?: boolean
 }
 
