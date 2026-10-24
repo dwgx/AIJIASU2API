@@ -29,6 +29,11 @@ const (
 	// small queue is enough; a slow sink degrades to dropped rows, never to a
 	// delayed delivery.
 	DefaultHookQueueSize = 256
+
+	// deadLetterDedupeSize bounds the set of delivery ids OnDeadLetter has
+	// already reported. A fixed ring keeps a long-lived daemon's memory flat;
+	// after the ring wraps, an ancient id can be reported again.
+	deadLetterDedupeSize = 256
 )
 
 // DefaultBackoff is the delay before attempt n+1. The last entry repeats when
@@ -76,6 +81,14 @@ type Config struct {
 	// HookQueueSize bounds the OnDelivery queue. A non-positive value selects
 	// DefaultHookQueueSize.
 	HookQueueSize int
+
+	// OnDeadLetter receives each delivery that exhausted its retries, at most
+	// once per delivery id (the recent ids are kept in a fixed-size ring).
+	// Unlike OnDelivery it runs synchronously on the delivery worker after the
+	// final attempt is recorded, so a slow sink delays that endpoint's next
+	// delivery; the operator audit write it usually drives is an in-memory
+	// append. Nil disables the hook.
+	OnDeadLetter func(Delivery)
 }
 
 // Dispatcher delivers events to registered endpoints. It is safe for
@@ -109,6 +122,14 @@ type Dispatcher struct {
 	hookCh      chan Delivery
 	hookDropped atomic.Int64
 	hookWG      sync.WaitGroup
+
+	// deadLetterSeen holds the delivery ids already reported to OnDeadLetter.
+	// deadLetterRing is the eviction order for that set and is preallocated at
+	// deadLetterDedupeSize, so reporting a dead letter allocates nothing.
+	deadLetterMu   sync.Mutex
+	deadLetterSeen map[string]struct{}
+	deadLetterRing []string
+	deadLetterNext int
 }
 
 type endpointState struct {
@@ -172,18 +193,20 @@ func New(cfg Config) *Dispatcher {
 		cfg.HookQueueSize = DefaultHookQueueSize
 	}
 	dispatcher := &Dispatcher{
-		cfg:          cfg,
-		logger:       cfg.Logger,
-		client:       client,
-		allowHTTP:    cfg.AllowHTTP || os.Getenv("AJS_WEBHOOK_ALLOW_HTTP") == "1",
-		allowPrivate: allowPrivate,
-		ctx:          ctx,
-		cancel:       cancel,
-		sem:          make(chan struct{}, cfg.Workers),
-		endpoints:    make(map[string]Endpoint),
-		states:       make(map[string]*endpointState),
-		dedupe:       make(map[string]time.Time),
-		log:          NewDeliveryLog(cfg.RingSize),
+		cfg:            cfg,
+		logger:         cfg.Logger,
+		client:         client,
+		allowHTTP:      cfg.AllowHTTP || os.Getenv("AJS_WEBHOOK_ALLOW_HTTP") == "1",
+		allowPrivate:   allowPrivate,
+		ctx:            ctx,
+		cancel:         cancel,
+		sem:            make(chan struct{}, cfg.Workers),
+		endpoints:      make(map[string]Endpoint),
+		states:         make(map[string]*endpointState),
+		dedupe:         make(map[string]time.Time),
+		log:            NewDeliveryLog(cfg.RingSize),
+		deadLetterSeen: make(map[string]struct{}, deadLetterDedupeSize),
+		deadLetterRing: make([]string, deadLetterDedupeSize),
 	}
 	if cfg.OnDelivery != nil {
 		dispatcher.hookCh = make(chan Delivery, cfg.HookQueueSize)
@@ -545,12 +568,14 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// record stores an attempt, hands it to the persistence hook and logs it
-// without any payload, secret or header content.
+// record stores an attempt, hands it to the persistence hook, reports a dead
+// letter to OnDeadLetter and logs it without any payload, secret or header
+// content.
 func (d *Dispatcher) record(delivery Delivery) {
 	d.log.Append(delivery)
 	d.publishHook(delivery)
 	if delivery.Status == StatusDeadLetter {
+		d.notifyDeadLetter(delivery)
 		d.logger.Warn("webhook delivery dead-lettered",
 			"endpoint", delivery.EndpointID,
 			"event", delivery.Event,
@@ -603,6 +628,42 @@ func (d *Dispatcher) callDeliveryHook(delivery Delivery) {
 		}
 	}()
 	d.cfg.OnDelivery(delivery)
+}
+
+// notifyDeadLetter reports one retry-exhausted delivery to OnDeadLetter at
+// most once per delivery id. The id set is a fixed-size ring, so a long-lived
+// process pays constant memory; once the ring wraps an ancient id may be
+// reported again.
+func (d *Dispatcher) notifyDeadLetter(delivery Delivery) {
+	if d.cfg.OnDeadLetter == nil {
+		return
+	}
+	d.deadLetterMu.Lock()
+	_, seen := d.deadLetterSeen[delivery.ID]
+	if !seen {
+		if evicted := d.deadLetterRing[d.deadLetterNext]; evicted != "" {
+			delete(d.deadLetterSeen, evicted)
+		}
+		d.deadLetterRing[d.deadLetterNext] = delivery.ID
+		d.deadLetterNext = (d.deadLetterNext + 1) % len(d.deadLetterRing)
+		d.deadLetterSeen[delivery.ID] = struct{}{}
+	}
+	d.deadLetterMu.Unlock()
+	if seen {
+		return
+	}
+	d.callDeadLetterHook(delivery)
+}
+
+// callDeadLetterHook isolates the sink: a panic is logged and the delivery
+// worker continues, so one bad audit row cannot stop an endpoint.
+func (d *Dispatcher) callDeadLetterHook(delivery Delivery) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			d.logger.Error("webhook_dead_letter_hook_panic", "panic", recovered)
+		}
+	}()
+	d.cfg.OnDeadLetter(delivery)
 }
 
 // HookDropped reports how many attempts were dropped because the OnDelivery

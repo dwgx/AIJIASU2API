@@ -803,16 +803,32 @@ func (s sealedWebhookSecrets) Delete(id string) error {
 // Every recorded attempt is appended to the store through OnDelivery. The
 // append is memory-only — the periodic snapshot carries it to disk — and the
 // dispatcher feeds the hook from its own bounded goroutine, so neither a slow
-// disk nor a slow store can delay a delivery.
+// disk nor a slow store can delay a delivery. A delivery that exhausts its
+// retries additionally writes one warning audit row through OnDeadLetter, so
+// an operator sees a receiver that stopped accepting events.
 func startWebhooks(st *store.Store, logger *slog.Logger, secrets api.WebhookSecretStore) (*webhook.Dispatcher, api.EventSink) {
-	dispatcher := webhook.New(webhook.Config{
-		Logger: logger,
-		OnDelivery: func(delivery webhook.Delivery) {
-			if err := st.AppendWebhookDelivery(persistedDelivery(delivery)); err != nil {
-				logger.Warn("webhook_delivery_persist_failed", "delivery", delivery.ID, "error", err)
-			}
-		},
-	})
+	return startWebhooksWithConfig(st, logger, secrets, webhook.Config{})
+}
+
+// startWebhooksWithConfig is startWebhooks with the dispatcher tunables the
+// tests need (attempt count, backoff). Production passes the zero Config,
+// which selects the dispatcher defaults; the persistence and audit hooks are
+// always owned by this function.
+func startWebhooksWithConfig(st *store.Store, logger *slog.Logger, secrets api.WebhookSecretStore, cfg webhook.Config) (*webhook.Dispatcher, api.EventSink) {
+	cfg.Logger = logger
+	cfg.OnDelivery = func(delivery webhook.Delivery) {
+		if err := st.AppendWebhookDelivery(persistedDelivery(delivery)); err != nil {
+			logger.Warn("webhook_delivery_persist_failed", "delivery", delivery.ID, "error", err)
+		}
+	}
+	// The dispatcher dedupes by delivery id, so one exhausted delivery writes
+	// exactly one row. The detail carries the event and the attempt count
+	// only; the URL, signing secret and payload never enter the audit trail.
+	cfg.OnDeadLetter = func(delivery webhook.Delivery) {
+		st.RecordAudit(model.SeverityWarn, "system", "webhook.dead_letter", delivery.EndpointID,
+			fmt.Sprintf("%s after %d attempts", delivery.Event, delivery.Attempt))
+	}
+	dispatcher := webhook.New(cfg)
 	registered, unavailable := 0, 0
 	for _, endpoint := range st.WebhookEndpoints() {
 		secret, ok := openWebhookSecret(secrets, endpoint.ID)
