@@ -339,11 +339,18 @@ func run() error {
 		}),
 	})
 
+	if os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1" {
+		logger.Warn("backup_restore_enabled",
+			"reason", "AJS_BACKUP_ALLOW_RESTORE=1: POST /v1/backup/restore may replace the panel files while the daemon runs")
+	}
 	server := api.New(api.Config{
 		AdminToken:           *token,
 		AllowInsecure:        *insecure,
 		CORSOrigins:          splitList(*corsOrigins),
 		Version:              api.DefaultVersion,
+		StateDir:             envOr("AJS_STATE_DIR", "./data"),
+		StatePath:            statePath,
+		AllowBackupRestore:   os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1",
 		Panel:                panel,
 		LoginService:         loginService,
 		LoginHook:            loginHook,

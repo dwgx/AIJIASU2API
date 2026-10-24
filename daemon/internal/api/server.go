@@ -160,6 +160,19 @@ type Config struct {
 	// Events receives customer-visible events (login/logout, node and schedule
 	// transitions). Nil drops them.
 	Events EventSink
+	// StateDir is the directory holding state.json, secrets.json and
+	// device-secrets.json (AJS_STATE_DIR). Empty disables the /v1/backup
+	// routes with 503 BACKUP_UNAVAILABLE.
+	StateDir string
+	// StatePath overrides where state.json lives (AJS_STATE_FILE); it
+	// defaults to StateDir/state.json, matching the daemon's own resolution,
+	// so a relocated state file is backed up and restored in place.
+	StatePath string
+	// AllowBackupRestore lets POST /v1/backup/restore write the panel files
+	// while the daemon runs (AJS_BACKUP_ALLOW_RESTORE=1). The default refusal
+	// is deliberate: the running daemon keeps the replaced panel in memory and
+	// writes it over state.json on its next snapshot.
+	AllowBackupRestore bool
 }
 
 // Server wires the store to an http.Handler.
@@ -180,6 +193,11 @@ type Server struct {
 	// secret.Store is configured. With a sealer the map stays empty.
 	webhookMu      sync.Mutex
 	webhookSecrets map[string]string
+
+	// backupMu serializes backup and restore: both read or replace the same
+	// state-directory files. TryLock turns a concurrent request into 409
+	// BACKUP_BUSY instead of queueing a multi-megabyte envelope behind it.
+	backupMu sync.Mutex
 }
 
 // New builds a server. Nil store and logger fall back to a seeded store and
@@ -344,6 +362,12 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPatch, "/v1/webhooks/{id}", s.handlePatchWebhook)
 	rt.handle(http.MethodDelete, "/v1/webhooks/{id}", s.handleDeleteWebhook)
 	rt.handle(http.MethodGet, "/v1/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
+
+	// Panel backup routes. All three are admin-only: no scoped key may read or
+	// replace the sealed panel files, so they stay absent from routeScopes.
+	rt.handle(http.MethodPost, "/v1/backup", s.handleBackupCreate)
+	rt.handle(http.MethodPost, "/v1/backup/inspect", s.handleBackupInspect)
+	rt.handle(http.MethodPost, "/v1/backup/restore", s.handleBackupRestore)
 }
 
 // handleTopologyView serves the Resin panel view when configured and the
@@ -442,6 +466,11 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 				limit = store.MaxImportBodyBytes
 			case "/v1/device-pool/import":
 				limit = store.DeviceImportMaxBytes
+			case "/v1/backup/inspect", "/v1/backup/restore":
+				// Both carry a whole envelope, so the default 1 MiB cap would
+				// refuse every real backup. The envelope itself is capped at
+				// backup.MaxEnvelopeBytes inside the handler.
+				limit = maxBackupBodyBytes
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
