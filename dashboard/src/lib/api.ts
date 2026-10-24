@@ -16,19 +16,30 @@ import {
   buildMetrics,
   buildMockExport,
   getDb,
+  mockAssignDevice,
   mockAuditExportCsv,
   mockBulkDelete,
   mockCreateBackup,
   mockCreateScopedKey,
   mockEventsPage,
+  mockExportDevicePool,
+  mockGenerateDevices,
+  mockGetDevicePoolRecord,
   mockImportAccounts,
+  mockImportDevicePool,
   mockInspectBackup,
+  mockListDevicePool,
+  mockPatchDevicePoolRecord,
+  mockPurgeDevice,
+  mockQuarantineDevice,
+  mockReleaseDevice,
   mockRestoreBackup,
+  mockRetireDevice,
   mockRevokeScopedKey,
   resetMockDb,
   syncAccountCounts,
 } from './mock'
-import { ApiError, UnauthorizedError } from './errors'
+import { ApiError, DevicePoolError, UnauthorizedError } from './errors'
 import { WEBHOOK_EVENTS } from './types'
 import type {
   Account,
@@ -55,7 +66,19 @@ import type {
   CreateAccountInput,
   CreateKeyInput,
   CreateKeyResult,
+  CreateLeaseInput,
+  CreateLeaseResult,
   Delivery,
+  DeviceExportEnvelope,
+  DeviceGenerateInput,
+  DeviceImportConflict,
+  DeviceImportResult,
+  DevicePoolExportInput,
+  DevicePoolImportInput,
+  DevicePoolPatchInput,
+  DevicePoolQuery,
+  DevicePoolRecord,
+  DevicePoolView,
   DeviceView,
   DiagnosticsView,
   DisconnectResult,
@@ -216,6 +239,8 @@ interface HttpErrorContext {
   reason: string | null
   details: Record<string, unknown> | null
   retryAfterSec: number | null
+  /** The parsed error document; device-pool import adds a `conflicts` array. */
+  body: Record<string, unknown> | null
 }
 
 function defaultHttpError(context: HttpErrorContext): ApiError {
@@ -278,6 +303,54 @@ function scheduleActionError(context: HttpErrorContext): ApiError {
   )
 }
 
+/**
+ * Reads the top-level `conflicts` array of a 409 import rejection. Unknown
+ * shapes are dropped rather than rendered as blank rows.
+ */
+function parseDeviceConflicts(raw: unknown): DeviceImportConflict[] {
+  if (!Array.isArray(raw)) return []
+  const out: DeviceImportConflict[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const rec = item as Record<string, unknown>
+    if (typeof rec.deviceId !== 'string' || typeof rec.reason !== 'string') continue
+    out.push({
+      deviceId: rec.deviceId,
+      reason: rec.reason,
+      existingFingerprint:
+        typeof rec.existingFingerprint === 'string' ? rec.existingFingerprint : '',
+      importedFingerprint:
+        typeof rec.importedFingerprint === 'string' ? rec.importedFingerprint : '',
+    })
+  }
+  return out
+}
+
+function devicePoolError(context: HttpErrorContext): ApiError {
+  const suffix = context.detail ? ` — ${context.detail.slice(0, 200)}` : ''
+  return new DevicePoolError(
+    context.status,
+    `${context.status} ${context.statusText}${suffix}`,
+    context.code,
+    context.reason,
+    parseDeviceConflicts(context.body?.conflicts),
+  )
+}
+
+/** Empty filters are omitted so the daemon applies its own defaults. */
+function devicePoolQueryString(query: DevicePoolQuery): string {
+  const params = new URLSearchParams()
+  if (query.state) params.set('state', query.state)
+  if (query.platform) params.set('platform', query.platform)
+  if (query.profile) params.set('profile', query.profile)
+  if (query.accountId) params.set('accountId', query.accountId)
+  if (query.q) params.set('q', query.q)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset !== undefined) params.set('offset', String(query.offset))
+  const search = params.toString()
+  return search ? `?${search}` : ''
+}
+
 async function request(
   path: string,
   init: RequestInit = {},
@@ -290,7 +363,7 @@ async function request(
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!response.ok) {
     const raw = await response.text().catch(() => '')
-    const { code, detail, reason, details } = parseErrorBody(raw)
+    const { code, detail, reason, details, body } = parseErrorBody(raw)
     const suffix = detail ? ` — ${detail.slice(0, 200)}` : ''
     if (response.status === 401) {
       // A vendor credential rejection on the account login action is also a
@@ -308,6 +381,7 @@ async function request(
       reason,
       details,
       retryAfterSec: parseRetryAfter(response.headers.get('Retry-After')),
+      body,
     })
   }
   return response
@@ -365,17 +439,21 @@ function parseRetryAfter(header: string | null): number | null {
 /**
  * Reads `{error:{code,message,reason,details}}`; a non-JSON body stays the
  * detail text. `reason`/`details` are additive P1 fields, absent on P0 routes.
+ * `body` is the whole document: device-pool import adds a top-level
+ * `conflicts` array next to the error envelope.
  */
 function parseErrorBody(raw: string): {
   code: string | null
   detail: string
   reason: string | null
   details: Record<string, unknown> | null
+  body: Record<string, unknown> | null
 } {
-  if (!raw) return { code: null, detail: '', reason: null, details: null }
+  if (!raw) return { code: null, detail: '', reason: null, details: null, body: null }
   try {
     const parsed = JSON.parse(raw) as {
       error?: { code?: unknown; message?: unknown; reason?: unknown; details?: unknown }
+      conflicts?: unknown
     }
     const rawDetails = parsed.error?.details
     return {
@@ -386,9 +464,13 @@ function parseErrorBody(raw: string): {
         typeof rawDetails === 'object' && rawDetails !== null
           ? (rawDetails as Record<string, unknown>)
           : null,
+      body:
+        typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : null,
     }
   } catch {
-    return { code: null, detail: raw, reason: null, details: null }
+    return { code: null, detail: raw, reason: null, details: null, body: null }
   }
 }
 
@@ -400,10 +482,8 @@ function clone<T>(value: T): T {
  * A pasted envelope is JSON text; the daemon expects the document itself, not
  * a quoted string. Parsing here keeps that mistake out of the request body.
  */
-function parseEnvelopeDocument(
-  envelope: string | Record<string, unknown>,
-): Record<string, unknown> {
-  if (typeof envelope !== 'string') return envelope
+function parseEnvelopeDocument(envelope: string | object): Record<string, unknown> {
+  if (typeof envelope !== 'string') return envelope as Record<string, unknown>
   let parsed: unknown
   try {
     parsed = JSON.parse(envelope)
@@ -432,6 +512,21 @@ function nextEgressIp(current: string): string {
   const pool = ['203.0.113.24', '198.51.100.44', '192.0.2.77', '203.0.113.88', '198.51.100.91']
   const index = pool.indexOf(current)
   return pool[(index + 1) % pool.length] ?? pool[0]
+}
+
+/** Parses the panel's sticky TTL vocabulary ("8h", "24h", "7d") to seconds. */
+function leaseTtlSeconds(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (trimmed.endsWith('d')) {
+    const days = Number(trimmed.slice(0, -1))
+    return Number.isInteger(days) && days > 0 ? days * 86_400 : null
+  }
+  const match = /^(\d+)(h|m|s)$/.exec(trimmed)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  return amount * (match[2] === 'h' ? 3600 : match[2] === 'm' ? 60 : 1)
 }
 
 const SNAPSHOT_PAGE_SIZE = 500
@@ -2218,6 +2313,144 @@ export const api = {
     return clone(getDb().leases)
   },
 
+  /**
+   * POST /v1/leases — allocate one free node. The idempotency key is sent as
+   * the header the daemon documents; a replay returns the original lease with
+   * `replayed: true` instead of taking a second node.
+   */
+  async createLease(input: CreateLeaseInput): Promise<CreateLeaseResult> {
+    if (!USE_MOCK) {
+      const headers: Record<string, string> = {}
+      if (input.idempotencyKey) headers['Idempotency-Key'] = input.idempotencyKey
+      return http<CreateLeaseResult>('/v1/leases', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: input.userId,
+          platform: input.platform,
+          ...(input.accountId ? { accountId: input.accountId } : {}),
+          ...(input.ttlSeconds ? { ttlSeconds: input.ttlSeconds } : {}),
+        }),
+      })
+    }
+    await wait()
+    const db = getDb()
+    const key = input.idempotencyKey?.trim() ?? ''
+    if (key) {
+      const existing = db.leases.find((lease) => lease.idempotencyKey === key)
+      if (existing) {
+        if (existing.userId !== input.userId || existing.platform !== input.platform) {
+          throw new ApiError(409, 'idempotency key already used for another request', 'CONFLICT')
+        }
+        return { lease: clone(existing), replayed: true }
+      }
+    }
+
+    const user = db.users.find((item) => item.id === input.userId)
+    if (!user) throw new ApiError(404, `user ${input.userId} not found`, 'NOT_FOUND')
+    if (!user.enabled) throw new ApiError(409, `user ${user.name} is suspended`, 'CONFLICT')
+    if (user.quotaBytesMonth !== null && user.usedBytes >= user.quotaBytesMonth) {
+      throw new ApiError(429, `user ${user.name} has exhausted its monthly quota`, 'QUOTA_EXCEEDED')
+    }
+    if (db.leases.some((lease) => lease.userId === user.id && lease.platform === input.platform)) {
+      throw new ApiError(
+        409,
+        `user ${user.name} already holds an active ${input.platform} lease`,
+        'CONFLICT',
+      )
+    }
+
+    const pickNode = (accountId: string): ProxyNode | undefined => {
+      const leased = new Set(db.leases.map((lease) => lease.nodeId))
+      return db.nodes
+        .filter(
+          (node) =>
+            node.accountId === accountId &&
+            !leased.has(node.id) &&
+            (node.state === 'LIVE' || node.state === 'READY'),
+        )
+        .sort((a, b) => (a.state === 'LIVE' ? 0 : 1) - (b.state === 'LIVE' ? 0 : 1))[0]
+    }
+
+    let account: Account | undefined
+    let node: ProxyNode | undefined
+    if (input.accountId) {
+      account = db.accounts.find((item) => item.id === input.accountId)
+      if (!account) throw new ApiError(404, `account ${input.accountId} not found`, 'NOT_FOUND')
+      if (account.platform !== input.platform) {
+        throw new ApiError(
+          400,
+          `account ${account.label} is ${account.platform}, not ${input.platform}`,
+          'INVALID_ARGUMENT',
+        )
+      }
+      if (account.state !== 'active') {
+        throw new ApiError(409, `account ${account.label} is ${account.state}`, 'CONFLICT')
+      }
+      if (db.leases.filter((lease) => lease.accountId === account!.id).length >= account.concurrency) {
+        throw new ApiError(
+          429,
+          `account ${account.label} reached its concurrency of ${account.concurrency} active leases`,
+          'QUOTA_EXCEEDED',
+        )
+      }
+      node = pickNode(account.id)
+      if (!node) throw new ApiError(429, `account ${account.label} has no free node`, 'QUOTA_EXCEEDED')
+    } else {
+      for (const candidate of db.accounts) {
+        if (candidate.platform !== input.platform || candidate.state !== 'active') continue
+        if (db.leases.filter((lease) => lease.accountId === candidate.id).length >= candidate.concurrency) {
+          continue
+        }
+        const free = pickNode(candidate.id)
+        if (free) {
+          account = candidate
+          node = free
+          break
+        }
+      }
+      if (!account || !node) {
+        throw new ApiError(
+          429,
+          `no active ${input.platform} account has a free node`,
+          'QUOTA_EXCEEDED',
+        )
+      }
+    }
+
+    const ttl =
+      input.ttlSeconds && input.ttlSeconds > 0
+        ? input.ttlSeconds
+        : (leaseTtlSeconds(user.stickyTtl) ?? 8 * 3600)
+    db.leaseSeq += 1
+    const now = new Date()
+    const lease: Lease = {
+      id: `lease-${String(db.leaseSeq).padStart(2, '0')}`,
+      userId: user.id,
+      userName: user.name,
+      accountId: account.id,
+      accountLabel: account.label,
+      platform: input.platform,
+      nodeId: node.id,
+      nodeLabel: node.label,
+      region: node.region,
+      egressIp: node.egressIp,
+      protocol: node.protocol,
+      gatePort: node.gatePort,
+      ttlSeconds: ttl,
+      expiresAt: new Date(now.getTime() + ttl * 1000).toISOString(),
+      requests: 0,
+      bytes: 0,
+      sticky: true,
+      status: 'active',
+      idempotencyKey: key,
+      createdAt: now.toISOString(),
+    }
+    db.leases.push(lease)
+    node.inUse += 1
+    return { lease: clone(lease) }
+  },
+
   async rotateLease(id: string): Promise<Lease> {
     if (!USE_MOCK) return http<Lease>(`/v1/leases/${id}/actions/rotate`, { method: 'POST' })
     await wait()
@@ -2232,19 +2465,27 @@ export const api = {
     return clone(lease)
   },
 
-  async releaseLease(id: string): Promise<void> {
+  /** DELETE /v1/leases/{id} — revoke after an explicit confirmation. */
+  async revokeLease(id: string): Promise<void> {
     if (!USE_MOCK) {
-      await http<void>(`/v1/leases/${id}`, { method: 'DELETE' })
+      await http<void>(`/v1/leases/${id}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ confirm: true }),
+      })
       return
     }
     await wait()
     const db = getDb()
     const lease = db.leases.find((item) => item.id === id)
-    if (lease) {
-      const node = db.nodes.find((item) => item.id === lease.nodeId)
-      if (node) node.inUse = Math.max(0, node.inUse - 1)
-    }
+    if (!lease) throw new ApiError(404, `lease ${id} not found`, 'NOT_FOUND')
+    const node = db.nodes.find((item) => item.id === lease.nodeId)
+    if (node) node.inUse = Math.max(0, node.inUse - 1)
     db.leases = db.leases.filter((item) => item.id !== id)
+  },
+
+  /** Historical name kept for callers that predate the revoke wording. */
+  async releaseLease(id: string): Promise<void> {
+    await api.revokeLease(id)
   },
 
   async listUsers(): Promise<PanelUser[]> {
@@ -2995,6 +3236,179 @@ export const api = {
     }
     await wait()
     return clone(mockRestoreBackup({ ...input, envelope: document }))
+  },
+
+  /**
+   * GET /v1/device-pool — filters are server-side; an empty query is the
+   * daemon's first page (50). A disabled pool is still a 200 with
+   * `enabled:false`, never an error.
+   */
+  async listDevicePool(query: DevicePoolQuery = {}): Promise<DevicePoolView> {
+    if (!USE_MOCK) {
+      return http<DevicePoolView>(
+        `/v1/device-pool${devicePoolQueryString(query)}`,
+        {},
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockListDevicePool(query)
+  },
+
+  /** POST /v1/device-pool/generate — one all-or-nothing batch. */
+  async generateDevices(input: DeviceGenerateInput): Promise<DevicePoolRecord[]> {
+    if (!USE_MOCK) {
+      const result = await http<{ devices: DevicePoolRecord[] }>(
+        '/v1/device-pool/generate',
+        { method: 'POST', body: JSON.stringify(input) },
+        devicePoolError,
+      )
+      return result.devices
+    }
+    await wait()
+    return mockGenerateDevices(input)
+  },
+
+  /** GET /v1/device-pool/{id} — hashes only, never the raw identity. */
+  async getDevicePoolRecord(id: string): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}`,
+        {},
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockGetDevicePoolRecord(id)
+  },
+
+  /** PATCH /v1/device-pool/{id} — operator label and notes only. */
+  async patchDevicePoolRecord(
+    id: string,
+    input: DevicePoolPatchInput,
+  ): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body: JSON.stringify(input) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockPatchDevicePoolRecord(id, input)
+  },
+
+  /** POST /v1/device-pool/{id}/assign — bind one account. */
+  async assignDevice(id: string, accountId: string): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}/assign`,
+        { method: 'POST', body: JSON.stringify({ accountId }) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockAssignDevice(id, accountId)
+  },
+
+  /** POST /v1/device-pool/{id}/release — requires the exact confirm token. */
+  async releaseDevice(id: string): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}/release`,
+        { method: 'POST', body: JSON.stringify({ confirm: 'RELEASE' }) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockReleaseDevice(id, 'RELEASE')
+  },
+
+  /** POST /v1/device-pool/{id}/retire — requires the exact confirm token. */
+  async retireDevice(id: string, reason = ''): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}/retire`,
+        { method: 'POST', body: JSON.stringify({ confirm: 'RETIRE', reason }) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockRetireDevice(id, 'RETIRE', reason)
+  },
+
+  /** POST /v1/device-pool/{id}/quarantine — requires the exact confirm token. */
+  async quarantineDevice(id: string, reason = ''): Promise<DevicePoolRecord> {
+    if (!USE_MOCK) {
+      return http<DevicePoolRecord>(
+        `/v1/device-pool/${encodeURIComponent(id)}/quarantine`,
+        { method: 'POST', body: JSON.stringify({ confirm: 'QUARANTINE', reason }) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockQuarantineDevice(id, 'QUARANTINE', reason)
+  },
+
+  /** POST /v1/device-pool/{id}/purge — requires the exact confirm token. */
+  async purgeDevice(id: string): Promise<void> {
+    if (!USE_MOCK) {
+      await http<void>(
+        `/v1/device-pool/${encodeURIComponent(id)}/purge`,
+        { method: 'POST', body: JSON.stringify({ confirm: 'PURGE' }) },
+        devicePoolError,
+      )
+      return
+    }
+    await wait()
+    mockPurgeDevice(id, 'PURGE')
+  },
+
+  /**
+   * POST /v1/device-pool/export — the daemon answers with the encrypted
+   * envelope as JSON, not a file; the page downloads it as `.json`.
+   */
+  async exportDevicePool(input: DevicePoolExportInput): Promise<DeviceExportEnvelope> {
+    if (!USE_MOCK) {
+      return http<DeviceExportEnvelope>(
+        '/v1/device-pool/export',
+        { method: 'POST', body: JSON.stringify(input) },
+        devicePoolError,
+      )
+    }
+    await wait()
+    return mockExportDevicePool(input)
+  },
+
+  /**
+   * POST /v1/device-pool/import — dry run unless `dryRun` is explicitly false.
+   * A 409 rejects with `DevicePoolError.conflicts` populated.
+   */
+  async importDevicePool(input: DevicePoolImportInput): Promise<DeviceImportResult> {
+    const document = parseEnvelopeDocument(input.envelope)
+    if (!USE_MOCK) {
+      return http<DeviceImportResult>(
+        '/v1/device-pool/import',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            passphrase: input.passphrase,
+            envelope: document,
+            dryRun: input.dryRun ?? false,
+            bind: input.bind ?? false,
+            ...(input.confirm ? { confirm: input.confirm } : {}),
+          }),
+        },
+        devicePoolError,
+      )
+    }
+    await wait()
+    // The mock re-validates the document at runtime; the cast only bridges the
+    // parsed JSON object to the envelope type.
+    return mockImportDevicePool({
+      ...input,
+      envelope: document as unknown as DeviceExportEnvelope,
+    })
   },
 
   async resetMock(): Promise<void> {

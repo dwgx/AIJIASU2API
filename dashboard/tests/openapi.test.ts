@@ -37,6 +37,7 @@ interface Parameter {
 interface ResponseObject {
   description?: string
   content?: Record<string, { schema?: JsonSchema }>
+  headers?: Record<string, unknown>
 }
 
 interface Operation {
@@ -194,7 +195,36 @@ describe('docs/openapi.json', () => {
 
   it('keeps the expected path and operation counts', () => {
     expect(Object.keys(doc.paths)).toHaveLength(79)
-    expect(entries).toHaveLength(97)
+    expect(entries).toHaveLength(98)
+  })
+
+  it('documents idempotent lease creation and confirmed revocation', () => {
+    const create = doc.paths['/v1/leases']?.post
+    expect(create).toBeDefined()
+    if (!create) return
+    expect(create['x-implementation-phase']).toBe('P0')
+    expect(create.parameters?.map((parameter) => parameter.$ref)).toContain(
+      '#/components/parameters/IdempotencyKey',
+    )
+    expect(responseSchema(create, '201')).toEqual({
+      $ref: '#/components/schemas/CreateLeaseResult',
+    })
+    expect(create.responses['409']).toEqual({ $ref: '#/components/responses/Conflict' })
+    expect(create.responses['429']).toEqual({ $ref: '#/components/responses/RateLimited' })
+
+    const input = schema('CreateLeaseInput')
+    expect(input.required).toEqual(expect.arrayContaining(['userId', 'platform']))
+    expect(input.properties?.platform).toEqual({ $ref: '#/components/schemas/Platform' })
+    expect(input.properties?.ttlSeconds).toMatchObject({ minimum: 60, maximum: 604800 })
+
+    const revoke = doc.paths['/v1/leases/{id}']?.delete
+    expect(revoke).toBeDefined()
+    if (!revoke) return
+    expect(revoke.requestBody).toBeDefined()
+    expect(revoke.responses['204']?.headers?.Warning).toBeDefined()
+    expect(revoke.responses['400']).toEqual({ $ref: '#/components/responses/BadRequest' })
+    expect(schema('RevokeLeaseInput').required).toEqual(['confirm'])
+    expect(schema('LeaseStatus').enum).toEqual(['active', 'expired', 'revoked'])
   })
 
   it('resolves every $ref', () => {
@@ -302,7 +332,7 @@ describe('docs/openapi.json', () => {
       'id', 'accountId', 'state', 'egressIp', 'protocol', 'gatePort',
     ]))
     expect(schema('Lease').required).toEqual(expect.arrayContaining([
-      'id', 'userId', 'nodeId', 'ttlSeconds', 'expiresAt',
+      'id', 'userId', 'platform', 'nodeId', 'ttlSeconds', 'expiresAt', 'status', 'idempotencyKey',
     ]))
     expect(schema('PanelUser').properties?.quotaBytesMonth?.oneOf).toBeDefined()
     expect(schema('ApiKey').properties?.revokedAt?.oneOf).toBeDefined()

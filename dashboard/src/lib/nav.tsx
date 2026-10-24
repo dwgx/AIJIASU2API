@@ -1,6 +1,7 @@
 import {
   ApcAccountsIcon,
   ApcBackupIcon,
+  ApcDevicePoolIcon,
   ApcLabIcon,
   ApcLeasesIcon,
   ApcLogsIcon,
@@ -66,6 +67,13 @@ export const NAV_SECTIONS: NavSection[] = [
         labelKey: 'nav.leases',
         icon: ApcLeasesIcon,
         keywords: 'sticky egress ip ttl rotate release 固定 出口 轮换 释放 租约',
+      },
+      {
+        to: '/device-pool',
+        labelKey: 'nav.devicePool',
+        icon: ApcDevicePoolIcon,
+        keywords:
+          'device identity pool fingerprint seal generate assign retire quarantine purge export import 设备 身份 设备池 指纹 生成 绑定 退役 隔离 清除 导出 导入',
       },
     ],
   },

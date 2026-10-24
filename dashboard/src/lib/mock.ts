@@ -19,6 +19,19 @@ import type {
   BackupRestoreView,
   BulkDeleteItem,
   BulkDeleteResult,
+  DeviceExportEnvelope,
+  DeviceGenerateInput,
+  DeviceImportConflict,
+  DeviceImportDevice,
+  DeviceImportResult,
+  DevicePoolExportInput,
+  DevicePoolImportInput,
+  DevicePoolPatchInput,
+  DevicePoolProfile,
+  DevicePoolQuery,
+  DevicePoolRecord,
+  DevicePoolState,
+  DevicePoolView,
   DeviceView,
   DiagnosticsView,
   EgressCheckResult,
@@ -54,7 +67,7 @@ import type {
   WebhookEvent,
 } from './types'
 import { SCOPES, WEBHOOK_EVENTS } from './types'
-import { ApiError } from './errors'
+import { ApiError, DevicePoolError } from './errors'
 import { regionName } from './regions'
 
 const MINUTE = 60_000
@@ -96,6 +109,17 @@ export interface MockDb {
   mutationSeq: number
   /** Epoch ms of the last guarded egress check per nodeId; reset with the dataset. */
   egressCheckedAt: Record<string, number>
+  /** Device pool records (hash-only views, exactly as the API returns them). */
+  devicePool: DevicePoolRecord[]
+  /** In-memory stand-in for the sealed material; never persisted or rendered. */
+  deviceMaterials: Record<string, MockDeviceMaterial>
+  devicePoolSeq: number
+}
+
+/** The mock's sealed-material stand-in: raw values never reach a view. */
+export interface MockDeviceMaterial {
+  machineCode: string
+  identity: { uid: string; osdid: string; cuid: string; cseid: string }
 }
 
 export const DEFAULT_SETTINGS: PanelSettings = {
@@ -222,7 +246,12 @@ function buildNodes(now: number): ProxyNode[] {
   }))
 }
 function buildLeases(now: number): Lease[] {
-  const rows: Array<Omit<Lease, 'createdAt' | 'expiresAt'> & { createdAgo: number; expiresIn: number }> = [
+  const rows: Array<
+    Omit<Lease, 'createdAt' | 'expiresAt' | 'platform' | 'status' | 'idempotencyKey'> & {
+      createdAgo: number
+      expiresIn: number
+    }
+  > = [
     { id: 'lease-01', userId: 'u-01', userName: 'ada.ops', accountId: 'acc-01', accountLabel: 'Northwind Ops', nodeId: 'node-01', nodeLabel: 'cn-zj-01', region: 'cn-zj', egressIp: '203.0.113.11', protocol: 'socks5', gatePort: 13000, ttlSeconds: 8 * 3600, requests: 18_432, bytes: 4_200_000_000, sticky: true, createdAgo: 2.8 * HOUR, expiresIn: 5.2 * HOUR },
     { id: 'lease-02', userId: 'u-01', userName: 'ada.ops', accountId: 'acc-03', accountLabel: 'Edge APAC', nodeId: 'node-06', nodeLabel: 'hk-02', region: 'hk', egressIp: '198.51.100.31', protocol: 'socks5', gatePort: 13005, ttlSeconds: 8 * 3600, requests: 6_204, bytes: 1_100_000_000, sticky: true, createdAgo: 1.1 * HOUR, expiresIn: 6.9 * HOUR },
     { id: 'lease-03', userId: 'u-02', userName: 'build-bot', accountId: 'acc-02', accountLabel: 'Field Lab', nodeId: 'node-04', nodeLabel: 'jp-tyo-01', region: 'jp-tyo', egressIp: '198.51.100.21', protocol: 'socks5', gatePort: 13003, ttlSeconds: 3600, requests: 3_912, bytes: 780_000_000, sticky: false, createdAgo: 0.4 * HOUR, expiresIn: 0.6 * HOUR },
@@ -232,8 +261,19 @@ function buildLeases(now: number): Lease[] {
     { id: 'lease-07', userId: 'u-04', userName: 'field.lab', accountId: 'acc-04', accountLabel: 'Partner EU', nodeId: 'node-09', nodeLabel: 'de-fra-01', region: 'de-fra', egressIp: '192.0.2.41', protocol: 'http', gatePort: 13008, ttlSeconds: 8 * 3600, requests: 2_884, bytes: 640_000_000, sticky: true, createdAgo: 5.4 * HOUR, expiresIn: 2.6 * HOUR },
     { id: 'lease-08', userId: 'u-04', userName: 'field.lab', accountId: 'acc-04', accountLabel: 'Partner EU', nodeId: 'node-10', nodeLabel: 'uk-lon-01', region: 'uk-lon', egressIp: '192.0.2.42', protocol: 'http', gatePort: 13009, ttlSeconds: 8 * 3600, requests: 1_190, bytes: 205_000_000, sticky: false, createdAgo: 1.9 * HOUR, expiresIn: 6.1 * HOUR },
   ]
+  const platformByAccount: Record<string, Platform> = {
+    'acc-01': 'android',
+    'acc-02': 'ios',
+    'acc-03': 'linux',
+    'acc-04': 'windows',
+    'acc-05': 'android',
+    'acc-06': 'android',
+  }
   return rows.map(({ createdAgo, expiresIn, ...lease }) => ({
     ...lease,
+    platform: platformByAccount[lease.accountId] ?? 'android',
+    status: 'active',
+    idempotencyKey: '',
     createdAt: iso(now - createdAgo),
     expiresAt: iso(now + expiresIn),
   }))
@@ -415,6 +455,7 @@ export function createDb(now = Date.now()): MockDb {
   const users = buildUsers(now)
   const nodes = buildNodes(now)
   const accounts = buildAccounts(now)
+  const devicePool = buildDevicePool(now, accounts)
   return {
     accounts,
     nodes,
@@ -430,10 +471,11 @@ export function createDb(now = Date.now()): MockDb {
     leaseSeq: 8,
     mutationSeq: 0,
     egressCheckedAt: {},
+    devicePool: devicePool.records,
+    deviceMaterials: devicePool.materials,
+    devicePoolSeq: devicePool.seq,
   }
 }
-
-let db = createDb()
 
 export function getDb(): MockDb {
   return db
@@ -2240,3 +2282,960 @@ export function mockRestoreBackup(input: {
     diff,
   }
 }
+
+/* --------------------------------------------------------------------------
+ * Device pool — mock parity for daemon/internal/api/device_pool.go
+ *
+ * Views are hash-only, exactly like the daemon's. Raw material lives in
+ * `deviceMaterials` (memory only, never localStorage) so export → import can
+ * round-trip. Envelopes use an explicitly non-cryptographic cipher: this mock
+ * has no synchronous PBKDF2 path and never claims the daemon's protection, so
+ * a mock envelope is readable by the mock and by nothing else.
+ * ------------------------------------------------------------------------ */
+
+const DEVICE_POOL_LIMIT = 2000
+const DEVICE_POOL_PAGE = 50
+const DEVICE_POOL_PAGE_MAX = 200
+const DEVICE_POOL_GENERATE_MAX = 100
+const DEVICE_POOL_EXPORT_MAX = 1000
+const DEVICE_POOL_PASSPHRASE_MIN = 12
+const DEVICE_POOL_PASSPHRASE_MAX = 1024
+const MOCK_DEVICE_KDF = 'mock-pbkdf2-sha256'
+const MOCK_DEVICE_CIPHER = 'mock-aes-256-gcm'
+const MOCK_DEVICE_ID = /^dev_[0-9a-f]{16}$/
+
+interface MockDeviceProfileMeta {
+  family: Platform
+  version: string
+  osp: string
+  osd: string
+  osv: string
+  lang: string
+}
+
+const MOCK_DEVICE_PROFILES: Record<DevicePoolProfile, MockDeviceProfileMeta> = {
+  'linux-4.2.3.0-binary': {
+    family: 'linux',
+    version: '4.2.3.0',
+    osp: 'linux',
+    osd: 'Linux 6.8.0-45-generic',
+    osv: '6.8.0',
+    lang: 'en-US',
+  },
+  'linux-4.3.0.1-binary': {
+    family: 'linux',
+    version: '4.3.0.1',
+    osp: 'linux',
+    osd: 'Linux 6.9.0-12-generic',
+    osv: '6.9.0',
+    lang: 'en-US',
+  },
+  'openajs-4.11.10.0-rawtcp': {
+    family: 'android',
+    version: '4.11.10.0',
+    osp: 'android',
+    osd: 'Android 14',
+    osv: '14',
+    lang: 'zh-CN',
+  },
+}
+
+function mockDeviceSeed(value: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash >>> 0
+}
+
+/** Deterministic lowercase hex. The mock never claims sha256 for these. */
+function mockDeviceHex(value: string, length: number): string {
+  let state = mockDeviceSeed(value) || 0x9e3779b9
+  let out = ''
+  while (out.length < length) {
+    state ^= state << 13
+    state >>>= 0
+    state ^= state >>> 17
+    state ^= state << 5
+    state >>>= 0
+    out += state.toString(16).padStart(8, '0')
+  }
+  return out.slice(0, length)
+}
+
+function mockDeviceShortHash(value: string): string {
+  return `sha256:${mockDeviceHex(`short:${value}`, 16)}`
+}
+
+function mockDeviceFingerprint(value: string): string {
+  return `sha256:${mockDeviceHex(`fingerprint:${value}`, 64)}`
+}
+
+function mockDeviceMaterial(id: string): MockDeviceMaterial {
+  return {
+    machineCode: `mc_${mockDeviceHex(`machine:${id}`, 24)}`,
+    identity: {
+      uid: mockDeviceHex(`uid:${id}`, 24),
+      osdid: mockDeviceHex(`osdid:${id}`, 32),
+      cuid: mockDeviceHex(`cuid:${id}`, 16),
+      cseid: mockDeviceHex(`cseid:${id}`, 32),
+    },
+  }
+}
+
+/** Mirrors store.deviceFingerprint: identity plus machine code, version-free. */
+function mockMaterialFingerprint(material: MockDeviceMaterial): string {
+  const { uid, osdid, cuid, cseid } = material.identity
+  return mockDeviceFingerprint(`${material.machineCode}|${uid}|${osdid}|${cuid}|${cseid}`)
+}
+
+function mockDeviceAccountKey(family: Platform, username: string): string {
+  return mockDeviceShortHash(`ajs.account.v1|${family}|${username}`)
+}
+
+function mockDeviceError(status: number, reason: string | null, message: string): DevicePoolError {
+  const code = status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : 'INVALID_ARGUMENT'
+  return new DevicePoolError(status, message, code, reason)
+}
+
+function mockDeviceNotFound(id: string): DevicePoolError {
+  return mockDeviceError(404, 'DEVICE_NOT_FOUND', `device ${JSON.stringify(id)} not found`)
+}
+
+interface MockDeviceRecordInput {
+  id: string
+  label: string
+  notes?: string
+  state: DevicePoolState
+  profile: DevicePoolProfile
+  algorithm: string
+  material: MockDeviceMaterial
+  createdAt: string
+  account?: Account | null
+  accountKey?: string
+  assignedAt?: string | null
+  presentedAt?: string | null
+  firstSeenAt?: string | null
+  lastSeenAt?: string | null
+  loginCount?: number
+  retiredAt?: string | null
+  retiredReason?: string
+}
+
+function mockDeviceRecord(input: MockDeviceRecordInput): DevicePoolRecord {
+  const meta = MOCK_DEVICE_PROFILES[input.profile]
+  const accountKey = input.account
+    ? mockDeviceAccountKey(meta.family, input.account.username)
+    : (input.accountKey ?? '')
+  const { uid, osdid, cuid, cseid } = input.material.identity
+  return {
+    id: input.id,
+    label: input.label,
+    notes: input.notes ?? '',
+    state: input.state,
+    platform: meta.family,
+    profile: input.profile,
+    algorithm: input.algorithm,
+    fingerprint: mockMaterialFingerprint(input.material),
+    hashes: {
+      uid: mockDeviceShortHash(uid),
+      osdid: mockDeviceShortHash(osdid),
+      cuid: mockDeviceShortHash(cuid),
+      cseid: mockDeviceShortHash(cseid),
+      machine: mockDeviceShortHash(input.material.machineCode),
+    },
+    claims: {
+      site: 'https://api.ajiasu.com',
+      version: meta.version,
+      osp: meta.osp,
+      osd: meta.osd,
+      osv: meta.osv,
+      lang: meta.lang,
+    },
+    accountId: input.account?.id,
+    accountLabel: input.account?.label,
+    accountKey,
+    createdAt: input.createdAt,
+    assignedAt: input.assignedAt ?? null,
+    presentedAt: input.presentedAt ?? null,
+    firstSeenAt: input.firstSeenAt ?? null,
+    lastSeenAt: input.lastSeenAt ?? null,
+    loginCount: input.loginCount ?? 0,
+    retiredAt: input.retiredAt ?? null,
+    retiredReason: input.retiredReason ?? '',
+    materialPresent: true,
+    warnings: [],
+  }
+}
+
+function buildDevicePool(
+  now: number,
+  accounts: Account[],
+): { records: DevicePoolRecord[]; materials: Record<string, MockDeviceMaterial>; seq: number } {
+  const accountByID = new Map(accounts.map((account) => [account.id, account]))
+  const specs: Array<{
+    label: string
+    profile: DevicePoolProfile
+    state: DevicePoolState
+    accountId?: string
+    createdDaysAgo: number
+    presentedDaysAgo?: number
+    retiredDaysAgo?: number
+    retiredReason?: string
+  }> = [
+    { label: 'pool-linux-01', profile: 'linux-4.2.3.0-binary', state: 'available', createdDaysAgo: 12 },
+    { label: 'pool-linux-02', profile: 'linux-4.3.0.1-binary', state: 'available', createdDaysAgo: 9 },
+    { label: 'pool-android-01', profile: 'openajs-4.11.10.0-rawtcp', state: 'available', createdDaysAgo: 7 },
+    {
+      label: 'northwind-android',
+      profile: 'openajs-4.11.10.0-rawtcp',
+      state: 'assigned',
+      accountId: 'acc-01',
+      createdDaysAgo: 20,
+      presentedDaysAgo: 5,
+    },
+    {
+      label: 'fieldlab-linux',
+      profile: 'linux-4.2.3.0-binary',
+      state: 'assigned',
+      accountId: 'acc-02',
+      createdDaysAgo: 14,
+      presentedDaysAgo: 2,
+    },
+    {
+      label: 'edgeapac-android-retired',
+      profile: 'openajs-4.11.10.0-rawtcp',
+      state: 'retired',
+      accountId: 'acc-03',
+      createdDaysAgo: 60,
+      presentedDaysAgo: 30,
+      retiredDaysAgo: 4,
+      retiredReason: 'released_after_presentation',
+    },
+    { label: 'qa-quarantined', profile: 'linux-4.2.3.0-binary', state: 'quarantined', createdDaysAgo: 40 },
+  ]
+  const records: DevicePoolRecord[] = []
+  const materials: Record<string, MockDeviceMaterial> = {}
+  specs.forEach((spec, index) => {
+    const id = `dev_${mockDeviceHex(`seed-id:${index}`, 16)}`
+    const material = mockDeviceMaterial(id)
+    const createdAt = now - spec.createdDaysAgo * DAY
+    const presentedAt =
+      spec.presentedDaysAgo === undefined ? null : iso(now - spec.presentedDaysAgo * DAY)
+    const retiredAt = spec.retiredDaysAgo === undefined ? null : iso(now - spec.retiredDaysAgo * DAY)
+    const account = spec.accountId ? accountByID.get(spec.accountId) ?? null : null
+    // Only an assigned record carries a binding; a tombstone keeps the key.
+    const bound = spec.state === 'assigned' ? account : null
+    records.push(
+      mockDeviceRecord({
+        id,
+        label: spec.label,
+        state: spec.state,
+        profile: spec.profile,
+        algorithm: 'random/v1',
+        material,
+        createdAt: iso(createdAt),
+        account: bound,
+        accountKey:
+          account && !bound
+            ? mockDeviceAccountKey(MOCK_DEVICE_PROFILES[spec.profile].family, account.username)
+            : undefined,
+        assignedAt: bound ? iso(createdAt + HOUR) : null,
+        presentedAt,
+        firstSeenAt: presentedAt,
+        lastSeenAt: presentedAt ? iso(Date.parse(presentedAt) + 2 * HOUR) : null,
+        loginCount: presentedAt ? 3 : 0,
+        retiredAt,
+        retiredReason: spec.retiredReason ?? '',
+      }),
+    )
+    materials[id] = material
+  })
+  return { records, materials, seq: specs.length }
+}
+
+export function mockListDevicePool(query: DevicePoolQuery = {}): DevicePoolView {
+  const db = getDb()
+  const counts: Record<DevicePoolState, number> = {
+    available: 0,
+    assigned: 0,
+    retired: 0,
+    quarantined: 0,
+  }
+  for (const record of db.devicePool) counts[record.state] += 1
+  const needle = (query.q ?? '').trim().toLowerCase()
+  const filtered = db.devicePool.filter((record) => {
+    if (query.state && record.state !== query.state) return false
+    if (query.platform && record.platform !== query.platform) return false
+    if (query.profile && record.profile !== query.profile) return false
+    if (query.accountId && record.accountId !== query.accountId) return false
+    if (needle) {
+      const haystack =
+        `${record.id} ${record.label} ${record.notes} ${record.accountId ?? ''}`.toLowerCase()
+      if (!haystack.includes(needle)) return false
+    }
+    return true
+  })
+  filtered.sort((left, right) =>
+    left.createdAt === right.createdAt
+      ? left.id.localeCompare(right.id)
+      : left.createdAt.localeCompare(right.createdAt),
+  )
+  const requested = query.limit && query.limit > 0 ? query.limit : DEVICE_POOL_PAGE
+  const limit = Math.min(requested, DEVICE_POOL_PAGE_MAX)
+  const offset = Math.max(0, query.offset ?? 0)
+  return {
+    enabled: true,
+    total: db.devicePool.length,
+    counts,
+    devices: structuredClone(filtered.slice(offset, offset + limit)),
+    warnings: [],
+  }
+}
+
+export function mockGenerateDevices(input: DeviceGenerateInput): DevicePoolRecord[] {
+  const db = getDb()
+  const profileName = input.profile
+  const profile = MOCK_DEVICE_PROFILES[profileName]
+  if (!profile) {
+    throw mockDeviceError(
+      400,
+      'DEVICE_PROFILE_MISMATCH',
+      `unknown device profile ${JSON.stringify(profileName)}`,
+    )
+  }
+  if (input.platform && input.platform !== profile.family) {
+    throw mockDeviceError(
+      400,
+      'DEVICE_PROFILE_MISMATCH',
+      `profile ${JSON.stringify(profileName)} is a ${profile.family} profile, not ${input.platform}`,
+    )
+  }
+  const algorithm = input.algorithm || 'random/v1'
+  if (algorithm !== 'random/v1' && algorithm !== 'hmac-sha256/v1') {
+    throw mockDeviceError(
+      400,
+      'DEVICE_ALGORITHM_UNKNOWN',
+      `unknown device algorithm ${JSON.stringify(algorithm)}`,
+    )
+  }
+  const count = input.count && input.count > 0 ? input.count : 1
+  if (count > DEVICE_POOL_GENERATE_MAX) {
+    throw mockDeviceError(400, null, 'device generation count must be between 1 and 100')
+  }
+  if (db.devicePool.length + count > DEVICE_POOL_LIMIT) {
+    throw mockDeviceError(
+      409,
+      'DEVICE_POOL_FULL',
+      `device pool would exceed its limit of ${DEVICE_POOL_LIMIT} records`,
+    )
+  }
+  const now = Date.now()
+  const prefix = (input.labelPrefix ?? '').trim()
+  const records: DevicePoolRecord[] = []
+  for (let index = 0; index < count; index += 1) {
+    db.devicePoolSeq += 1
+    const id = `dev_${mockDeviceHex(`id:${db.devicePoolSeq}`, 16)}`
+    const material = mockDeviceMaterial(id)
+    const label = prefix ? (count > 1 ? `${prefix}-${index + 1}` : prefix) : ''
+    const record = mockDeviceRecord({
+      id,
+      label,
+      state: 'available',
+      profile: profileName,
+      algorithm,
+      material,
+      createdAt: iso(now),
+    })
+    db.devicePool.push(record)
+    db.deviceMaterials[id] = material
+    records.push(record)
+  }
+  return structuredClone(records)
+}
+
+export function mockGetDevicePoolRecord(id: string): DevicePoolRecord {
+  const record = getDb().devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  return structuredClone(record)
+}
+
+export function mockPatchDevicePoolRecord(
+  id: string,
+  input: DevicePoolPatchInput,
+): DevicePoolRecord {
+  const record = getDb().devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  if (input.label !== undefined) record.label = input.label.trim()
+  if (input.notes !== undefined) record.notes = input.notes.trim()
+  return structuredClone(record)
+}
+
+function mockLiveNode(accountId: string | undefined): boolean {
+  if (!accountId) return false
+  return getDb().nodes.some((node) => node.accountId === accountId && node.state === 'LIVE')
+}
+
+export function mockAssignDevice(id: string, accountId: string): DevicePoolRecord {
+  const db = getDb()
+  const record = db.devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  const account = db.accounts.find((item) => item.id === accountId)
+  if (!account) throw mockDeviceError(404, null, `account ${JSON.stringify(accountId)} not found`)
+  if (db.devicePool.some((item) => item.state === 'assigned' && item.accountId === accountId)) {
+    throw mockDeviceError(409, 'DEVICE_ALREADY_BOUND', `account ${JSON.stringify(accountId)} is already bound to a device`)
+  }
+  const meta = MOCK_DEVICE_PROFILES[record.profile as DevicePoolProfile]
+  const accountKey = mockDeviceAccountKey(meta.family, account.username)
+  if (record.state === 'available') {
+    if (record.presentedAt) {
+      throw mockDeviceError(
+        409,
+        'DEVICE_STATE_INVALID',
+        `device ${JSON.stringify(id)} has been presented to the vendor and cannot be reassigned`,
+      )
+    }
+  } else if (record.state === 'retired') {
+    if (record.accountKey !== accountKey) {
+      throw mockDeviceError(
+        409,
+        'DEVICE_STATE_INVALID',
+        `device ${JSON.stringify(id)} was retired for a different account key`,
+      )
+    }
+  } else {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is ${record.state} and cannot be assigned`,
+    )
+  }
+  record.state = 'assigned'
+  record.accountId = account.id
+  record.accountLabel = account.label
+  record.accountKey = accountKey
+  record.assignedAt = iso(Date.now())
+  record.retiredAt = null
+  record.retiredReason = ''
+  return structuredClone(record)
+}
+
+function mockRequireDeviceConfirm(got: string, want: string): void {
+  if (got !== want) {
+    throw mockDeviceError(400, 'DEVICE_CONFIRM_REQUIRED', `confirm must be "${want}"`)
+  }
+}
+
+export function mockReleaseDevice(id: string, confirm: string): DevicePoolRecord {
+  mockRequireDeviceConfirm(confirm, 'RELEASE')
+  const record = getDb().devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  if (record.state !== 'assigned') {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is ${record.state} and cannot be released`,
+    )
+  }
+  if (mockLiveNode(record.accountId)) {
+    throw mockDeviceError(
+      409,
+      'DEVICE_ACTIVE_SESSION',
+      `account ${JSON.stringify(record.accountId)} has a live node; log out before releasing its device`,
+    )
+  }
+  record.accountId = undefined
+  record.accountLabel = undefined
+  record.assignedAt = null
+  if (record.presentedAt) {
+    record.state = 'retired'
+    record.retiredAt = iso(Date.now())
+    record.retiredReason = 'released_after_presentation'
+  } else {
+    record.state = 'available'
+    record.retiredAt = null
+    record.retiredReason = ''
+  }
+  return structuredClone(record)
+}
+
+export function mockRetireDevice(id: string, confirm: string, reason = ''): DevicePoolRecord {
+  mockRequireDeviceConfirm(confirm, 'RETIRE')
+  const record = getDb().devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  if (record.state === 'quarantined') {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is quarantined; purge it instead`,
+    )
+  }
+  if (record.state === 'assigned' && mockLiveNode(record.accountId)) {
+    throw mockDeviceError(
+      409,
+      'DEVICE_ACTIVE_SESSION',
+      `account ${JSON.stringify(record.accountId)} has a live node; log out before retiring its device`,
+    )
+  }
+  record.accountId = undefined
+  record.accountLabel = undefined
+  record.assignedAt = null
+  record.state = 'retired'
+  record.retiredAt = iso(Date.now())
+  record.retiredReason = reason.trim() || 'operator'
+  return structuredClone(record)
+}
+
+export function mockQuarantineDevice(id: string, confirm: string, reason = ''): DevicePoolRecord {
+  mockRequireDeviceConfirm(confirm, 'QUARANTINE')
+  const record = getDb().devicePool.find((item) => item.id === id)
+  if (!record) throw mockDeviceNotFound(id)
+  if (record.state === 'assigned') {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is assigned; release it before quarantining`,
+    )
+  }
+  if (record.state === 'quarantined') {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is already quarantined`,
+    )
+  }
+  record.state = 'quarantined'
+  record.retiredAt = null
+  record.retiredReason = reason.trim() || 'operator'
+  return structuredClone(record)
+}
+
+export function mockPurgeDevice(id: string, confirm: string): void {
+  mockRequireDeviceConfirm(confirm, 'PURGE')
+  const db = getDb()
+  const index = db.devicePool.findIndex((item) => item.id === id)
+  if (index < 0) throw mockDeviceNotFound(id)
+  if (db.devicePool[index].state === 'assigned') {
+    throw mockDeviceError(
+      409,
+      'DEVICE_STATE_INVALID',
+      `device ${JSON.stringify(id)} is assigned; rotate or release it before purging`,
+    )
+  }
+  db.devicePool.splice(index, 1)
+  delete db.deviceMaterials[id]
+}
+
+/* --- export / import --- */
+
+export interface MockDeviceExportDevice {
+  deviceId: string
+  label?: string
+  platform: Platform
+  profile: DevicePoolProfile
+  algorithm: string
+  machineCode: string
+  identity: MockDeviceMaterial['identity']
+  fingerprint: string
+  accountKey?: string
+  createdAt: string
+  presentedAt?: string
+  firstSeenAt?: string
+  lastSeenAt?: string
+  loginCount: number
+}
+
+export interface MockDeviceExportPayload {
+  format: 'ajs-device-pool-payload'
+  version: 1
+  exportedAt: string
+  source: { stateSchema: number }
+  devices: MockDeviceExportDevice[]
+}
+
+function mockBytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function mockBase64ToBytes(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes
+}
+
+function mockXorCipher(bytes: Uint8Array, key: string): Uint8Array {
+  let state = mockDeviceSeed(`stream:${key}`) || 0x9e3779b9
+  const out = new Uint8Array(bytes.length)
+  for (let index = 0; index < bytes.length; index += 1) {
+    state ^= state << 13
+    state >>>= 0
+    state ^= state >>> 17
+    state ^= state << 5
+    state >>>= 0
+    out[index] = bytes[index] ^ (state & 0xff)
+  }
+  return out
+}
+
+function validateMockDevicePassphrase(passphrase: string): void {
+  const bytes = new TextEncoder().encode(passphrase).length
+  if (bytes < DEVICE_POOL_PASSPHRASE_MIN || bytes > DEVICE_POOL_PASSPHRASE_MAX) {
+    throw mockDeviceError(
+      400,
+      null,
+      `device passphrase must be between ${DEVICE_POOL_PASSPHRASE_MIN} and ${DEVICE_POOL_PASSPHRASE_MAX} bytes`,
+    )
+  }
+}
+
+/** Seals a payload with the mock cipher; exported for import-conflict tests. */
+export function mockSealDevicePayload(
+  payload: MockDeviceExportPayload,
+  passphrase: string,
+): DeviceExportEnvelope {
+  const plaintext = JSON.stringify(payload)
+  const createdAt = iso(Date.now())
+  const salt = new Uint8Array(16)
+  const nonce = new Uint8Array(12)
+  for (let index = 0; index < salt.length; index += 1) {
+    salt[index] = mockDeviceSeed(`salt:${createdAt}:${index}`) & 0xff
+  }
+  for (let index = 0; index < nonce.length; index += 1) {
+    nonce[index] = mockDeviceSeed(`nonce:${createdAt}:${index}`) & 0xff
+  }
+  return {
+    format: 'ajs-device-pool',
+    version: 1,
+    createdAt,
+    kdf: { name: MOCK_DEVICE_KDF, iterations: 600000, salt: mockBytesToBase64(salt) },
+    cipher: { name: MOCK_DEVICE_CIPHER, nonce: mockBytesToBase64(nonce) },
+    payloadSha256: mockDeviceHex(`payload:${plaintext}`, 64),
+    ciphertext: mockBytesToBase64(mockXorCipher(new TextEncoder().encode(plaintext), passphrase)),
+    deviceCount: payload.devices.length,
+  }
+}
+
+/** Opens a mock envelope; exported for import-conflict tests. */
+export function mockOpenDeviceEnvelope(
+  envelope: DeviceExportEnvelope,
+  passphrase: string,
+): MockDeviceExportPayload {
+  validateMockDevicePassphrase(passphrase)
+  if (envelope?.format !== 'ajs-device-pool' || envelope.version !== 1) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import envelope format or version is unsupported')
+  }
+  if (envelope.kdf?.name !== MOCK_DEVICE_KDF || envelope.cipher?.name !== MOCK_DEVICE_CIPHER) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import cipher is unsupported')
+  }
+  let plaintext: string
+  try {
+    plaintext = new TextDecoder().decode(
+      mockXorCipher(mockBase64ToBytes(envelope.ciphertext), passphrase),
+    )
+  } catch {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_DECRYPT', 'device import could not be decrypted')
+  }
+  if (mockDeviceHex(`payload:${plaintext}`, 64) !== envelope.payloadSha256) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_DECRYPT', 'device import could not be decrypted')
+  }
+  let payload: MockDeviceExportPayload
+  try {
+    payload = JSON.parse(plaintext) as MockDeviceExportPayload
+  } catch {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import payload is malformed')
+  }
+  if (payload.format !== 'ajs-device-pool-payload' || payload.version !== 1) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import payload format is unsupported')
+  }
+  if (!Array.isArray(payload.devices) || payload.devices.length === 0) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import payload has an invalid record count')
+  }
+  if (envelope.deviceCount !== payload.devices.length) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import count does not match the payload')
+  }
+  return payload
+}
+
+export function mockExportDevicePool(input: DevicePoolExportInput): DeviceExportEnvelope {
+  const db = getDb()
+  validateMockDevicePassphrase(input.passphrase)
+  if (input.confirm !== undefined && input.confirm !== 'EXPORT') {
+    throw mockDeviceError(400, 'DEVICE_CONFIRM_REQUIRED', 'confirm must be "EXPORT"')
+  }
+  const scope = input.scope ?? 'assigned'
+  if (scope !== 'assigned' && scope !== 'retired' && scope !== 'all') {
+    throw mockDeviceError(400, null, `unknown device export scope ${JSON.stringify(scope)}`)
+  }
+  let selected = db.devicePool.filter((record) => record.state !== 'quarantined')
+  if (input.deviceIds?.length) {
+    const byID = new Map(db.devicePool.map((record) => [record.id, record]))
+    selected = []
+    for (const id of new Set(input.deviceIds)) {
+      const record = byID.get(id)
+      if (!record) {
+        throw mockDeviceError(404, 'DEVICE_NOT_FOUND', `device ${JSON.stringify(id)} not found`)
+      }
+      if (record.state === 'quarantined') {
+        throw mockDeviceError(
+          409,
+          'DEVICE_STATE_INVALID',
+          `device ${JSON.stringify(id)} is quarantined and cannot be exported`,
+        )
+      }
+      selected.push(record)
+    }
+  } else if (scope === 'assigned') {
+    selected = selected.filter((record) => record.state === 'assigned')
+  } else if (scope === 'retired') {
+    selected = selected.filter((record) => record.state === 'retired')
+  }
+  if (selected.length === 0) {
+    throw mockDeviceError(409, 'DEVICE_EXPORT_EMPTY', 'no device records match the export scope')
+  }
+  if (selected.length > DEVICE_POOL_EXPORT_MAX) {
+    throw mockDeviceError(
+      409,
+      'DEVICE_EXPORT_FORMAT',
+      `device export is limited to ${DEVICE_POOL_EXPORT_MAX} records`,
+    )
+  }
+  const payload: MockDeviceExportPayload = {
+    format: 'ajs-device-pool-payload',
+    version: 1,
+    exportedAt: iso(Date.now()),
+    source: { stateSchema: 1 },
+    devices: selected.map((record) => {
+      const material = db.deviceMaterials[record.id] ?? mockDeviceMaterial(record.id)
+      return {
+        deviceId: record.id,
+        label: input.includeLabels === false || !record.label ? undefined : record.label,
+        platform: record.platform,
+        profile: record.profile as DevicePoolProfile,
+        algorithm: record.algorithm,
+        machineCode: material.machineCode,
+        identity: { ...material.identity },
+        fingerprint: record.fingerprint,
+        accountKey:
+          input.includeAccountKeys === false ? undefined : record.accountKey || undefined,
+        createdAt: record.createdAt,
+        presentedAt: record.presentedAt ?? undefined,
+        firstSeenAt: record.firstSeenAt ?? undefined,
+        lastSeenAt: record.lastSeenAt ?? undefined,
+        loginCount: record.loginCount,
+      }
+    }),
+  }
+  return mockSealDevicePayload(payload, input.passphrase)
+}
+
+function mockValidateImportDevice(device: MockDeviceExportDevice): void {
+  if (!device || typeof device.deviceId !== 'string' || !MOCK_DEVICE_ID.test(device.deviceId)) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import payload contains an invalid device id')
+  }
+  const meta = MOCK_DEVICE_PROFILES[device.profile]
+  if (!meta || device.platform !== meta.family) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', `device ${JSON.stringify(device.deviceId)} has an invalid profile`)
+  }
+  if (typeof device.machineCode !== 'string' || !device.machineCode) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', `device ${JSON.stringify(device.deviceId)} has no machine code`)
+  }
+  const identity = device.identity
+  if (
+    !identity ||
+    typeof identity.uid !== 'string' ||
+    typeof identity.osdid !== 'string' ||
+    typeof identity.cuid !== 'string' ||
+    typeof identity.cseid !== 'string'
+  ) {
+    throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', `device ${JSON.stringify(device.deviceId)} has an invalid identity`)
+  }
+}
+
+export function mockImportDevicePool(input: DevicePoolImportInput): DeviceImportResult {
+  const db = getDb()
+  validateMockDevicePassphrase(input.passphrase)
+  const envelope = input.envelope as DeviceExportEnvelope
+  const payload = mockOpenDeviceEnvelope(envelope, input.passphrase)
+
+  const planned: DeviceImportDevice[] = []
+  const materials = new Map<string, MockDeviceMaterial>()
+  const seenIDs = new Set<string>()
+  const seenFingerprints = new Set<string>()
+  for (const device of payload.devices) {
+    mockValidateImportDevice(device)
+    const material: MockDeviceMaterial = {
+      machineCode: device.machineCode,
+      identity: { ...device.identity },
+    }
+    const fingerprint = mockMaterialFingerprint(material)
+    if (seenIDs.has(device.deviceId)) {
+      throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', `device import payload repeats ${JSON.stringify(device.deviceId)}`)
+    }
+    if (seenFingerprints.has(fingerprint)) {
+      throw mockDeviceError(400, 'DEVICE_IMPORT_FORMAT', 'device import payload repeats a fingerprint')
+    }
+    seenIDs.add(device.deviceId)
+    seenFingerprints.add(fingerprint)
+    materials.set(device.deviceId, material)
+    planned.push({
+      deviceId: device.deviceId,
+      state: device.presentedAt ? 'retired' : 'available',
+      fingerprint,
+      action: 'added',
+    })
+  }
+
+  const conflicts: DeviceImportConflict[] = []
+  for (const plan of planned) {
+    const existing = db.devicePool.find((record) => record.id === plan.deviceId)
+    if (!existing) {
+      if (db.devicePool.some((record) => record.fingerprint === plan.fingerprint)) {
+        conflicts.push({
+          deviceId: plan.deviceId,
+          existingFingerprint: db.devicePool.find((record) => record.fingerprint === plan.fingerprint)?.fingerprint ?? '',
+          importedFingerprint: plan.fingerprint,
+          reason: 'duplicate_identity',
+        })
+      }
+      continue
+    }
+    if (existing.fingerprint !== plan.fingerprint) {
+      conflicts.push({
+        deviceId: plan.deviceId,
+        existingFingerprint: existing.fingerprint,
+        importedFingerprint: plan.fingerprint,
+        reason: 'fingerprint_mismatch',
+      })
+      continue
+    }
+    plan.action = 'skipped'
+    plan.state = existing.state
+  }
+  if (conflicts.length > 0) {
+    throw new DevicePoolError(
+      409,
+      `device import has ${conflicts.length} conflicts`,
+      'CONFLICT',
+      'DEVICE_IMPORT_CONFLICT',
+      conflicts,
+    )
+  }
+
+  // Binding plan: one local account whose key matches, and no existing binding.
+  const bindings = new Map<string, string>()
+  const bindingConflicts: Array<{ deviceId: string; accountId?: string; reason: string }> = []
+  if (input.bind) {
+    for (const device of payload.devices) {
+      const plan = planned.find((item) => item.deviceId === device.deviceId)
+      if (!plan) continue
+      if (plan.action === 'skipped') {
+        const live = db.devicePool.find((record) => record.id === device.deviceId)
+        if (!live || (live.state !== 'available' && live.state !== 'retired')) {
+          bindingConflicts.push({ deviceId: device.deviceId, reason: 'record_assigned' })
+          continue
+        }
+      }
+      if (!device.accountKey) continue
+      const meta = MOCK_DEVICE_PROFILES[device.profile]
+      const matches = db.accounts.filter(
+        (account) => mockDeviceAccountKey(meta.family, account.username) === device.accountKey,
+      )
+      if (matches.length === 0) continue
+      if (matches.length > 1) {
+        bindingConflicts.push({ deviceId: device.deviceId, reason: 'multiple_matches' })
+        continue
+      }
+      if (db.devicePool.some((record) => record.state === 'assigned' && record.accountId === matches[0].id)) {
+        bindingConflicts.push({
+          deviceId: device.deviceId,
+          accountId: matches[0].id,
+          reason: 'already_bound',
+        })
+        continue
+      }
+      bindings.set(device.deviceId, matches[0].id)
+    }
+  }
+
+  const result: DeviceImportResult = {
+    dryRun: input.dryRun ?? false,
+    format: envelope.format,
+    version: envelope.version,
+    added: 0,
+    skipped: 0,
+    conflicts: 0,
+    bound: bindings.size,
+    devices: planned,
+    bindingConflicts,
+    warnings: [],
+  }
+  for (const plan of planned) {
+    if (plan.action === 'added') result.added += 1
+    else result.skipped += 1
+  }
+  const neverPresented = payload.devices.filter((device) => !device.presentedAt).length
+  if (neverPresented > 0) {
+    result.warnings.push(
+      `${neverPresented} identities have never been presented to the vendor and are available`,
+    )
+  }
+  if (result.dryRun) return structuredClone(result)
+
+  const now = iso(Date.now())
+  for (const device of payload.devices) {
+    const plan = planned.find((item) => item.deviceId === device.deviceId)
+    if (!plan) continue
+    const material = materials.get(device.deviceId) as MockDeviceMaterial
+    if (plan.action === 'skipped') {
+      const accountID = bindings.get(device.deviceId)
+      if (!accountID) continue
+      const live = db.devicePool.find((record) => record.id === device.deviceId)
+      if (!live || (live.state !== 'available' && live.state !== 'retired')) continue
+      const account = db.accounts.find((item) => item.id === accountID)
+      if (!account) continue
+      live.state = 'assigned'
+      live.accountId = account.id
+      live.accountLabel = account.label
+      live.assignedAt = now
+      live.retiredAt = null
+      live.retiredReason = ''
+      continue
+    }
+    const meta = MOCK_DEVICE_PROFILES[device.profile]
+    const accountID = bindings.get(device.deviceId)
+    const account = accountID ? db.accounts.find((item) => item.id === accountID) ?? null : null
+    const record = mockDeviceRecord({
+      id: device.deviceId,
+      label: device.label ?? '',
+      state: account ? 'assigned' : device.presentedAt ? 'retired' : 'available',
+      profile: device.profile,
+      algorithm: device.algorithm || 'import/v1',
+      material,
+      createdAt: device.createdAt || now,
+      account,
+      accountKey: account
+        ? undefined
+        : device.accountKey || (meta ? mockDeviceAccountKey(meta.family, '') : ''),
+      assignedAt: account ? now : null,
+      presentedAt: device.presentedAt ?? null,
+      firstSeenAt: device.firstSeenAt ?? null,
+      lastSeenAt: device.lastSeenAt ?? null,
+      loginCount: device.loginCount ?? 0,
+      retiredAt: !account && device.presentedAt ? now : null,
+      retiredReason: !account && device.presentedAt ? 'imported' : '',
+    })
+    db.devicePool.push(record)
+    db.deviceMaterials[record.id] = material
+  }
+  return structuredClone(result)
+}
+
+// Initialized last: the seed builders read module consts declared above, so
+// calling this earlier would hit their temporal dead zone.
+let db = createDb()

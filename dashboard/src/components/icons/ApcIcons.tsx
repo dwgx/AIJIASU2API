@@ -102,6 +102,16 @@ export const ApcLeasesIcon = createIcon(
   </>,
 )
 
+export const ApcDevicePoolIcon = createIcon(
+  'ApcDevicePoolIcon',
+  <>
+    <rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2" />
+    <rect x="13" y="3.5" width="7.5" height="7.5" rx="2" />
+    <rect x="3.5" y="13" width="7.5" height="7.5" rx="2" />
+    <path d="M16.75 12.5v4.4M16.75 19.6v.1" />
+  </>,
+)
+
 export const ApcUsersIcon = createIcon(
   'ApcUsersIcon',
   <>

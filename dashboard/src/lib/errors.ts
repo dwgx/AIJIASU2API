@@ -1,3 +1,5 @@
+import type { DeviceImportConflict } from './types'
+
 /**
  * HTTP error with the daemon's `{error:{code,message}}` envelope unpacked.
  * `message` stays human-readable so list views can render it directly, while
@@ -21,5 +23,28 @@ export class UnauthorizedError extends ApiError {
   constructor(message = '401 Unauthorized') {
     super(401, message, 'UNAUTHORIZED')
     this.name = 'UnauthorizedError'
+  }
+}
+
+/**
+ * A device-pool write rejected by the daemon. `reason` is the stable DEVICE_*
+ * machine code; an import conflict also carries the per-record `conflicts`
+ * array that the generic error envelope would drop.
+ */
+export class DevicePoolError extends ApiError {
+  readonly reason: string | null
+  readonly conflicts: DeviceImportConflict[]
+
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    reason: string | null = null,
+    conflicts: DeviceImportConflict[] = [],
+  ) {
+    super(status, message, code)
+    this.name = 'DevicePoolError'
+    this.reason = reason
+    this.conflicts = conflicts
   }
 }

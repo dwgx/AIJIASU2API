@@ -8,6 +8,7 @@ import { ThemeProvider } from './lib/theme'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
 const Backup = lazy(() => import('./pages/Backup'))
+const DevicePool = lazy(() => import('./pages/DevicePool'))
 const Lab = lazy(() => import('./pages/Lab'))
 const Leases = lazy(() => import('./pages/Leases'))
 const Logs = lazy(() => import('./pages/Logs'))
@@ -43,6 +44,7 @@ export default function App() {
                   <Route path="/accounts" element={<Accounts />} />
                   <Route path="/nodes" element={<Nodes />} />
                   <Route path="/leases" element={<Leases />} />
+                  <Route path="/device-pool" element={<DevicePool />} />
                   <Route path="/users" element={<Users />} />
                   <Route path="/requests" element={<Requests />} />
                   <Route path="/logs" element={<Logs />} />

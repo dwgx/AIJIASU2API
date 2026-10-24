@@ -1,40 +1,171 @@
-import { Pin, RotateCw, ShieldAlert, ShieldCheck, Ticket, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { Pin, Plus, RotateCw, ShieldAlert, ShieldCheck, Ticket, Trash2 } from 'lucide-react'
+import { useId, useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import { formatDate, formatNumber, formatTtl, proxyUrl } from '../lib/format'
 import { useI18n } from '../lib/i18n'
-import type { Lease } from '../lib/types'
+import type { Account, Lease, PanelUser, Platform } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
-import { ConfirmDialog } from '../components/Overlay'
+import { ConfirmDialog, Modal } from '../components/Overlay'
 import { useToast } from '../components/Toast'
 import { CopyButton } from '../components/CopyButton'
 import {
   Badge,
+  Button,
   Card,
   EmptyState,
   ErrorState,
+  Field,
   IconButton,
   PageHeader,
+  Select,
   TableSkeleton,
 } from '../components/primitives'
+
+const PLATFORMS: Platform[] = ['android', 'ios', 'windows', 'linux']
+
+const TTL_OPTIONS = [
+  { value: '3600', labelKey: 'leases.ttl1h' },
+  { value: '28800', labelKey: 'leases.ttl8h' },
+  { value: '86400', labelKey: 'leases.ttl24h' },
+  { value: '604800', labelKey: 'leases.ttl7d' },
+] as const
+
+interface CreateForm {
+  userId: string
+  platform: Platform
+  accountId: string
+  ttlSeconds: number
+}
+
+function emptyForm(): CreateForm {
+  return { userId: '', platform: 'android', accountId: '', ttlSeconds: 28_800 }
+}
+
+/**
+ * A fresh key per dialog open. Retrying a failed submit with the same key is
+ * safe: the daemon returns the original lease instead of allocating a second
+ * node. The key is never persisted or rendered.
+ */
+function newIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID()
+  return `lease-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function accountOptionLabel(account: Account): string {
+  return `${account.label} · ${account.id}`
+}
+
+function userOptionLabel(user: PanelUser): string {
+  return `${user.name} · ${user.id}`
+}
 
 export default function Leases() {
   const leases = useAsync(() => api.listLeases(), [], { intervalMs: 15_000 })
   const lab = useAsync(() => api.getLabOverview(), [], { intervalMs: 30_000 })
+  const users = useAsync(() => api.listUsers(), [], { intervalMs: 60_000 })
+  const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 60_000 })
   const { push } = useToast()
   const { t } = useI18n()
-  const [releaseId, setReleaseId] = useState<string | null>(null)
-  const [releasing, setReleasing] = useState(false)
+  const [revokeId, setRevokeId] = useState<string | null>(null)
+  const [revoking, setRevoking] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
+  const [idempotencyKey, setIdempotencyKey] = useState('')
+  const [form, setForm] = useState<CreateForm>(emptyForm)
+  const userFieldId = useId()
+  const platformFieldId = useId()
+  const accountFieldId = useId()
+  const ttlFieldId = useId()
 
-  const releaseTarget = leases.data?.find((lease) => lease.id === releaseId) ?? null
+  const revokeTarget = leases.data?.find((lease) => lease.id === revokeId) ?? null
   const stickyCount = leases.data?.filter((lease) => lease.sticky).length ?? 0
   // Rotation is only real when the daemon has a Resin admin token. Without it
   // the store rewrites the recorded IP and adds 17 synthetic requests. A
   // disabled lab overview also leaves the posture unknown, so treat it as off.
   const rotateDisabled =
     lab.data !== undefined && (lab.data.enabled === false || !lab.data.modes?.resin)
+
+  const userOptions = useMemo(
+    () =>
+      (users.data ?? []).map((user) => ({
+        value: user.id,
+        label: userOptionLabel(user),
+        description: user.platform,
+      })),
+    [users.data],
+  )
+
+  const accountOptions = useMemo(() => {
+    const available = (accounts.data ?? []).filter(
+      (account) => account.platform === form.platform && account.state === 'active',
+    )
+    return [
+      { value: '', label: t('leases.anyAccount') },
+      ...available.map((account) => ({
+        value: account.id,
+        label: accountOptionLabel(account),
+        description: account.username,
+      })),
+    ]
+  }, [accounts.data, form.platform, t])
+
+  const openCreate = () => {
+    setForm(emptyForm())
+    setCreateError('')
+    setIdempotencyKey(newIdempotencyKey())
+    setCreateOpen(true)
+  }
+
+  const changePlatform = (platform: Platform) => {
+    setForm((current) => {
+      const account = accounts.data?.find((item) => item.id === current.accountId)
+      return {
+        ...current,
+        platform,
+        accountId: account && account.platform === platform ? current.accountId : '',
+      }
+    })
+  }
+
+  const submitCreate = async () => {
+    if (!form.userId) {
+      setCreateError(t('leases.createUserRequired'))
+      return
+    }
+    setCreating(true)
+    setCreateError('')
+    try {
+      const result = await api.createLease({
+        userId: form.userId,
+        platform: form.platform,
+        accountId: form.accountId || undefined,
+        ttlSeconds: form.ttlSeconds,
+        idempotencyKey,
+      })
+      leases.reload()
+      push(
+        t('leases.toastCreated', {
+          name: result.lease.userName,
+          node: result.lease.nodeLabel,
+        }),
+        'success',
+      )
+      if (result.warning) {
+        push(t('leases.toastCreatedWarning', { warning: result.warning }), 'danger')
+      }
+      setCreateOpen(false)
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : t('leases.createFailed')
+      setCreateError(message)
+      push(message, 'danger')
+    } finally {
+      setCreating(false)
+    }
+  }
 
   const rotate = async (lease: Lease) => {
     if (rotateDisabled) {
@@ -50,18 +181,18 @@ export default function Leases() {
     }
   }
 
-  const confirmRelease = async () => {
-    if (!releaseId) return
-    setReleasing(true)
+  const confirmRevoke = async () => {
+    if (!revokeId) return
+    setRevoking(true)
     try {
-      await api.releaseLease(releaseId)
+      await api.revokeLease(revokeId)
       leases.reload()
       push(t('leases.toastReleased'), 'success')
-      setReleaseId(null)
+      setRevokeId(null)
     } catch (cause) {
       push(cause instanceof Error ? cause.message : t('leases.toastReleaseFailed'), 'danger')
     } finally {
-      setReleasing(false)
+      setRevoking(false)
     }
   }
 
@@ -159,7 +290,7 @@ export default function Leases() {
           <IconButton
             label={t('leases.releaseLease', { name: lease.userName })}
             icon={<Trash2 size={14} />}
-            onClick={() => setReleaseId(lease.id)}
+            onClick={() => setRevokeId(lease.id)}
           />
         </span>
       ),
@@ -175,6 +306,11 @@ export default function Leases() {
           sticky: stickyCount,
         })}
         refresh={summarizeRefresh([leases])}
+        actions={
+          <Button variant="primary" icon={<Plus size={14} />} onClick={openCreate}>
+            {t('leases.newLease')}
+          </Button>
+        }
       />
 
       <div className="callout callout--info">
@@ -215,28 +351,108 @@ export default function Leases() {
                 title={t('leases.emptyTitle')}
                 description={t('leases.emptyDesc')}
                 icon={<Ticket size={20} aria-hidden="true" />}
+                action={
+                  <Button variant="secondary" icon={<Plus size={14} />} onClick={openCreate}>
+                    {t('leases.emptyAction')}
+                  </Button>
+                }
               />
             }
           />
         )}
       </Card>
 
+      <Modal
+        open={createOpen}
+        title={t('leases.createTitle')}
+        description={t('leases.createDesc')}
+        onClose={() => {
+          if (!creating) setCreateOpen(false)
+        }}
+        size="md"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={creating}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="primary" onClick={() => void submitCreate()} loading={creating}>
+              {t('leases.createConfirm')}
+            </Button>
+          </>
+        }
+      >
+        <div className="form">
+          <Field
+            label={t('leases.fieldUser')}
+            htmlFor={userFieldId}
+            hint={users.data && users.data.length === 0 ? t('leases.noUsers') : undefined}
+          >
+            <Select
+              id={userFieldId}
+              aria-label={t('leases.fieldUser')}
+              options={userOptions}
+              value={form.userId}
+              onChange={(value) => setForm((current) => ({ ...current, userId: value }))}
+              placeholder={t('leases.selectUser')}
+              searchable
+            />
+          </Field>
+          <Field label={t('leases.fieldPlatform')} htmlFor={platformFieldId}>
+            <Select
+              id={platformFieldId}
+              aria-label={t('leases.fieldPlatform')}
+              options={PLATFORMS.map((platform) => ({ value: platform, label: platform }))}
+              value={form.platform}
+              onChange={(value) => changePlatform(value as Platform)}
+            />
+          </Field>
+          <Field label={t('leases.fieldAccount')} htmlFor={accountFieldId}>
+            <Select
+              id={accountFieldId}
+              aria-label={t('leases.fieldAccount')}
+              options={accountOptions}
+              value={form.accountId}
+              onChange={(value) => setForm((current) => ({ ...current, accountId: value }))}
+            />
+          </Field>
+          <Field label={t('leases.fieldTtl')} htmlFor={ttlFieldId}>
+            <Select
+              id={ttlFieldId}
+              aria-label={t('leases.fieldTtl')}
+              options={TTL_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.labelKey),
+              }))}
+              value={String(form.ttlSeconds)}
+              onChange={(value) =>
+                setForm((current) => ({ ...current, ttlSeconds: Number(value) }))
+              }
+            />
+          </Field>
+          {createError ? (
+            <p className="form-error" role="alert">
+              {createError}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
       <ConfirmDialog
-        open={releaseTarget !== null}
+        open={revokeTarget !== null}
         title={t('leases.releaseTitle')}
         description={
-          releaseTarget
+          revokeTarget
             ? t('leases.releaseDesc', {
-                name: releaseTarget.userName,
-                node: releaseTarget.nodeLabel,
-                ip: releaseTarget.egressIp,
+                name: revokeTarget.userName,
+                node: revokeTarget.nodeLabel,
+                ip: revokeTarget.egressIp,
               })
             : ''
         }
         confirmLabel={t('leases.releaseConfirm')}
-        busy={releasing}
-        onConfirm={() => void confirmRelease()}
-        onCancel={() => setReleaseId(null)}
+        busy={revoking}
+        onConfirm={() => void confirmRevoke()}
+        onCancel={() => setRevokeId(null)}
       />
     </div>
   )

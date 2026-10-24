@@ -105,12 +105,16 @@ export interface ProxyNode {
   lastProbeAt: string
 }
 
+export type LeaseStatus = 'active' | 'expired' | 'revoked'
+
 export interface Lease {
   id: string
   userId: string
   userName: string
   accountId: string
   accountLabel: string
+  /** Account platform the lease was allocated for. */
+  platform: Platform
   nodeId: string
   nodeLabel: string
   region: string
@@ -122,7 +126,28 @@ export interface Lease {
   requests: number
   bytes: number
   sticky: boolean
+  status: LeaseStatus
+  /** The create request's retry key; empty when none was sent. */
+  idempotencyKey: string
   createdAt: string
+}
+
+/** POST /v1/leases body. ttlSeconds 0/absent uses the user's sticky TTL. */
+export interface CreateLeaseInput {
+  userId: string
+  platform: Platform
+  accountId?: string
+  ttlSeconds?: number
+  idempotencyKey?: string
+}
+
+/** POST /v1/leases response: the committed lease plus a publish warning. */
+export interface CreateLeaseResult {
+  lease: Lease
+  /** Set when the lease committed but the optional publish hook failed. */
+  warning?: string
+  /** True when an Idempotency-Key matched an existing lease. */
+  replayed?: boolean
 }
 
 export interface PanelUser {
@@ -1467,4 +1492,218 @@ export interface BackupRestoreView {
   /** Blobs an apply wrote; empty for a dry run. */
   files?: string[]
   warning?: string
+}
+
+/* --------------------------------------------------------------------------
+ * Device pool — daemon/internal/store/device_pool.go and api/device_pool.go
+ *
+ * A record carries hashes only: machineCode and the raw identity never leave
+ * the daemon. `hashes` is keyed uid / osdid / cuid / cseid / machine with
+ * sha256 prefixes; `claims` is public vendor metadata (site, version, osp…).
+ * ------------------------------------------------------------------------ */
+
+export type DevicePoolState = 'available' | 'assigned' | 'retired' | 'quarantined'
+
+/** The three compiled-in client profiles; the family decides the identity format. */
+export type DevicePoolProfile =
+  | 'linux-4.2.3.0-binary'
+  | 'linux-4.3.0.1-binary'
+  | 'openajs-4.11.10.0-rawtcp'
+
+/** `import/v1` and `legacy/v1` label records the daemon did not generate. */
+export type DevicePoolAlgorithm =
+  | 'random/v1'
+  | 'hmac-sha256/v1'
+  | 'import/v1'
+  | 'legacy/v1'
+
+export type DevicePoolExportScope = 'assigned' | 'retired' | 'all'
+
+/** The exact confirm token each lifecycle route requires. */
+export type DevicePoolConfirmAction = 'release' | 'retire' | 'quarantine' | 'purge'
+
+export type DeviceImportConflictReason = 'duplicate_identity' | 'fingerprint_mismatch'
+
+export const DEVICE_POOL_STATES: readonly DevicePoolState[] = [
+  'available',
+  'assigned',
+  'retired',
+  'quarantined',
+]
+
+export const DEVICE_POOL_PROFILES: readonly DevicePoolProfile[] = [
+  'linux-4.2.3.0-binary',
+  'linux-4.3.0.1-binary',
+  'openajs-4.11.10.0-rawtcp',
+]
+
+/** Generators an operator may select; import/legacy records are not new batches. */
+export const DEVICE_POOL_GENERATORS: readonly Exclude<
+  DevicePoolAlgorithm,
+  'import/v1' | 'legacy/v1'
+>[] = ['random/v1', 'hmac-sha256/v1']
+
+export const DEVICE_CONFIRM_TOKENS: Record<DevicePoolConfirmAction, string> = {
+  release: 'RELEASE',
+  retire: 'RETIRE',
+  quarantine: 'QUARANTINE',
+  purge: 'PURGE',
+}
+
+/** The export dialog's confirm token; the daemon accepts it when supplied. */
+export const DEVICE_EXPORT_CONFIRM = 'EXPORT'
+
+/** One hash-only pool record (GET /v1/device-pool). */
+export interface DevicePoolRecord {
+  id: string
+  label: string
+  notes: string
+  state: DevicePoolState
+  platform: Platform
+  profile: string
+  algorithm: DevicePoolAlgorithm | string
+  /** Full sha256:<64 hex> identity fingerprint. */
+  fingerprint: string
+  /** sha256:<16 hex> per field; raw values never leave the daemon. */
+  hashes: Record<string, string>
+  claims: Record<string, string>
+  accountId?: string
+  accountLabel?: string
+  accountKey?: string
+  createdAt: string
+  assignedAt: string | null
+  presentedAt: string | null
+  firstSeenAt: string | null
+  lastSeenAt: string | null
+  loginCount: number
+  retiredAt: string | null
+  retiredReason: string
+  materialPresent: boolean
+  warnings: string[]
+}
+
+/**
+ * GET /v1/device-pool. A disabled pool is still a 200: `enabled:false` carries
+ * the stable reason so the page can render the setup hint. `total` and
+ * `counts` describe the whole pool, not the page.
+ */
+export interface DevicePoolView {
+  enabled: boolean
+  reason?: string
+  total: number
+  counts: Record<DevicePoolState, number> | Partial<Record<DevicePoolState, number>>
+  devices: DevicePoolRecord[]
+  warnings?: string[]
+}
+
+/** Query for GET /v1/device-pool; empty fields are omitted from the request. */
+export interface DevicePoolQuery {
+  state?: DevicePoolState
+  platform?: Platform
+  profile?: string
+  accountId?: string
+  q?: string
+  limit?: number
+  offset?: number
+}
+
+/** POST /v1/device-pool/generate — one all-or-nothing batch. */
+export interface DeviceGenerateInput {
+  count: number
+  platform: Platform
+  profile: DevicePoolProfile
+  algorithm: Exclude<DevicePoolAlgorithm, 'import/v1' | 'legacy/v1'>
+  labelPrefix?: string
+}
+
+export interface DeviceGenerateResult {
+  devices: DevicePoolRecord[]
+}
+
+/** PATCH /v1/device-pool/{id} — free-text operator metadata only. */
+export interface DevicePoolPatchInput {
+  label?: string
+  notes?: string
+}
+
+/** POST /v1/device-pool/export — the passphrase-encrypted envelope. */
+export interface DevicePoolExportInput {
+  passphrase: string
+  scope?: DevicePoolExportScope
+  deviceIds?: string[]
+  includeAccountKeys?: boolean
+  includeLabels?: boolean
+  /** Optional; when supplied it must be exactly EXPORT. */
+  confirm?: typeof DEVICE_EXPORT_CONFIRM
+}
+
+export interface DeviceEnvelopeKDF {
+  name: string
+  iterations: number
+  /** Base64 salt. */
+  salt: string
+}
+
+export interface DeviceEnvelopeCipher {
+  name: string
+  /** Base64 nonce. */
+  nonce: string
+}
+
+/** The only device-pool representation that leaves the daemon. */
+export interface DeviceExportEnvelope {
+  format: 'ajs-device-pool' | string
+  version: number
+  createdAt: string
+  kdf: DeviceEnvelopeKDF
+  cipher: DeviceEnvelopeCipher
+  payloadSha256: string
+  ciphertext: string
+  deviceCount: number
+}
+
+/** POST /v1/device-pool/import — dry run unless `dryRun` is false. */
+export interface DevicePoolImportInput {
+  passphrase: string
+  envelope: string | DeviceExportEnvelope
+  dryRun?: boolean
+  bind?: boolean
+  confirm?: string
+}
+
+/** One per-record import outcome. */
+export interface DeviceImportDevice {
+  deviceId: string
+  state: DevicePoolState
+  fingerprint: string
+  action: 'added' | 'skipped' | string
+}
+
+/** An imported record whose account binding could not be resolved. */
+export interface DeviceBindingConflict {
+  deviceId: string
+  accountId?: string
+  reason: string
+}
+
+/** The dry-run and commit summary. */
+export interface DeviceImportResult {
+  dryRun: boolean
+  format: string
+  version: number
+  added: number
+  skipped: number
+  conflicts: number
+  bound: number
+  devices: DeviceImportDevice[]
+  bindingConflicts: DeviceBindingConflict[]
+  warnings: string[]
+}
+
+/** One all-or-nothing import conflict; no record was mutated. */
+export interface DeviceImportConflict {
+  deviceId: string
+  existingFingerprint: string
+  importedFingerprint: string
+  reason: DeviceImportConflictReason | string
 }

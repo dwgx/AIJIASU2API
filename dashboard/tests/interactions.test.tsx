@@ -47,22 +47,22 @@ describe('leases', () => {
     expect(await screen.findByText(/Lease rotated/)).toBeInTheDocument()
   })
 
-  it('releases a lease after confirmation', async () => {
+  it('revokes a lease after confirmation', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/leases')
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Leases', level: 1 })
-    const releaseButtons = await screen.findAllByRole('button', { name: 'Release lease for ada.ops' })
+    const releaseButtons = await screen.findAllByRole('button', { name: 'Revoke lease for ada.ops' })
     const row = releaseButtons[0].closest('tr')
     expect(row).not.toBeNull()
     const before = within(row as HTMLElement).getByText(IP_PATTERN).textContent
 
     await user.click(releaseButtons[0])
-    const dialog = await screen.findByRole('dialog', { name: 'Release lease?' })
-    await user.click(within(dialog).getByRole('button', { name: 'Release lease' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Revoke lease?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Revoke lease' }))
 
-    expect(await screen.findByText('Lease released')).toBeInTheDocument()
+    expect(await screen.findByText('Lease revoked')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.queryByText(before as string)).not.toBeInTheDocument()
     })
