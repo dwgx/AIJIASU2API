@@ -130,11 +130,16 @@ func (s *Server) durationMs(started time.Time) int64 {
 	return duration
 }
 
-// recordFlow stamps the id and duration, then appends to the bounded ring.
+// recordFlow stamps the id and duration, then appends to the bounded ring and
+// hands the stamped record to the optional observer. The observer runs in the
+// flow's goroutine after the ring write, so the Lab view never depends on it.
 func (s *Server) recordFlow(record FlowRecord) {
 	record.ID = s.nextFlowID()
 	record.DurationMs = s.durationMs(record.StartedAt)
 	s.flowRing.add(record)
+	if s.cfg.OnFlow != nil {
+		s.cfg.OnFlow(record)
+	}
 }
 
 // recordReject records a pre-relay refusal. An empty target host means the

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ajsaccountd/internal/model"
@@ -326,6 +327,32 @@ func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, err
 	s.addAuditLocked(model.SeverityInfo, "operator", "request.mutation", node.Label,
 		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
 	return entry, nil
+}
+
+// gateRequestSeq orders metered rows inside one process. The id also carries
+// the append timestamp, so a row retained across a restart keeps a distinct id
+// even when the sequence restarts.
+var gateRequestSeq atomic.Uint64
+
+// AppendRequest prepends one metered request-log row, stamping the id and
+// timestamp when the caller leaves them empty. It applies the same
+// RequestRetention cap as every other writer, so gate metering can never grow
+// the snapshot beyond the documented 10,000 rows. It returns the stored row.
+//
+// The caller owns the row's content. The gate meter passes host:port targets
+// only (never a URL, header or credential) and sets SourceGate.
+func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if entry.ID == "" {
+		entry.ID = fmt.Sprintf("req-gate-%d-%d", s.now().UnixNano(), gateRequestSeq.Add(1))
+	}
+	if entry.TS == "" {
+		entry.TS = iso(s.now())
+	}
+	s.requests = prependCapped(s.requests, entry, RequestRetention)
+	return entry
 }
 
 // UpdateSettings applies a validated partial settings update.

@@ -84,6 +84,7 @@ type RequestSource string
 const (
 	SourceProxy       RequestSource = "proxy"
 	SourceMutationLab RequestSource = "mutation-lab"
+	SourceGate        RequestSource = "gate"
 )
 
 // Account mirrors the dashboard Account interface.

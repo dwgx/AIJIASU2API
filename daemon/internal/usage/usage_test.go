@@ -659,3 +659,57 @@ func TestAggregateRowIDsAreNotRequired(t *testing.T) {
 		t.Fatalf("summary = %+v", got)
 	}
 }
+
+// TestRetentionFields pins the honest-history contract: rowsRetained is the
+// configured store cap (independent of the window and filters) and
+// retentionDays counts the retained span from the oldest row through now.
+func TestRetentionFields(t *testing.T) {
+	agg := New(Config{
+		Now:           func() time.Time { return testNow },
+		RetentionRows: 5000,
+	})
+	logs := []model.RequestLog{
+		logRow("2026-10-01T05:00:00Z", "u1", "ada", "acct-a", "old.example:443", 200, 10, 1),
+		logRow("2026-10-24T09:00:00Z", "u1", "ada", "acct-a", "today.example:443", 200, 20, 2),
+		logRow("not-a-time", "u1", "ada", "acct-a", "bad.example:443", 200, 30, 3),
+	}
+	got, err := agg.Aggregate(logs, Query{
+		From: mustTime(t, "2026-10-24T00:00:00Z"),
+		To:   mustTime(t, "2026-10-24T23:59:59Z"),
+	})
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if got.RowsRetained != 5000 {
+		t.Fatalf("RowsRetained = %d, want the configured 5000", got.RowsRetained)
+	}
+	// 2026-10-01 through 2026-10-24 inclusive.
+	if got.RetentionDays != 24 {
+		t.Fatalf("RetentionDays = %d, want 24", got.RetentionDays)
+	}
+	if got.Requests != 1 || got.Bytes != 20 {
+		t.Fatalf("window totals = %d/%d, want 1/20 (retention must not widen the window)", got.Requests, got.Bytes)
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"rowsRetained":5000`, `"retentionDays":24`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("summary JSON missing %s: %s", want, encoded)
+		}
+	}
+
+	empty, err := New(Config{Now: func() time.Time { return testNow }}).Aggregate(nil, Query{
+		From: mustTime(t, "2026-10-24T00:00:00Z"),
+		To:   mustTime(t, "2026-10-24T23:59:59Z"),
+	})
+	if err != nil {
+		t.Fatalf("Aggregate empty: %v", err)
+	}
+	if empty.RowsRetained != DefaultRetentionRows || empty.RetentionDays != 0 {
+		t.Fatalf("empty retention = %d rows/%d days, want %d/0",
+			empty.RowsRetained, empty.RetentionDays, DefaultRetentionRows)
+	}
+}

@@ -181,7 +181,9 @@ func run() error {
 	// sampler probes only loopback gate ports; the webhook dispatcher fans
 	// customer events out to the persisted receivers.
 	renewalService := renewal.New(renewal.Config{})
-	usageAggregator := usage.New(usage.Config{})
+	// RetentionRows mirrors the store's request-log cap so the summary can
+	// label limited history honestly (rowsRetained/retentionDays).
+	usageAggregator := usage.New(usage.Config{RetentionRows: store.RequestRetention})
 
 	var healthSampler *health.Sampler
 	var healthView api.HealthMonitor
@@ -1221,10 +1223,22 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 	if panel != nil {
 		reconciler = panel
 	}
+	// Gate flow metering is on by default; AJS_FLOW_METER=0 turns it off. The
+	// factory attaches one observer callback per gate, so metering costs no
+	// goroutine and no extra copy of the flow.
+	var gates runtime.GateFactory
+	if flowMeterEnabled(os.Getenv("AJS_FLOW_METER")) {
+		meter := runtime.NewFlowMeter(st)
+		gates = meter.GateFactory()
+		logger.Info("flow_meter_enabled", "retention_rows", store.RequestRetention)
+	} else {
+		logger.Info("flow_meter_disabled", "reason", "AJS_FLOW_METER=0")
+	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 		Store:      st,
 		Logins:     logins,
 		Sessions:   factory,
+		Gates:      gates,
 		Reconciler: reconciler,
 		Profile:    profile,
 		MaxServers: limit,
@@ -1239,6 +1253,13 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all")
 	}
 	return controller, nil
+}
+
+// flowMeterEnabled parses AJS_FLOW_METER. Metering is on by default so the
+// usage page reflects real traffic; only the explicit value "0" disables it,
+// matching the AJS_HEALTH_PROBE convention.
+func flowMeterEnabled(raw string) bool {
+	return strings.TrimSpace(raw) != "0"
 }
 
 // nodeLimit parses AJS_NODE_LIMIT, the per-account cap on usable servers the

@@ -98,7 +98,8 @@ func (s *Server) handleRenewalAccount(w http.ResponseWriter, r *http.Request) {
 
 // handleUsage serves GET /v1/usage. The aggregator owns the window rules: an
 // unparsable bound, a reversed window and a window longer than
-// usage.MaxWindowDays all answer 400 with the aggregator's reason.
+// usage.MaxWindowDays all answer 400 with the aggregator's reason. A scoped
+// key restricted by accountIds/regions aggregates only its accounts' rows.
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Usage == nil {
 		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
@@ -106,11 +107,11 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	from, ok := parseUsageTime(w, query.Get("from"), "from")
+	from, ok := parseUsageTime(w, query.Get("from"), "from", false)
 	if !ok {
 		return
 	}
-	to, ok := parseUsageTime(w, query.Get("to"), "to")
+	to, ok := parseUsageTime(w, query.Get("to"), "to", true)
 	if !ok {
 		return
 	}
@@ -138,9 +139,12 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summary)
 }
 
-// parseUsageTime accepts RFC 3339 or a bare UTC date. Empty means "unbounded"
-// and is returned as the zero time, which the aggregator defaults.
-func parseUsageTime(w http.ResponseWriter, raw, field string) (time.Time, bool) {
+// parseUsageTime accepts RFC 3339 or a bare UTC date. A bare date resolves to
+// 00:00:00Z for `from` and to 23:59:59.999999999Z for `to`, so a date-only
+// window covers the whole final day instead of stopping at its midnight. Empty
+// means "unbounded" and is returned as the zero time, which the aggregator
+// defaults.
+func parseUsageTime(w http.ResponseWriter, raw, field string, endOfDay bool) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return time.Time{}, true
@@ -149,6 +153,10 @@ func parseUsageTime(w http.ResponseWriter, raw, field string) (time.Time, bool) 
 		return parsed, true
 	}
 	if parsed, err := time.Parse("2006-01-02", raw); err == nil {
+		if endOfDay {
+			// Inclusive upper bound: the last nanosecond of that UTC day.
+			return parsed.UTC().Add(24*time.Hour - time.Nanosecond), true
+		}
 		return parsed.UTC(), true
 	}
 	writeError(w, http.StatusBadRequest, CodeInvalidArgument,

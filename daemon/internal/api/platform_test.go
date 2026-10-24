@@ -109,6 +109,12 @@ func TestUsageSummaryAndValidation(t *testing.T) {
 	if len(summary.Accounts) == 0 {
 		t.Fatalf("usage summary has no account roll-up")
 	}
+	if summary.RowsRetained != usage.DefaultRetentionRows {
+		t.Fatalf("rowsRetained = %d, want %d", summary.RowsRetained, usage.DefaultRetentionRows)
+	}
+	if summary.RetentionDays <= 0 {
+		t.Fatalf("retentionDays = %d, want a positive retained span", summary.RetentionDays)
+	}
 
 	// The account filter accepts the label or the account id.
 	resp, body = apiCall(t, ts, http.MethodGet,
@@ -141,11 +147,53 @@ func TestUsageSummaryAndValidation(t *testing.T) {
 	requireErrorCode(t, body, CodeInvalidArgument)
 }
 
+// TestUsageDateOnlyBoundsCoverFinalDay pins the P2-5 fix: a bare YYYY-MM-DD
+// `to` is the end of that UTC day, so a row at 23:59:59Z is included, while an
+// explicit midnight still behaves as an exact instant.
+func TestUsageDateOnlyBoundsCoverFinalDay(t *testing.T) {
+	ts, st := newPlatformServer(t, Config{Usage: usageAggregator()})
+	rows := []model.RequestLog{
+		{ID: "boundary-midnight", TS: "2026-10-01T00:00:00Z", AccountLabel: "Northwind Ops", Target: "a.example:443", Status: 200, Bytes: 10, LatencyMs: 1, Source: model.SourceGate},
+		{ID: "boundary-last-second", TS: "2026-10-01T23:59:59Z", AccountLabel: "Northwind Ops", Target: "b.example:443", Status: 200, Bytes: 20, LatencyMs: 1, Source: model.SourceGate},
+		{ID: "boundary-next-day", TS: "2026-10-02T00:00:00Z", AccountLabel: "Northwind Ops", Target: "c.example:443", Status: 200, Bytes: 40, LatencyMs: 1, Source: model.SourceGate},
+	}
+	for _, row := range rows {
+		st.AppendRequest(row)
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		want  int
+		bytes int64
+	}{
+		{"date-only to includes the whole day", "from=2026-10-01&to=2026-10-01", 2, 30},
+		{"explicit end of day agrees", "from=2026-10-01&to=2026-10-01T23:59:59Z", 2, 30},
+		{"explicit midnight is exact", "from=2026-10-01&to=2026-10-01T00:00:00Z", 1, 10},
+		{"date-only from starts at midnight", "from=2026-10-02&to=2026-10-02", 1, 40},
+		{"two-day date-only window", "from=2026-10-01&to=2026-10-02", 3, 70},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := apiCall(t, ts, http.MethodGet, "/v1/usage?account=Northwind+Ops&"+tc.query, nil)
+			requireStatus(t, resp, http.StatusOK)
+			summary := decodeBody[usageSummary](t, body)
+			if summary.Requests != tc.want || summary.Bytes != tc.bytes {
+				t.Fatalf("%s: requests/bytes = %d/%d, want %d/%d (body %s)",
+					tc.query, summary.Requests, summary.Bytes, tc.want, tc.bytes, body)
+			}
+		})
+	}
+}
+
 // usageSummary mirrors the fields this test asserts; the wire type itself is
 // usage.Summary.
 type usageSummary struct {
-	Requests int `json:"requests"`
-	Days     []struct {
+	Requests      int   `json:"requests"`
+	Bytes         int64 `json:"bytes"`
+	RowsRetained  int   `json:"rowsRetained"`
+	RetentionDays int   `json:"retentionDays"`
+	Days          []struct {
 		Day string `json:"day"`
 	} `json:"days"`
 	Accounts []struct {

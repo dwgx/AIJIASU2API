@@ -315,3 +315,24 @@ func assertEmptyStore(t *testing.T, st *store.Store) {
 		t.Fatalf("startup store leases = %d, want 0", len(leases))
 	}
 }
+
+// TestFlowMeterEnabled pins AJS_FLOW_METER: metering is on by default and only
+// the explicit "0" (surrounding whitespace allowed) turns it off.
+func TestFlowMeterEnabled(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "", want: true},
+		{raw: "1", want: true},
+		{raw: "true", want: true},
+		{raw: "  ", want: true},
+		{raw: "0", want: false},
+		{raw: " 0 ", want: false},
+	}
+	for _, tc := range cases {
+		if got := flowMeterEnabled(tc.raw); got != tc.want {
+			t.Fatalf("flowMeterEnabled(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}

@@ -31,6 +31,10 @@ const (
 	TopTargetsLimit = 10
 	// UnknownTarget groups rows whose target has no usable host.
 	UnknownTarget = "unknown"
+	// DefaultRetentionRows is the request-log cap reported when Config leaves
+	// RetentionRows at zero. It mirrors store.RequestRetention; the daemon
+	// passes the store's constant explicitly so the two cannot drift.
+	DefaultRetentionRows = 10_000
 )
 
 // Errors returned by Aggregate. Callers use errors.Is.
@@ -49,6 +53,10 @@ type Config struct {
 	MaxRows int
 	// MaxWindowDays overrides MaxWindowDays when positive.
 	MaxWindowDays int
+	// RetentionRows is the number of request rows the store retains. The
+	// summary echoes it as rowsRetained so a client can label bounded
+	// history. Zero selects DefaultRetentionRows.
+	RetentionRows int
 }
 
 // Aggregator turns request logs into usage summaries. It is immutable after
@@ -57,6 +65,7 @@ type Aggregator struct {
 	now           func() time.Time
 	maxRows       int
 	maxWindowDays int
+	retentionRows int
 }
 
 // New builds an Aggregator. The zero Config is valid.
@@ -65,6 +74,7 @@ func New(cfg Config) *Aggregator {
 		now:           cfg.Now,
 		maxRows:       cfg.MaxRows,
 		maxWindowDays: cfg.MaxWindowDays,
+		retentionRows: cfg.RetentionRows,
 	}
 	if agg.now == nil {
 		agg.now = time.Now
@@ -74,6 +84,9 @@ func New(cfg Config) *Aggregator {
 	}
 	if agg.maxWindowDays <= 0 {
 		agg.maxWindowDays = MaxWindowDays
+	}
+	if agg.retentionRows <= 0 {
+		agg.retentionRows = DefaultRetentionRows
 	}
 	return agg
 }
@@ -146,6 +159,15 @@ type Summary struct {
 	// Truncated reports that the input held more in-window rows than the
 	// configured cap, so the summary covers only the first MaxRows of them.
 	Truncated bool `json:"truncated"`
+	// RowsRetained is the request-log cap the store enforces. A client uses
+	// it with RetentionDays to label how much history actually exists; the
+	// window may be wider than the retained rows.
+	RowsRetained int `json:"rowsRetained"`
+	// RetentionDays is the number of UTC calendar days the retained rows
+	// cover, counted inclusively from the oldest parseable row through the
+	// aggregator clock. Zero means the store holds no request rows. It is a
+	// property of the store, so the query window and filters do not narrow it.
+	RetentionDays int `json:"retentionDays"`
 }
 
 // totals is the mutable accumulator shared by the summary and one group.
@@ -190,14 +212,25 @@ type userAccum struct {
 // sorted by bytes descending then name ascending, and the day series is
 // chronological and zero-filled.
 func (a *Aggregator) Aggregate(logs []model.RequestLog, q Query) (Summary, error) {
-	from, to, days, err := a.window(q)
+	now := a.now
+	if now == nil {
+		now = time.Now
+	}
+	current := now()
+	from, to, days, err := a.window(q, current)
 	if err != nil {
 		return Summary{}, err
 	}
+	retentionRows := a.retentionRows
+	if retentionRows <= 0 {
+		retentionRows = DefaultRetentionRows
+	}
 
 	summary := Summary{
-		From: from.UTC().Format(time.RFC3339),
-		To:   to.UTC().Format(time.RFC3339),
+		From:          from.UTC().Format(time.RFC3339),
+		To:            to.UTC().Format(time.RFC3339),
+		RowsRetained:  retentionRows,
+		RetentionDays: retentionDays(logs, current),
 	}
 	dayIndex := make(map[string]int, len(days))
 	dayLatency := make([]int64, len(days))
@@ -372,22 +405,45 @@ func (a *Aggregator) Aggregate(logs []model.RequestLog, q Query) (Summary, error
 
 const dayLayout = "2006-01-02"
 
-// window resolves the query bounds and enumerates the UTC days they cover.
-func (a *Aggregator) window(q Query) (time.Time, time.Time, []time.Time, error) {
-	now := a.now
-	if now == nil {
-		now = time.Now
+// retentionDays counts the UTC calendar days from the oldest parseable row
+// through now, inclusively. It reads every retained row, not just the queried
+// window: the cap is a store property, so an account-filtered request still
+// learns how much history exists. Zero means no row could be parsed.
+func retentionDays(logs []model.RequestLog, now time.Time) int {
+	var oldest time.Time
+	for _, row := range logs {
+		ts, err := time.Parse(time.RFC3339, row.TS)
+		if err != nil {
+			continue
+		}
+		if oldest.IsZero() || ts.Before(oldest) {
+			oldest = ts
+		}
 	}
+	if oldest.IsZero() {
+		return 0
+	}
+	days := int(now.UTC().Truncate(24*time.Hour).Sub(oldest.UTC().Truncate(24*time.Hour))/(24*time.Hour)) + 1
+	if days < 1 {
+		return 1
+	}
+	return days
+}
+
+// window resolves the query bounds and enumerates the UTC days they cover.
+// now is the single aggregator clock reading for this call, so the window and
+// the retention span cannot straddle a midnight.
+func (a *Aggregator) window(q Query, now time.Time) (time.Time, time.Time, []time.Time, error) {
 	maxWindowDays := a.maxWindowDays
 	if maxWindowDays <= 0 {
 		maxWindowDays = MaxWindowDays
 	}
 	from, to := q.From, q.To
 	if from.IsZero() && to.IsZero() {
-		to = now()
+		to = now
 	}
 	if to.IsZero() {
-		to = now()
+		to = now
 	}
 	if from.IsZero() {
 		from = to.AddDate(0, 0, -DefaultWindowDays)

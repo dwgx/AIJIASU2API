@@ -94,6 +94,11 @@ type Config struct {
 	// Logger receives one line per accepted flow plus rejection lines. Default
 	// slog.Default().
 	Logger *slog.Logger
+	// OnFlow observes every finished flow record, accepted or rejected, after
+	// it enters the bounded ring. It runs synchronously in the flow's own
+	// goroutine, so an implementation must be fast and must not block: the
+	// metering seam appends one small request-log row. Nil is a no-op.
+	OnFlow func(FlowRecord)
 }
 
 // Session opens one proxied TCP flow. *account.FlowSession satisfies it: the
