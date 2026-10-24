@@ -24,6 +24,7 @@ const (
 	FlowErrorClosed           = "closed"
 	FlowErrorDraining         = "draining"
 	FlowErrorAdmissionTimeout = "admission_timeout"
+	FlowErrorQuota            = "quota_exceeded"
 	FlowErrorOpenFlow         = "open_flow"
 	FlowErrorReply            = "reply"
 )

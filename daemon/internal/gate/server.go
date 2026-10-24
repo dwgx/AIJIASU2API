@@ -40,6 +40,7 @@ const (
 
 	repSucceeded          = 0x00
 	repGeneralFailure     = 0x01
+	repNotAllowed         = 0x02
 	repConnectionRefused  = 0x05
 	repTTLExpired         = 0x06
 	repCommandUnsupported = 0x07
@@ -99,6 +100,13 @@ type Config struct {
 	// goroutine, so an implementation must be fast and must not block: the
 	// metering seam appends one small request-log row. Nil is a no-op.
 	OnFlow func(FlowRecord)
+	// QuotaCheck is the per-account admission policy. It runs after the
+	// CONNECT request parses and before an admission slot is taken or any
+	// vendor flow opens, with the gate's AccountID. A false result records a
+	// quota rejection (error class FlowErrorQuota), answers SOCKS5 0x02 and
+	// never calls Session.OpenFlow; used and budget are diagnostics only.
+	// Nil disables quota admission.
+	QuotaCheck func(accountID string) (ok bool, used, budget int64)
 }
 
 // Session opens one proxied TCP flow. *account.FlowSession satisfies it: the
@@ -456,6 +464,26 @@ func (s *Server) handle(client net.Conn) {
 		return
 	}
 	_ = client.SetDeadline(time.Time{})
+
+	// Quota admission runs before the slot wait and before any vendor
+	// connection: an over-budget account must not consume capacity or open
+	// upstream traffic. 0x02 is SOCKS5's "connection not allowed by ruleset".
+	if s.cfg.QuotaCheck != nil {
+		if ok, used, budget := s.cfg.QuotaCheck(s.cfg.AccountID); !ok {
+			s.rejected.Add(1)
+			s.recordReject(started, target, FlowErrorQuota)
+			_ = writeReply(client, repNotAllowed)
+			s.logger.Warn("gate flow rejected",
+				"node_id", s.cfg.NodeID,
+				"account_id", s.cfg.AccountID,
+				"target", target.String(),
+				"reason", FlowErrorQuota,
+				"used_bytes", used,
+				"budget_bytes", budget,
+			)
+			return
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

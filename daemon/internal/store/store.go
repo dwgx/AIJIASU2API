@@ -415,6 +415,44 @@ func (s *Store) Requests() []model.RequestLog {
 	return out
 }
 
+// MonthlyUsage returns the gate-metered bytes for accountID in the current UTC
+// calendar month. Only rows whose Source is model.SourceGate count: seeded
+// demo traffic and the mutation lab never consume a customer's budget.
+//
+// The scan is bounded by the request-log cap and stops at the first row older
+// than the month start. AppendRequest prepends every row and restore preserves
+// the saved order, so the log is newest-first; rows with an unparseable
+// timestamp are skipped rather than ending the scan. An unknown account has no
+// usage.
+func (s *Store) MonthlyUsage(accountID string) int64 {
+	now := s.now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	idx := s.accountIndexLocked(accountID)
+	if idx < 0 {
+		return 0
+	}
+	label := s.accounts[idx].Label
+
+	var total int64
+	for _, row := range s.requests {
+		ts, err := time.Parse(time.RFC3339, row.TS)
+		if err != nil {
+			continue
+		}
+		if ts.UTC().Before(monthStart) {
+			break
+		}
+		if row.Source != model.SourceGate || row.AccountLabel != label {
+			continue
+		}
+		total += row.Bytes
+	}
+	return total
+}
+
 // Audit returns up to limit events newest first.
 func (s *Store) Audit(limit int) []model.AuditEvent {
 	s.mu.RLock()
@@ -639,6 +677,15 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 		}
 		next.ExpiresAt = iso(parsed)
 		changed = append(changed, "expiresAt")
+	}
+	if patch.TrafficBudgetSet || patch.TrafficBudgetBytes != nil {
+		if patch.TrafficBudgetBytes != nil && *patch.TrafficBudgetBytes < 0 {
+			return model.Account{}, invalidf("trafficBudgetBytes must be zero or positive, or null for unlimited")
+		}
+		if !int64PtrEqual(next.TrafficBudgetBytes, patch.TrafficBudgetBytes) {
+			next.TrafficBudgetBytes = copyInt64(patch.TrafficBudgetBytes)
+			changed = append(changed, "trafficBudgetBytes")
+		}
 	}
 	if len(changed) == 0 {
 		return cloneAccount(next), nil
@@ -1002,6 +1049,7 @@ func clientMessage(value string) string {
 
 func cloneAccount(account model.Account) model.Account {
 	account.Regions = append([]string{}, account.Regions...)
+	account.TrafficBudgetBytes = copyInt64(account.TrafficBudgetBytes)
 	return account
 }
 
@@ -1019,6 +1067,14 @@ func copyInt64(value *int64) *int64 {
 	}
 	copied := *value
 	return &copied
+}
+
+// int64PtrEqual compares two optional counters by value; two nils are equal.
+func int64PtrEqual(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func cloneKey(key model.APIKey) model.APIKey {

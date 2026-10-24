@@ -33,22 +33,33 @@ const acceptedStatus = 200
 // so UserID/UserName stay empty (the account is the attribution unit).
 type FlowMeter struct {
 	store *store.Store
+	quota *Quota
 }
 
 // NewFlowMeter builds a meter over st. The store must not be nil: it is both
-// the label source and the request-log sink.
+// the label source and the request-log sink. The meter also owns the gate's
+// monthly quota policy, so one factory wires metering and enforcement.
 func NewFlowMeter(st *store.Store) *FlowMeter {
-	return &FlowMeter{store: st}
+	return &FlowMeter{store: st, quota: NewQuota(st)}
 }
 
-// GateFactory returns a GateFactory that attaches the meter to every gate the
-// node controller starts. Passing the result as NodeControllerConfig.Gates is
-// the whole wiring; a nil factory keeps the default unmetered gate.
+// Quota returns the admission policy the factory attaches to every gate.
+func (m *FlowMeter) Quota() *Quota {
+	return m.quota
+}
+
+// GateFactory returns a GateFactory that attaches the meter and the quota
+// policy to every gate the node controller starts. Passing the result as
+// NodeControllerConfig.Gates is the whole wiring; a nil factory keeps the
+// default unmetered, unenforced gate.
 func (m *FlowMeter) GateFactory() GateFactory {
 	return func(cfg gate.Config, session gate.Session) (Gate, error) {
 		nodeID, accountID := cfg.NodeID, cfg.AccountID
 		cfg.OnFlow = func(record gate.FlowRecord) {
 			m.observe(nodeID, accountID, record)
+		}
+		if m.quota != nil {
+			cfg.QuotaCheck = m.quota.Check
 		}
 		return gate.NewServer(cfg, session)
 	}
@@ -84,6 +95,9 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		LatencyMs:    int(record.DurationMs),
 		Source:       model.SourceGate,
 	})
+	// The next admission must see this row, so the cached monthly total is
+	// dropped before the flow goroutine ends.
+	m.quota.Invalidate(accountID)
 }
 
 // flowTarget renders a flow destination as host:port. The gate only ever

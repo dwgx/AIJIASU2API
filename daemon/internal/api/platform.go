@@ -152,6 +152,9 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, err.Error())
 		return
 	}
+	quotas, enforced := s.usageAccountQuotas(r)
+	summary.QuotaEnforced = enforced
+	applyAccountQuotas(&summary, quotas)
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -191,6 +194,55 @@ func (s *Server) usageQuotas() map[string]*int64 {
 		}
 	}
 	return quotas
+}
+
+// accountQuotaView is one account's monthly enforcement figures. budget is nil
+// when the account is unlimited.
+type accountQuotaView struct {
+	budget *int64
+	used   int64
+}
+
+// usageAccountQuotas returns the request-visible accounts' budgets and current
+// UTC month gate usage keyed by account label (the request log's attribution
+// unit). enforced reports whether at least one visible account has a budget.
+// A scoped key restricted by accountIds/regions sees only its own accounts, so
+// a budget outside its scope does not switch its summary to enforced.
+func (s *Server) usageAccountQuotas(r *http.Request) (map[string]accountQuotaView, bool) {
+	accounts := s.filterAccountsForRequest(r, s.store.Accounts())
+	quotas := make(map[string]accountQuotaView, len(accounts))
+	enforced := false
+	for _, account := range accounts {
+		view := accountQuotaView{used: s.store.MonthlyUsage(account.ID)}
+		if account.TrafficBudgetBytes != nil {
+			budget := *account.TrafficBudgetBytes
+			view.budget = &budget
+			enforced = true
+		}
+		quotas[account.Label] = view
+	}
+	return quotas, enforced
+}
+
+// applyAccountQuotas decorates the aggregated account rows with their monthly
+// budget, used bytes and clamped remaining bytes. Rows are matched by label,
+// the same key the aggregator buckets on.
+func applyAccountQuotas(summary *usage.Summary, quotas map[string]accountQuotaView) {
+	for i := range summary.Accounts {
+		view, ok := quotas[summary.Accounts[i].Account]
+		if !ok {
+			continue
+		}
+		summary.Accounts[i].TrafficBudgetBytes = view.budget
+		summary.Accounts[i].UsedBytes = view.used
+		if view.budget != nil {
+			remaining := *view.budget - view.used
+			if remaining < 0 {
+				remaining = 0
+			}
+			summary.Accounts[i].RemainingBytes = &remaining
+		}
+	}
 }
 
 type healthNodesResponse struct {

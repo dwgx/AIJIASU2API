@@ -210,7 +210,7 @@ func TestJSONFieldNames(t *testing.T) {
 	requireStatus(t, resp, http.StatusOK)
 	assertKeys(t, "Account", firstObject(t, body),
 		"id", "label", "username", "platform", "state", "concurrency", "regions",
-		"nodeCount", "liveNodeCount", "usageBytes", "expiresAt", "lastLoginAt", "createdAt")
+		"nodeCount", "liveNodeCount", "usageBytes", "trafficBudgetBytes", "expiresAt", "lastLoginAt", "createdAt")
 
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/nodes", nil)
 	requireStatus(t, resp, http.StatusOK)

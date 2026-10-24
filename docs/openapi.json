@@ -4967,6 +4967,19 @@
             "type": "integer",
             "format": "int64"
           },
+          "trafficBudgetBytes": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Monthly gate-enforced traffic budget in bytes. Null means unlimited; zero refuses every byte."
+          },
           "expiresAt": {
             "type": "string",
             "description": "RFC 3339 timestamp; empty when unset."
@@ -4991,6 +5004,7 @@
           "nodeCount",
           "liveNodeCount",
           "usageBytes",
+          "trafficBudgetBytes",
           "expiresAt",
           "lastLoginAt",
           "createdAt"
@@ -5062,6 +5076,19 @@
           },
           "expiresAt": {
             "type": "string"
+          },
+          "trafficBudgetBytes": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Monthly traffic budget in bytes. Null clears the budget (unlimited); an absent field leaves it unchanged."
           }
         },
         "description": "Partial update; every field is optional."
@@ -9318,6 +9345,38 @@
               "$ref": "#/components/schemas/UsageBucket"
             },
             "description": "Covers every day in the window so a chart can render a continuous series."
+          },
+          "trafficBudgetBytes": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Monthly gate-enforced budget in bytes; null means unlimited."
+          },
+          "usedBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Gate-metered bytes for the current UTC month, independent of the queried window."
+          },
+          "remainingBytes": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Budget headroom for the current UTC month, clamped at zero; null when unlimited."
           }
         },
         "required": [
@@ -9326,7 +9385,10 @@
           "bytes",
           "errors",
           "avgLatencyMs",
-          "buckets"
+          "buckets",
+          "trafficBudgetBytes",
+          "usedBytes",
+          "remainingBytes"
         ]
       },
       "UsageUser": {
@@ -9463,7 +9525,7 @@
           },
           "quotaEnforced": {
             "type": "boolean",
-            "description": "Whether the gate enforces quotaBytesMonth. Always false today: the gate has no quota logic, so quotas are advisory. The field is part of the contract so the panel can switch to enforced without a schema change."
+            "description": "True when the gate enforces a monthly traffic budget for at least one account in the response. Account rows then carry trafficBudgetBytes, usedBytes and remainingBytes."
           }
         },
         "required": [

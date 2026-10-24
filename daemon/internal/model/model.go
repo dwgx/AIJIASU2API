@@ -106,9 +106,12 @@ type Account struct {
 	NodeCount     int          `json:"nodeCount"`
 	LiveNodeCount int          `json:"liveNodeCount"`
 	UsageBytes    int64        `json:"usageBytes"`
-	ExpiresAt     string       `json:"expiresAt"`
-	LastLoginAt   string       `json:"lastLoginAt"`
-	CreatedAt     string       `json:"createdAt"`
+	// TrafficBudgetBytes is the monthly gate-enforced traffic budget. Nil
+	// means unlimited; zero is a real budget that refuses every byte.
+	TrafficBudgetBytes *int64 `json:"trafficBudgetBytes"`
+	ExpiresAt          string `json:"expiresAt"`
+	LastLoginAt        string `json:"lastLoginAt"`
+	CreatedAt          string `json:"createdAt"`
 }
 
 // ProxyNode mirrors the dashboard ProxyNode interface.
@@ -415,14 +418,18 @@ type CreateUserInput struct {
 }
 
 // AccountPatch is the partial body accepted by PATCH /v1/accounts/{id}.
+// TrafficBudgetSet distinguishes an absent budget field from an explicit JSON
+// null: absent leaves the budget alone, null clears it (unlimited).
 type AccountPatch struct {
-	Label       *string       `json:"label"`
-	Username    *string       `json:"username"`
-	Platform    *Platform     `json:"platform"`
-	State       *AccountState `json:"state"`
-	Concurrency *int          `json:"concurrency"`
-	Regions     *[]string     `json:"regions"`
-	ExpiresAt   *string       `json:"expiresAt"`
+	Label              *string       `json:"label"`
+	Username           *string       `json:"username"`
+	Platform           *Platform     `json:"platform"`
+	State              *AccountState `json:"state"`
+	Concurrency        *int          `json:"concurrency"`
+	Regions            *[]string     `json:"regions"`
+	ExpiresAt          *string       `json:"expiresAt"`
+	TrafficBudgetBytes *int64        `json:"trafficBudgetBytes"`
+	TrafficBudgetSet   bool          `json:"-"`
 }
 
 // UserPatch is the normalised partial update used by the store. QuotaSet

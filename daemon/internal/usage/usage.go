@@ -117,13 +117,21 @@ type Bucket struct {
 
 // AccountUsage is the per-account roll-up. Buckets always covers every day in
 // the window so a chart can render a continuous series.
+//
+// TrafficBudgetBytes, UsedBytes and RemainingBytes are monthly enforcement
+// figures, not window figures: UsedBytes is the gate-metered total for the
+// current UTC month. The API fills them from the store; the aggregator itself
+// leaves the zero values.
 type AccountUsage struct {
-	Account      string   `json:"account"`
-	Requests     int      `json:"requests"`
-	Bytes        int64    `json:"bytes"`
-	Errors       int      `json:"errors"`
-	AvgLatencyMs int      `json:"avgLatencyMs"`
-	Buckets      []Bucket `json:"buckets"`
+	Account            string   `json:"account"`
+	Requests           int      `json:"requests"`
+	Bytes              int64    `json:"bytes"`
+	Errors             int      `json:"errors"`
+	AvgLatencyMs       int      `json:"avgLatencyMs"`
+	Buckets            []Bucket `json:"buckets"`
+	TrafficBudgetBytes *int64   `json:"trafficBudgetBytes"`
+	UsedBytes          int64    `json:"usedBytes"`
+	RemainingBytes     *int64   `json:"remainingBytes"`
 }
 
 // UserUsage is the per-user roll-up. UsedBytes is the byte total inside the
@@ -168,10 +176,10 @@ type Summary struct {
 	// aggregator clock. Zero means the store holds no request rows. It is a
 	// property of the store, so the query window and filters do not narrow it.
 	RetentionDays int `json:"retentionDays"`
-	// QuotaEnforced reports whether the gate enforces UserUsage.QuotaBytesMonth.
-	// The gate has no quota logic today, so this is always false and the quota
-	// column stays advisory. The field is part of the wire contract so the
-	// panel can switch to enforced without a schema change.
+	// QuotaEnforced reports whether the gate enforces a monthly traffic budget
+	// for at least one account in the response. The API sets it from the store;
+	// the aggregator itself leaves it false. When true, each account row's
+	// TrafficBudgetBytes/UsedBytes/RemainingBytes are live enforcement figures.
 	QuotaEnforced bool `json:"quotaEnforced"`
 }
 

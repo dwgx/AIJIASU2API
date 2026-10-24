@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,9 +54,41 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
-	var patch model.AccountPatch
-	if !decodeJSON(w, r, &patch) {
+	// The budget is decoded as raw JSON so an explicit null (clear it) is
+	// distinguishable from an absent field (leave it alone).
+	var body struct {
+		Label              *string             `json:"label"`
+		Username           *string             `json:"username"`
+		Platform           *model.Platform     `json:"platform"`
+		State              *model.AccountState `json:"state"`
+		Concurrency        *int                `json:"concurrency"`
+		Regions            *[]string           `json:"regions"`
+		ExpiresAt          *string             `json:"expiresAt"`
+		TrafficBudgetBytes json.RawMessage     `json:"trafficBudgetBytes"`
+	}
+	if !decodeJSON(w, r, &body) {
 		return
+	}
+	patch := model.AccountPatch{
+		Label:       body.Label,
+		Username:    body.Username,
+		Platform:    body.Platform,
+		State:       body.State,
+		Concurrency: body.Concurrency,
+		Regions:     body.Regions,
+		ExpiresAt:   body.ExpiresAt,
+	}
+	if len(body.TrafficBudgetBytes) > 0 {
+		patch.TrafficBudgetSet = true
+		if !bytes.Equal(bytes.TrimSpace(body.TrafficBudgetBytes), []byte("null")) {
+			var budget int64
+			if err := json.Unmarshal(body.TrafficBudgetBytes, &budget); err != nil || budget < 0 {
+				writeError(w, http.StatusBadRequest, CodeInvalidArgument,
+					"trafficBudgetBytes must be a non-negative integer or null")
+				return
+			}
+			patch.TrafficBudgetBytes = &budget
+		}
 	}
 	account, err := s.store.UpdateAccount(pathParam(r, "id"), patch)
 	if err != nil {

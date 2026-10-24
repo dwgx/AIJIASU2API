@@ -403,6 +403,9 @@ func (snap *Snapshot) validate() error {
 		if _, ok := accounts[account.ID]; ok {
 			return fmt.Errorf("state snapshot has duplicate account %q", account.ID)
 		}
+		if account.TrafficBudgetBytes != nil && *account.TrafficBudgetBytes < 0 {
+			return fmt.Errorf("state snapshot account %q has a negative traffic budget", account.ID)
+		}
 		accounts[account.ID] = struct{}{}
 	}
 	nodes := make(map[string]struct{}, len(snap.Nodes))
