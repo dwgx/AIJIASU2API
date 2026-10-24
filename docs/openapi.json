@@ -2315,6 +2315,62 @@
             "$ref": "#/components/parameters/Offset"
           }
         ]
+      },
+      "post": {
+        "operationId": "createLease",
+        "tags": [
+          "Leases"
+        ],
+        "summary": "Create an idempotent lease on a free node.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLeaseInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Lease created, or the original lease replayed for a known Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateLeaseResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
       }
     },
     "/v1/leases/{id}/actions/rotate": {
@@ -2368,11 +2424,32 @@
         "tags": [
           "Leases"
         ],
-        "summary": "Release a lease immediately.",
+        "summary": "Revoke a lease and free its node.",
         "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeLeaseInput"
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
-            "description": "Lease released."
+            "description": "Lease revoked.",
+            "headers": {
+              "Warning": {
+                "description": "299 ajs-accountd: the lease was revoked, but the optional publish hook failed.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4739,6 +4816,16 @@
           "type": "string"
         },
         "description": "Filter by account id. accountId is accepted as an alias."
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "description": "Retry-safe create key. A replay returns the original lease with replayed=true instead of allocating a second node."
       }
     },
     "schemas": {
@@ -5171,6 +5258,14 @@
           "lastProbeAt"
         ]
       },
+      "LeaseStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "expired",
+          "revoked"
+        ]
+      },
       "Lease": {
         "type": "object",
         "properties": {
@@ -5188,6 +5283,9 @@
           },
           "accountLabel": {
             "type": "string"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
           },
           "nodeId": {
             "type": "string"
@@ -5225,6 +5323,13 @@
           "sticky": {
             "type": "boolean"
           },
+          "status": {
+            "$ref": "#/components/schemas/LeaseStatus"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "The create request's retry key; empty when none was sent."
+          },
           "createdAt": {
             "type": "string",
             "description": "RFC 3339 timestamp; empty when unset."
@@ -5236,6 +5341,7 @@
           "userName",
           "accountId",
           "accountLabel",
+          "platform",
           "nodeId",
           "nodeLabel",
           "region",
@@ -5247,7 +5353,70 @@
           "requests",
           "bytes",
           "sticky",
+          "status",
+          "idempotencyKey",
           "createdAt"
+        ]
+      },
+      "CreateLeaseInput": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
+          },
+          "accountId": {
+            "type": "string",
+            "description": "Optional account pin. It must be active and match platform."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 604800,
+            "description": "Lease lifetime. 0 or absent uses the user's sticky TTL, then the panel lease TTL."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Body form of the Idempotency-Key header; the two must agree when both are sent."
+          }
+        },
+        "required": [
+          "userId",
+          "platform"
+        ]
+      },
+      "CreateLeaseResult": {
+        "type": "object",
+        "properties": {
+          "lease": {
+            "$ref": "#/components/schemas/Lease"
+          },
+          "warning": {
+            "type": "string",
+            "description": "Set when the lease committed but the optional publish hook failed."
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "True when an Idempotency-Key matched an existing lease."
+          }
+        },
+        "required": [
+          "lease"
+        ]
+      },
+      "RevokeLeaseInput": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true; a false or absent flag is refused."
+          }
+        },
+        "required": [
+          "confirm"
         ]
       },
       "PanelUser": {

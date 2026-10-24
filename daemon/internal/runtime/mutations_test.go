@@ -18,6 +18,11 @@ import (
 	"ajsaccountd/internal/store"
 )
 
+// testLeaseExpiry is a far-future Resin expiry. It must stay in the future:
+// the store sweeps an expired lease on the next read, so a fixed past date
+// would make the rotated row disappear before the assertion.
+const testLeaseExpiry = "2099-12-31T23:59:59Z"
+
 // newStartedPanel starts a panel against the seed store and clears the calls
 // recorded by Start, so mutation tests assert only their own traffic.
 func newStartedPanel(t *testing.T) (*store.Store, *runtime.ResinPanel, *fakeResin) {
@@ -81,7 +86,7 @@ func TestRotateLeaseThroughPanel(t *testing.T) {
 		NodeHash:   "hash-01",
 		NodeTag:    "ajs-live/cn-zj-01",
 		EgressIP:   "203.0.113.99",
-		Expiry:     "2026-10-23T13:00:00Z",
+		Expiry:     testLeaseExpiry,
 	})
 	before, ok := st.Lease("lease-01")
 	if !ok {
@@ -118,7 +123,7 @@ func TestRotateLeaseThroughPanel(t *testing.T) {
 		t.Fatalf("platform filters after rotate = %v, want restored", got)
 	}
 
-	if updated.EgressIP != "203.0.113.99" || updated.ExpiresAt != "2026-10-23T13:00:00Z" {
+	if updated.EgressIP != "203.0.113.99" || updated.ExpiresAt != testLeaseExpiry {
 		t.Fatalf("rotated lease egress/expiry = %q/%q", updated.EgressIP, updated.ExpiresAt)
 	}
 	if updated.ID != before.ID || updated.UserID != before.UserID ||
@@ -133,7 +138,7 @@ func TestRotateLeaseThroughPanel(t *testing.T) {
 	}
 
 	stored, ok := st.Lease("lease-01")
-	if !ok || stored.EgressIP != "203.0.113.99" || stored.ExpiresAt != "2026-10-23T13:00:00Z" {
+	if !ok || stored.EgressIP != "203.0.113.99" || stored.ExpiresAt != testLeaseExpiry {
 		t.Fatalf("store lease after rotate = %+v (ok=%v)", stored, ok)
 	}
 	node, ok := st.Node("node-01")
@@ -148,7 +153,7 @@ func TestReconcileWaitsForRotation(t *testing.T) {
 		PlatformID: "plat-1",
 		Account:    "acc-01",
 		EgressIP:   "203.0.113.99",
-		Expiry:     "2026-10-23T13:00:00Z",
+		Expiry:     testLeaseExpiry,
 	})
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -235,7 +240,7 @@ func TestRotateLeaseErrors(t *testing.T) {
 
 	t.Run("rate limited", func(t *testing.T) {
 		st, panel, fake := newStartedPanel(t)
-		fake.setLease("acc-01", resin.Lease{EgressIP: "203.0.113.99", Expiry: "2026-10-23T13:00:00Z"})
+		fake.setLease("acc-01", resin.Lease{EgressIP: "203.0.113.99", Expiry: testLeaseExpiry})
 		if _, err := panel.RotateLease(context.Background(), "lease-01"); err != nil {
 			t.Fatalf("first rotate: %v", err)
 		}
@@ -395,7 +400,7 @@ func TestAPIMutationsThroughPanel(t *testing.T) {
 		PlatformID: "plat-1",
 		Account:    "acc-01",
 		EgressIP:   "203.0.113.99",
-		Expiry:     "2026-10-23T13:00:00Z",
+		Expiry:     testLeaseExpiry,
 	})
 	ts := httptest.NewServer(api.New(api.Config{AllowInsecure: true, Panel: panel}, st, discardLogger()))
 	t.Cleanup(ts.Close)
@@ -406,11 +411,11 @@ func TestAPIMutationsThroughPanel(t *testing.T) {
 	}
 	rotated := decode[model.Lease](t, body)
 	if rotated.ID != "lease-01" || rotated.EgressIP != "203.0.113.99" ||
-		rotated.ExpiresAt != "2026-10-23T13:00:00Z" || rotated.TTLSeconds != 28_800 {
+		rotated.ExpiresAt != testLeaseExpiry || rotated.TTLSeconds != 28_800 {
 		t.Fatalf("rotated lease JSON = %+v", rotated)
 	}
 
-	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02")
+	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02", map[string]any{"confirm": true})
 	if status != http.StatusNoContent {
 		t.Fatalf("DELETE lease = %d, want 204 (body %s)", status, body)
 	}
@@ -456,7 +461,7 @@ func TestAPIMutationsThroughPanel(t *testing.T) {
 	if code := errorCode(t, body); code != api.CodeNotFound {
 		t.Fatalf("missing lease code = %q, want %s", code, api.CodeNotFound)
 	}
-	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-99")
+	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-99", map[string]any{"confirm": true})
 	if status != http.StatusNotFound {
 		t.Fatalf("release missing lease = %d, want 404 (body %s)", status, body)
 	}
@@ -480,7 +485,7 @@ func TestMutationFallbackWithoutPanel(t *testing.T) {
 		t.Fatalf("fallback rotate = %+v, want next pool IP and requests +17", rotated)
 	}
 
-	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02")
+	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02", map[string]any{"confirm": true})
 	if status != http.StatusNoContent {
 		t.Fatalf("fallback release = %d, want 204 (body %s)", status, body)
 	}

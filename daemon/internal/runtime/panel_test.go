@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -834,11 +835,22 @@ func drainLiveNodes(t *testing.T, st *store.Store) {
 	}
 }
 
-func apiCall(t *testing.T, ts *httptest.Server, method, path string) (int, []byte) {
+func apiCall(t *testing.T, ts *httptest.Server, method, path string, payload ...any) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(method, ts.URL+path, nil)
+	var reader io.Reader
+	if len(payload) > 0 && payload[0] != nil {
+		encoded, err := json.Marshal(payload[0])
+		if err != nil {
+			t.Fatalf("marshal request body: %v", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequest(method, ts.URL+path, reader)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
+	}
+	if reader != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := ts.Client().Do(req)
 	if err != nil {

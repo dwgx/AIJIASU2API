@@ -318,7 +318,9 @@ func (s *Store) RotateLease(id string) (model.Lease, error) {
 	}
 	s.addAuditLocked(model.SeverityInfo, "operator", "lease.rotate", lease.UserName,
 		fmt.Sprintf("synthetic rotation without Resin · %s → %s", oldIP, lease.EgressIP))
-	return *lease, nil
+	out := *lease
+	s.normalizeLeaseLocked(&out)
+	return out, nil
 }
 
 // ApplyLeaseRotation records the lease state Resin reported after a rotation:
@@ -350,24 +352,7 @@ func (s *Store) ApplyLeaseRotation(id, egressIP, expiresAt string, requests int6
 	}
 	s.addAuditLocked(model.SeverityInfo, "operator", "lease.rotate", lease.UserName,
 		fmt.Sprintf("%s → %s", oldIP, lease.EgressIP))
-	return *lease, nil
-}
-
-// ReleaseLease removes a lease and returns its slot to the node.
-func (s *Store) ReleaseLease(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	idx := s.leaseIndexLocked(id)
-	if idx < 0 {
-		return notFoundf("lease %q not found", id)
-	}
-	lease := s.leases[idx]
-	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
-		s.nodes[nodeIdx].InUse--
-	}
-	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
-	s.addAuditLocked(model.SeverityInfo, "operator", "lease.release", lease.UserName,
-		fmt.Sprintf("Lease on %s released", lease.NodeLabel))
-	return nil
+	out := *lease
+	s.normalizeLeaseLocked(&out)
+	return out, nil
 }

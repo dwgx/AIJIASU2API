@@ -138,25 +138,51 @@ type ProxyNode struct {
 	ServerID string `json:"serverId,omitempty"`
 }
 
-// Lease mirrors the dashboard Lease interface.
+// LeaseStatus is the lifecycle state of one lease. Only active leases are
+// listed; expired and revoked rows are removed after their audit row is
+// written, so the status is the marker recorded at the transition.
+type LeaseStatus string
+
+const (
+	LeaseActive  LeaseStatus = "active"
+	LeaseExpired LeaseStatus = "expired"
+	LeaseRevoked LeaseStatus = "revoked"
+)
+
+// Lease mirrors the dashboard Lease interface. Platform is the account
+// platform the lease was allocated for, and IdempotencyKey is the caller's
+// retry key (empty when the create request carried none).
 type Lease struct {
-	ID           string        `json:"id"`
-	UserID       string        `json:"userId"`
-	UserName     string        `json:"userName"`
-	AccountID    string        `json:"accountId"`
-	AccountLabel string        `json:"accountLabel"`
-	NodeID       string        `json:"nodeId"`
-	NodeLabel    string        `json:"nodeLabel"`
-	Region       string        `json:"region"`
-	EgressIP     string        `json:"egressIp"`
-	Protocol     ProxyProtocol `json:"protocol"`
-	GatePort     int           `json:"gatePort"`
-	TTLSeconds   int           `json:"ttlSeconds"`
-	ExpiresAt    string        `json:"expiresAt"`
-	Requests     int64         `json:"requests"`
-	Bytes        int64         `json:"bytes"`
-	Sticky       bool          `json:"sticky"`
-	CreatedAt    string        `json:"createdAt"`
+	ID             string        `json:"id"`
+	UserID         string        `json:"userId"`
+	UserName       string        `json:"userName"`
+	AccountID      string        `json:"accountId"`
+	AccountLabel   string        `json:"accountLabel"`
+	Platform       Platform      `json:"platform"`
+	NodeID         string        `json:"nodeId"`
+	NodeLabel      string        `json:"nodeLabel"`
+	Region         string        `json:"region"`
+	EgressIP       string        `json:"egressIp"`
+	Protocol       ProxyProtocol `json:"protocol"`
+	GatePort       int           `json:"gatePort"`
+	TTLSeconds     int           `json:"ttlSeconds"`
+	ExpiresAt      string        `json:"expiresAt"`
+	Requests       int64         `json:"requests"`
+	Bytes          int64         `json:"bytes"`
+	Sticky         bool          `json:"sticky"`
+	Status         LeaseStatus   `json:"status"`
+	IdempotencyKey string        `json:"idempotencyKey"`
+	CreatedAt      string        `json:"createdAt"`
+}
+
+// CreateLeaseInput is the body accepted by POST /v1/leases. TTLSeconds 0 asks
+// the store for the user's sticky TTL, then the panel lease TTL.
+type CreateLeaseInput struct {
+	UserID         string   `json:"userId"`
+	Platform       Platform `json:"platform"`
+	AccountID      string   `json:"accountId"`
+	TTLSeconds     int      `json:"ttlSeconds"`
+	IdempotencyKey string   `json:"idempotencyKey"`
 }
 
 // PanelUser mirrors the dashboard PanelUser interface. QuotaBytesMonth is null

@@ -114,6 +114,11 @@ type Config struct {
 	// logged and answers 500 INTERNAL with no state change; a node the store
 	// does not know is answered 404 without calling the hook.
 	NodeDrainHook func(ctx context.Context, nodeID string, drain bool) error
+	// LeasePublishHook runs after a lease create/revoke commits. It is the
+	// optional Resin seam: a deployment that publishes allocation changes
+	// installs it, and its failure is reported as a warning because the store
+	// mutation already happened and is never rolled back for a publish error.
+	LeasePublishHook func(ctx context.Context, action LeaseAction, lease model.Lease) error
 	// UpdateRepo is the GitHub "owner/repo" checked by GET
 	// /v1/system/update. Empty keeps the endpoint enabled:false and the
 	// daemon makes no network call at all.
@@ -334,8 +339,9 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/nodes/{id}/actions/probe", s.handleProbeNode)
 
 	rt.handle(http.MethodGet, "/v1/leases", s.handleListLeases)
+	rt.handle(http.MethodPost, "/v1/leases", s.handleCreateLease)
 	rt.handle(http.MethodPost, "/v1/leases/{id}/actions/rotate", s.handleRotateLease)
-	rt.handle(http.MethodDelete, "/v1/leases/{id}", s.handleReleaseLease)
+	rt.handle(http.MethodDelete, "/v1/leases/{id}", s.handleRevokeLease)
 
 	rt.handle(http.MethodGet, "/v1/users", s.handleListUsers)
 	rt.handle(http.MethodPost, "/v1/users", s.handleCreateUser)

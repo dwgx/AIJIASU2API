@@ -19,6 +19,10 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrUpstream = errors.New("upstream unavailable")
+	// ErrQuota is a refusal caused by a configured limit: a user's monthly
+	// quota, an account's active-lease concurrency, or a pool with no free
+	// node. The API maps it to 429 QUOTA_EXCEEDED.
+	ErrQuota = errors.New("quota exceeded")
 )
 
 // Error carries a client-safe message while keeping a matchable kind.
@@ -333,24 +337,32 @@ func (s *Store) Node(id string) (model.ProxyNode, bool) {
 	return s.nodes[idx], true
 }
 
-// Leases returns a snapshot in seed order.
+// Leases returns a snapshot in seed order. Expired leases are released first,
+// so a read never lists a lease whose TTL already passed.
 func (s *Store) Leases() []model.Lease {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepExpiredLocked(s.now())
 	out := make([]model.Lease, len(s.leases))
 	copy(out, s.leases)
+	for i := range out {
+		s.normalizeLeaseLocked(&out[i])
+	}
 	return out
 }
 
-// Lease returns one lease by id.
+// Lease returns one lease by id. Like Leases it sweeps expired rows first.
 func (s *Store) Lease(id string) (model.Lease, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepExpiredLocked(s.now())
 	idx := s.leaseIndexLocked(id)
 	if idx < 0 {
 		return model.Lease{}, false
 	}
-	return s.leases[idx], true
+	lease := s.leases[idx]
+	s.normalizeLeaseLocked(&lease)
+	return lease, true
 }
 
 // Users returns a snapshot in seed order.

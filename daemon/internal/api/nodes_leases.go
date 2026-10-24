@@ -185,20 +185,3 @@ func (s *Server) handleRotateLease(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, lease)
 }
-
-func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
-	id := pathParam(r, "id")
-	if s.cfg.Panel != nil {
-		if err := s.cfg.Panel.ReleaseLease(r.Context(), id); err != nil {
-			s.writePanelError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if err := s.store.ReleaseLease(id); err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}

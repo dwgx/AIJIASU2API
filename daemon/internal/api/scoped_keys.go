@@ -63,6 +63,7 @@ var routeScopes = map[string]model.Scope{
 	http.MethodPost + " /v1/nodes/{id}/actions/probe":   model.ScopeCatalogWrite,
 
 	http.MethodGet + " /v1/leases":                      model.ScopeLeasesRead,
+	http.MethodPost + " /v1/leases":                     model.ScopeLeasesWrite,
 	http.MethodPost + " /v1/leases/{id}/actions/rotate": model.ScopeLeasesWrite,
 	http.MethodDelete + " /v1/leases/{id}":              model.ScopeLeasesWrite,
 

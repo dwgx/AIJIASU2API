@@ -221,9 +221,9 @@ func TestJSONFieldNames(t *testing.T) {
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/leases", nil)
 	requireStatus(t, resp, http.StatusOK)
 	assertKeys(t, "Lease", firstObject(t, body),
-		"id", "userId", "userName", "accountId", "accountLabel", "nodeId", "nodeLabel",
+		"id", "userId", "userName", "accountId", "accountLabel", "platform", "nodeId", "nodeLabel",
 		"region", "egressIp", "protocol", "gatePort", "ttlSeconds", "expiresAt", "requests",
-		"bytes", "sticky", "createdAt")
+		"bytes", "sticky", "status", "idempotencyKey", "createdAt")
 
 	resp, body = apiCall(t, ts, http.MethodGet, "/v1/users", nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -1097,7 +1097,7 @@ func TestLeaseRotateRelease(t *testing.T) {
 		t.Fatalf("node egress IP = %q, want %q", nodes[0].EgressIP, rotated.EgressIP)
 	}
 
-	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-01", nil)
+	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-01", map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
 
 	_, body = apiCall(t, ts, http.MethodGet, "/v1/leases", nil)
