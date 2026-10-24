@@ -555,3 +555,54 @@ func TestScheduleRenewalSweepIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+func TestOnRunCallbackReportsRecordedOutcome(t *testing.T) {
+	now := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	clock := newTestClock(now)
+	st := store.NewEmpty()
+	account := testAccount(t, st)
+	catalog := newFakeCatalog(account.ID)
+	scheduleValue := createTestSchedule(t, st, account.ID, nil)
+
+	var mu sync.Mutex
+	var runs []model.ScheduleRun
+	engine, err := NewEngine(Config{
+		Store:         st,
+		Catalog:       catalog,
+		Logger:        testLogger(),
+		Now:           clock.Now,
+		Tick:          time.Second,
+		MaxConcurrent: 1,
+		QueueSize:     10,
+		NodeLimit:     1,
+		OnRun: func(_ model.Schedule, run model.ScheduleRun) {
+			mu.Lock()
+			runs = append(runs, run)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	if err := engine.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = engine.Stop(stopCtx)
+	})
+
+	run, err := engine.RunNow(context.Background(), scheduleValue.ID, false, true)
+	if err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(runs) != 1 {
+		t.Fatalf("OnRun calls = %d, want 1", len(runs))
+	}
+	if runs[0].ID != run.ID || runs[0].Result != "ok" {
+		t.Fatalf("OnRun run = %+v, want %s ok", runs[0], run.ID)
+	}
+}

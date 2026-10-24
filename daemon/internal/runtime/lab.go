@@ -296,6 +296,7 @@ func (v *LabView) Gates() ([]model.GateView, string) {
 			}
 			view.Accepted = state.Accepted
 			view.Rejected = state.Rejected
+			view.Probes = state.Probes
 			view.IngressBytes = state.IngressBytes
 			view.EgressBytes = state.EgressBytes
 			view.Draining = state.Draining || running.Draining

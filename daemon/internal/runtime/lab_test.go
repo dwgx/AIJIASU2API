@@ -58,6 +58,7 @@ func TestLabViewTelemetry(t *testing.T) {
 		Limit:        32,
 		Accepted:     3,
 		Rejected:     1,
+		Probes:       7,
 		IngressBytes: 111,
 		EgressBytes:  222,
 		StartedAt:    gateStarted,
@@ -138,8 +139,15 @@ func TestLabViewTelemetry(t *testing.T) {
 		t.Fatalf("gate identity = %+v", got)
 	}
 	if got.Active != 2 || got.Limit != 32 || got.Accepted != 3 || got.Rejected != 1 ||
-		got.IngressBytes != 111 || got.EgressBytes != 222 {
+		got.Probes != 7 || got.IngressBytes != 111 || got.EgressBytes != 222 {
 		t.Fatalf("gate counters = %+v", got)
+	}
+	gateJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal gate view: %v", err)
+	}
+	if !strings.Contains(string(gateJSON), `"probes":7`) {
+		t.Fatalf("gate view JSON = %s, want a probes counter", gateJSON)
 	}
 	if got.StartedAt != gateStarted.Format(time.RFC3339) {
 		t.Fatalf("gate startedAt = %q, want %q", got.StartedAt, gateStarted.Format(time.RFC3339))

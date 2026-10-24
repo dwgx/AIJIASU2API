@@ -271,6 +271,38 @@ func TestFlowRingHTTPServesRealGateRows(t *testing.T) {
 	lab := runtime.NewLabView(runtime.LabConfig{Store: st, Controller: controller, Logins: logins})
 	ts := newLabTestServer(t, lab, st)
 
+	// A probe is a dial-and-close with no SOCKS5 greeting. The gate must count
+	// it as probes, not rejected, and GET /v1/lab/gates must carry the counter.
+	probe, err := net.Dial("tcp", gateServer.Addr().String())
+	if err != nil {
+		t.Fatalf("dial probe: %v", err)
+	}
+	_ = probe.Close()
+	probeDeadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := labGET(t, ts, "/v1/lab/gates", true)
+		if status != http.StatusOK {
+			t.Fatalf("gates = %d: %s", status, body)
+		}
+		var gates []model.GateView
+		if err := json.Unmarshal(body, &gates); err != nil {
+			t.Fatalf("decode gates: %v (%s)", err, body)
+		}
+		if len(gates) == 1 && gates[0].Probes == 1 {
+			if gates[0].Rejected != 0 {
+				t.Fatalf("probe counted as a rejection: %+v", gates[0])
+			}
+			if !strings.Contains(string(body), `"probes":1`) {
+				t.Fatalf("gates body has no probes counter: %s", body)
+			}
+			break
+		}
+		if time.Now().After(probeDeadline) {
+			t.Fatalf("timed out waiting for the probe counter; last = %s", body)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	conn := gateConnect(t, gateServer.Addr().String(), "example.com", 443)
 	if _, err := conn.Write([]byte("ping")); err != nil {
 		t.Fatalf("write payload: %v", err)

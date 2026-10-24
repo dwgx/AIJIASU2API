@@ -499,6 +499,161 @@ func TestMalformedHandshakes(t *testing.T) {
 	}
 }
 
+// captureHandler records every log record under a mutex, so a handler
+// goroutine can log while the test inspects the slice.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+// waitLog waits for one record with the given message and returns it.
+func waitLog(t *testing.T, h *captureHandler, msg string) slog.Record {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		for _, r := range h.snapshot() {
+			if r.Message == msg {
+				return r
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for log %q; records = %v", msg, h.snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// warnRecords returns every WARN record seen so far.
+func warnRecords(h *captureHandler) []slog.Record {
+	var out []slog.Record
+	for _, r := range h.snapshot() {
+		if r.Level == slog.LevelWarn {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// TestProbeConnectionIsNotRejected pins the health-sampler fix: a dial and
+// close with no handshake byte counts as a probe, logs at debug, and leaves
+// Rejected and the flow ring untouched.
+func TestProbeConnectionIsNotRejected(t *testing.T) {
+	logs := &captureHandler{}
+	srv := startServer(t, Config{NodeID: "node-probe", Logger: slog.New(logs)}, &fakeSession{})
+
+	c := dialGate(t, srv)
+	_ = c.Close()
+
+	record := waitLog(t, logs, "gate probe closed")
+	if record.Level != slog.LevelDebug {
+		t.Fatalf("probe log level = %v, want DEBUG", record.Level)
+	}
+	st := waitState(t, srv, func(st State) bool { return st.Probes == 1 })
+	if st.Accepted != 0 || st.Rejected != 0 {
+		t.Fatalf("accepted/rejected/probes = %d/%d/%d, want 0/0/1", st.Accepted, st.Rejected, st.Probes)
+	}
+	if records := srv.Flows(0); len(records) != 0 {
+		t.Fatalf("probe wrote flow records: %+v", records)
+	}
+	if warns := warnRecords(logs); len(warns) != 0 {
+		t.Fatalf("probe logged warnings: %v", warns)
+	}
+}
+
+// TestZeroByteWriteThenCloseIsProbe covers a sampler that writes an empty
+// buffer before closing: still zero handshake bytes, still a probe.
+func TestZeroByteWriteThenCloseIsProbe(t *testing.T) {
+	logs := &captureHandler{}
+	srv := startServer(t, Config{NodeID: "node-probe", Logger: slog.New(logs)}, &fakeSession{})
+
+	c := dialGate(t, srv)
+	if n, err := c.Write([]byte{}); err != nil || n != 0 {
+		t.Fatalf("zero-length write = %d, %v; want 0, nil", n, err)
+	}
+	_ = c.Close()
+
+	waitLog(t, logs, "gate probe closed")
+	st := waitState(t, srv, func(st State) bool { return st.Probes == 1 })
+	if st.Accepted != 0 || st.Rejected != 0 {
+		t.Fatalf("accepted/rejected/probes = %d/%d/%d, want 0/0/1", st.Accepted, st.Rejected, st.Probes)
+	}
+	if records := srv.Flows(0); len(records) != 0 {
+		t.Fatalf("probe wrote flow records: %+v", records)
+	}
+	if warns := warnRecords(logs); len(warns) != 0 {
+		t.Fatalf("probe logged warnings: %v", warns)
+	}
+}
+
+// TestPartialGreetingIsRejected proves a truncated real handshake keeps the
+// old semantics: one consumed byte is not a probe.
+func TestPartialGreetingIsRejected(t *testing.T) {
+	logs := &captureHandler{}
+	srv := startServer(t, Config{NodeID: "node-truncated", Logger: slog.New(logs)}, &fakeSession{})
+
+	c := dialGate(t, srv)
+	if _, err := c.Write([]byte{socks5Version}); err != nil {
+		t.Fatalf("write partial greeting: %v", err)
+	}
+	_ = c.Close()
+
+	record := waitLog(t, logs, "gate handshake rejected")
+	if record.Level != slog.LevelWarn {
+		t.Fatalf("truncated handshake log level = %v, want WARN", record.Level)
+	}
+	st := waitState(t, srv, func(st State) bool { return st.Rejected == 1 })
+	if st.Probes != 0 || st.Accepted != 0 {
+		t.Fatalf("accepted/rejected/probes = %d/%d/%d, want 0/1/0", st.Accepted, st.Rejected, st.Probes)
+	}
+	records := waitFlowRecords(t, srv, func(records []FlowRecord) bool { return len(records) == 1 })
+	if records[0].Status != FlowStatusRejected || records[0].ErrorClass != FlowErrorHandshake {
+		t.Fatalf("record = %+v, want rejected/handshake", records[0])
+	}
+}
+
+// TestProbeThenValidHandshake proves classification does not disturb normal
+// service: after a probe, a full CONNECT still relays.
+func TestProbeThenValidHandshake(t *testing.T) {
+	logs := &captureHandler{}
+	sess := &fakeSession{}
+	srv := startServer(t, Config{NodeID: "node-probe", Logger: slog.New(logs)}, sess)
+
+	probe := dialGate(t, srv)
+	_ = probe.Close()
+	waitLog(t, logs, "gate probe closed")
+
+	c := dialGate(t, srv)
+	connectOK(t, c, atypDomain, append([]byte{11}, []byte("example.com")...), 443)
+	echoOnce(t, c, []byte("ping"))
+	_ = c.Close()
+
+	st := waitState(t, srv, func(st State) bool { return st.Accepted == 1 && st.Active == 0 })
+	if st.Probes != 1 || st.Rejected != 0 {
+		t.Fatalf("accepted/rejected/probes = %d/%d/%d, want 1/0/1", st.Accepted, st.Rejected, st.Probes)
+	}
+	if opens := sess.recorded(); len(opens) != 1 {
+		t.Fatalf("OpenFlow calls = %v, want one", opens)
+	}
+}
+
 func TestOpenFlowErrorRepliesRefused(t *testing.T) {
 	sess := &fakeSession{err: errors.New("upstream unavailable")}
 	srv := startServer(t, Config{NodeID: "node-1"}, sess)

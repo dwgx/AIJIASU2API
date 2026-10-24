@@ -117,6 +117,10 @@ type State struct {
 	// Rejected counts flows refused before relay: draining, admission
 	// timeout, malformed handshake, or a failed OpenFlow.
 	Rejected uint64 `json:"rejected"`
+	// Probes counts connections that closed before sending any handshake
+	// byte: a health sampler dial-and-close. A probe is not a rejection and
+	// never enters the flow ring.
+	Probes uint64 `json:"probes"`
 	// IngressBytes is client -> target payload; EgressBytes is target ->
 	// client. They exclude the SOCKS5 handshake.
 	IngressBytes uint64    `json:"ingressBytes"`
@@ -161,6 +165,7 @@ type Server struct {
 
 	accepted atomic.Uint64
 	rejected atomic.Uint64
+	probes   atomic.Uint64
 	ingress  atomic.Uint64
 	egress   atomic.Uint64
 }
@@ -268,6 +273,7 @@ func (s *Server) State() State {
 	s.mu.Unlock()
 	st.Accepted = s.accepted.Load()
 	st.Rejected = s.rejected.Load()
+	st.Probes = s.probes.Load()
 	st.IngressBytes = s.ingress.Load()
 	st.EgressBytes = s.egress.Load()
 	return st
@@ -429,8 +435,16 @@ func (s *Server) handle(client net.Conn) {
 
 	_ = client.SetDeadline(time.Now().Add(handshakeTimeout))
 
-	target, err := readRequest(client)
+	// Count what the peer sends so an idle probe (dial and close) can be told
+	// apart from a real handshake that was truncated mid-frame.
+	handshake := &countingConn{Conn: client}
+	target, err := readRequest(handshake)
 	if err != nil {
+		if handshake.read == 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			s.probes.Add(1)
+			s.logger.Debug("gate probe closed", "node_id", s.cfg.NodeID)
+			return
+		}
 		s.rejected.Add(1)
 		s.recordReject(started, target, FlowErrorHandshake)
 		s.logger.Warn("gate handshake rejected", "node_id", s.cfg.NodeID, "error", err)
@@ -626,6 +640,20 @@ type target struct {
 
 func (t target) String() string {
 	return net.JoinHostPort(t.host, strconv.Itoa(t.port))
+}
+
+// countingConn counts the bytes read from the peer during the handshake. The
+// greeting reader owns the connection for the whole handshake, so the plain
+// int is race-free; writes still go through the embedded net.Conn.
+type countingConn struct {
+	net.Conn
+	read int
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read += n
+	return n, err
 }
 
 // readRequest performs the greeting and the CONNECT request. It writes every

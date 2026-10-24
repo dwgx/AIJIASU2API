@@ -66,6 +66,7 @@ type GateView struct {
 	Limit        int       `json:"limit"`
 	Accepted     uint64    `json:"accepted"`
 	Rejected     uint64    `json:"rejected"`
+	Probes       uint64    `json:"probes"`
 	IngressBytes uint64    `json:"ingressBytes"`
 	EgressBytes  uint64    `json:"egressBytes"`
 	Draining     bool      `json:"draining"`

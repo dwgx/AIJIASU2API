@@ -50,6 +50,16 @@ type Config struct {
 	RenewalLeadDays []int
 	RenewalHour     int
 	RenewalTimezone string
+
+	// OnRun, when set, is called after a run is recorded, with the schedule it
+	// belongs to. It runs on the worker goroutine (or the RunNow caller) and
+	// must not block; the daemon uses it to emit customer webhook events.
+	OnRun func(schedule model.Schedule, run model.ScheduleRun)
+
+	// OnReminder, when set, is called once for every renewal mark a sweep
+	// arms, on the goroutine that runs the sweep. It must not block; the daemon
+	// uses it to emit customer webhook events.
+	OnReminder func(ReminderEvent)
 }
 
 // uniqueDescending dedupes and sorts lead days so a sweep cannot emit the
@@ -705,6 +715,9 @@ func (e *Engine) finishRun(schedule model.Schedule, job runJob, runID, fireKey s
 			e.recordCircuitFailure(schedule.Target.ID)
 		}
 		e.auditError(schedule, run, started)
+	}
+	if e.cfg.OnRun != nil {
+		e.cfg.OnRun(schedule, run)
 	}
 	return run
 }
