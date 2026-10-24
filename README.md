@@ -28,11 +28,14 @@ one account): original app and daemon egress parity through one node, device ide
 across logins; the `2261` deployment now runs login-enabled with that account active and is
 demo-free (one account, one node; gate port read from `/v1/lab/gates`). The platform wave — scoped
 keys (including customer-scoped read scopes), the device-pool HTTP API, renewal, flow-metered
-usage, webhooks with an SSRF policy, loopback gate health and passphrase-encrypted panel
-backup/restore — is served by the daemon and covered offline, but not yet exercised against the
-vendor. Panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
+usage, webhooks with an SSRF policy and persisted delivery history, loopback gate health and
+passphrase-encrypted panel backup/restore — is served by the daemon and covered offline, but not
+yet exercised against the vendor. Startup recovery demotes a persisted `LIVE`/`DRAINING` node to
+`STALE` when no in-process gate serves it, and the opt-in `AJS_AUTO_LOGIN=1` reopens eligible
+sessions once per boot. Panel state survives a restart only as a versioned JSON snapshot, not
+SQLite.**
 
-As of 2026-10-24:
+As of 2026-10-25:
 
 - `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
@@ -66,14 +69,14 @@ As of 2026-10-24:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 330 Vitest tests in 37 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 354 Vitest tests in 40 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
   labels, server names, IPs and API values are data and are never translated. Settings is an
   eight-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
   Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later** states
   for controls the daemon does not read yet; Integrations now carries the live webhook registry
-  (one-time signing secret, enable/disable, per-endpoint delivery ring). HMC serves the mock
+  (one-time signing secret, enable/disable, per-endpoint delivery history). HMC serves the mock
   build on `18081` and the live build on `18082`, the latter published on the LAN at
   `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
   bearer token is required (insecure mode is refused off loopback).
@@ -95,7 +98,7 @@ As of 2026-10-24:
   next-run preview, `ARM`/`RUN` confirmations, an `If-Match` revision retry, run history and the
   read-only renewal-sweep card), a gate-health panel on Overview (compact) and Nodes → Connected
   (full) fed by the daemon's loopback sampler, and a live webhook registry in Settings →
-  Integrations (one-time signing secret, enable/disable, per-endpoint delivery ring).
+  Integrations (one-time signing secret, enable/disable, per-endpoint delivery history).
   Accounts exports the selected, filtered or all accounts as an encrypted `.ajsx` envelope
   (passphrase-derived key, device identity optional), imports JSON, CSV or encrypted files with a
   dry-run preview and an atomic or partial apply, and bulk-deletes up to 100 accounts with per-row
@@ -130,14 +133,21 @@ As of 2026-10-24:
   aggregation with `rowsRetained`/`retentionDays`, fed by gate flows unless `AJS_FLOW_METER=0`),
   `/v1/health/nodes` (loopback gate sampler: 30 s probes, 120 samples per node,
   `AJS_HEALTH_MAX_NODES` rings with eviction healing), `/v1/webhooks*` (HMAC-SHA256 delivery with
-  five attempts and a 200-attempt ring; a receiver must not resolve to a private address unless
+  five attempts, a 200-attempt in-memory ring and a persisted delivery history — 50 rows per
+  endpoint, 500 total, merged newest first behind `?limit`; a dead-lettered delivery writes one
+  warning `webhook.dead_letter` audit row; a receiver must not resolve to a private address unless
   `AJS_WEBHOOK_ALLOW_PRIVATE=1`) and `/v1/backup*` (passphrase-encrypted panel backup, inspect and
   a dry-run-first restore).
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. 675 Go test
-  functions — 634 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  a second login on the same account) and again on 2026-10-24 after the rebuild. Startup recovery
+  closes the restart gap: before the panel reconcile and the listener, every persisted
+  `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and egress
+  cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a no-op),
+  and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
+  accounts once per process, pausing a jittered 60 s after a failed login. 744 Go test
+  functions — 703 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -214,10 +224,12 @@ As of 2026-10-24:
   it keeps one hour of samples (120 at 30 s) for at most `AJS_HEALTH_MAX_NODES` nodes (default 16)
   and re-arms an evicted watched ring within a reconcile tick. The flow meter records one row per
   completed gate flow and never a rejected one, and `/v1/usage` reports the 10 000-row cap with
-  the day span it actually covers. Webhook retries and the delivery ring live in memory, so a
-  restart drops queued retries and the ring, and the signing secret survives a restart only with
-  `AJS_MASTER_KEY`. A backup envelope carries sealed credentials; restore writes the panel files
-  only on an explicit apply and the daemon must then be restarted.
+  the day span it actually covers. Webhook retries and the live 200-attempt ring live in memory,
+  so a restart drops queued retries and the live window; the persisted delivery history (50 rows
+  per endpoint, 500 total) and a dead-lettered delivery's warning audit row survive in the
+  snapshot, and the signing secret survives a restart only with `AJS_MASTER_KEY`. A backup
+  envelope carries sealed credentials; restore writes the panel files only on an explicit apply
+  and the daemon must then be restarted.
 
 The product layer above the daemon — multi-account sessions, lease allocation and per-user
 access — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
@@ -225,7 +237,7 @@ sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the c
 behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (77 paths, 95 operations, 147 schemas at the last sync): every route registered in
+surface (79 paths, 97 operations, 149 schemas at the last sync): every route registered in
 `daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
 schedules, scoped keys, the platform views (renewal, usage, health, webhooks), panel backup and the
 Lab — plus the proposed P1 interfaces. Scoped API keys (`ajs_sk_`, least privilege with per-route
@@ -318,8 +330,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (330 tests in 37 files), `cd daemon && go test ./...`
-(634 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (354 tests in 40 files), `cd daemon && go test ./...`
+(703 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and

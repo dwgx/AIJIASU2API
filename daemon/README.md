@@ -44,8 +44,9 @@ The platform wave adds the customer read views and registries: cached renewal pl
 per-account expiry (`/v1/renewal/*`, redirects refused), flow-metered request-log usage
 (`/v1/usage`; gate flows append rows unless `AJS_FLOW_METER=0`), a loopback gate health sampler
 (`/v1/health/nodes`, `AJS_HEALTH_MAX_NODES` rings with eviction healing), outbound webhooks with
-HMAC signing, an SSRF policy and bounded retries (`/v1/webhooks*`), passphrase-encrypted panel
-backup, inspect and restore (`/v1/backup*`), plus least-privilege scoped API keys
+HMAC signing, an SSRF policy, bounded retries, a persisted delivery history and a dead-letter
+audit row (`/v1/webhooks*`), passphrase-encrypted panel backup, inspect and restore (`/v1/backup*`),
+plus least-privilege scoped API keys
 (`/v1/scoped-keys`, `ajs_sk_` secrets with per-route scopes, including the
 `usage:read`/`renewal:read`/`health:read`/`events:read` customer reads). The same wave adds
 customer-visible event replay and a server-sent event stream (`/v1/events`,
@@ -1156,13 +1157,19 @@ the lab/test opt-out for the address classes; the metadata names stay blocked.
 **Delivery.** The dispatcher has a 256-event queue and four workers, keeps
 per-endpoint FIFO order, times each attempt out after 10 s and retries up to
 five attempts with backoff 1 s, 5 s, 30 s, 2 min and 10 min. A delivery that
-exhausts its attempts is recorded as `dead_letter` and is not retried again; an
-identical event id inside the 60 s dedupe window is dropped. Every attempt is
-also appended to the persisted delivery history — 50 rows per endpoint, 500 in
+exhausts its attempts is recorded as `dead_letter` and is not retried again;
+the dispatcher reports it once per delivery id (a fixed 256-id ring), and the
+composition root appends one `warn` `webhook.dead_letter` audit row — actor
+`system`, target the endpoint id, detail `<event> after <n> attempts` — so the
+URL, signing secret and payload never enter the audit trail. An identical event
+id inside the 60 s dedupe window is dropped. Every attempt is also appended to
+the persisted delivery history — 50 rows per endpoint, 500 in
 total, oldest dropped first — from one background goroutine fed by a bounded
 queue, so a slow sink costs dropped history (counted) and never delays a
 delivery. The append itself is memory-only: the periodic state snapshot carries
-it to disk, so a delivery never waits on a write or an fsync.
+it to disk, so a delivery never waits on a write or an fsync. Both sinks
+isolate panics: a panicking hook is logged and the worker continues, so one bad
+row cannot stop an endpoint.
 `GET /v1/webhooks/{id}/deliveries` merges those persisted rows (authoritative;
 they survive a restart) with the live in-memory ring (the last 200 attempts per
 endpoint), dedupes by delivery id and answers newest first; `?limit` pages it
@@ -1970,7 +1977,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **634 `func Test` functions across 77 `_test.go` files** (recounted 2026-10-25);
+The tree holds **703 `func Test` functions across 87 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -2032,7 +2039,11 @@ sink (a blocked sink never stalls dispatch, drops are counted, one call per atte
 drop-oldest, snapshot validation and the delete cascade; `internal/webhook/dispatcher_test.go` and
 `webhook_test.go`/`ssrf_test.go` pin signing, retry/backoff, dead-letter, dedupe, the 200-attempt
 ring, payload scrubbing (including embedded `password=…` values) and the private/metadata-host
-probe table plus dial-guard recheck; `internal/store/audit_hook_test.go` pins critical-audit
+probe table plus dial-guard recheck; `internal/webhook/deadletter_test.go` pins the report-once
+ring and panic isolation, and `cmd/ajs-accountd/webhook_deadletter_test.go` pins the composition
+root: exactly one warning `webhook.dead_letter` audit row per exhausted delivery (no second row on
+close), the endpoint/event/attempt detail, and no URL or signing secret;
+`internal/store/audit_hook_test.go` pins critical-audit
 delivery; `internal/health/health_test.go` pins the 30 s/120-sample window, states, error
 classes, loopback-only dials, the configurable cap, unwatched-first eviction, the watched-LRU
 fallback and its bounded `Evicted` record; `cmd/ajs-accountd/health_reconcile_test.go` pins the

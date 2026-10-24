@@ -9,7 +9,7 @@ variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 341 tests in 38 files.
+- Tests: Vitest + React Testing Library + jsdom, 354 tests in 40 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 341 tests in 38 files
+npm test           # Vitest, 354 tests in 40 files
 npm run typecheck  # tsc -b
 ```
 
@@ -271,7 +271,10 @@ the typed-query preservation on unrelated param changes.
   mode renders the `{enabled:false}` reason. No demo or overseas rows are invented.
 - The catalog polls every 30 s, the Connected tab every 15 s. Connected renders `/v1/nodes` with
   region/state filters, latency sparkline, success/capacity meters, drain/undrain, probe and a
-  detail drawer.
+  detail drawer. The state filter offers `STALE` between `DRAINING` and `DOWN`: startup recovery
+  demotes a persisted `LIVE`/`DRAINING` row whose gate did not survive the restart (no gate port,
+  no egress), so the row stays visible with a warning-toned `Stale` badge instead of disappearing
+  or still claiming `LIVE`.
 - Mock mode serves deterministic fixtures from `src/lib/mock.ts` (including the paging envelope),
   so the same layout is reviewable offline.
 
@@ -753,10 +756,12 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 - **Edit is a replace.** The daemon only mutates `enabled`, so a changed URL, label or event list
   is a new receiver: the page creates it first (showing the new signing secret once), then deletes
   the old row, so a failed create leaves the original endpoint intact.
-- **Deliveries.** The drawer lists the endpoint's retained attempts oldest first with event,
-  attempt number, status (`success`/`failed`/`dead_letter`), HTTP status or transport error, and
-  duration. The ring is the daemon's in-memory last 200 attempts per endpoint: it does not survive
-  a daemon restart, and the dashboard never invents an attempt.
+- **Deliveries.** The drawer requests `?limit=50` and lists the endpoint's attempts newest first
+  with event, attempt number, status (`success`/`failed`/`dead_letter`), HTTP status or transport
+  error, and duration. The daemon merges its persisted history (50 rows per endpoint, 500 total,
+  in `state.json`) with the live 200-attempt ring and dedupes by delivery id, so the newest rows
+  survive a daemon restart; the default page is 200 and a larger limit is clamped to 500.
+  The dashboard never invents an attempt.
 - **Events.** The subscription list is the daemon's closed catalogue: `account.login`,
   `account.logout`, `account.expired`, `account.renewal_due`, `node.connected`,
   `node.disconnected`, `node.switched`, `schedule.fired`, `schedule.failed`, `device.retired`,
@@ -774,7 +779,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 341 Vitest tests in 38 files (65 at the 2026-10-23 record; see
+- 354 Vitest tests in 40 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -816,7 +821,8 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   and delete. `tests/health-panel.test.tsx` covers `ok`/`degraded`/`down`, the compact and full
   variants, `enabled:false`, an empty sampler and the stale poll. `tests/webhooks.test.tsx` covers
   the registry, the show-once secret, the enable-409 when the secret is gone, delete and the
-  deliveries drawer. `tests/platform-client.test.ts` pins the client contract for renewal, usage,
+  deliveries drawer (newest-first rows, the 50-row page and the last-delivery read from index 0).
+  `tests/platform-client.test.ts` pins the client contract for renewal, usage,
   health and webhooks (live URL/query/method/bearer header and deterministic mock data).
   `tests/lab.test.tsx` covers the Lab page: overview posture badges and effective flags (a secret
   value never reaches the DOM), gate counters plus redacted session SIDs, the `enabled:false`
@@ -842,6 +848,9 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   versus a far-future `clock skew`, the vendor-claim egress badge and copy button, Verify egress
   showing claimed/verified/mismatch/latency, the disabled-unless-LIVE guard, a 409/429 inline
   alert plus toast, the touch-only note, and the Chinese drawer.
+  `tests/nodes-connected.test.tsx` covers the Connected state filter: `STALE` sits between
+  draining and down, filtering keeps only the demoted row (no gate, no egress), and the option is
+  localized.
   `tests/regions.test.ts` pins `regionName()`: ISO country codes and city subdivisions resolve to
   English and Chinese names, case is normalised, `unknown` and empty codes become `Unknown
   region`, and any other unknown code passes through unchanged.
@@ -912,7 +921,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay); a compact gate-health panel sits under the metric tiles |
 | `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account and per-user tables with advisory quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
-| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
+| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
