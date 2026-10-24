@@ -611,6 +611,7 @@ func (v *LabView) Servers(_ context.Context, accountID string) (model.ServersVie
 		item := model.ServerView{
 			ID:             entry.id,
 			Title:          entry.server.Tit,
+			Order:          strings.TrimSpace(entry.server.Ord),
 			Region:         nodeRegion(entry.server),
 			Host:           entry.server.Svr,
 			Port:           entry.server.Port(),

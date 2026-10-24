@@ -28,6 +28,10 @@ func (plainSealer) Open(_ string, sealed []byte) ([]byte, error) {
 	return append([]byte(nil), sealed...), nil
 }
 
+// Delete satisfies store.Sealer: this stub keeps nothing, so there is nothing
+// to remove.
+func (plainSealer) Delete(string) error { return nil }
+
 func newLoginAccount(t *testing.T, st *store.Store) model.Account {
 	t.Helper()
 	account, err := st.CreateAccount(model.CreateAccountInput{

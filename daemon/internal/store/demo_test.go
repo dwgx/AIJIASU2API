@@ -1,6 +1,8 @@
 package store_test
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"ajsaccountd/internal/model"
@@ -311,4 +313,78 @@ func singleHealth(t *testing.T, st *store.Store) model.AccountHealth {
 		t.Fatalf("account health rows = %d, want 1", len(metrics.AccountHealth))
 	}
 	return metrics.AccountHealth[0]
+}
+
+// TestPurgeDemoPrunesSealerEntries covers the bulk path: a seed account that
+// carries a sealed secret in a snapshot written by another build must lose it
+// in the sealer file too, not only in the snapshot map.
+func TestPurgeDemoPrunesSealerEntries(t *testing.T) {
+	sealer, secretsPath := newSealer(t)
+	sealed, err := sealer.Seal("acc-01", []byte(testPassword))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	st := store.NewWithSealer(sealer)
+	restoreWithSeedSecret(t, st, sealed)
+	if got, err := st.AccountSecret("acc-01"); err != nil || string(got) != testPassword {
+		t.Fatalf("AccountSecret before purge = %q, %v", got, err)
+	}
+	if _, ok := sealedEntries(t, secretsPath)["acc-01"]; !ok {
+		t.Fatal("the sealer file has no entry for the seed account")
+	}
+
+	result, err := st.PurgeDemo()
+	if err != nil {
+		t.Fatalf("PurgeDemo: %v", err)
+	}
+	if result.Accounts != 6 {
+		t.Fatalf("PurgeDemo accounts = %d, want 6", result.Accounts)
+	}
+	if _, err := st.AccountSecret("acc-01"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("AccountSecret after purge error = %v, want ErrNotFound", err)
+	}
+	if _, ok := sealedEntries(t, secretsPath)["acc-01"]; ok {
+		t.Fatal("PurgeDemo left the seed account's sealed entry in the sealer file")
+	}
+}
+
+// TestPurgeDemoSealerFailureIsReported pins the error contract: a sealer that
+// cannot remove a purged account's entry makes PurgeDemo fail so the caller
+// does not save the half-purged snapshot.
+func TestPurgeDemoSealerFailureIsReported(t *testing.T) {
+	inner, _ := newSealer(t)
+	sealed, err := inner.Seal("acc-01", []byte(testPassword))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	st := store.NewWithSealer(deleteFailSealer{Store: inner})
+	restoreWithSeedSecret(t, st, sealed)
+	if _, err := st.PurgeDemo(); err == nil {
+		t.Fatal("PurgeDemo reported success while the sealer refused the delete")
+	}
+}
+
+// restoreWithSeedSecret rewrites the store from its own snapshot with a sealed
+// secret attached to the seed account acc-01.
+func restoreWithSeedSecret(t *testing.T, st *store.Store, sealed []byte) {
+	t.Helper()
+	raw, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var snap store.Snapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("Unmarshal snapshot: %v", err)
+	}
+	if snap.Secrets == nil {
+		snap.Secrets = make(map[string][]byte)
+	}
+	snap.Secrets["acc-01"] = sealed
+	doc, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("Marshal snapshot: %v", err)
+	}
+	if err := st.Restore(doc); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 }

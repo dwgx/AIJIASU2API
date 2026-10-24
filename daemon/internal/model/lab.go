@@ -190,8 +190,11 @@ type ProfilesView struct {
 // deliberately absent, and Par.FV.PS is reduced to HasPingSecret: the secret
 // itself is never serialized.
 type ServerView struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Order is the vendor ord used by ?sort=order. It is catalog metadata,
+	// not part of the response shape, so it is never serialized.
+	Order          string    `json:"-"`
 	Region         string    `json:"region"`
 	Host           string    `json:"host"`
 	Port           int       `json:"port"`
@@ -207,16 +210,33 @@ type ServerView struct {
 	LatencyMs      *int      `json:"latencyMs"`
 }
 
+// RegionCount is one entry of the catalog's per-region summary.
+type RegionCount struct {
+	Code  string `json:"code"`
+	Count int    `json:"count"`
+}
+
 // ServersView is the GET /v1/accounts/{id}/servers response. Stale is true
 // when the daemon has no in-memory login result (for example after a
 // restart); the catalog is then empty rather than invented.
+//
+// Servers is one page of the filtered catalog. Total counts every server that
+// matches the filters, Regions summarizes those same rows, and NextOffset is
+// the offset to request next (offset+len(Servers), equal to Total on the last
+// page). HasMore is true when another page exists.
 type ServersView struct {
-	Enabled   bool         `json:"enabled"`
-	Reason    string       `json:"reason,omitempty"`
-	AccountID string       `json:"accountId"`
-	FetchedAt string       `json:"fetchedAt"`
-	Stale     bool         `json:"stale"`
-	Servers   []ServerView `json:"servers"`
+	Enabled    bool          `json:"enabled"`
+	Reason     string        `json:"reason,omitempty"`
+	AccountID  string        `json:"accountId"`
+	FetchedAt  string        `json:"fetchedAt"`
+	Stale      bool          `json:"stale"`
+	Total      int           `json:"total"`
+	Offset     int           `json:"offset"`
+	Limit      int           `json:"limit"`
+	NextOffset int           `json:"nextOffset"`
+	HasMore    bool          `json:"hasMore"`
+	Regions    []RegionCount `json:"regions"`
+	Servers    []ServerView  `json:"servers"`
 }
 
 // DeviceView is the GET /v1/accounts/{id}/device response. Hashes holds

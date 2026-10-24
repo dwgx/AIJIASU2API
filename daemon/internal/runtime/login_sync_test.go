@@ -26,6 +26,10 @@ func (loginSyncSealer) Open(_ string, sealed []byte) ([]byte, error) {
 	return append([]byte(nil), sealed...), nil
 }
 
+// Delete satisfies store.Sealer: this stub keeps nothing, so there is nothing
+// to remove.
+func (loginSyncSealer) Delete(string) error { return nil }
+
 const (
 	retainedLoginReply = `{"Login":{"AuthResult":"OK","LoginToken":"tok-1|user",` +
 		`"UserName":"user","ConnectPassword":"cp-1","MembershipStatus":"vip"}}`

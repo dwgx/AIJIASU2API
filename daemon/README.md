@@ -929,17 +929,27 @@ the account is stored.
 - Envelope: `v1` + 12-byte random nonce + AES-256-GCM ciphertext/tag, base64 in
   the JSON document. The account id is the additional authenticated data, so a
   sealed blob cannot be moved to another account.
-- File: `$AJS_STATE_DIR/secrets.json`, mode `0600`, rewritten on every seal
-  through a `0600` temporary file and an atomic rename. A missing file starts an
-  empty store.
+- File: `$AJS_STATE_DIR/secrets.json`, mode `0600`, rewritten on every seal and
+  delete through a `0600` temporary file and an atomic rename. A missing file
+  starts an empty store.
 - Rotation: `secret.Store.Rotate(newKey)` re-seals every entry under the new key
   and rewrites the file; the old key stays active if re-sealing or the write
   fails. There is no HTTP endpoint for rotation.
+- Deletion: `secret.Store.Delete(id)` drops one entry and rewrites the file
+  before returning; a missing entry is a no-op, so a retried delete converges,
+  and a failed rewrite restores the entry. `store.DeleteAccount` prunes the
+  sealer before the in-memory cascade (a sealer write may fsync, so it runs
+  outside the store lock); a sealer failure answers 503 and leaves the account
+  and its secret in place, so no delete can drop the account while orphaning the
+  sealed blob on disk. `Store.PurgeDemo` prunes the same way for its bulk
+  removal.
 - Access: `store.AccountSecret(id)` opens a password for the account client. It
   is not exposed over HTTP and `model.Account` has no credential field.
 - Limitation: the sealed blobs are duplicated in `secrets.json` (the sealer's
   own file) and in the full snapshot. The snapshot is authoritative on load;
-  see Persistence below. SQLite (PANEL §6) is a later slice.
+  see Persistence below. A snapshot saved before a delete keeps its copy until
+  the next save, while `secrets.json` is pruned immediately. SQLite (PANEL §6)
+  is a later slice.
 
 ## Persistence (AJS-45)
 
@@ -993,11 +1003,13 @@ $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
 - Duplication with `secrets.json`: the sealer still writes its own file on every
   seal, so a sealed envelope can exist in both files. On startup the snapshot
   replaces `store.secrets`, making it authoritative for which accounts have a
-  secret. A snapshot restored under a different `AJS_MASTER_KEY` keeps the
-  envelopes but `AccountSecret` cannot open them; the key is never stored.
-  Rotation is not wired to the panel store: `secret.Store.Rotate` re-seals only
-  its own file, so the snapshot's map keeps old-key blobs and would need the
-  same entries re-sealed before they can be opened again.
+  secret. `Store.DeleteAccount` prunes both copies: the sealer file immediately,
+  the snapshot map at the next save. A snapshot restored under a different
+  `AJS_MASTER_KEY` keeps the envelopes but `AccountSecret` cannot open them; the
+  key is never stored. Rotation is not wired to the panel store:
+  `secret.Store.Rotate` re-seals only its own file, so the snapshot's map keeps
+  old-key blobs and would need the same entries re-sealed before they can be
+  opened again.
 - Limitations: the format is JSON rather than SQLite; every save rewrites the
   whole document, so cost grows with request/audit history; a crash can lose up
   to one snapshot interval of mutations; there is no schema migration beyond
@@ -1186,7 +1198,7 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
 | GET | `/v1/accounts/{id}` | single account |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
-| DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove account, its nodes, its leases and its sealed secret; keep audit |
+| DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases, its device identity and its sealed secret (sealer file immediately, snapshot at the next save); a sealer failure → 503 with the account and its secret intact; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the account's gates and sessions first (stop failure → 500, account active and nodes unchanged); then pause the account and mark its nodes `DRAINING` |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
@@ -1279,7 +1291,7 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | GET | `/v1/lab/profiles` | supported version profiles plus the sample matrix (versions and carriers, no payloads) |
 | GET | `/v1/lab/logs?level=&component=&limit=&since=` | newest-first window over the bounded log ring; `limit` 1–2000 (default 200), `level` one of debug/info/warn/error, `since` RFC 3339; an invalid value answers 400 instead of silently widening the filter |
 | GET | `/v1/lab/diagnostics` | component health map, state-snapshot facts (basename path, last save, size), build facts (version, Go version, commit) and warnings |
-| GET | `/v1/accounts/{id}/servers` | vendor server catalog for one account from the retained `LoginResult`; without one it answers `stale:true`, an empty list and `no retained login result; log in to refresh the catalog`; unknown account → 404 |
+| GET | `/v1/accounts/{id}/servers?q=&region=&status=&selected=&offset=&limit=&sort=` | vendor server catalog for one account from the retained `LoginResult`; without one it answers `stale:true`, an empty list and `no retained login result; log in to refresh the catalog`; unknown account → 404. `q` is a case-insensitive substring over id/title/host/region, `region`/`status` match case-insensitively, `selected` is `true`/`false`, `offset` ≥ 0, `limit` 1–500 (default 50) and `sort` is `order` (default, vendor ord compared numerically), `title`, `host`, `status` or `region`; an invalid value → 400 `INVALID_ARGUMENT`. The body keeps the existing fields and adds `total` (filtered row count), `offset`, `limit`, `nextOffset`, `hasMore` and `regions:[{code,count}]` (the filtered rows per region). Pagination and filters run over the retained catalog only: no vendor call and no extra store write |
 | GET | `/v1/accounts/{id}/device` | stable device identity as `sha256:`-prefixed 16-hex hashes plus non-secret claims; unknown account → 404 |
 
 A mode that is off is still HTTP 200 with `{"enabled":false,"reason":"…"}` naming the switch
@@ -1332,11 +1344,18 @@ or secret in the body, and `AllowInsecure` passthrough.
 `internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
 mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen
 under the new key, the 0600 file mode with no temp-file leftovers, a missing
-file starting empty, key-length rejection, and that the JSON file holds only
-base64 envelopes (no plaintext). `internal/store/secret_test.go` covers
+file starting empty, key-length rejection, that the JSON file holds only base64
+envelopes (no plaintext), and delete: the entry leaves memory and the file, a
+surviving entry still opens after a reopen, a missing entry is a no-op, and a
+failed rewrite restores the entry. `internal/store/secret_test.go` covers
 seal-on-create, `AccountSecret` per account, delete, the nil-sealer discard
 path, seeded accounts without a secret, no credential in the account JSON, and
-a failing sealer leaving the store unchanged. `internal/store/persist_test.go`
+a failing sealer leaving the store unchanged. It also pins the AJS-170 delete
+contract: after create → save → delete → save → reload neither the account, its
+device identity nor its sealed secret is in `state.json` or `secrets.json`, a
+retried delete is a not-found with one audit event, a sealer failure answers
+`ErrUpstream` with the account and secret intact, logout keeps the secret, and
+the delete audit event and retry error carry no credential. `internal/store/persist_test.go`
 covers a full roundtrip of every collection, settings, key hashes, sealed
 secrets and counters (including `AccountSecret` after restore with the same
 sealer), the `0600` file mode (asserted on non-Windows) with no temp-file
@@ -1348,9 +1367,10 @@ create → delete → save/load plus a lost-counter restore that must not reuse 
 account, user, key, mutation or audit id. `internal/store/demo_test.go` covers
 the empty startup store and its sequences, `PurgeDemo` removing only seed rows
 while preserving `acc-07`, its runtime node, a created user/key, a
-mutation-lab request and later audit events, idempotency, and the real health
-formula (active+LIVE=100, active without LIVE=70, paused=40,
-auth_failed/expired=0) with empty traffic totals.
+mutation-lab request and later audit events, idempotency, the sealer prune for a
+seed account that carries a sealed secret (and the reported error when the
+sealer refuses), and the real health formula (active+LIVE=100, active without
+LIVE=70, paused=40, auth_failed/expired=0) with empty traffic totals.
 
 `internal/resin/client_test.go` runs against an `httptest` fake Resin and covers
 subscription create/unchanged/PATCH, platform create/update with only the

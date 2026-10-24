@@ -36,6 +36,8 @@ func (b *blockingSealer) Open(string, []byte) ([]byte, error) {
 	return nil, errors.New("blockingSealer.Open is not used")
 }
 
+func (b *blockingSealer) Delete(string) error { return nil }
+
 // recordingSealer records every account id it seals.
 type recordingSealer struct {
 	mu     sync.Mutex
@@ -52,6 +54,8 @@ func (r *recordingSealer) Seal(accountID string, plaintext []byte) ([]byte, erro
 func (r *recordingSealer) Open(string, []byte) ([]byte, error) {
 	return nil, errors.New("recordingSealer.Open is not used")
 }
+
+func (r *recordingSealer) Delete(string) error { return nil }
 
 func (r *recordingSealer) ids() []string {
 	r.mu.Lock()

@@ -45,7 +45,7 @@ type fileEnvelope struct {
 
 // Store seals and opens secrets with AES-256-GCM. Entries live in memory and,
 // when path is not empty, in a 0600 JSON file rewritten atomically on every
-// seal or rotation. All exported methods are safe for concurrent use.
+// seal, delete or rotation. All exported methods are safe for concurrent use.
 type Store struct {
 	mu      sync.Mutex
 	aead    cipher.AEAD
@@ -113,6 +113,32 @@ func (s *Store) Seal(accountID string, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 	return sealed, nil
+}
+
+// Delete removes the sealed entry for accountID and rewrites the file before
+// returning, so a completed delete is durable. A missing entry is not an
+// error: a retried account deletion converges instead of failing on the second
+// attempt. When the rewrite fails the entry is restored, so a failed delete
+// never leaves the in-memory map and the file disagreeing.
+func (s *Store) Delete(accountID string) error {
+	if accountID == "" {
+		return errors.New("secret: account id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	previous, ok := s.entries[accountID]
+	if !ok {
+		return nil
+	}
+	delete(s.entries, accountID)
+	if err := s.persistLocked(); err != nil {
+		s.entries[accountID] = previous
+		return err
+	}
+	return nil
 }
 
 // Open decrypts a sealed envelope for accountID. The account id must match the

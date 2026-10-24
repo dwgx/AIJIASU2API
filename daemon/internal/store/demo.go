@@ -43,14 +43,35 @@ func seedIDSet(prefix string, count, width int) map[string]struct{} {
 // seed.go did not create untouched. A node is removed when it carries a seed
 // id or belongs to a removed seed account, so a runtime node opened for a demo
 // account cannot outlive its account; the removed account's sealed secret and
-// device identity go with it. Leases, users, keys, request rows and audit
-// events are matched by their seed ids only: an account created after acc-06,
-// a created key, a mutation-lab request row or a later audit event survives.
+// device identity go with it, in the snapshot map and in the sealer's own file.
+// Leases, users, keys, request rows and audit events are matched by their seed
+// ids only: an account created after acc-06, a created key, a mutation-lab
+// request row or a later audit event survives.
 //
-// The call is idempotent: a store without seed rows returns zero counts. The
-// error return is always nil today; it keeps the operator path uniform with the
-// other store mutations.
+// The call is idempotent: a store without seed rows returns zero counts. An
+// error is returned only when the sealer cannot delete a removed account's
+// entry; the caller must then not save the snapshot, so a restart retries the
+// purge with the accounts still present.
 func (s *Store) PurgeDemo() (PurgeResult, error) {
+	result, removedAccounts, sealer := s.purgeDemoLocked()
+	// A sealer write may fsync, so the file-backed prune runs after the lock is
+	// released. Seed accounts never carry a sealed secret in this build, but a
+	// snapshot written by another build can, and a purged account must not
+	// leave its envelope behind.
+	if sealer != nil {
+		for id := range removedAccounts {
+			if err := sealer.Delete(id); err != nil {
+				return result, fmt.Errorf("purge demo sealed secret for %q: %w", id, err)
+			}
+		}
+	}
+	return result, nil
+}
+
+// purgeDemoLocked applies the in-memory purge under the write lock and returns
+// the removed account ids plus the configured sealer, so the caller can prune
+// the sealer file without holding the lock.
+func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -136,5 +157,5 @@ func (s *Store) PurgeDemo() (PurgeResult, error) {
 		delete(s.devices, id)
 	}
 	s.syncAccountCountsLocked()
-	return result, nil
+	return result, removedAccounts, s.sealer
 }

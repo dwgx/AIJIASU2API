@@ -314,25 +314,30 @@ func (s *Server) handleLabDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAccountServers(w http.ResponseWriter, r *http.Request) {
 	accountID := pathParam(r, "id")
+	query, message := parseServerCatalogQuery(r.URL.Query())
+	if message != "" {
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument, message)
+		return
+	}
+
+	var view model.ServersView
 	if s.cfg.Lab == nil {
-		writeJSON(w, http.StatusOK, model.ServersView{
+		view = model.ServersView{
 			Enabled:   false,
 			Reason:    labUnavailable,
 			AccountID: accountID,
 			Stale:     true,
 			Servers:   []model.ServerView{},
-		})
-		return
+		}
+	} else {
+		var err error
+		view, err = s.cfg.Lab.Servers(r.Context(), accountID)
+		if err != nil {
+			s.writeLabStoreError(w, err)
+			return
+		}
 	}
-	view, err := s.cfg.Lab.Servers(r.Context(), accountID)
-	if err != nil {
-		s.writeLabStoreError(w, err)
-		return
-	}
-	if view.Servers == nil {
-		view.Servers = []model.ServerView{}
-	}
-	writeJSON(w, http.StatusOK, view)
+	writeJSON(w, http.StatusOK, applyServerCatalogQuery(view, query))
 }
 
 func (s *Server) handleAccountDevice(w http.ResponseWriter, r *http.Request) {

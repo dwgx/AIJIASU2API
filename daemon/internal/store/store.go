@@ -47,12 +47,14 @@ func upstreamf(format string, args ...any) error {
 	return &Error{Kind: ErrUpstream, Message: fmt.Sprintf(format, args...)}
 }
 
-// Sealer encrypts account credentials at rest. Open must reject a blob sealed
-// for a different account id. *secret.Store implements it; tests may use a
-// stub.
+// Sealer encrypts account credentials at rest and removes them when an account
+// is deleted. Open must reject a blob sealed for a different account id; Delete
+// must be idempotent and durable before it returns. *secret.Store implements
+// it; tests may use a stub.
 type Sealer interface {
 	Seal(accountID string, plaintext []byte) ([]byte, error)
 	Open(accountID string, sealed []byte) ([]byte, error)
+	Delete(accountID string) error
 }
 
 // Retention caps for the two append-only histories. An insert past the cap
@@ -569,14 +571,37 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 	return cloneAccount(next), nil
 }
 
-// DeleteAccount removes the account, its nodes, its leases and its sealed
-// secret. Requests and audit history are retained.
+// DeleteAccount removes the account, its nodes, its leases, its device
+// identity and its sealed secret. Requests and audit history are retained.
+//
+// The sealed entry lives twice: s.secrets, which the next snapshot persists,
+// and the sealer's own file. The sealer is pruned first, outside the store lock
+// because a sealer write may fsync; a failure there leaves the account and its
+// secret untouched so the operator can retry, whereas deleting the account
+// first would drop it while leaking the sealed blob on disk. The in-memory
+// cascade then runs under one write lock.
 func (s *Store) DeleteAccount(id string) error {
+	s.mu.RLock()
+	sealer := s.sealer
+	exists := s.accountIndexLocked(id) >= 0
+	s.mu.RUnlock()
+	if !exists {
+		return notFoundf("account %q not found", id)
+	}
+	if sealer != nil {
+		if err := sealer.Delete(id); err != nil {
+			// The cause can carry the sealer's file path, so it stays out of
+			// the client-facing message.
+			return upstreamf("account %q could not be deleted: sealed secret store unavailable", id)
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	idx := s.accountIndexLocked(id)
 	if idx < 0 {
+		// A concurrent delete won the race after this call pruned the sealer.
+		// Sealer.Delete is idempotent, so this is still a clean not-found.
 		return notFoundf("account %q not found", id)
 	}
 	label := s.accounts[idx].Label
@@ -681,7 +706,9 @@ func (s *Store) MarkAuthFailed(id, message string) (model.Account, error) {
 }
 
 // LogoutAccount stops the account's sessions by pausing it and draining every
-// node that belongs to it.
+// node that belongs to it. The sealed secret is deliberately kept: logout ends
+// a session, and the account client needs the password to sign in again.
+// Only DeleteAccount removes it.
 func (s *Store) LogoutAccount(id string) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -367,3 +367,149 @@ func TestClose(t *testing.T) {
 		t.Fatalf("Rotate after Close error = %v, want ErrClosed", err)
 	}
 }
+
+// TestDeleteRemovesPersistedEntry is the AJS-170 regression at the sealer
+// layer: a deleted entry must be gone from the file, not only from memory, and
+// the surviving entry must still open after a reopen.
+func TestDeleteRemovesPersistedEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	key := testKey(0xbb)
+	s, err := New(key, path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	doomed, err := s.Seal("acc-01", []byte("password-one"))
+	if err != nil {
+		t.Fatalf("Seal acc-01: %v", err)
+	}
+	if _, err := s.Seal("acc-02", []byte("password-two")); err != nil {
+		t.Fatalf("Seal acc-02: %v", err)
+	}
+
+	if err := s.Delete("acc-01"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := s.entries["acc-01"]; ok {
+		t.Fatal("Delete left the entry in memory")
+	}
+	if _, ok := s.entries["acc-02"]; !ok {
+		t.Fatal("Delete removed an unrelated entry")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var doc fileEnvelope
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := doc.Entries["acc-01"]; ok {
+		t.Fatal("Delete left the entry in the file")
+	}
+	if _, ok := doc.Entries["acc-02"]; !ok {
+		t.Fatal("Delete dropped the surviving entry from the file")
+	}
+	if bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(doomed))) {
+		t.Fatal("the deleted envelope is still in the file")
+	}
+
+	reopened, err := New(key, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if _, ok := reopened.entries["acc-01"]; ok {
+		t.Fatal("the deleted entry came back after reopen")
+	}
+	sealed, ok := reopened.entries["acc-02"]
+	if !ok {
+		t.Fatal("reopen lost the surviving entry")
+	}
+	plaintext, err := reopened.Open("acc-02", sealed)
+	if err != nil {
+		t.Fatalf("Open surviving entry: %v", err)
+	}
+	if string(plaintext) != "password-two" {
+		t.Fatalf("Open surviving entry = %q, want password-two", plaintext)
+	}
+}
+
+// TestDeleteMissingEntryIsNoop pins idempotency: a retried account deletion
+// must not fail on the sealer, and must not rewrite unrelated state.
+func TestDeleteMissingEntryIsNoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	s, err := New(testKey(0xbc), path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Seal("acc-01", []byte("password-one")); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if err := s.Delete("acc-99"); err != nil {
+		t.Fatalf("Delete missing entry: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after noop: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("Delete of a missing entry rewrote the file")
+	}
+}
+
+// TestDeleteRestoresEntryWhenPersistFails proves the rollback: a failed file
+// rewrite must not leave the entry gone from memory while still on disk.
+func TestDeleteRestoresEntryWhenPersistFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.json")
+	s, err := New(testKey(0xbd), path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	sealed, err := s.Seal("acc-01", []byte("password-one"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	// Replace the state directory with a regular file so the next rewrite
+	// cannot create its temporary file.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := s.Delete("acc-01"); err == nil {
+		t.Fatal("Delete succeeded with an unusable state directory")
+	}
+	if _, ok := s.entries["acc-01"]; !ok {
+		t.Fatal("failed Delete removed the entry from memory")
+	}
+	plaintext, err := s.Open("acc-01", sealed)
+	if err != nil {
+		t.Fatalf("Open after failed Delete: %v", err)
+	}
+	if string(plaintext) != "password-one" {
+		t.Fatalf("Open after failed Delete = %q, want password-one", plaintext)
+	}
+}
+
+func TestDeleteRejectsEmptyIDAndClosedStore(t *testing.T) {
+	s := newMemoryStore(t, testKey(0xbe))
+	if err := s.Delete(""); err == nil {
+		t.Fatal("Delete with an empty account id succeeded")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := s.Delete("acc-01"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Delete after Close error = %v, want ErrClosed", err)
+	}
+}
