@@ -73,6 +73,22 @@ var routeScopes = map[string]model.Scope{
 	http.MethodGet + " /v1/settings":   model.ScopeSettingsRead,
 	http.MethodPatch + " /v1/settings": model.ScopeSettingsWrite,
 	http.MethodGet + " /v1/topology":   model.ScopeCatalogRead,
+
+	// Customer-facing platform reads. Each is a separate read grant, so a
+	// monitoring key can reach usage, renewal or health without an accounts,
+	// settings or admin scope. Account-scoped keys are still narrowed to their
+	// accountIds/regions by scopedKeyDeniesRequest and the handlers.
+	http.MethodGet + " /v1/usage":                 model.ScopeUsageRead,
+	http.MethodGet + " /v1/renewal/plans":         model.ScopeRenewalRead,
+	http.MethodGet + " /v1/renewal/accounts/{id}": model.ScopeRenewalRead,
+	http.MethodGet + " /v1/health/nodes":          model.ScopeHealthRead,
+
+	// POST /v1/backup, /v1/backup/inspect and /v1/backup/restore are
+	// deliberately absent: a scoped key must never read the sealed panel files
+	// or replace them, so those routes stay admin-only. The same holds for
+	// every webhook route, including the GET reads: a customer key has no
+	// business enumerating or editing the daemon's outbound receivers.
+	// Settings and schedule writes keep their existing write scopes.
 }
 
 // authIdentity is the authenticated caller stored in the request context by
@@ -128,6 +144,9 @@ func (id authIdentity) hasScope(scope model.Scope) bool {
 
 // scopedKeyDeniesRequest enforces accountIds/regions on account-scoped reads.
 // Writes are governed by scopes; the restriction narrows what a key may see.
+// It covers the account path, the renewal account path, the account_id query
+// and the usage page's account filter, so a restricted key cannot read one
+// account through a different route.
 func (s *Server) scopedKeyDeniesRequest(key model.ScopedKey, r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -143,19 +162,46 @@ func (s *Server) scopedKeyDeniesRequest(key model.ScopedKey, r *http.Request) bo
 		}
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 3 || parts[0] != "v1" || parts[1] != "accounts" {
+	if len(parts) < 2 || parts[0] != "v1" {
 		return false
 	}
-	switch parts[2] {
-	case "io", "export", "import", "bulk-delete":
+	if len(parts) == 2 && parts[1] == "usage" {
+		// The usage filter accepts an account id or its exact label; only a
+		// value that names an account outside the key is refused, so an
+		// unknown label still answers an empty summary instead of 403.
+		if value := strings.TrimSpace(r.URL.Query().Get("account")); value != "" {
+			if account, ok := s.accountByIDOrLabel(value); ok && !keyAllowsAccount(key, account) {
+				return true
+			}
+		}
 		return false
 	}
-	account, ok := s.store.Account(parts[2])
-	if !ok {
-		// The handler answers 404; an unknown id reveals nothing either way.
+	if len(parts) < 3 {
 		return false
 	}
-	return !keyAllowsAccount(key, account)
+	switch parts[1] {
+	case "accounts":
+		switch parts[2] {
+		case "io", "export", "import", "bulk-delete":
+			return false
+		}
+		account, ok := s.store.Account(parts[2])
+		if !ok {
+			// The handler answers 404; an unknown id reveals nothing either way.
+			return false
+		}
+		return !keyAllowsAccount(key, account)
+	case "renewal":
+		if len(parts) < 4 || parts[2] != "accounts" {
+			return false
+		}
+		account, ok := s.store.Account(parts[3])
+		if !ok {
+			return false
+		}
+		return !keyAllowsAccount(key, account)
+	}
+	return false
 }
 
 func (s *Server) keyAllowsAccountID(key model.ScopedKey, id string) bool {
@@ -167,6 +213,20 @@ func (s *Server) keyAllowsAccountID(key model.ScopedKey, id string) bool {
 		return len(key.AccountIDs) == 0 || containsString(key.AccountIDs, id)
 	}
 	return keyAllowsAccount(key, account)
+}
+
+// accountByIDOrLabel resolves an account reference the way the usage filter
+// accepts it: an exact id first, then an exact label.
+func (s *Server) accountByIDOrLabel(value string) (model.Account, bool) {
+	if account, ok := s.store.Account(value); ok {
+		return account, true
+	}
+	for _, account := range s.store.Accounts() {
+		if account.Label == value {
+			return account, true
+		}
+	}
+	return model.Account{}, false
 }
 
 // keyAllowsAccount reports whether the key may read account. An account
@@ -224,6 +284,23 @@ func (s *Server) filterAccountsForRequest(r *http.Request, accounts []model.Acco
 		}
 	}
 	return filtered
+}
+
+// visibleAccountLabels returns the account labels a restricted key may read.
+// The request log stores labels, not ids, so usage aggregation filters on this
+// set. The bool is false when the key is unrestricted.
+func (s *Server) visibleAccountLabels(r *http.Request) (map[string]struct{}, bool) {
+	ids, restricted := s.visibleAccountIDs(r)
+	if !restricted {
+		return nil, false
+	}
+	labels := make(map[string]struct{}, len(ids))
+	for _, account := range s.store.Accounts() {
+		if _, ok := ids[account.ID]; ok {
+			labels[account.Label] = struct{}{}
+		}
+	}
+	return labels, true
 }
 
 func (s *Server) handleListScopedKeys(w http.ResponseWriter, r *http.Request) {

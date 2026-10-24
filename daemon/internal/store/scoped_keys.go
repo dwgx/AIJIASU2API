@@ -227,6 +227,7 @@ func validScope(scope model.Scope) bool {
 		model.ScopeRequestsRead, model.ScopeAuditRead,
 		model.ScopeMetricsRead, model.ScopeLabRead,
 		model.ScopeSettingsRead, model.ScopeSettingsWrite,
+		model.ScopeUsageRead, model.ScopeRenewalRead, model.ScopeHealthRead,
 		model.ScopeAdmin:
 		return true
 	default:

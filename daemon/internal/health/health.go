@@ -30,8 +30,10 @@ const (
 	DefaultTimeout = 3 * time.Second
 	// DefaultCapacity is the per-node ring size.
 	DefaultCapacity = 120
-	// DefaultMaxNodes bounds the number of retained node rings.
-	DefaultMaxNodes = 64
+	// DefaultMaxNodes bounds the number of retained node rings. The daemon
+	// overrides it from AJS_HEALTH_MAX_NODES, which is clamped to 1..64 at
+	// that boundary, so the default stays inside the accepted range.
+	DefaultMaxNodes = 16
 	// DefaultMaxConcurrent caps simultaneous probes.
 	DefaultMaxConcurrent = 8
 )
@@ -141,13 +143,29 @@ type nodeState struct {
 	done   chan struct{}
 }
 
+// evictionRecord is one entry of the bounded evicted-key log. The stamp
+// identifies the record so a Watch that clears a key cannot resurrect an old
+// record when the log is pruned.
+type evictionRecord struct {
+	key   string
+	stamp uint64
+}
+
 // Sampler probes watched nodes on a fixed interval and retains a bounded
 // window per node. All exported methods are safe for concurrent use.
 type Sampler struct {
 	cfg Config
 
-	mu      sync.Mutex
-	nodes   map[string]*nodeState
+	mu    sync.Mutex
+	nodes map[string]*nodeState
+	// evicted records the keys whose watched ring the LRU cap reclaimed, so
+	// the daemon can re-arm a gate that still runs. A Watch clears the entry;
+	// evictedOrder and evictedLimit keep the record bounded.
+	evicted      map[string]uint64
+	evictedOrder []evictionRecord
+	evictedSeq   uint64
+	evictedLimit int
+
 	seq     uint64
 	started bool
 	stopped bool
@@ -182,10 +200,19 @@ func New(cfg Config) *Sampler {
 	if cfg.Dial == nil {
 		cfg.Dial = dialTCP
 	}
+	// The record only needs to outlive one reconcile sweep, but a daemon may
+	// run several gates per ring slot; four slots per node covers that with a
+	// floor so a tiny MaxNodes still keeps a useful history.
+	evictedLimit := 4 * cfg.MaxNodes
+	if evictedLimit < 16 {
+		evictedLimit = 16
+	}
 	return &Sampler{
-		cfg:   cfg,
-		nodes: make(map[string]*nodeState),
-		sem:   make(chan struct{}, cfg.MaxConcurrent),
+		cfg:          cfg,
+		nodes:        make(map[string]*nodeState),
+		evicted:      make(map[string]uint64),
+		evictedLimit: evictedLimit,
+		sem:          make(chan struct{}, cfg.MaxConcurrent),
 	}
 }
 
@@ -245,7 +272,8 @@ func (s *Sampler) Stop() {
 // the original port. Watching a key whose history was retained but whose
 // probe was stopped re-arms it with the new port. At capacity the least
 // recently used node ring is evicted; an unwatched ring is preferred over a
-// watched one.
+// watched one, and a watched victim is recorded for Evicted so the caller can
+// re-arm it. Watching a key always clears its Evicted record.
 func (s *Sampler) Watch(key string, port int) error {
 	if key == "" {
 		return ErrInvalidKey
@@ -258,6 +286,9 @@ func (s *Sampler) Watch(key string, port int) error {
 	if s.stopped {
 		return ErrStopped
 	}
+	// Watching a key again re-arms it: the window is fresh, so it is no
+	// longer a missed ring the reconciler has to heal.
+	delete(s.evicted, key)
 	if node, ok := s.nodes[key]; ok {
 		node.lastUsed = s.touchLocked()
 		if node.cancel == nil {
@@ -304,8 +335,8 @@ func (s *Sampler) Unwatch(key string) {
 }
 
 // Stats returns the aggregate for key. ok is false when the key was never
-// watched or was evicted. A watched node with no sample yet reports StateOK
-// and Count 0.
+// watched or was evicted; Evicted tells the two apart. A watched node with no
+// sample yet reports StateOK and Count 0.
 func (s *Sampler) Stats(key string) (Stats, bool) {
 	s.mu.Lock()
 	node, ok := s.nodes[key]
@@ -338,8 +369,9 @@ func (s *Sampler) startLocked(key string, node *nodeState) {
 
 // evictLocked drops the least recently used node ring, preferring an
 // unwatched one. A watched victim is cancelled here; its goroutine observes
-// the cancellation and exits without waiting (Stop joins it). Callers hold
-// s.mu.
+// the cancellation and exits without waiting (Stop joins it). A watched
+// victim is also recorded for Evicted: its gate may still be running, so the
+// caller can re-arm the probe. Callers hold s.mu.
 func (s *Sampler) evictLocked() {
 	var victimKey string
 	var victim *nodeState
@@ -364,7 +396,38 @@ func (s *Sampler) evictLocked() {
 	delete(s.nodes, victimKey)
 	if victim.cancel != nil {
 		victim.cancel()
+		// Only a watched victim lost a live probe; reclaiming an unwatched
+		// ring is the intended outcome and nothing needs healing.
+		s.markEvictedLocked(victimKey)
 	}
+}
+
+// markEvictedLocked records key as evicted and prunes the oldest records past
+// evictedLimit. A record for a key that was watched again in the meantime is
+// already gone and must not be resurrected, hence the stamp comparison.
+// Callers hold s.mu.
+func (s *Sampler) markEvictedLocked(key string) {
+	s.evictedSeq++
+	s.evicted[key] = s.evictedSeq
+	s.evictedOrder = append(s.evictedOrder, evictionRecord{key: key, stamp: s.evictedSeq})
+	for len(s.evictedOrder) > s.evictedLimit {
+		oldest := s.evictedOrder[0]
+		s.evictedOrder = s.evictedOrder[1:]
+		if s.evicted[oldest.key] == oldest.stamp {
+			delete(s.evicted, oldest.key)
+		}
+	}
+}
+
+// Evicted reports whether key's watched ring was reclaimed by the LRU cap and
+// the key has not been watched since. The daemon re-arms such a key: the gate
+// is still running, only its retained window is gone. The record is bounded,
+// so a very old eviction may have been forgotten and report false.
+func (s *Sampler) Evicted(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.evicted[key]
+	return ok
 }
 
 // loop probes immediately, then once per interval, until ctx is cancelled.

@@ -55,6 +55,11 @@ func TestDefaults(t *testing.T) {
 	if s.cfg.Capacity != DefaultCapacity || s.cfg.MaxNodes != DefaultMaxNodes || s.cfg.MaxConcurrent != DefaultMaxConcurrent {
 		t.Fatalf("defaults = capacity %d, max nodes %d, max concurrent %d", s.cfg.Capacity, s.cfg.MaxNodes, s.cfg.MaxConcurrent)
 	}
+	// The console contract for the platform wave: sixteen watched gates fit
+	// before the LRU cap reclaims a ring.
+	if DefaultMaxNodes != 16 {
+		t.Fatalf("DefaultMaxNodes = %d, want 16", DefaultMaxNodes)
+	}
 	if s.cfg.Now == nil || s.cfg.Dial == nil {
 		t.Fatal("default clock or dialer is nil")
 	}
@@ -297,6 +302,116 @@ func TestLRUEvictsUnwatchedFirst(t *testing.T) {
 	}
 	if _, ok := s.Stats("watched"); !ok {
 		t.Fatal("watched node was evicted before the unwatched one")
+	}
+}
+
+func TestEvictedReportsWatchedVictim(t *testing.T) {
+	s := New(Config{
+		MaxNodes: 2,
+		Interval: time.Hour,
+		Timeout:  time.Hour,
+		// The dial blocks until the probe is cancelled, so no sample bumps
+		// lastUsed and the LRU victim is deterministic.
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	s.Start(context.Background())
+	defer s.Stop()
+
+	for i, key := range []string{"a", "b"} {
+		if err := s.Watch(key, 1000+i); err != nil {
+			t.Fatalf("Watch(%q): %v", key, err)
+		}
+	}
+	if s.Evicted("a") {
+		t.Fatal("a watched key reported evicted before the cap was reached")
+	}
+	if err := s.Watch("c", 1002); err != nil {
+		t.Fatalf("Watch(c): %v", err)
+	}
+	if !s.Evicted("a") {
+		t.Fatal("the watched LRU victim was not recorded as evicted")
+	}
+	if s.Evicted("b") || s.Evicted("c") {
+		t.Fatal("a surviving key reported evicted")
+	}
+	if _, ok := s.Stats("a"); ok {
+		t.Fatal("evicted key still has a retained window")
+	}
+
+	// Re-arming clears the record: the reconciler heals exactly once.
+	if err := s.Watch("a", 1000); err != nil {
+		t.Fatalf("re-Watch(a): %v", err)
+	}
+	if s.Evicted("a") {
+		t.Fatal("re-watched key still reports evicted")
+	}
+	if _, ok := s.Stats("a"); !ok {
+		t.Fatal("re-watched key has no retained window")
+	}
+}
+
+func TestEvictedIgnoresUnwatchedVictim(t *testing.T) {
+	s := New(Config{
+		MaxNodes: 1,
+		Interval: time.Hour,
+		Timeout:  time.Hour,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	s.Start(context.Background())
+	defer s.Stop()
+
+	if err := s.Watch("a", 1000); err != nil {
+		t.Fatalf("Watch(a): %v", err)
+	}
+	s.Unwatch("a")
+	if err := s.Watch("b", 1001); err != nil {
+		t.Fatalf("Watch(b): %v", err)
+	}
+	if s.Evicted("a") {
+		t.Fatal("reclaiming an unwatched ring was recorded as a missed probe")
+	}
+}
+
+func TestEvictedRecordIsBounded(t *testing.T) {
+	s := New(Config{
+		MaxNodes: 1,
+		Interval: time.Hour,
+		Timeout:  time.Hour,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	s.Start(context.Background())
+	defer s.Stop()
+
+	// Every new key evicts the previous watched one, so each watch records
+	// exactly one eviction and the record must stay bounded.
+	for i := range 40 {
+		if err := s.Watch(fmt.Sprintf("k:%d", i), 1000+i); err != nil {
+			t.Fatalf("Watch(k:%d): %v", i, err)
+		}
+	}
+	s.mu.Lock()
+	recorded, limit := len(s.evicted), s.evictedLimit
+	s.mu.Unlock()
+	if limit != 16 {
+		t.Fatalf("evicted record limit = %d, want the 16-entry floor", limit)
+	}
+	if recorded > limit {
+		t.Fatalf("recorded evictions = %d, want <= %d", recorded, limit)
+	}
+	if !s.Evicted("k:38") {
+		t.Fatal("the newest eviction was forgotten")
+	}
+	if s.Evicted("k:0") {
+		t.Fatal("the oldest eviction was not pruned")
 	}
 }
 

@@ -122,10 +122,24 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	// The request log stores the account label; accept an account id too so a
 	// dashboard link with acc-01 works as expected.
 	accountFilter := strings.TrimSpace(query.Get("account"))
-	if account, ok := s.store.Account(accountFilter); ok {
+	if account, ok := s.accountByIDOrLabel(accountFilter); ok {
 		accountFilter = account.Label
 	}
-	summary, err := s.cfg.Usage.Aggregate(s.store.Requests(), usage.Query{
+	// A restricted key only aggregates rows of the accounts it may read. The
+	// auth middleware already refuses an explicit out-of-scope account filter;
+	// this narrows the unfiltered case, whose roll-ups would otherwise carry
+	// every account.
+	rows := s.store.Requests()
+	if labels, restricted := s.visibleAccountLabels(r); restricted {
+		filtered := make([]model.RequestLog, 0, len(rows))
+		for _, row := range rows {
+			if _, ok := labels[row.AccountLabel]; ok {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+	summary, err := s.cfg.Usage.Aggregate(rows, usage.Query{
 		From:    from,
 		To:      to,
 		Account: accountFilter,
@@ -209,7 +223,8 @@ type healthSampleView struct {
 
 // handleHealthNodes serves GET /v1/health/nodes: one row per watched node with
 // the retained aggregate and the newest sample. Nodes that were never watched
-// (or whose ring was evicted at the cap) are omitted.
+// (or whose ring is between an eviction and the next reconciler heal) are
+// omitted, and an account-restricted key only sees nodes of its own accounts.
 func (s *Server) handleHealthNodes(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Health == nil {
 		writeJSON(w, http.StatusOK, healthNodesResponse{
@@ -220,8 +235,14 @@ func (s *Server) handleHealthNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodes := s.store.Nodes()
+	visible, restricted := s.visibleAccountIDs(r)
 	out := make([]healthNodeView, 0, len(nodes))
 	for _, node := range nodes {
+		if restricted {
+			if _, ok := visible[node.AccountID]; !ok {
+				continue
+			}
+		}
 		stats, ok := s.cfg.Health.Stats(node.ID)
 		if !ok {
 			continue

@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,7 +192,11 @@ func run() error {
 	if os.Getenv("AJS_HEALTH_PROBE") == "0" {
 		logger.Info("health_probe_disabled", "reason", "AJS_HEALTH_PROBE=0")
 	} else {
-		healthSampler = health.New(health.Config{MaxNodes: healthMaxNodes})
+		maxNodes, err := healthMaxNodes()
+		if err != nil {
+			return err
+		}
+		healthSampler = health.New(health.Config{MaxNodes: maxNodes})
 		healthSampler.Start(ctx)
 		// Registered before the controller's stop defer, so probes stop after
 		// the gates they sample are closed.
@@ -201,7 +206,7 @@ func run() error {
 		logger.Info("health_probe_enabled",
 			"interval", health.DefaultInterval.String(),
 			"timeout", health.DefaultTimeout.String(),
-			"max_nodes", healthMaxNodes)
+			"max_nodes", maxNodes)
 	}
 
 	var webhookSecrets api.WebhookSecretStore
@@ -287,7 +292,7 @@ func run() error {
 			return controller.UndrainNode(ctx, nodeID)
 		}
 		if healthWatches != nil {
-			go runHealthReconciler(ctx, controller, healthWatches)
+			go runHealthReconciler(ctx, controller, healthWatches, logger)
 		}
 	}
 
@@ -529,10 +534,37 @@ func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, s
 	return engine, stop, nil
 }
 
-// healthMaxNodes bounds the sampler's node rings. Eight watched gates is the
-// console contract for AJS-205; the sampler evicts the least recently used
-// ring beyond it.
-const healthMaxNodes = 8
+// Health sampler bounds. AJS_HEALTH_MAX_NODES overrides the retained-ring cap;
+// values outside 1..64 are clamped and a non-integer fails startup, matching
+// AJS_NODE_LIMIT. The default covers a sixteen-gate console before the LRU cap
+// reclaims a ring.
+const (
+	defaultHealthMaxNodes = health.DefaultMaxNodes
+	minHealthMaxNodes     = 1
+	maxHealthMaxNodes     = 64
+)
+
+// healthMaxNodes parses AJS_HEALTH_MAX_NODES. Empty selects the default; a
+// numeric value is clamped into the accepted range so an operator can write
+// 100 without failing the daemon; a non-integer fails startup instead of
+// silently running a different cap.
+func healthMaxNodes() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("AJS_HEALTH_MAX_NODES"))
+	if raw == "" {
+		return defaultHealthMaxNodes, nil
+	}
+	nodes, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("AJS_HEALTH_MAX_NODES %q must be an integer", raw)
+	}
+	if nodes < minHealthMaxNodes {
+		return minHealthMaxNodes, nil
+	}
+	if nodes > maxHealthMaxNodes {
+		return maxHealthMaxNodes, nil
+	}
+	return nodes, nil
+}
 
 // healthReconcileInterval is how often the sampler is re-aligned with the
 // controller's running gates. The API updates it immediately on
@@ -540,19 +572,32 @@ const healthMaxNodes = 8
 // scheduler, which never passes through an API handler.
 const healthReconcileInterval = 15 * time.Second
 
+// healthRearmLogInterval throttles the re-arm log: one line per minute at
+// most, so a sampler pinned at its node cap cannot emit a line every sweep.
+const healthRearmLogInterval = time.Minute
+
+// healthGateSource is the live-gate view the reconciler follows.
+// *runtime.NodeController implements it.
+type healthGateSource interface {
+	Snapshot() []runtime.NodeRuntime
+}
+
 // healthTracker adapts *health.Sampler to api.HealthMonitor and remembers the
 // watched keys, so the reconciler can unwatch gates the controller no longer
-// runs. It serializes Watch/Unwatch because a port change needs the sampler's
-// retained ring re-armed, and Unwatch waits for the probe goroutine.
+// runs and re-arm a key the sampler evicted. It serializes Watch/Unwatch
+// because a port change needs the sampler's retained ring re-armed, and
+// Unwatch waits for the probe goroutine.
 type healthTracker struct {
 	sampler *health.Sampler
+	now     func() time.Time
 
-	mu      sync.Mutex
-	watched map[string]int
+	mu           sync.Mutex
+	watched      map[string]int
+	lastRearmLog time.Time
 }
 
 func newHealthTracker(sampler *health.Sampler) *healthTracker {
-	return &healthTracker{sampler: sampler, watched: make(map[string]int)}
+	return &healthTracker{sampler: sampler, now: time.Now, watched: make(map[string]int)}
 }
 
 func (t *healthTracker) Watch(key string, port int) error {
@@ -580,6 +625,12 @@ func (t *healthTracker) Stats(key string) (health.Stats, bool) {
 	return t.sampler.Stats(key)
 }
 
+// Evicted reports whether the sampler dropped this key's window at its node
+// cap. The reconciler re-arms such a key; the gate itself is still running.
+func (t *healthTracker) Evicted(key string) bool {
+	return t.sampler.Evicted(key)
+}
+
 // snapshot returns a copy of the watched key→port map.
 func (t *healthTracker) snapshot() map[string]int {
 	t.mu.Lock()
@@ -591,9 +642,31 @@ func (t *healthTracker) snapshot() map[string]int {
 	return out
 }
 
+// noteRearm logs one healing sweep at most once per minute. Both lists are
+// sorted by the caller so the line is stable across map iteration.
+func (t *healthTracker) noteRearm(logger *slog.Logger, rearmed, failed []string) {
+	if logger == nil || (len(rearmed) == 0 && len(failed) == 0) {
+		return
+	}
+	t.mu.Lock()
+	now := t.now()
+	if !t.lastRearmLog.IsZero() && now.Sub(t.lastRearmLog) < healthRearmLogInterval {
+		t.mu.Unlock()
+		return
+	}
+	t.lastRearmLog = now
+	t.mu.Unlock()
+	if len(rearmed) > 0 {
+		logger.Info("health_watch_rearmed", "count", len(rearmed), "keys", rearmed)
+	}
+	if len(failed) > 0 {
+		logger.Warn("health_watch_rearm_failed", "count", len(failed), "keys", failed)
+	}
+}
+
 // runHealthReconciler keeps the sampler aligned with the controller's live
 // gates until ctx is cancelled.
-func runHealthReconciler(ctx context.Context, controller *runtime.NodeController, tracker *healthTracker) {
+func runHealthReconciler(ctx context.Context, source healthGateSource, tracker *healthTracker, logger *slog.Logger) {
 	ticker := time.NewTicker(healthReconcileInterval)
 	defer ticker.Stop()
 	for {
@@ -601,29 +674,50 @@ func runHealthReconciler(ctx context.Context, controller *runtime.NodeController
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			reconcileHealthWatches(controller, tracker)
+			reconcileHealthWatches(source, tracker, logger)
 		}
 	}
 }
 
-// reconcileHealthWatches watches every running gate and unwatches keys the
-// controller no longer runs. controller.Snapshot is the authoritative running
-// set; store nodes may outlive their gate after a restart.
-func reconcileHealthWatches(controller *runtime.NodeController, tracker *healthTracker) {
+// reconcileHealthWatches watches every running gate, re-arms a watched key the
+// sampler evicted at its cap, and unwatches keys the controller no longer
+// runs. source.Snapshot is the authoritative running set; store nodes may
+// outlive their gate after a restart.
+//
+// A re-arm is bounded to one attempt per key per sweep. The evicted set is
+// captured before the first attempt, so a key evicted by a heal in this sweep
+// waits for the next one: with fewer ring slots than live gates the sweep
+// cannot rotate the whole watch set, and the key it healed stays watched.
+func reconcileHealthWatches(source healthGateSource, tracker *healthTracker, logger *slog.Logger) {
 	live := make(map[string]int)
-	for _, node := range controller.Snapshot() {
+	for _, node := range source.Snapshot() {
 		if node.Port <= 0 {
 			continue
 		}
 		live[node.NodeID] = node.Port
 	}
 	current := tracker.snapshot()
+	pending := make(map[string]bool, len(live))
+	for key := range live {
+		pending[key] = tracker.Evicted(key)
+	}
+	rearmed := make([]string, 0, 1)
+	failed := make([]string, 0, 1)
 	for key, port := range live {
-		if got, ok := current[key]; ok && got == port {
+		if got, ok := current[key]; ok && got == port && !pending[key] {
 			continue
 		}
-		_ = tracker.Watch(key, port)
+		if err := tracker.Watch(key, port); err != nil {
+			failed = append(failed, key)
+			continue
+		}
+		if pending[key] {
+			rearmed = append(rearmed, key)
+		}
 	}
+	sort.Strings(rearmed)
+	sort.Strings(failed)
+	tracker.noteRearm(logger, rearmed, failed)
 	for key := range tracker.snapshot() {
 		if _, ok := live[key]; !ok {
 			tracker.Unwatch(key)

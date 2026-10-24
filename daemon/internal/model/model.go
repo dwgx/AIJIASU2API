@@ -179,7 +179,9 @@ type APIKey struct {
 
 // Scope is one permission carried by a scoped API key. The vocabulary is the
 // OpenAPI Scope enum; accounts:write is part of the daemon contract even
-// though the first published enum only listed accounts:read.
+// though the first published enum only listed accounts:read. The platform
+// reads (usage, renewal, health) are separate scopes so a monitoring key never
+// needs an account or settings grant.
 type Scope string
 
 const (
@@ -195,6 +197,9 @@ const (
 	ScopeLabRead       Scope = "lab:read"
 	ScopeSettingsRead  Scope = "settings:read"
 	ScopeSettingsWrite Scope = "settings:write"
+	ScopeUsageRead     Scope = "usage:read"
+	ScopeRenewalRead   Scope = "renewal:read"
+	ScopeHealthRead    Scope = "health:read"
 	ScopeAdmin         Scope = "admin"
 )
 
