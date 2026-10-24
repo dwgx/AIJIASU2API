@@ -201,6 +201,10 @@ type AuditEvent struct {
 	Action   string   `json:"action"`
 	Target   string   `json:"target"`
 	Detail   string   `json:"detail"`
+	// Meta is the small, credential-free key/value block the catalog writes
+	// (server ids, node id, gate port, duration, result). Older events have
+	// nil, which omitempty keeps out of the wire shape.
+	Meta map[string]string `json:"meta,omitempty"`
 }
 
 // TrafficPoint is one ingress/egress sample.

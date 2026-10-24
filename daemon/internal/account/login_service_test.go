@@ -14,6 +14,7 @@ import (
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
+	"ajsproxy/apifacade"
 )
 
 // plainSealer is an identity Sealer: the tests exercise the login path, not
@@ -559,4 +560,26 @@ func TestLoginServiceDeviceSurvivesRejection(t *testing.T) {
 	if current, ok := st.AccountDevice(account.ID); !ok || current != device {
 		t.Fatalf("device identity changed across the retry: %+v", current)
 	}
+}
+
+func TestLoginServiceForget(t *testing.T) {
+	st := store.NewWithSealer(plainSealer{})
+	account := newLoginAccount(t, st)
+	service := newTestLoginService(t, st, "http://127.0.0.1:1", nil)
+
+	if !service.remember(account.ID, nil, LoginResult{
+		AuthResult: "OK",
+		Servers:    map[string]apifacade.Server{"s1": {ID: "s1", Sts: "ok"}},
+		FetchedAt:  time.Now().UTC(),
+	}) {
+		t.Fatal("remember refused a live result")
+	}
+	if _, ok := service.Result(account.ID); !ok {
+		t.Fatal("Result did not see the retained login")
+	}
+	service.Forget(account.ID)
+	if _, ok := service.Result(account.ID); ok {
+		t.Fatal("Forget kept the retained login")
+	}
+	service.Forget(account.ID) // idempotent
 }

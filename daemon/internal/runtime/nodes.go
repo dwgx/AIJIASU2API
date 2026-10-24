@@ -146,6 +146,13 @@ type NodeControllerConfig struct {
 	Logger     *slog.Logger
 	// PortBase is the first port tried; zero selects DefaultGatePortBase.
 	PortBase int
+	// Now overrides the clock used for the connect cooldown and result
+	// durations. Nil uses time.Now; tests pin it.
+	Now func() time.Time
+	// ConnectCooldown is the minimum interval between two switch attempts for
+	// one account. Zero selects DefaultConnectCooldown; a negative value
+	// disables the cooldown (tests only).
+	ConnectCooldown time.Duration
 }
 
 // nodeGate is one running gate plus the session it serves.
@@ -184,6 +191,17 @@ type NodeController struct {
 	// ctx is the gate lifetime. Stop cancels it and closes every gate.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// now and cooldown drive the per-account connect cooldown.
+	now      func() time.Time
+	cooldown time.Duration
+
+	// switchMu guards the per-account switch markers and last-attempt times.
+	// It is separate from mu so a second switch for the same account gets
+	// 409 switch_in_progress instead of blocking behind the first one.
+	switchMu    sync.Mutex
+	switching   map[string]struct{}
+	lastAttempt map[string]time.Time
 
 	mu       sync.Mutex
 	running  map[string]*nodeGate
@@ -224,21 +242,36 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 	if portBase < 1 || portBase > maxGatePort {
 		portBase = DefaultGatePortBase
 	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
+	cooldown := cfg.ConnectCooldown
+	switch {
+	case cooldown == 0:
+		cooldown = DefaultConnectCooldown
+	case cooldown < 0:
+		cooldown = 0
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &NodeController{
-		store:      cfg.Store,
-		logins:     cfg.Logins,
-		sessions:   cfg.Sessions,
-		gates:      gates,
-		reconciler: cfg.Reconciler,
-		profile:    profile,
-		logger:     logger,
-		portBase:   portBase,
-		ctx:        ctx,
-		cancel:     cancel,
-		running:    make(map[string]*nodeGate),
-		nextPort:   portBase,
-		maxServers: cfg.MaxServers,
+		store:       cfg.Store,
+		logins:      cfg.Logins,
+		sessions:    cfg.Sessions,
+		gates:       gates,
+		reconciler:  cfg.Reconciler,
+		profile:     profile,
+		logger:      logger,
+		portBase:    portBase,
+		ctx:         ctx,
+		cancel:      cancel,
+		running:     make(map[string]*nodeGate),
+		nextPort:    portBase,
+		maxServers:  cfg.MaxServers,
+		now:         now,
+		cooldown:    cooldown,
+		switching:   make(map[string]struct{}),
+		lastAttempt: make(map[string]time.Time),
 	}, nil
 }
 
@@ -256,6 +289,12 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 // deterministic sort are desired: the rest are skipped, and on a later sync
 // with a lower cap their gates close and their nodes are deleted like any
 // server the login no longer lists.
+//
+// A persisted selection overrides MaxServers and makes exactly one server
+// desired (DESIGN-CATALOG §3.6). A selection that no longer resolves is cleared
+// with a catalog.selection_lost audit and the default desired set is used. If
+// the account is already serving a different server, the move runs through the
+// guarded switch so a failed open leaves the old session live.
 func (c *NodeController) SyncAccount(ctx context.Context, accountID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -281,7 +320,33 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	}
 
 	servers := usableServers(result.Servers)
-	if c.maxServers > 0 && len(servers) > c.maxServers {
+	selection, hasSelection := c.store.Selection(accountID)
+	selectionApplied := false
+	if hasSelection {
+		selected, found := findServer(result.Servers, selection.ServerID)
+		switch {
+		case found && selected.server.OK():
+			// The operator's target is the whole desired set, regardless of
+			// MaxServers: exactly one session, never a sorted fallback.
+			servers = []serverRef{selected}
+			selectionApplied = true
+			if c.maxServers > 1 {
+				c.logger.Info("catalog_selection_limits_desired", "account_id", accountID,
+					"server_id", selected.id, "node_limit", c.maxServers)
+			}
+		default:
+			reason := "server_missing"
+			if found {
+				reason = "server_ineligible"
+			}
+			if _, err := c.store.LoseSelection(accountID, reason); err != nil {
+				c.logger.Warn("catalog_selection_lost_audit_failed", "account_id", accountID, "error", err)
+			}
+			c.logger.Info("catalog_selection_lost", "account_id", accountID,
+				"server_id", selection.ServerID, "reason", reason)
+		}
+	}
+	if !selectionApplied && c.maxServers > 0 && len(servers) > c.maxServers {
 		skipped := len(servers) - c.maxServers
 		servers = servers[:c.maxServers]
 		c.logger.Info("node_limit_skipped", "account_id", accountID, "limit", c.maxServers, "skipped", skipped)
@@ -291,12 +356,27 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 		desired[nodeID(accountID, srv.id)] = struct{}{}
 	}
 
-	failures := c.removeUndesiredLocked(accountID, desired)
-
 	userName := strings.TrimSpace(result.UserName)
 	if userName == "" {
 		userName = acct.Username
 	}
+
+	// A selection changed while the account was offline must move the session
+	// through the same guarded switch as a manual connect, not close the old
+	// gate first: an open failure has to keep the old session serving.
+	if selectionApplied && len(servers) == 1 {
+		if old, err := c.accountGateLocked(accountID); err == nil && old != nil && old.serverID != servers[0].id {
+			if _, switchErr := c.switchLocked(ctx, acct, result, servers[0], old, "login", c.now()); switchErr != nil {
+				c.logger.Warn("catalog_login_switch_failed", "account_id", accountID, "error", switchErr)
+				if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
+					return errors.Join(switchErr, reconcileErr)
+				}
+				return switchErr
+			}
+		}
+	}
+
+	failures := c.removeUndesiredLocked(accountID, desired)
 
 	started := 0
 	for _, srv := range servers {
@@ -539,6 +619,14 @@ func (c *NodeController) writeNodeLocked(id string, acct model.Account, srv serv
 			Protocol: model.ProtocolSOCKS5,
 		}
 	}
+	node = applyServerToNode(node, acct, srv, state, port, egressIP)
+	return c.store.PutNode(node)
+}
+
+// applyServerToNode overlays one vendor server onto a node row. It is shared by
+// the login sync (PutNode) and the switch commit (CommitSwitch), so both paths
+// write the same label, region and gate fields.
+func applyServerToNode(node model.ProxyNode, acct model.Account, srv serverRef, state model.NodeState, port int, egressIP string) model.ProxyNode {
 	node.AccountID = acct.ID
 	node.AccountLabel = acct.Label
 	node.Label = nodeTag(srv, acct.ID)
@@ -552,7 +640,7 @@ func (c *NodeController) writeNodeLocked(id string, acct model.Account, srv serv
 	if egressIP != "" {
 		node.EgressIP = egressIP
 	}
-	return c.store.PutNode(node)
+	return node
 }
 
 // removeUndesiredLocked closes the gates of servers the login no longer lists

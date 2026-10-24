@@ -38,6 +38,58 @@ const maxNodeRegionLen = 64
 // runtime refresh cannot clobber a concurrent probe or lease write. A new node
 // is appended after the existing rows and gets LastProbeAt=now.
 func (s *Store) PutNode(node model.ProxyNode) (model.ProxyNode, error) {
+	node, err := normalizeNode(node)
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	label := node.Label
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	accountIdx := s.accountIndexLocked(node.AccountID)
+	if accountIdx < 0 {
+		return model.ProxyNode{}, notFoundf("account %q not found", node.AccountID)
+	}
+	account := s.accounts[accountIdx]
+
+	idx := s.nodeIndexLocked(node.ID)
+	if idx >= 0 && s.nodes[idx].AccountID != node.AccountID {
+		return model.ProxyNode{}, conflictf("node %q belongs to account %q", node.ID, s.nodes[idx].AccountID)
+	}
+	for i, other := range s.nodes {
+		if i != idx && other.Label == label {
+			return model.ProxyNode{}, conflictf("node label %q is already used by %q", label, other.ID)
+		}
+	}
+
+	node.AccountID = account.ID
+	node.AccountLabel = account.Label
+	if idx >= 0 {
+		existing := s.nodes[idx]
+		if node.InUse == 0 {
+			node.InUse = existing.InUse
+		}
+		if node.SuccessRate == 0 {
+			node.SuccessRate = existing.SuccessRate
+		}
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = existing.LastProbeAt
+		}
+		s.nodes[idx] = node
+	} else {
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = iso(s.now())
+		}
+		s.nodes = append(s.nodes, node)
+	}
+	s.syncAccountCountsLocked()
+	return node, nil
+}
+
+// normalizeNode validates one node and trims its string fields. PutNode and
+// CommitSwitch share it so a switch cannot write a row PutNode would reject.
+func normalizeNode(node model.ProxyNode) (model.ProxyNode, error) {
 	id := strings.TrimSpace(node.ID)
 	if id == "" || id != node.ID || strings.ContainsAny(id, " \t\r\n") {
 		return model.ProxyNode{}, invalidf("node id %q is required and must not contain whitespace", node.ID)
@@ -69,51 +121,10 @@ func (s *Store) PutNode(node model.ProxyNode) (model.ProxyNode, error) {
 	if strings.ContainsAny(serverID, " \t\r\n") {
 		return model.ProxyNode{}, invalidf("node %q server id must not contain whitespace", id)
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	accountIdx := s.accountIndexLocked(node.AccountID)
-	if accountIdx < 0 {
-		return model.ProxyNode{}, notFoundf("account %q not found", node.AccountID)
-	}
-	account := s.accounts[accountIdx]
-
-	idx := s.nodeIndexLocked(id)
-	if idx >= 0 && s.nodes[idx].AccountID != node.AccountID {
-		return model.ProxyNode{}, conflictf("node %q belongs to account %q", id, s.nodes[idx].AccountID)
-	}
-	for i, other := range s.nodes {
-		if i != idx && other.Label == label {
-			return model.ProxyNode{}, conflictf("node label %q is already used by %q", label, other.ID)
-		}
-	}
-
 	node.ID = id
-	node.AccountID = account.ID
-	node.AccountLabel = account.Label
 	node.Label = label
 	node.Region = region
 	node.ServerID = serverID
-	if idx >= 0 {
-		existing := s.nodes[idx]
-		if node.InUse == 0 {
-			node.InUse = existing.InUse
-		}
-		if node.SuccessRate == 0 {
-			node.SuccessRate = existing.SuccessRate
-		}
-		if node.LastProbeAt == "" {
-			node.LastProbeAt = existing.LastProbeAt
-		}
-		s.nodes[idx] = node
-	} else {
-		if node.LastProbeAt == "" {
-			node.LastProbeAt = iso(s.now())
-		}
-		s.nodes = append(s.nodes, node)
-	}
-	s.syncAccountCountsLocked()
 	return node, nil
 }
 

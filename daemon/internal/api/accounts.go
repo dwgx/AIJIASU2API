@@ -81,6 +81,9 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if s.cfg.LoginService != nil {
+		s.cfg.LoginService.Forget(id)
+	}
 	// The hook only stopped gates; the nodes were still LIVE when it ran, so
 	// the reconcile that drops the account's tags must happen after the store
 	// cascade removed them.
@@ -171,6 +174,9 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if s.cfg.LoginService != nil {
+		s.cfg.LoginService.Forget(id)
 	}
 	// store.LogoutAccount paused the account and drained its nodes; publish
 	// that state now, because the pre-mutation hook did not reconcile.
