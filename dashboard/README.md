@@ -1,15 +1,15 @@
 # AJiaSu Proxy Console
 
-Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, usage, request telemetry,
-the audit trail, schedules, webhook receivers, gate health and a read-only Lab instrument in one
-graphite-and-mint APC surface. **Mock-first:** the default build runs on deterministic in-memory
-data and never contacts AJiaSu, a vendor binary or a live daemon. A live mode against the local
-`ajs-accountd` skeleton is also built and verified; it is opt-in through build-time environment
-variables (see [Modes](#modes) and [Live mode](#live-mode)).
+Operator dashboard for `ajs-accountd` — accounts, nodes, leases, the device pool, users, usage,
+request telemetry, the audit trail, schedules, webhook receivers, gate health and a read-only Lab
+instrument in one graphite-and-mint APC surface. **Mock-first:** the default build runs on
+deterministic in-memory data and never contacts AJiaSu, a vendor binary or a live daemon. A live
+mode against the local `ajs-accountd` skeleton is also built and verified; it is opt-in through
+build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 354 tests in 40 files.
+- Tests: Vitest + React Testing Library + jsdom, 393 tests in 43 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 354 tests in 40 files
+npm test           # Vitest, 393 tests in 43 files
 npm run typecheck  # tsc -b
 ```
 
@@ -171,6 +171,7 @@ place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`.
 | Logs (audit) | 15 s | SSE runtime logs remain `[PROPOSED]` |
 | Gate health | 15 s | `/v1/health/nodes`; the daemon probes every 30 s, so the panel is one probe behind at most |
 | Schedules | 15 s | schedules poll at 15 s, the account list at 30 s |
+| Device pool | 30 s | `/v1/device-pool`; the assign dialog loads the account list once on mount |
 | Usage | — | manual only; the window/filter change triggers the request |
 | Webhooks | — | manual only; load on mount and **Refresh** |
 | Settings | — | manual only |
@@ -481,8 +482,10 @@ and seed rows — so the numbers reset with the request log's 10 000-row retenti
   row is written per account per hour. When any visible account has a budget the daemon sends
   `quotaEnforced:true`, the user table labels its quota column **Quota** instead of **Budget
   (advisory)**, and the account table adds a monthly meter (`trafficBudgetBytes` against
-  `usedBytes`) with the remaining headroom. User quotas remain window-based advisory figures:
-  SOCKS5 flows carry no user identity, so the gate cannot attribute traffic to a panel user.
+  `usedBytes`) with the remaining headroom. User quotas are advisory under the default no-auth
+  loopback gate, because such a flow carries no user identity; with `AJS_GATE_AUTH=userpass` the
+  gate authenticates the panel user, refuses a flow at the user's monthly quota, and the metered
+  row advances the same per-user total.
 - **Chart and tables.** A per-day bar/area chart fills missing days with zeros across the returned
   `from`–`to` window; the account and user tables are sortable and the user rows show the monthly
   quota meter (`quotaBytesMonth` against `usedBytes`, labelled advisory as above); a top-targets
@@ -519,6 +522,54 @@ every 30 s.
   the daemon lists that row, otherwise an explicit *state unavailable*, plus the reminder marks
   derived from account expiry inside the 30-day window. The page cannot trigger or edit the sweep
   and never invents a next run.
+
+## Leases page
+
+`/leases` lists the active leases and is where a lease is created or revoked. **New lease** opens
+a modal with a searchable user picker (`GET /v1/users`), a platform picker
+(android/ios/windows/linux, default android), an optional account pin limited to active accounts of
+that platform, and a TTL choice (1 h, 8 h, 24 h, 7 d; default 8 h).
+
+- **Idempotency.** Every dialog open generates a fresh key (`crypto.randomUUID()`, or a
+  timestamp/random fallback when unavailable) and sends it as the `Idempotency-Key` header, so
+  retrying a failed submit returns the original lease instead of allocating a second node. The page
+  never renders the key; the daemon records it on the lease row.
+- **Refusals.** The daemon's message stays in the dialog as an alert. The daemon's reasons are 409
+  `lease_conflict` for a second active lease of the same user and platform, 409 `user_disabled`/
+  `account_unavailable`, 429 `quota_exceeded`/`concurrency_exceeded`/`no_capacity`, and 404 for an
+  unknown user or account. The page does not retry by itself and never fakes a lease.
+- **Success and warning.** A committed lease reloads the list and shows `Lease created · user on
+  node`; if the daemon reports a publish-hook `warning`, the lease still committed and the warning
+  is shown as a danger toast.
+- **Rotate and revoke.** Rotate is disabled while the Lab overview says Resin is not configured;
+  revoke asks for confirmation and says the node is freed immediately.
+
+## Device pool page
+
+`/device-pool` is the console for the daemon's sealed identity pool. It polls
+`GET /v1/device-pool` every 30 s and renders count chips (total, available, assigned, retired,
+quarantined) that also act as a state filter, a platform filter, and a 250 ms-debounced search over
+id, label, notes and account.
+
+- **Hash-only table.** Columns are label/id, platform/profile, state, bound account, created and
+  presented times, and the first two hashes truncated as `sha256:<8 hex>…` with a `+N more` note.
+  The sealed machine code is never requested or rendered; a record whose material is gone carries a
+  warning badge.
+- **Lifecycle.** The row actions follow the state: assign (account picker), release, retire,
+  quarantine and purge. Release/retire/quarantine/purge require the daemon's exact typed token
+  (`RELEASE`, `RETIRE`, `QUARANTINE`, `PURGE`), retire and quarantine accept an optional reason,
+  and a 409 (for example a live session) is localized from its `DEVICE_*` reason.
+- **Generate, export, import.** Generate creates a batch; export seals the selected scope
+  (`assigned` default, `retired` or `all`) with a passphrase and an `EXPORT` token, optionally
+  including account keys and labels; import accepts a pasted or uploaded envelope, defaults to a
+  dry run, and lists per-record conflicts when the daemon refuses an apply.
+- **Disabled and warnings.** A pool that answers `enabled:false` (for example no `AJS_MASTER_KEY`)
+  renders a warning callout with the daemon's reason instead of an empty table, and pool warnings
+  are listed above the table. The detail drawer shows the full fingerprint, lifecycle timestamps and
+  the sealed-material warning.
+
+Mock mode seeds seven records (3 available, 2 assigned, 1 retired, 1 quarantined) so the page is
+reviewable offline.
 
 ## HMC layout
 
@@ -784,7 +835,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 354 Vitest tests in 40 files (65 at the 2026-10-23 record; see
+- 393 Vitest tests in 43 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -928,8 +979,9 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account monthly budget meters and per-user quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
-| `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
-| `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
+| `/leases` | Leases | sticky-lease callout, copy proxy URL, create dialog (user, platform, optional account pin, TTL, per-dialog idempotency key), rotate, release confirm, TTL |
+| `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
+| `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor (the daemon's gate enforces it, with the monthly quota, only under `AJS_GATE_AUTH=userpass`) |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, CSV export of `/v1/audit/export.csv` with the active severity filter and an `X-Truncated` warning |
 | `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
@@ -943,12 +995,12 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 ```text
 src/
-  App.tsx                 lazy routes for all 11 pages
+  App.tsx                 lazy routes for all 13 pages
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
     types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*, Schedule*, Usage*, Health*, Webhook*
-    mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows
+    mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows · 7 device-pool records
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
     nodes.ts              catalog query state + region grouping + client-side geo filters
@@ -972,9 +1024,10 @@ src/
     settings/             SettingsNav rail, section shell, field row, provenance badge, WebhooksSection, settings.css
     nodes/                CatalogTab (grouped vendor catalog), ChinaMap (offline choropleth), ConnectedTab (runtime nodes), HealthPanel
     schedules/            ScheduleDialog, ScheduleHistoryDrawer, RenewalSweepCard, schedules.css
+    devicepool/           GenerateDeviceDialog, DeviceExportDialog, DeviceImportDialog, LifecycleDialog, DeviceDetailDrawer, shared.ts, device-pool.css
     usage/                UsageChart
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
-  pages/                  Overview, Usage, Accounts, Nodes, Leases, Users, Requests, Logs, Schedules, Lab, Settings, Backup
+  pages/                  Overview, Usage, Accounts, Nodes, Leases, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
@@ -991,7 +1044,9 @@ tests/
   icon-morph.test.tsx     morph planning, spring, reduced motion, resting paths
   openapi.test.ts         docs/openapi.json parses, refs, operation ids, route-table parity
   app.test.tsx            all routes, palette open/navigate/Esc/filter
-  interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
+  interactions.test.tsx   copy toast, rotate, release, create lease, create account, bulk pause, key show-once, mutation lab
+  leases-create.test.tsx  create dialog, per-dialog idempotency key, duplicate user+platform refusal, TTL/platform/account picker
+  device-pool.test.tsx    hash-only list, count chips, filters, generate, assign, typed-token lifecycle, export/import, disabled pool
   nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
   china-map.test.tsx      map totals, province selection, city filter, Other, reduced motion, i18n
   geo.test.ts             offline title→province resolution and map aggregation
@@ -1118,7 +1173,8 @@ contract only):
 | Test login / change state / delete | `POST /v1/accounts/{id}/actions/login`, `PATCH/DELETE /v1/accounts/{id}` | `[SPEC]` |
 | List nodes | `GET /v1/nodes` | `[SPEC]` |
 | Drain / undrain / probe | `POST /v1/nodes/{id}/actions/{drain\|undrain\|probe}` | `[SPEC]` |
-| List / rotate / release leases | `GET /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` | `[PROPOSED]` |
+| List / create / rotate / release leases | `GET/POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Device pool | `GET /v1/device-pool`, `POST /v1/device-pool/{generate,export,import}`, `GET/PATCH /v1/device-pool/{id}`, `POST /v1/device-pool/{id}/{assign,release,retire,quarantine,purge}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Users | `GET /v1/users`, `POST /v1/users/{id}/{suspend\|resume}`, `PATCH /v1/users/{id}` | `[SPEC]` / `[PROPOSED]` |
 | API keys | `GET/POST /v1/apikeys`, `DELETE /v1/apikeys/{id}` | `[SPEC]` |
 | Requests | `GET /v1/requests`, `POST /v1/requests/mutations` | `[PROPOSED]` |
@@ -1348,11 +1404,15 @@ and reports healthy on `/healthz`.
   login is wired but default-off (`AJS_ACCOUNT_LOGIN=1` opts in). Live login/FV/egress was
   exercised on 2026-10-23 and 2026-10-24 for one account (see the root README); multi-account
   coexistence and Resin live publish remain `[UNVERIFIED]`.
-- Catalog target/connect, account import/export and bulk delete are wired to the daemon routes;
-  a P0 daemon without them degrades to a read-only catalog and a disabled export option rather
-  than faking success. Usage, schedules, gate health and webhooks are surfaced and degrade to an
-  explicit disabled state when the daemon answers `enabled:false` or 503. The device pool has an
-  HTTP API (`/v1/device-pool`) but no dashboard surface yet.
+- Catalog target/connect, account import/export, bulk delete, lease creation and the device pool
+  are wired to the daemon routes; a P0 daemon without them degrades to a read-only catalog and a
+  disabled export option rather than faking success. Usage, schedules, gate health and webhooks are
+  surfaced and degrade to an explicit disabled state when the daemon answers `enabled:false` or
+  503. The device-pool page renders hash-only records and never the sealed machine code; a daemon
+  without `AJS_MASTER_KEY` answers `enabled:false` with its reason, and every lifecycle action needs
+  the daemon's typed token (`RELEASE`, `RETIRE`, `QUARANTINE`, `PURGE`). Lease creation sends a
+  per-dialog `Idempotency-Key`; the page shows the daemon's 409/429 reason instead of retrying
+  silently, and a publish-hook warning is surfaced as a warning toast after the lease committed.
 - Usage aggregates the daemon's request log: with gate metering on (`AJS_FLOW_METER`, default)
   each completed SOCKS5 flow appends one row, so the page reflects real proxy traffic, but its
   requests and bytes are still recorded rows and reset with the 10 000-row retention. The

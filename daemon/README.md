@@ -7,7 +7,11 @@ startup/topology/reconcile wiring and the runtime mutations are in place: when
 `AJS_RESIN_ADMIN_TOKEN` is set the daemon renders the store's `LIVE` nodes into
 the `ajs-live` local subscription before it starts listening,
 `/v1/topology` / `/v1/reconcile` report the Resin view, and lease
-rotate/release plus node drain/undrain write through Resin. Without the token it
+rotate/release plus node drain/undrain write through Resin. The panel allocates
+its own leases too: `POST /v1/leases` picks a free node for a user and platform
+(an `Idempotency-Key` makes a retry safe, one active lease is allowed per user
+and platform, and quota/concurrency/capacity refusals answer 429) and
+`DELETE /v1/leases/{id}` revokes one behind `confirm:true`. Without the token it
 keeps the store-derived view and the in-memory mutation behavior, and logs
 `resin_disabled`. With `AJS_MASTER_KEY` set, created account passwords are
 sealed with AES-256-GCM into `$AJS_STATE_DIR/secrets.json`; without it they are
@@ -21,7 +25,11 @@ host is contacted. With the same switch the node controller follows a
 successful login with `loginSync`, opens one authenticated FV session and one
 loopback SOCKS5 gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
 (default `1`, the vendor's one active data session per account;
-`127.0.0.1:13000` upward), writes the node, and reconciles Resin. It also makes
+`127.0.0.1:13000` upward), writes the node, and reconciles Resin. Every gate
+defaults to the no-auth loopback method; `AJS_GATE_AUTH=userpass` makes it
+require RFC 1929 (username = `PanelUser.ID`, password = an active API-key
+secret) and enforce that user's allowlist and monthly quota before admitting a
+flow. It also makes
 `POST .../drain|undrain` call the controller before the store, so a running gate
 stops admitting (or reopens) before the node state changes; without the
 switch the handlers keep the store/Resin behavior. A Lab telemetry view
@@ -31,9 +39,10 @@ vendor, and the single POST runs an explicit egress probe that writes nothing.
 There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md`
 §6, and the node supervisor is implemented but not wired to the controller.
 
-Three P1 surfaces are served in the same process: account export/import/bulk-delete, catalog
-selection with guarded connect/reconnect/disconnect, and a cron/interval/once scheduler behind
-`AJS_SCHEDULES=1`. The device identity pool seals each account's vendor identity in a separate
+Four P1 surfaces are served in the same process: account export/import/bulk-delete, catalog
+selection with guarded connect/reconnect/disconnect, lease allocation and revocation, and a
+cron/interval/once scheduler behind `AJS_SCHEDULES=1`. The device identity pool seals each
+account's vendor identity in a separate
 file under a key derived with HKDF-SHA-256 from `AJS_MASTER_KEY`, retires a deleted account's
 identity instead of erasing it, and restores it when the same account is added again; it is served
 over `/v1/device-pool` as well as through the store API. The catalog page also carries a
@@ -81,6 +90,7 @@ internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
 internal/store/device.go     stable per-account device identity (snapshot-backed)
 internal/store/device_pool.go  sealed device pool: states, restore, retire/GC, migration, import/export
 internal/store/account_io.go  account export/import formats, encrypted envelope, bulk-delete apply
+internal/store/leases.go     lease allocation: guards, idempotency replay, node placement, revoke
 internal/store/catalog.go    selection + per-server connect counters
 internal/store/schedules.go  schedule/run/fire/reminder retention and CRUD
 internal/catalog/            offline exact-match city index for the catalog geo aggregate
@@ -88,6 +98,7 @@ internal/schedule/           cron parser, next-run, fire journal (WAL), engine, 
 internal/runtime/catalog_connect.go  guarded switch: one session per account, cooldown, snapshot guard
 internal/api/catalog_connect.go  selection/connect/reconnect/disconnect handlers
 internal/api/account_io.go   export/import/bulk-delete handlers
+internal/api/leases.go       lease create/revoke handlers, Idempotency-Key contract, error mapping
 internal/api/schedules.go    schedule CRUD, preview, run-now and run history handlers
 internal/api/scoped_keys.go  scope table, scoped-key handlers and the auth identity
 internal/api/device_pool.go  device-pool HTTP lifecycle handlers
@@ -992,6 +1003,50 @@ Reason mapping: 404 `unknown_server`/`no_target`; 409 `login_required`, `login_d
 429 `connect_cooldown`; 502 `session_open_failed`/`gate_start_failed`; 500 `store_failed`. The
 client-safe message and `details` are serialized; the wrapped cause stays in the log.
 
+## Lease allocation
+
+`internal/store/leases.go` allocates and frees the panel's leases; `internal/api/leases.go` serves
+them. Create and revoke need the `leases:write` scope for a scoped key (list uses `leases:read`).
+
+**Create** (`POST /v1/leases`, body `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}`)
+answers 201 with `{lease, replayed?, warning?}`.
+
+- **Idempotency.** The `Idempotency-Key` header and the body's `idempotencyKey` are one channel:
+  when both are present they must match (400 otherwise), and a key is at most 128 characters and
+  must not contain whitespace. A replay returns the original lease with `Idempotency-Replayed:
+  true` and allocates nothing; it is resolved before the current-state checks, so a retry after a
+  lost response is not refused by a later quota or pool change. Reusing a key for another user or
+  platform is 409 `idempotency_conflict`.
+- **Guards, in order.** Unknown user → 404 `user_not_found`; suspended user → 409 `user_disabled`;
+  exhausted monthly quota → 429 `quota_exceeded`; an active lease for the same user and platform →
+  409 `lease_conflict`; unknown pinned account → 404 `account_not_found`; a pin of another platform
+  → 400 `invalid_lease`; a pinned account that is paused, failed or expired → 409
+  `account_unavailable`; the account already at its concurrency → 429 `concurrency_exceeded`; no
+  account of that platform can take another lease → 429 `concurrency_exceeded` or `no_capacity`,
+  depending on which guard blocked it.
+- **TTL.** `ttlSeconds: 0` uses the user's sticky TTL, then the panel lease TTL; an explicit value
+  must be 60 s – 7 days. An unsupported platform, a malformed body or an out-of-range TTL is 400
+  (`invalid_lease` / `INVALID_ARGUMENT`).
+- **Placement.** Every node that already has an active lease is excluded; a `LIVE` node outranks a
+  `READY` one, and seed order breaks the tie. Without a pin the first active account of the
+  platform with spare concurrency and a free node wins. The commit appends one `lease.create`
+  audit row and increments the node's `inUse`.
+- **Publish hook.** When the runtime wires `LeasePublishHook`, a hook failure is reported in the
+  201 body as `warning` (and logged as `lease_publish_hook_failed`); the lease stays committed and
+  the request is not rolled back.
+
+**Revoke** (`DELETE /v1/leases/{id}`, body `{confirm:true}`) answers 204; a missing confirm is 400.
+With a Resin panel the store row is read first (missing → 404), then the panel lease is deleted —
+Resin's 404 is treated as already gone, a missing panel platform is 409, and any other panel failure
+is 503 with the store row left in place — and finally the store row is released, the node's `inUse`
+decremented and one `lease.revoke` audit row written. Without a panel the store release is the whole
+path and an unknown id is 404. A hook failure after the commit is returned in the `Warning` header.
+
+`internal/store/leases_test.go` covers allocation, replay, duplicate user/platform, user quota,
+account concurrency, no capacity, a suspended user, revoke/expire releasing the node and snapshot
+survival; `internal/api/leases_test.go` covers the HTTP retry/conflict contract, both 429 reasons,
+validation, the `confirm` gate, the publish-hook warning and the `leases:write` scope.
+
 ## Supervisor (AJS-43)
 
 `internal/supervisor` owns the per-node child processes (`docs/PANEL.md` §2,
@@ -1371,7 +1426,7 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 | `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology` |
 | `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, node drain/undrain/probe |
 | `leases:read` | `GET /v1/leases` |
-| `leases:write` | `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
+| `leases:write` | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `requests:read` | `GET /v1/requests` |
 | `audit:read` | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | `GET /metrics`, `GET /v1/metrics` |
@@ -1845,7 +1900,7 @@ objects.
 | POST | `/v1/accounts/import` | `{source:{kind:"json"\|"csv"\|"encrypted", content, passphrase?}, options:{mode, matchBy, onConflict, initialState, idPolicy, devicePolicy, preserveTimestamps, dryRun}}` → per-row plan/apply result. Defaults: atomic, label, skip, paused, new, restore_if_missing. `dryRun:true` previews without mutating; atomic applies nothing when a row fails; partial applies the valid rows; > 1 000 rows or a bad envelope → 400 |
 | POST | `/v1/accounts/bulk-delete` | `{ids[], dryRun?, mode:"continue"\|"stop"}` → per-row `deleted`/`would_delete`/`not_found`/`failed`/`skipped` with counts. ≤ 100 ids; each row runs the account delete hook (stop gates/sessions) before the store delete, so a hook or sealer failure leaves that account and its secret intact |
 | GET | `/v1/accounts/{id}` | single account |
-| PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
+| PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt/trafficBudgetBytes (`null` clears the monthly budget, `0` refuses every byte) |
 | DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases and its sealed secret (sealer file immediately, snapshot at the next save) and retire its device identity as a tombstone (pool mode; the legacy plaintext map is deleted) for re-add restore; a sealer failure → 503 with the account and its secret intact; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the account's gates and sessions first (stop failure → 500, account active and nodes unchanged); then pause the account and mark its nodes `DRAINING` |
@@ -1865,8 +1920,9 @@ objects.
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
 | POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
 | GET | `/v1/leases` | list; filter `user_id` |
+| POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`no_capacity` |
 | POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17 |
-| DELETE | `/v1/leases/{id}` | panel: delete Resin lease, then store row; fallback: store release; decrement node `inUse` |
+| DELETE | `/v1/leases/{id}` | body `{confirm:true}` → 204; panel: delete Resin lease (404 idempotent), then store row; fallback: store release; decrement node `inUse`; a missing confirm → 400 |
 | GET | `/v1/users` | list |
 | POST | `/v1/users` | create; name conflict → 409 |
 | PATCH | `/v1/users/{id}` | stickyTtl, quota (null = unlimited), allowlist, platform |
@@ -1916,9 +1972,9 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 |---|---|---|
 | `INVALID_ARGUMENT` | 400 (413 oversize) | malformed JSON, bad enum/range, unknown settings key, a missing `If-Match` on schedule PATCH |
 | `NOT_FOUND` | 404 | unknown id or route, unknown catalog server, no catalog target |
-| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete |
+| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete, a lease create refused as `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict` |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
-| `QUOTA_EXCEEDED` | 429 | repeat Lab egress check for the same node inside the 5 s cooldown; account quotas remain advisory |
+| `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals (SOCKS5 `0x02`), not HTTP errors |
 | `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds) or a scoped key over its per-minute budget (`Retry-After` is one refill interval) |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account |
@@ -1947,8 +2003,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (79 paths, 97 operations,
-  149 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (79 paths, 98 operations,
+  153 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
@@ -2040,7 +2096,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **703 `func Test` functions across 87 `_test.go` files** (recounted 2026-10-25);
+The tree holds **753 `func Test` functions across 95 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -2067,7 +2123,8 @@ and `internal/runtime/catalog_connect_test.go` cover selection CRUD and the swit
 node, already-connected idempotence, cooldown, ineligible/unknown/login-required reasons,
 concurrent switches, open/store failure rollback, multiple sessions, cleanup warnings, disconnect,
 and the HTTP reason mapping. `internal/store/catalog_test.go` pins selection persistence and the
-additive snapshot maps.
+additive snapshot maps. `internal/store/leases_test.go` and `internal/api/leases_test.go` cover
+lease allocation and revocation (see [Lease allocation](#lease-allocation)).
 
 `internal/store/device_pool_test.go` covers generation and sealing, the HMAC vector, uniqueness,
 assign/release/quarantine, delete-retires-then-re-add-restores, ambiguous restore, fail-closed
@@ -3406,8 +3463,10 @@ header or credential). No live vendor call was made.
   it.
 - The gate is constructed from a login session and allocates `13000` upward
   through the node controller, but it is not wired to the node supervisor,
-  publishes no `State` and serves no `GateController` HTTP surface. It has no
-  per-user auth or quota (P3) and binds loopback only.
+  publishes no `State` and serves no `GateController` HTTP surface. Per-user
+  authentication is opt-in (`AJS_GATE_AUTH=userpass`: RFC 1929, the user's
+  allowlist and monthly quota); the default stays the no-auth loopback method,
+  and the gate binds loopback only.
 - The supervisor is not wired to the runtime: nothing starts an `ajsproxy`
   child, allocates its `12000–12999` port or reacts to its events. Readiness is
   a TCP dial on `ReadyAddr`, not an FV auth check, and a crashed child is
@@ -3415,10 +3474,14 @@ header or credential). No live vendor call was made.
   Stop is hardened (process-group kill on Unix, `WaitDelay` bound, Windows
   single-process fallback), but it is still a seam with no production caller,
   and on Windows a grandchild that outlives its parent is not group-killed.
-- Lease creation, `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
+- `/v1/subscription`, `/v1/errors`, `/v1/overview`, `/v1/logs`
   and `/v1/nodes/{id}/flows` are out of this slice.
-- Quotas are advisory; the only `QUOTA_EXCEEDED` is the Lab egress-check cooldown (429), a probe
-  rate limit rather than an account quota.
+- Account traffic budgets are enforced at the gate: an over-budget account gets SOCKS5 `0x02` with
+  the `quota_exceeded` class before a slot or vendor flow is taken, metered from the current UTC
+  month's gate rows. User quotas are enforced only in `AJS_GATE_AUTH=userpass` mode, because the
+  no-auth loopback method carries no user identity; both are SOCKS5 refusals, not HTTP errors. The
+  HTTP `QUOTA_EXCEEDED` (429) is a lease create refusal (`quota_exceeded`/`concurrency_exceeded`/
+  `no_capacity`) or the Lab egress-check cooldown, a probe rate limit rather than a traffic quota.
 - No TLS, request-wide rate limiting, multi-process coordination, or CSRF surface; the rate limits
   are the per-node Lab egress-check cooldown and the per-scoped-key request budget
   (`rateLimitPerMin`, default 60), and the admin bearer token is not rate-limited. The Lab
@@ -3451,12 +3514,13 @@ header or credential). No live vendor call was made.
 - The dashboard lives in a separate tree (`dashboard/`); the Lab page consumes the endpoints
   above and needs no daemon write path.
 - The P1 surfaces are offline-tested only. Catalog selection/connect, account export/import and
-  bulk delete have `httptest` coverage but have never been exercised against the live vendor
-  account; a live switch has not been attempted. The scheduler is off unless `AJS_SCHEDULES=1`
+  bulk delete, lease creation/revocation and SOCKS5 gate user authentication have `httptest`
+  coverage but have never been exercised against the live vendor account; a live switch has not
+  been attempted. The scheduler is off unless `AJS_SCHEDULES=1`
   and its only actions are `account.rotate`/`account.reconnect` (the rest validate but fail as
   `unsupported_action`); the dashboard surfaces it now. The device pool is served over
   `/v1/device-pool` as well as through the store API, and is off without `AJS_MASTER_KEY`; the
-  dashboard does not surface it yet.
+  dashboard surfaces it on `/device-pool` (hash-only records, typed-token lifecycle).
 - Plaintext account export is off by default (`AJS_ALLOW_PLAINTEXT_EXPORT=0`), and even when on it
   writes unencrypted credentials to the operator's disk; the encrypted `.ajsx` envelope is the
   intended path. The account-IO mutex is per process, so two daemons sharing a state file can
