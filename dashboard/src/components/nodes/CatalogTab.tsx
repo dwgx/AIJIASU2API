@@ -40,7 +40,7 @@ interface CatalogTabProps {
  */
 export function CatalogTab({ catalog, query, onQueryChange, selected, onSelectedChange }: CatalogTabProps) {
   const { t, lang } = useI18n()
-  const [regionFilter, setRegionFilter] = useState('all')
+  const [regionFilter, setRegionFilter] = useState<string[]>([])
   const [statusFilter, setStatusFilter] = useState('all')
 
   const rows = catalog.data?.rows ?? []
@@ -60,7 +60,7 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return rows.filter((row) => {
-      if (regionFilter !== 'all' && row.region !== regionFilter) return false
+      if (regionFilter.length > 0 && !regionFilter.includes(row.region)) return false
       if (statusFilter !== 'all' && row.status !== statusFilter) return false
       if (!needle) return true
       return `${row.title} ${row.id} ${row.host} ${row.region} ${regionName(row.region, lang)} ${row.accountLabel}`
@@ -69,14 +69,33 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
     })
   }, [rows, query, regionFilter, statusFilter, lang])
 
+  // Group the picker by country so a long vendor catalog stays scannable.
+  const regionOptions = useMemo(
+    () =>
+      regions
+        .map((region) => ({
+          value: region,
+          label: regionName(region, lang),
+          group: regionName(region.split('-')[0], lang),
+        }))
+        .sort(
+          (left, right) =>
+            left.group.localeCompare(right.group) || left.label.localeCompare(right.label),
+        ),
+    [lang, regions],
+  )
+
   const groups = useMemo(() => groupCatalogByRegion(filtered), [filtered])
 
   // A poll can drop the last server of a region or status; drop the filter too
   // so the select never shows a value it no longer offers.
   useEffect(() => {
-    if (regionFilter !== 'all' && !regions.includes(regionFilter)) setRegionFilter('all')
+    setRegionFilter((current) => {
+      const next = current.filter((region) => regions.includes(region))
+      return next.length === current.length ? current : next
+    })
     if (statusFilter !== 'all' && !statuses.includes(statusFilter)) setStatusFilter('all')
-  }, [regionFilter, regions, statusFilter, statuses])
+  }, [regions, statusFilter, statuses])
 
   // A poll can drop a server; keep the count honest instead of counting ghosts.
   useEffect(() => {
@@ -104,7 +123,7 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
 
   const clearFilters = () => {
     onQueryChange('')
-    setRegionFilter('all')
+    setRegionFilter([])
     setStatusFilter('all')
   }
 
@@ -298,29 +317,25 @@ export function CatalogTab({ catalog, query, onQueryChange, selected, onSelected
             />
           </div>
           <Select
+            variant="region"
+            multiple
+            searchable
             aria-label={t('nodes.filterRegion')}
+            placeholder={t('nodes.allRegions')}
             value={regionFilter}
-            onChange={(event) => setRegionFilter(event.target.value)}
-          >
-            <option value="all">{t('nodes.allRegions')}</option>
-            {regions.map((region) => (
-              <option key={region} value={region}>
-                {regionName(region, lang)}
-              </option>
-            ))}
-          </Select>
+            onChange={setRegionFilter}
+            options={regionOptions}
+          />
           <Select
+            variant="filter"
             aria-label={t('nodes.catalog.filterStatus')}
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-          >
-            <option value="all">{t('nodes.allStatuses')}</option>
-            {statuses.map((status) => (
-              <option key={status} value={status}>
-                {status}
-              </option>
-            ))}
-          </Select>
+            onChange={setStatusFilter}
+            options={[
+              { value: 'all', label: t('nodes.allStatuses') },
+              ...statuses.map((status) => ({ value: status, label: status })),
+            ]}
+          />
           <span className="toolbar__count">
             {t('common.of', { shown: filtered.length, total: rows.length })}
           </span>

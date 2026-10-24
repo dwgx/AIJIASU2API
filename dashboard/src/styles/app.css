@@ -84,6 +84,7 @@
   --z-sidebar: 20;
   --z-scrim: 40;
   --z-overlay: 50;
+  --z-popover: 60;
   --z-toast: 80;
 }
 
@@ -201,7 +202,6 @@ body {
 
 button,
 input,
-select,
 textarea {
   font: inherit;
   color: inherit;
@@ -1124,26 +1124,359 @@ svg {
   resize: vertical;
 }
 
-.select {
+/* Custom select — the trigger mirrors `.input`, the popup portals to <body>
+   and is placed with fixed coordinates from the trigger rect. Variants change
+   density and chrome only; the structure stays one combobox everywhere. */
+.sel {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.sel__trigger {
+  display: inline-flex;
+  width: 100%;
+  height: var(--control-h);
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-control);
+  background: var(--sunken);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.sel__trigger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--mint) 30%, var(--border-strong));
+}
+
+.sel__trigger[aria-expanded='true'] {
+  border-color: var(--mint);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mint) 18%, transparent);
+}
+
+.sel__trigger:disabled {
+  cursor: not-allowed;
+  color: var(--text-disabled);
+  opacity: 0.55;
+}
+
+.sel__value {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sel__value.is-placeholder {
+  color: var(--muted);
+}
+
+.sel__count {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  flex: none;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mint) 16%, transparent);
+  color: var(--mint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sel__chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.sel__trigger[aria-expanded='true'] .sel__chevron {
+  transform: rotate(180deg);
+}
+
+/* Compact chip for toolbars. */
+.sel--filter .sel__trigger {
   width: auto;
-  min-width: 132px;
-  padding-right: 28px;
-  appearance: none;
-  /* Chevron drawn from two gradients so it follows --muted in both themes. */
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 17px) calc(50% - 2px),
-    calc(100% - 12px) calc(50% - 2px);
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
+  min-width: 126px;
+  height: var(--control-h-sm);
+  padding: 0 8px 0 10px;
+  border-radius: 999px;
+  background: var(--raised);
+}
+
+.sel--filter .sel__opt {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+/* Full-width control for dialogs and forms. */
+.sel--form {
+  display: flex;
+  width: 100%;
+}
+
+.page-head__actions .sel--form {
+  width: auto;
+  min-width: 200px;
+}
+
+/* Roomier settings control; descriptions live in the option rows. */
+.sel--settings {
+  display: flex;
+  width: 100%;
+}
+
+.sel--settings .sel__trigger {
+  height: 38px;
+  padding: 4px 10px;
+}
+
+.sel--settings .sel__opt {
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.sel--settings .sel__opt-label {
+  font-weight: 600;
+}
+
+/* Dense mono treatment for log filters and node ids. */
+.sel--log .sel__trigger {
+  height: var(--control-h-sm);
+  padding: 0 6px 0 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sel--log .sel__opt {
+  min-height: 26px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Region picker: multi-select, search and group headers. */
+.sel--region .sel__trigger {
+  height: 30px;
+}
+
+.sel--sm .sel__trigger {
+  height: var(--control-h-sm);
+}
+
+.sel--lg .sel__trigger {
+  height: 38px;
+}
+
+.sel__pop {
+  position: fixed;
+  z-index: var(--z-popover);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-menu);
+  background: var(--overlay);
+  box-shadow: var(--shadow-pop);
+  animation: select-pop-in var(--dur-base) var(--ease-out);
+  transform-origin: top center;
+}
+
+.sel__pop[data-placement='top'] {
+  transform-origin: bottom center;
+  animation-name: select-pop-in-top;
+}
+
+.sel__search {
+  display: flex;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.sel__search-input {
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.sel__search-input::placeholder {
+  color: var(--muted);
+}
+
+.sel__search-clear {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
 
-.select option {
-  background: var(--overlay);
+.sel__search-clear:hover {
+  background: var(--wash);
   color: var(--text);
+}
+
+.sel__list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.sel__group + .sel__group {
+  margin-top: 2px;
+}
+
+.sel__group-label {
+  padding: 6px 8px 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sel__opt {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sel__opt.is-active {
+  background: var(--active);
+}
+
+.sel__opt.is-selected .sel__opt-label {
+  color: var(--mint);
+}
+
+.sel__opt.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.sel__opt-icon {
+  display: flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.sel__opt-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sel__opt-label {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sel__opt-desc {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.sel__check {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--on-mint);
+}
+
+.sel__check.is-checked {
+  border-color: var(--mint);
+  background: var(--mint);
+}
+
+.sel__check--end {
+  border: 0;
+  background: transparent;
+  color: var(--mint);
+}
+
+.sel__foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-top: 1px solid var(--border);
+  background: var(--raised);
+}
+
+.sel__foot-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sel__foot-btn:hover:not(:disabled) {
+  background: var(--wash);
+  color: var(--text);
+}
+
+.sel__foot-btn:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.sel__foot-btn--done {
+  margin-left: auto;
+  color: var(--mint);
+  font-weight: 600;
+}
+
+.sel__empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
 }
 
 .field {
@@ -1757,7 +2090,7 @@ svg {
   padding-left: 30px;
 }
 
-.toolbar .select {
+.toolbar .sel {
   min-width: 126px;
 }
 
@@ -3595,10 +3928,21 @@ svg {
   }
 }
 
-@keyframes modal-in {
+@keyframes select-pop-in {
   from {
     opacity: 0;
-    transform: translateY(-6px) scale(0.985);
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes select-pop-in-top {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
   }
   to {
     opacity: 1;

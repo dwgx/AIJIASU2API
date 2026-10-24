@@ -16,7 +16,6 @@ import {
   ErrorState,
   Input,
   PageHeader,
-  SegmentedControl,
   Select,
   StatusPill,
   TableSkeleton,
@@ -119,10 +118,11 @@ export default function Logs() {
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <SegmentedControl
-            label={t('audit.filterSeverity')}
+          <Select
+            variant="log"
+            aria-label={t('audit.filterSeverity')}
             value={severity}
-            onChange={setSeverity}
+            onChange={(value) => setSeverity(value as 'all' | Severity)}
             options={[
               { value: 'all', label: t('common.all') },
               { value: 'info', label: t('state.info') },
@@ -130,14 +130,16 @@ export default function Logs() {
               { value: 'error', label: t('state.error') },
             ]}
           />
-          <Select aria-label={t('audit.filterActor')} value={actor} onChange={(event) => setActor(event.target.value)}>
-            <option value="all">{t('audit.allActors')}</option>
-            {actors.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </Select>
+          <Select
+            variant="log"
+            aria-label={t('audit.filterActor')}
+            value={actor}
+            onChange={setActor}
+            options={[
+              { value: 'all', label: t('audit.allActors') },
+              ...actors.map((name) => ({ value: name, label: name })),
+            ]}
+          />
           <span className="toolbar__count">
             {t('common.of', { shown: filtered.length, total: audit.data?.length ?? 0 })}
           </span>

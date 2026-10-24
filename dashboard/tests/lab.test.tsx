@@ -131,7 +131,7 @@ describe('lab egress check', () => {
     expect(within(table).getAllByText('never checked').length).toBeGreaterThan(0)
 
     const select = screen.getByRole('combobox', { name: 'Egress check node' })
-    await waitFor(() => expect(select).toHaveValue('node-01'))
+    await waitFor(() => expect(select).toHaveTextContent('node-01'))
 
     const check = screen.getByRole('button', { name: 'Check egress' })
     await waitFor(() => expect(check).toBeEnabled())
@@ -177,12 +177,14 @@ describe('lab egress check', () => {
     await user.click(check)
 
     const select = screen.getByRole('combobox', { name: 'Egress check node' })
-    await user.selectOptions(select, 'node-02')
+    await user.click(select)
+    await user.click(screen.getByRole('option', { name: /node-02/ }))
     const other = await screen.findByRole('region', { name: 'Selected node egress' })
     expect(within(other).getByText('203.0.113.12')).toBeInTheDocument()
     expect(within(other).getByText('not observed')).toBeInTheDocument()
 
-    await user.selectOptions(select, 'node-01')
+    await user.click(select)
+    await user.click(screen.getByRole('option', { name: /node-01/ }))
     const first = await screen.findByRole('region', { name: 'Selected node egress' })
     expect(within(first).getAllByText('203.0.113.11')).toHaveLength(2)
     expect(within(first).getByText('match')).toBeInTheDocument()

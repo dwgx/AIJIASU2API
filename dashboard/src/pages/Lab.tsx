@@ -109,17 +109,18 @@ export default function Lab() {
             <span className="lab-env-badges">{environmentBadges(overview.data, t)}</span>
             {needsAccount ? (
               <Select
+                variant="form"
+                size="sm"
+                searchable
                 aria-label={t('lab.accountSelect')}
                 value={accountId}
-                onChange={(event) => setAccountId(event.target.value)}
+                onChange={setAccountId}
                 disabled={(accounts.data ?? []).length === 0}
-              >
-                {(accounts.data ?? []).map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.label}
-                  </option>
-                ))}
-              </Select>
+                options={(accounts.data ?? []).map((account) => ({
+                  value: account.id,
+                  label: account.label,
+                }))}
+              />
             ) : null}
             <Button
               variant="secondary"

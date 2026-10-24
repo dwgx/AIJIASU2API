@@ -125,24 +125,26 @@ export function LogsTab() {
         <>
           <Card bodyClassName="card__body--flush">
             <div className="toolbar">
-              <Select aria-label={t('lab.logs.levelFilter')} value={level} onChange={(event) => setLevel(event.target.value)}>
-                {LEVELS.map((option) => (
-                  <option key={option} value={option}>
-                    {option === 'all' ? t('lab.logs.allLevels') : option}
-                  </option>
-                ))}
-              </Select>
               <Select
+                variant="log"
+                aria-label={t('lab.logs.levelFilter')}
+                value={level}
+                onChange={setLevel}
+                options={LEVELS.map((option) => ({
+                  value: option,
+                  label: option === 'all' ? t('lab.logs.allLevels') : option,
+                }))}
+              />
+              <Select
+                variant="log"
                 aria-label={t('lab.logs.componentFilter')}
                 value={component}
-                onChange={(event) => setComponent(event.target.value)}
-              >
-                {COMPONENTS.map((option) => (
-                  <option key={option} value={option}>
-                    {option === 'all' ? t('lab.logs.allComponents') : option}
-                  </option>
-                ))}
-              </Select>
+                onChange={setComponent}
+                options={COMPONENTS.map((option) => ({
+                  value: option,
+                  label: option === 'all' ? t('lab.logs.allComponents') : option,
+                }))}
+              />
               <Badge tone={paused ? 'warning' : 'success'}>
                 {paused ? t('lab.paused') : t('lab.livePolling')}
               </Badge>

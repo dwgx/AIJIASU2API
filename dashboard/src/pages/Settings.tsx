@@ -207,15 +207,21 @@ export default function Settings() {
               hint={t('settings.leases.hint')}
             >
               <Select
+                variant="settings"
                 id="lease-ttl"
                 value={draft.leaseTtl}
-                onChange={(event) => update('leaseTtl', event.target.value)}
-              >
-                <option value="1h">{t('settings.leases.1h')}</option>
-                <option value="4h">{t('settings.leases.4h')}</option>
-                <option value="8h">{t('settings.leases.8h')}</option>
-                <option value="24h">{t('settings.leases.24h')}</option>
-              </Select>
+                onChange={(value) => update('leaseTtl', value)}
+                options={[
+                  { value: '1h', label: t('settings.leases.1h'), description: t('settings.leases.1hDesc') },
+                  { value: '4h', label: t('settings.leases.4h'), description: t('settings.leases.4hDesc') },
+                  { value: '8h', label: t('settings.leases.8h'), description: t('settings.leases.8hDesc') },
+                  {
+                    value: '24h',
+                    label: t('settings.leases.24h'),
+                    description: t('settings.leases.24hDesc'),
+                  },
+                ]}
+              />
             </Field>
           </Card>
 

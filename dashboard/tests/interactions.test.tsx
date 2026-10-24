@@ -124,7 +124,7 @@ describe('users', () => {
 
     await user.click(button)
     const dialog = await screen.findByRole('dialog', { name: 'Create API key' })
-    expect(within(dialog).getByLabelText('User')).toHaveValue('u-01')
+    expect(within(dialog).getByRole('combobox', { name: 'User' })).toHaveTextContent('ada.ops')
   })
 
   it('creates an API key and shows the secret once', async () => {

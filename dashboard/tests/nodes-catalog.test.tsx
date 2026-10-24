@@ -59,8 +59,10 @@ describe('nodes catalog', () => {
     expect(codes.length).toBeGreaterThan(0)
     for (const code of codes) expect(code).toHaveClass('mono')
 
-    const regionFilter = screen.getByRole('combobox', { name: '按区域筛选' })
-    expect(within(regionFilter).getByRole('option', { name: '中国 · 浙江' })).toBeInTheDocument()
+    const user = userEvent.setup()
+    const regionFilter = screen.getByRole('button', { name: '按区域筛选' })
+    await user.click(regionFilter)
+    expect(await screen.findByRole('option', { name: '中国 · 浙江' })).toBeInTheDocument()
   })
 
   it('renders only the rows getAccountServers returned', async () => {
@@ -125,13 +127,13 @@ describe('nodes catalog', () => {
     ).not.toBeInTheDocument()
 
     await user.clear(screen.getByRole('textbox', { name: 'Search nodes' }))
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filter by region' }), 'hk')
+    await user.click(screen.getByRole('button', { name: 'Filter by region' }))
+    await user.click(screen.getByRole('option', { name: 'Hong Kong' }))
+    await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.getByText('3 of 12')).toBeInTheDocument())
 
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Filter by vendor status' }),
-      'offline',
-    )
+    await user.click(screen.getByRole('combobox', { name: 'Filter by vendor status' }))
+    await user.click(screen.getByRole('option', { name: 'offline' }))
     await waitFor(() => expect(screen.getByText('1 of 12')).toBeInTheDocument())
     expect(
       within(screen.getByRole('table', { name: 'Hong Kong vendor servers' })).getByText('offline'),

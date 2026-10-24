@@ -251,21 +251,26 @@ export function EgressTab() {
               <>
                 <div className="lab-tab-actions">
                   <Select
+                    variant="log"
                     aria-label={t('lab.egress.nodeAria')}
                     value={nodeId}
-                    onChange={(event) => chooseNode(event.target.value)}
+                    onChange={chooseNode}
                     disabled={gateRows.length === 0 || checking}
-                  >
-                    {gateRows.length === 0 ? <option value="">{t('lab.egress.noGateOption')}</option> : null}
-                    {gateRows.map((gate) => {
-                      const meta = nodeStateMeta(gate.state)
-                      return (
-                        <option key={gate.nodeId} value={gate.nodeId}>
-                          {gate.nodeId} · {gate.accountId} · {meta.labelKey ? t(meta.labelKey) : meta.label}
-                        </option>
-                      )
-                    })}
-                  </Select>
+                    options={[
+                      ...(gateRows.length === 0
+                        ? [{ value: '', label: t('lab.egress.noGateOption') }]
+                        : []),
+                      ...gateRows.map((gate) => {
+                        const meta = nodeStateMeta(gate.state)
+                        return {
+                          value: gate.nodeId,
+                          label: `${gate.nodeId} · ${gate.accountId} · ${
+                            meta.labelKey ? t(meta.labelKey) : meta.label
+                          }`,
+                        }
+                      }),
+                    ]}
+                  />
                   <Button
                     variant="primary"
                     icon={<Radar size={14} />}

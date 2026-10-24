@@ -610,28 +610,28 @@ export default function Accounts() {
             />
           </div>
           <Select
+            variant="filter"
             aria-label={t('accounts.filterState')}
             value={stateFilter}
-            onChange={(event) => setStateFilter(event.target.value as 'all' | AccountState)}
-          >
-            <option value="all">{t('accounts.allStates')}</option>
-            <option value="active">{t('state.active')}</option>
-            <option value="paused">{t('state.paused')}</option>
-            <option value="auth_failed">{t('state.auth_failed')}</option>
-            <option value="expired">{t('state.expired')}</option>
-          </Select>
+            onChange={(value) => setStateFilter(value as 'all' | AccountState)}
+            options={[
+              { value: 'all', label: t('accounts.allStates') },
+              { value: 'active', label: t('state.active') },
+              { value: 'paused', label: t('state.paused') },
+              { value: 'auth_failed', label: t('state.auth_failed') },
+              { value: 'expired', label: t('state.expired') },
+            ]}
+          />
           <Select
+            variant="filter"
             aria-label={t('accounts.filterPlatform')}
             value={platformFilter}
-            onChange={(event) => setPlatformFilter(event.target.value as 'all' | Platform)}
-          >
-            <option value="all">{t('accounts.allPlatforms')}</option>
-            {PLATFORMS.map((platform) => (
-              <option key={platform} value={platform}>
-                {platform}
-              </option>
-            ))}
-          </Select>
+            onChange={(value) => setPlatformFilter(value as 'all' | Platform)}
+            options={[
+              { value: 'all', label: t('accounts.allPlatforms') },
+              ...PLATFORMS.map((platform) => ({ value: platform, label: platform })),
+            ]}
+          />
           <AccountViewSwitch value={view} onChange={changeView} />
           <span className="toolbar__count">
             {t('common.of', { shown: filtered.length, total: accounts.data?.length ?? 0 })}
@@ -748,16 +748,12 @@ export default function Accounts() {
           </Field>
           <Field label={t('accounts.platform')} htmlFor="account-platform">
             <Select
+              variant="form"
               id="account-platform"
               value={form.platform}
-              onChange={(event) => setForm({ ...form, platform: event.target.value as Platform })}
-            >
-              {PLATFORMS.map((platform) => (
-                <option key={platform} value={platform}>
-                  {platform}
-                </option>
-              ))}
-            </Select>
+              onChange={(value) => setForm({ ...form, platform: value as Platform })}
+              options={PLATFORMS.map((platform) => ({ value: platform, label: platform }))}
+            />
           </Field>
           <p className="form-note" role="note">
             {t('accounts.concurrencyNote')}

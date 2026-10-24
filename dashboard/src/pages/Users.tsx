@@ -407,16 +407,12 @@ export default function Users() {
           <form id="create-key-form" className="form" onSubmit={submitCreate}>
             <Field label={t('users.columnUser')} htmlFor="key-user">
               <Select
+                variant="form"
                 id="key-user"
                 value={createUserId}
-                onChange={(event) => setCreateUserId(event.target.value)}
-              >
-                {users.data?.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name}
-                  </option>
-                ))}
-              </Select>
+                onChange={setCreateUserId}
+                options={(users.data ?? []).map((user) => ({ value: user.id, label: user.name }))}
+              />
             </Field>
             <Field label={t('users.label')} htmlFor="key-label" hint={t('users.labelHint')}>
               <Input

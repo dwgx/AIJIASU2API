@@ -9,7 +9,7 @@ is opt-in through build-time environment variables (see [Modes](#modes) and
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 131 tests in 19 files.
+- Tests: Vitest + React Testing Library + jsdom, 154 tests in 21 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings language card.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
@@ -73,7 +73,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 131 tests in 19 files
+npm test           # Vitest, 154 tests in 21 files
 npm run typecheck  # tsc -b
 ```
 
@@ -260,6 +260,34 @@ the typed-query preservation on unrelated param changes.
   detail drawer.
 - Mock mode serves deterministic fixtures from `src/lib/mock.ts`, so the same layout is
   reviewable offline.
+
+### Node detail drawer
+
+The Connected tab's drawer is a read-out of what the daemon reports plus what the operator has
+actually observed; it never turns an absence of data into a measurement.
+
+- **Localised region first.** The region fact renders `regionName()` in the active language
+  (`cn-zj` → China · Zhejiang / 中国 · 浙江) and keeps the raw vendor code as secondary mono text.
+  An unresolved code falls back to the node's `city, country` while still showing the raw code;
+  `Unknown region` is only the last resort.
+- **Unmeasured is not zero.** A success rate counts only when a probe recorded a sample, so
+  `successRate: 0` (or an empty `lastProbeAt`) renders `Not measured` with the tooltip “No probe
+  has measured this node yet.”, never `0.0%` — in the table and in the drawer.
+- **Probe clock skew.** A probe stamp up to 5 minutes ahead of the browser clock reads `just now`
+  and keeps the absolute time in its tooltip. Further ahead, the drawer renders the absolute
+  date/time plus a `clock skew` badge instead of a future relative label; an empty or invalid
+  stamp reads `Never`.
+- **Egress is a vendor claim.** The egress IP carries a `Vendor claim` badge, a copy button and
+  `not verified` until the operator runs a check; the badge tooltip says this panel has not
+  observed the address.
+- **Verify egress.** The guarded action is enabled only for a `LIVE` node (the disabled title
+  says so). It calls `POST /v1/lab/egress-check` and then shows verified, claimed,
+  match/mismatch, latency and checkedAt in an `Egress verification` region. A rejection (409/429)
+  appears inline as an alert and as a toast; a mismatch keeps the inline observation without a
+  success toast. Observations are keyed per node, so closing the drawer or switching nodes does
+  not erase them.
+- **Touch probe honesty.** **Touch probe timestamp** only moves `lastProbeAt`; the drawer then
+  notes “Touch only — no latency or egress check.” and the previous measurement stays.
 
 ## Requests flows
 
@@ -469,7 +497,7 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 131 Vitest tests in 19 files (65 at the 2026-10-23 record; see
+- 154 Vitest tests in 21 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -514,6 +542,17 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   region with the live gate marked `Current`, rendering only the rows `getAccountServers`
   returned, search/region/status filters, local multi-select with count and clear, the honest
   empty state, the disabled reason, and the runtime actions on Connected.
+  `tests/select.test.tsx` covers the custom combobox: click-open in a body portal,
+  combobox/listbox/option ARIA with `aria-activedescendant`, Arrow/Home/End/Enter/Escape and Tab,
+  typeahead, searchable filtering plus the no-match status and clear button, Enter from the search
+  input, multi-select count/select-all/clear/done with `aria-multiselectable`, group headers,
+  outside-click and disabled handling, viewport flip/clamp, and the motion-token plus
+  reduced-motion CSS contract.
+  `tests/nodes-drawer.test.tsx` covers the Connected drawer: the localized region with the vendor
+  code secondary (and the city/country fallback), `Not measured` instead of `0.0%`, `just now`
+  versus a far-future `clock skew`, the vendor-claim egress badge and copy button, Verify egress
+  showing claimed/verified/mismatch/latency, the disabled-unless-LIVE guard, a 409/429 inline
+  alert plus toast, the touch-only note, and the Chinese drawer.
   `tests/regions.test.ts` pins `regionName()`: ISO country codes and city subdivisions resolve to
   English and Chinese names, case is normalised, `unknown` and empty codes become `Unknown
   region`, and any other unknown code passes through unchanged.
@@ -561,7 +600,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay) |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select |
-| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, search/region/status filters, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer) |
+| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, search/region/status filters, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, row detail drawer, mutation lab drawer |
@@ -594,6 +633,7 @@ src/
   components/
     AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton, TokenGate
     DataTable, Overlay (Drawer/Modal/ConfirmDialog), primitives
+    Select.tsx            custom combobox: variants, search, multi, groups, body portal
     icons/                APC brand, nav, status and shell glyphs (inline SVG)
     nodes/                CatalogTab (grouped vendor catalog), ConnectedTab (runtime nodes)
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
@@ -608,7 +648,11 @@ tests/
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
   nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
+  nodes-drawer.test.tsx   drawer region, not-measured, clock skew, egress claim/verify, zh copy
+  select.test.tsx         combobox ARIA/keys/search/multi/groups/portal/flip/motion
   requests.test.tsx       gate-flow rows, filters, detail, empty/error, host-only targets
+  overview-telemetry.test.tsx no-telemetry empty state, no synthetic chart or zeroed KPI
+  regions.test.ts          regionName(): ISO/city names, case, unknown fallback
   ui-quickfix.test.tsx    APC brand, sidebar collapse, add-account modal, Requests honesty fixes
   api.test.ts             seed counts, metrics, CRUD, reset, settings persistence
   live-mode.test.tsx      live shell labels, no reset card when VITE_USE_MOCK=false
@@ -774,12 +818,59 @@ button hover fill) for all sixteen pairs (4.98–11.45:1), and no accent equals 
 both fills, checks the status-hue distinctness, and verifies the live cascade, the Settings swatches,
 `aria-pressed`, and persistence across remounts.
 
+### Custom select
+
+Every dropdown in the console is the custom combobox in `components/Select.tsx`; there is no
+native `<select>` anywhere in `src/`. One component covers single- and multi-select, searchable
+and typeahead modes, option groups and five density variants that change chrome only — the
+structure and accessibility stay one combobox everywhere.
+
+| Variant | Shape | Used on |
+|---|---|---|
+| `filter` | compact toolbar pill (`--control-h-sm`, `--raised`, 126 px min) | Accounts (state, platform), Nodes Connected (region, state), Nodes Catalog (status), Requests (status, source) |
+| `form` | full-width inside a `Field`, auto width in a page header | Accounts add-account modal (platform), Users create-key (user), Lab account picker, Requests mutation-lab drawer |
+| `settings` | 38 px trigger and 44 px option rows with descriptions | Settings lease TTL |
+| `log` | 11 px mono trigger and 26 px option rows | Logs (severity, actor), Requests (method, node, error class), Lab Logs/Egress filters |
+| `region` | 30 px trigger, 260 px minimum popup, grouped + searchable + multi-select | Nodes Catalog region picker |
+
+Behaviour:
+
+- **Trigger.** A real `<button role="combobox" aria-haspopup="listbox" aria-expanded>` shows the
+  value or placeholder and a count badge for multi-select. `aria-controls` points at the listbox
+  only while open, and `aria-activedescendant` tracks the active option; focus stays on the trigger
+  in the non-searchable case.
+- **Keyboard.** ArrowDown/ArrowUp open (ArrowUp starts at the last option) and move; Home/End jump;
+  Enter selects; Escape closes and returns focus to the trigger; Tab closes and moves on; typing a
+  letter outside a searchable popup runs a 600 ms typeahead over option labels. Disabled options
+  are skipped and cannot be selected.
+- **Search.** `searchable` moves focus into a real input carrying the combobox role, so screen
+  readers announce filtered results from the focus point. Filtering matches label, description and
+  group; an empty result announces `No matches for “…”` in a `role="status"` node, and a clear
+  button restores the list. Enter selects from the search input; Shift+Tab closes back to the
+  trigger rather than a page control that precedes the portal in document order.
+- **Multi-select.** `multiple` keeps the popup open, sets `aria-multiselectable`, shows the count
+  badge and a footer with select-all-visible, clear-all and done. Every option carries a check mark
+  and `aria-selected`.
+- **Groups.** `option.group` renders `role="group"` sections with a labelled header while preserving
+  the caller's option order.
+- **Portal and positioning.** The popup is rendered with `createPortal` into `<body>` and
+  `position: fixed`, so toolbar overflow and a drawer's scroll container cannot clip it. It is
+  measured after commit and repositioned on window resize and capture-phase scroll; it flips above
+  the trigger when the space below is short, clamps to an 8 px viewport margin, caps at 320 px and
+  keeps at least 96 px usable.
+- **Motion.** The popup enters with `select-pop-in` over `--dur-base` / `--ease-out` (scale 0.98
+  from above, translate from below) and collapses to 0.001 ms under `prefers-reduced-motion`. The
+  open trigger uses the shared mint border and 3 px ring.
+
 ## Keyboard and accessibility
 
 - `Ctrl/Cmd+K` opens the command palette (fuzzy filter, ↑/↓, Enter, Esc, Tab trap). Queries of
   2+ non-space characters also match Accounts and Nodes entries (see
   [Command palette data search](#command-palette-data-search)).
 - Sidebar links, table actions and form controls are keyboard reachable with visible focus.
+- Custom selects follow the APG select-only combobox pattern: Arrow/Home/End/Enter/Escape/Tab,
+  typeahead when not searchable, a focused search input when searchable, `aria-activedescendant`,
+  and `aria-multiselectable` for multi-select (see [Custom select](#custom-select)).
 - Drawers/modals trap focus, close on Esc/backdrop, and restore the previous focus.
 - Tables use real `<table>` semantics with an accessible caption; status is dot **and** label.
 - Toasts announce through `aria-live="polite"`; destructive actions confirm in a modal.

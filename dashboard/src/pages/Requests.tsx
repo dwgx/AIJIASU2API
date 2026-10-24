@@ -649,59 +649,60 @@ export default function Requests() {
             ]}
           />
           <Select
+            variant="filter"
             aria-label={t('requests.filterStatus')}
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value as StatusClass)}
-          >
-            <option value="all">{t('requests.allStatuses')}</option>
-            <option value="ok">{t('requests.statusOk')}</option>
-            <option value="rejected">{t('requests.statusRejected')}</option>
-          </Select>
+            onChange={(value) => setStatusFilter(value as StatusClass)}
+            options={[
+              { value: 'all', label: t('requests.allStatuses') },
+              { value: 'ok', label: t('requests.statusOk') },
+              { value: 'rejected', label: t('requests.statusRejected') },
+            ]}
+          />
           <Select
+            variant="log"
             aria-label={t('requests.filterMethod')}
             value={methodFilter}
-            onChange={(event) => setMethodFilter(event.target.value)}
-          >
-            <option value="all">{t('requests.allMethods')}</option>
-            {methodOptions.map((method) => (
-              <option key={method} value={method}>
-                {method === UNKNOWN_METHOD ? t('requests.methodUnknown') : method}
-              </option>
-            ))}
-          </Select>
+            onChange={setMethodFilter}
+            options={[
+              { value: 'all', label: t('requests.allMethods') },
+              ...methodOptions.map((method) => ({
+                value: method,
+                label: method === UNKNOWN_METHOD ? t('requests.methodUnknown') : method,
+              })),
+            ]}
+          />
           <Select
+            variant="log"
             aria-label={t('requests.filterNode')}
             value={nodeFilter}
-            onChange={(event) => setNodeFilter(event.target.value)}
-          >
-            <option value="all">{t('requests.allNodes')}</option>
-            {nodeOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
+            onChange={setNodeFilter}
+            options={[
+              { value: 'all', label: t('requests.allNodes') },
+              ...nodeOptions.map(([value, label]) => ({ value, label })),
+            ]}
+          />
           <Select
+            variant="filter"
             aria-label={t('requests.filterSource')}
             value={sourceFilter}
-            onChange={(event) => setSourceFilter(event.target.value as 'all' | FlowSource)}
-          >
-            <option value="all">{t('requests.allSources')}</option>
-            <option value="gate">{t('requests.gateFlows')}</option>
-            <option value="mutation-lab">{t('requests.mutationLab')}</option>
-          </Select>
+            onChange={(value) => setSourceFilter(value as 'all' | FlowSource)}
+            options={[
+              { value: 'all', label: t('requests.allSources') },
+              { value: 'gate', label: t('requests.gateFlows') },
+              { value: 'mutation-lab', label: t('requests.mutationLab') },
+            ]}
+          />
           <Select
+            variant="log"
             aria-label={t('requests.filterErrorClass')}
             value={errorFilter}
-            onChange={(event) => setErrorFilter(event.target.value)}
-          >
-            <option value="all">{t('requests.allErrorClasses')}</option>
-            {errorClassOptions.map((errorClass) => (
-              <option key={errorClass} value={errorClass}>
-                {errorClass}
-              </option>
-            ))}
-          </Select>
+            onChange={setErrorFilter}
+            options={[
+              { value: 'all', label: t('requests.allErrorClasses') },
+              ...errorClassOptions.map((errorClass) => ({ value: errorClass, label: errorClass })),
+            ]}
+          />
           <Button variant="ghost" size="sm" onClick={clearFilters} disabled={!filtersActive}>
             {t('common.clearFilters')}
           </Button>
@@ -864,29 +865,24 @@ export default function Requests() {
           <div className="form-grid">
             <Field label={t('requests.method')} htmlFor="mutation-method">
               <Select
+                variant="form"
                 id="mutation-method"
                 value={lab.method}
-                onChange={(event) => setLab({ ...lab, method: event.target.value })}
-              >
-                {METHODS.map((method) => (
-                  <option key={method} value={method}>
-                    {method}
-                  </option>
-                ))}
-              </Select>
+                onChange={(value) => setLab({ ...lab, method: value })}
+                options={METHODS.map((method) => ({ value: method, label: method }))}
+              />
             </Field>
             <Field label={t('requests.node')} htmlFor="mutation-node">
               <Select
+                variant="form"
                 id="mutation-node"
                 value={lab.nodeId}
-                onChange={(event) => setLab({ ...lab, nodeId: event.target.value })}
-              >
-                {liveNodes.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.label} · {node.egressIp}
-                  </option>
-                ))}
-              </Select>
+                onChange={(value) => setLab({ ...lab, nodeId: value })}
+                options={liveNodes.map((node) => ({
+                  value: node.id,
+                  label: `${node.label} · ${node.egressIp}`,
+                }))}
+              />
             </Field>
           </div>
           <Field label={t('requests.targetHostPort')} htmlFor="mutation-target" error={labError}>

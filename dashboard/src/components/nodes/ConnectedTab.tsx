@@ -1,11 +1,12 @@
-import { Power, Search, Server, ShieldCheck } from 'lucide-react'
+import { Globe, Power, Search, Server, ShieldCheck } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { api } from '../../lib/api'
-import { formatDateTime, formatRelative, percent } from '../../lib/format'
+import { formatDateTime, formatNumber, formatRelative, percent } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
+import type { Language } from '../../lib/i18n'
 import { NODE_STATE } from '../../lib/labels'
 import { regionName } from '../../lib/regions'
-import type { NodeState, ProxyNode } from '../../lib/types'
+import type { EgressCheckResult, NodeState, ProxyNode } from '../../lib/types'
 import type { AsyncState } from '../../lib/useAsync'
 import { DataTable } from '../DataTable'
 import type { Column } from '../DataTable'
@@ -13,6 +14,7 @@ import { Drawer } from '../Overlay'
 import { useToast } from '../Toast'
 import { CopyButton } from '../CopyButton'
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -25,11 +27,70 @@ import {
   TableSkeleton,
 } from '../primitives'
 
+/** A probe stamp further ahead than this is reported as clock skew, not "just now". */
+const CLOCK_SKEW_TOLERANCE_MS = 5 * 60_000
+
 function latencyHistory(latency: number): number[] {
   return Array.from({ length: 14 }, (_, index) => {
     const wave = Math.sin(index / 2.4) * 0.18 + Math.sin(index / 5.1) * 0.1
     return Math.max(8, Math.round(latency * (1 + wave)))
   })
+}
+
+/**
+ * A success rate is a measurement only when a probe recorded a sample. The
+ * daemon stores `successRate: 0` for a node it never measured, so a zero must
+ * render as "not measured" and never as a measured 0.0%.
+ */
+function isSuccessMeasured(node: ProxyNode): boolean {
+  return node.lastProbeAt.trim() !== '' && node.successRate > 0
+}
+
+/**
+ * Localized region label for the drawer: the dictionary name is primary, an
+ * unresolved vendor code falls back to the node's city/country, and the raw
+ * code stays available as secondary mono text.
+ */
+function regionLabel(node: ProxyNode, lang: Language): { name: string; code: string } {
+  const name = regionName(node.region, lang)
+  const resolved = node.region.trim() !== '' && name !== node.region
+  const fallback = [node.city, node.country]
+    .map((part) => part.trim())
+    .filter((part) => part !== '')
+    .join(', ')
+  return { name: resolved || !fallback ? name : fallback, code: node.region }
+}
+
+interface ProbeStamp {
+  /** Relative label, or the absolute stamp once the timestamp is far ahead. */
+  text: string
+  /** True when the daemon timestamp is ahead of this browser by more than the tolerance. */
+  skew: boolean
+}
+
+/**
+ * A probe timestamp slightly ahead of the browser is clock skew, not a future
+ * probe, so it reads "just now". A far-future stamp is shown absolutely and
+ * flagged instead of silently rendering "in 6h".
+ */
+function probeStamp(
+  value: string,
+  now: number,
+  lang: Language,
+  t: (key: string) => string,
+): ProbeStamp {
+  const time = new Date(value).getTime()
+  if (value.trim() === '' || Number.isNaN(time)) return { text: t('common.never'), skew: false }
+  const aheadMs = time - now
+  if (aheadMs > CLOCK_SKEW_TOLERANCE_MS) return { text: formatDateTime(value), skew: true }
+  if (aheadMs > 0) return { text: t('nodes.justNow'), skew: false }
+  return { text: formatRelative(value, now, lang), skew: false }
+}
+
+function EgressMatchBadge({ match }: { match: boolean | null }) {
+  const { t } = useI18n()
+  if (match === null) return <Badge tone="neutral">{t('lab.notObserved')}</Badge>
+  return <Badge tone={match ? 'success' : 'danger'}>{t(match ? 'lab.match' : 'lab.mismatch')}</Badge>
 }
 
 interface ConnectedTabProps {
@@ -48,6 +109,13 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
   const [regionFilter, setRegionFilter] = useState('all')
   const [stateFilter, setStateFilter] = useState<'all' | NodeState>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // A touch probe only moves lastProbeAt; the note below the drawer says so.
+  const [touchedProbes, setTouchedProbes] = useState<string[]>([])
+  // Egress checks are guarded observations: keep them keyed by node so a poll
+  // or a switch of the drawer never erases a result the operator paid for.
+  const [egressChecks, setEgressChecks] = useState<Record<string, EgressCheckResult>>({})
+  const [egressErrors, setEgressErrors] = useState<Record<string, string>>({})
+  const [checkingNodeId, setCheckingNodeId] = useState<string | null>(null)
 
   const regions = useMemo(
     () => Array.from(new Set((nodes.data ?? []).map((node) => node.region))).sort(),
@@ -85,10 +153,42 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
   const probe = async (node: ProxyNode) => {
     try {
       await api.probeNode(node.id)
+      setTouchedProbes((prev) => (prev.includes(node.id) ? prev : [...prev, node.id]))
       nodes.reload()
       push(t('nodes.toastProbeTouched', { name: node.label }), 'default')
     } catch (cause) {
       push(cause instanceof Error ? cause.message : t('nodes.toastProbeFailed'), 'danger')
+    }
+  }
+
+  /**
+   * Guarded egress observation: the daemon dials the node's loopback gate and
+   * reads the exit address. The result is session state, never written back to
+   * the node, because the daemon's GET panel stays claim-only.
+   */
+  const verifyEgress = async (node: ProxyNode) => {
+    if (node.state !== 'LIVE') return
+    setCheckingNodeId(node.id)
+    setEgressErrors((prev) => {
+      if (!(node.id in prev)) return prev
+      const next = { ...prev }
+      delete next[node.id]
+      return next
+    })
+    try {
+      const result = await api.checkLabEgress(node.id)
+      setEgressChecks((prev) => ({ ...prev, [node.id]: result }))
+      // A mismatch is a successful observation with a bad answer; the inline
+      // result carries it, so only a clean match earns the success toast.
+      if (!result.error && result.match !== false) {
+        push(t('nodes.toastEgressVerified', { name: node.label }), 'success')
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : t('nodes.toastEgressFailed')
+      setEgressErrors((prev) => ({ ...prev, [node.id]: message }))
+      push(message, 'danger')
+    } finally {
+      setCheckingNodeId(null)
     }
   }
 
@@ -145,16 +245,21 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
     {
       key: 'success',
       label: t('nodes.columnSuccess'),
-      render: (node) => (
-        <span className="meter-cell">
-          <span className="cell-mono">{node.successRate.toFixed(1)}%</span>
-          <ProgressBar
-            value={node.successRate}
-            tone={node.successRate >= 98 ? 'success' : node.successRate >= 95 ? 'warning' : 'danger'}
-            label={t('nodes.successRate', { name: node.label })}
-          />
-        </span>
-      ),
+      render: (node) =>
+        isSuccessMeasured(node) ? (
+          <span className="meter-cell">
+            <span className="cell-mono">{node.successRate.toFixed(1)}%</span>
+            <ProgressBar
+              value={node.successRate}
+              tone={node.successRate >= 98 ? 'success' : node.successRate >= 95 ? 'warning' : 'danger'}
+              label={t('nodes.successRate', { name: node.label })}
+            />
+          </span>
+        ) : (
+          <span className="cell-sub" title={t('nodes.notMeasuredHint')}>
+            {t('nodes.notMeasured')}
+          </span>
+        ),
     },
     {
       key: 'capacity',
@@ -211,6 +316,13 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
     },
   ]
 
+  // Drawer facts are derived once per render so the footer and the body agree.
+  const selectedRegion = selected ? regionLabel(selected, lang) : null
+  const lastProbe = selected ? probeStamp(selected.lastProbeAt, Date.now(), lang, t) : null
+  const selectedCheck = selected ? egressChecks[selected.id] : undefined
+  const selectedCheckError = selected ? egressErrors[selected.id] : undefined
+  const selectedTouched = selected ? touchedProbes.includes(selected.id) : false
+
   return (
     <>
       <Card bodyClassName="card__body--flush">
@@ -225,28 +337,28 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
             />
           </div>
           <Select
+            variant="filter"
             aria-label={t('nodes.filterRegion')}
             value={regionFilter}
-            onChange={(event) => setRegionFilter(event.target.value)}
-          >
-            <option value="all">{t('nodes.allRegions')}</option>
-            {regions.map((region) => (
-              <option key={region} value={region}>
-                {regionName(region, lang)}
-              </option>
-            ))}
-          </Select>
+            onChange={setRegionFilter}
+            options={[
+              { value: 'all', label: t('nodes.allRegions') },
+              ...regions.map((region) => ({ value: region, label: regionName(region, lang) })),
+            ]}
+          />
           <Select
+            variant="filter"
             aria-label={t('nodes.filterState')}
             value={stateFilter}
-            onChange={(event) => setStateFilter(event.target.value as 'all' | NodeState)}
-          >
-            <option value="all">{t('nodes.allStatuses')}</option>
-            <option value="LIVE">{t('state.LIVE')}</option>
-            <option value="READY">{t('state.READY')}</option>
-            <option value="DRAINING">{t('state.DRAINING')}</option>
-            <option value="DOWN">{t('state.DOWN')}</option>
-          </Select>
+            onChange={(value) => setStateFilter(value as 'all' | NodeState)}
+            options={[
+              { value: 'all', label: t('nodes.allStatuses') },
+              { value: 'LIVE', label: t('state.LIVE') },
+              { value: 'READY', label: t('state.READY') },
+              { value: 'DRAINING', label: t('state.DRAINING') },
+              { value: 'DOWN', label: t('state.DOWN') },
+            ]}
+          />
           <span className="toolbar__count">
             {t('common.of', { shown: filtered.length, total: nodes.data?.length ?? 0 })}
           </span>
@@ -288,7 +400,7 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
       <Drawer
         open={selected !== null}
         title={selected ? t('nodes.drawerTitle', { name: selected.label }) : t('nodes.title')}
-        subtitle={selected ? `${selected.accountLabel} · ${regionName(selected.region, lang)}` : undefined}
+        subtitle={selected ? `${selected.accountLabel} · ${selectedRegion?.name ?? ''}` : undefined}
         onClose={() => setSelectedId(null)}
         footer={
           selected ? (
@@ -335,17 +447,34 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
             <dl className="facts">
               <div>
                 <dt>{t('nodes.factsRegion')}</dt>
-                <dd className="mono">{selected.region}</dd>
+                <dd className="cell-stack">
+                  <span>{selectedRegion?.name}</span>
+                  {selectedRegion?.code ? (
+                    <span className="cell-sub mono">{selectedRegion.code}</span>
+                  ) : null}
+                </dd>
               </div>
               <div>
                 <dt>{t('nodes.factsEgress')}</dt>
-                <dd className="inline-copy">
-                  <span className="mono">{selected.egressIp}</span>
-                  <CopyButton
-                    value={selected.egressIp}
-                    label={t('nodes.copyEgress', { name: selected.label })}
-                    toastMessage={t('nodes.egressCopied')}
-                  />
+                <dd className="cell-stack">
+                  <span className="inline-copy">
+                    <span className="mono">{selected.egressIp}</span>
+                    <CopyButton
+                      value={selected.egressIp}
+                      label={t('nodes.copyEgress', { name: selected.label })}
+                      toastMessage={t('nodes.egressCopied')}
+                    />
+                  </span>
+                  <span className="inline-copy">
+                    <Badge tone="warning" title={t('nodes.egressClaimHint')}>
+                      {t('nodes.egressVendorClaim')}
+                    </Badge>
+                    {selectedCheck?.verified ? (
+                      <EgressMatchBadge match={selectedCheck.match} />
+                    ) : (
+                      <Badge tone="warning">{t('nodes.egressNotVerified')}</Badge>
+                    )}
+                  </span>
                 </dd>
               </div>
               <div>
@@ -354,7 +483,15 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
               </div>
               <div>
                 <dt>{t('nodes.factsSuccess')}</dt>
-                <dd className="mono">{selected.successRate.toFixed(1)}%</dd>
+                <dd>
+                  {isSuccessMeasured(selected) ? (
+                    <span className="mono">{selected.successRate.toFixed(1)}%</span>
+                  ) : (
+                    <Badge tone="warning" title={t('nodes.notMeasuredHint')}>
+                      {t('nodes.notMeasured')}
+                    </Badge>
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>{t('nodes.factsCapacity')}</dt>
@@ -364,8 +501,16 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
               </div>
               <div>
                 <dt>{t('nodes.factsLastProbe')}</dt>
-                <dd title={formatDateTime(selected.lastProbeAt)}>
-                  {formatRelative(selected.lastProbeAt, Date.now(), lang)}
+                <dd
+                  className="inline-copy"
+                  title={selected.lastProbeAt ? formatDateTime(selected.lastProbeAt) : undefined}
+                >
+                  <span>{lastProbe?.text}</span>
+                  {lastProbe?.skew ? (
+                    <Badge tone="warning" title={t('nodes.clockSkewHint')}>
+                      {t('nodes.clockSkew')}
+                    </Badge>
+                  ) : null}
                 </dd>
               </div>
             </dl>
@@ -383,7 +528,74 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
                     ? t('nodes.undrainNode')
                     : t('nodes.activateNode')}
               </Button>
+              <Button
+                variant="secondary"
+                icon={<Globe size={14} />}
+                loading={checkingNodeId === selected.id}
+                disabled={selected.state !== 'LIVE' || checkingNodeId !== null}
+                title={
+                  selected.state === 'LIVE'
+                    ? t('lab.egress.checkTitleReady')
+                    : t('nodes.verifyEgressDisabled')
+                }
+                onClick={() => void verifyEgress(selected)}
+              >
+                {t('nodes.verifyEgress')}
+              </Button>
             </div>
+
+            {selectedCheck || selectedCheckError ? (
+              <div className="stack" role="region" aria-label={t('nodes.verifyEgressResult')}>
+                {selectedCheck ? (
+                  <dl className="facts">
+                    <div>
+                      <dt>{t('lab.egress.verified')}</dt>
+                      <dd>
+                        {selectedCheck.verified ? (
+                          <span className="mono">{selectedCheck.verified}</span>
+                        ) : (
+                          <Badge tone="warning">{t('lab.notObserved')}</Badge>
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('lab.egress.claimed')}</dt>
+                      <dd className="mono">{selectedCheck.claimed || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>{t('lab.egress.match')}</dt>
+                      <dd>
+                        <EgressMatchBadge match={selectedCheck.match} />
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t('lab.egress.latency')}</dt>
+                      <dd className="mono">{formatNumber(selectedCheck.latencyMs)} ms</dd>
+                    </div>
+                    <div>
+                      <dt>{t('lab.egress.checked')}</dt>
+                      <dd className="mono">{formatDateTime(selectedCheck.checkedAt)}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+                {selectedCheck?.error ? (
+                  <p className="callout callout--warning" role="alert">
+                    {selectedCheck.error}
+                  </p>
+                ) : null}
+                {selectedCheckError ? (
+                  <p className="callout callout--warning" role="alert">
+                    {selectedCheckError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {selectedTouched ? (
+              <p className="callout callout--muted" role="note">
+                {t('nodes.touchOnlyNote')}
+              </p>
+            ) : null}
 
             <p className="callout callout--warning" role="note">
               {t('nodes.probeNote')}

@@ -4,7 +4,6 @@ import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
-  SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from 'react'
 import type { Status, Tone } from '../lib/types'
@@ -90,13 +89,10 @@ export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLText
   return <textarea className={clsx('input', 'textarea', className)} {...rest} />
 }
 
-export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return (
-    <select className={clsx('input', 'select', className)} {...rest}>
-      {children}
-    </select>
-  )
-}
+// The select system lives in its own module; re-exported here so the
+// primitives barrel stays the single import surface for page chrome.
+export { Select } from './Select'
+export type { SelectOption, SelectProps, SelectSize, SelectVariant } from './Select'
 
 interface FieldProps {
   label: string

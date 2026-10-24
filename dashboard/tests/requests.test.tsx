@@ -40,15 +40,15 @@ describe('requests page', () => {
     const user = userEvent.setup()
     const table = await openRequests()
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filter by status' }), 'rejected')
+    await user.click(screen.getByRole('combobox', { name: 'Filter by status' }))
+    await user.click(screen.getByRole('option', { name: 'rejected' }))
     await waitFor(() => expect(within(table).queryAllByText('ok')).toHaveLength(0))
     expect(within(table).getAllByText('rejected').length).toBeGreaterThan(0)
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Filter by status' }), 'all')
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Filter by source' }),
-      'mutation-lab',
-    )
+    await user.click(screen.getByRole('combobox', { name: 'Filter by status' }))
+    await user.click(screen.getByRole('option', { name: 'All statuses' }))
+    await user.click(screen.getByRole('combobox', { name: 'Filter by source' }))
+    await user.click(screen.getByRole('option', { name: 'Mutation lab' }))
     expect(await screen.findByText('No flows match these filters')).toBeInTheDocument()
 
     await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0])
