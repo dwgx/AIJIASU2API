@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"ajsaccountd/internal/events"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/ratelimit"
 	"ajsaccountd/internal/runtime"
@@ -161,6 +162,11 @@ type Config struct {
 	// Events receives customer-visible events (login/logout, node and schedule
 	// transitions). Nil drops them.
 	Events EventSink
+	// EventRing is the replay ring behind GET /v1/events and
+	// GET /v1/events/stream. main wires one ring and mirrors every event the
+	// webhook sink receives into it, so both consumers see the same stream.
+	// Nil answers 503 on both routes.
+	EventRing *events.Ring
 	// RateLimitClock is the clock the per-scoped-key token bucket reads. Nil
 	// uses time.Now; tests inject a fake to prove refill and GC without
 	// sleeping.
@@ -372,6 +378,11 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPatch, "/v1/webhooks/{id}", s.handlePatchWebhook)
 	rt.handle(http.MethodDelete, "/v1/webhooks/{id}", s.handleDeleteWebhook)
 	rt.handle(http.MethodGet, "/v1/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
+
+	// Event replay and streaming (AJS-232). The ring is filled by the same sink
+	// that fans events out to webhooks, so the two views cannot drift.
+	rt.handle(http.MethodGet, "/v1/events", s.handleListEvents)
+	rt.handle(http.MethodGet, "/v1/events/stream", s.handleEventsStream)
 
 	// Panel backup routes. All three are admin-only: no scoped key may read or
 	// replace the sealed panel files, so they stay absent from routeScopes.

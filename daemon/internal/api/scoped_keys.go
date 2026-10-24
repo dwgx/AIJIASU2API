@@ -83,6 +83,12 @@ var routeScopes = map[string]model.Scope{
 	http.MethodGet + " /v1/renewal/accounts/{id}": model.ScopeRenewalRead,
 	http.MethodGet + " /v1/health/nodes":          model.ScopeHealthRead,
 
+	// The replay ring and its SSE stream are one read grant. The handlers
+	// additionally refuse a key restricted by accountIds/regions: the ring is
+	// global, so no per-account filter can be applied honestly.
+	http.MethodGet + " /v1/events":        model.ScopeEventsRead,
+	http.MethodGet + " /v1/events/stream": model.ScopeEventsRead,
+
 	// POST /v1/backup, /v1/backup/inspect and /v1/backup/restore are
 	// deliberately absent: a scoped key must never read the sealed panel files
 	// or replace them, so those routes stay admin-only. The same holds for

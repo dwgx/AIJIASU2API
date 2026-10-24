@@ -181,7 +181,9 @@ type APIKey struct {
 // OpenAPI Scope enum; accounts:write is part of the daemon contract even
 // though the first published enum only listed accounts:read. The platform
 // reads (usage, renewal, health) are separate scopes so a monitoring key never
-// needs an account or settings grant.
+// needs an account or settings grant. events:read reaches the replay ring and
+// the SSE stream and is refused to keys restricted by accountIds/regions,
+// because the ring is global and an event is not attributed to one account.
 type Scope string
 
 const (
@@ -200,6 +202,7 @@ const (
 	ScopeUsageRead     Scope = "usage:read"
 	ScopeRenewalRead   Scope = "renewal:read"
 	ScopeHealthRead    Scope = "health:read"
+	ScopeEventsRead    Scope = "events:read"
 	ScopeAdmin         Scope = "admin"
 )
 

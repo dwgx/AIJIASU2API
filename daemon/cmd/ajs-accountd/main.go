@@ -29,6 +29,7 @@ import (
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
+	eventring "ajsaccountd/internal/events"
 	"ajsaccountd/internal/health"
 	"ajsaccountd/internal/lablog"
 	"ajsaccountd/internal/model"
@@ -216,8 +217,14 @@ func run() error {
 		logger.Warn("webhook_secrets_memory_only",
 			"reason", "AJS_MASTER_KEY is not set; endpoint secrets do not survive a restart")
 	}
-	webhookDispatcher, events := startWebhooks(st, logger, webhookSecrets)
+	webhookDispatcher, webhookEvents := startWebhooks(st, logger, webhookSecrets)
 	defer func() { _ = webhookDispatcher.Close() }()
+	// One ring behind GET /v1/events and the SSE stream. Every event the
+	// webhook sink receives is mirrored into it first, so the replay and the
+	// outbound deliveries are the same stream and cannot drift.
+	eventRing := eventring.NewRing(api.DefaultEventRingCapacity)
+	defer eventRing.Close()
+	events := &ringSink{ring: eventRing, next: webhookEvents}
 	// Every critical audit event (webhook path excluded) reaches subscribed
 	// receivers. The dispatcher fans it out; a nil receiver set is a no-op.
 	st.SetAuditHook(func(ev model.AuditEvent) {
@@ -373,6 +380,7 @@ func run() error {
 		Webhooks:             webhookDispatcher,
 		WebhookSecrets:       webhookSecrets,
 		Events:               events,
+		EventRing:            eventRing,
 		AllowPlaintextExport: os.Getenv("AJS_ALLOW_PLAINTEXT_EXPORT") == "1",
 		Persist: func() {
 			saveState(st, statePath, logger, "account-io")
@@ -390,6 +398,10 @@ func run() error {
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	// An SSE handler only returns when its subscriber channel closes, and
+	// Shutdown waits for active handlers, so close the ring first to release
+	// every open stream instead of burning the 5 s shutdown budget.
+	httpServer.RegisterOnShutdown(eventRing.Close)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
@@ -806,6 +818,23 @@ func webhookEventTypes(events []string) []webhook.EventType {
 		out = append(out, webhook.EventType(event))
 	}
 	return out
+}
+
+// ringSink mirrors every customer event into the replay ring before fanning it
+// out to the webhook dispatcher. It is the single emission point for both
+// consumers: the replay API and the SSE stream serve the same stream the
+// webhook receivers see, so neither view can miss an event the other saw.
+// Publishing first is safe because Ring.Publish never blocks.
+type ringSink struct {
+	ring *eventring.Ring
+	next api.EventSink
+}
+
+func (s *ringSink) Emit(event webhook.EventType, data map[string]any) {
+	s.ring.Publish(eventring.Event{Type: string(event), Data: data})
+	if s.next != nil {
+		s.next.Emit(event, data)
+	}
 }
 
 // webhookSink fans one customer event out to every enabled endpoint.

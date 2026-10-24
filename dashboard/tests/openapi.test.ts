@@ -189,8 +189,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(77)
-    expect(entries).toHaveLength(95)
+    expect(Object.keys(doc.paths)).toHaveLength(79)
+    expect(entries).toHaveLength(97)
   })
 
   it('resolves every $ref', () => {

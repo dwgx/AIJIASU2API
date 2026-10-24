@@ -104,6 +104,10 @@
       "description": "Outbound webhook receivers, one-time signing secrets and the delivery ring."
     },
     {
+      "name": "Events",
+      "description": "Customer-visible event replay and the server-sent event stream."
+    },
+    {
       "name": "Backup",
       "description": "Admin-only full-panel backup: seal the state directory into an encrypted envelope, inspect it, and restore it."
     }
@@ -4239,6 +4243,104 @@
         ]
       }
     },
+    "/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "tags": [
+          "Events"
+        ],
+        "summary": "Replay the retained event ring from a cursor.",
+        "description": "Returns up to limit retained events published after since, oldest first. An empty since starts at the oldest retained event. When the cursor is current and wait is set, the request is held until the next event arrives or the wait budget expires, then answers a page (possibly empty) whose nextCursor is the resume point. A malformed cursor is 400 INVALID_ARGUMENT; a cursor whose event was evicted is 410 CURSOR_EXPIRED and details.oldestCursor names the restart point. A scoped key restricted by accountIds/regions is refused 403 because the ring is global.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "One page of retained events and the cursor to pass next.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "410": {
+            "$ref": "#/components/responses/CursorExpired"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSince"
+          },
+          {
+            "$ref": "#/components/parameters/EventLimit"
+          },
+          {
+            "$ref": "#/components/parameters/EventWait"
+          }
+        ]
+      }
+    },
+    "/v1/events/stream": {
+      "get": {
+        "operationId": "streamEvents",
+        "tags": [
+          "Events"
+        ],
+        "summary": "Stream retained and live events as server-sent events.",
+        "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every event is one id:/event:/data: frame whose data is the Event JSON object. Retained events after the cursor are replayed first, then live events follow; a duplicate that appears in both windows is sent once. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. A malformed cursor is 400 INVALID_ARGUMENT; an evicted one is 410 CURSOR_EXPIRED with details.oldestCursor, both as JSON before the stream starts. The stream closes when the client disconnects or the daemon shuts down.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "SSE frames; the response never ends on its own while the daemon runs.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "410": {
+            "$ref": "#/components/responses/CursorExpired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSince"
+          },
+          {
+            "$ref": "#/components/parameters/EventLastEventID"
+          }
+        ]
+      }
+    },
     "/v1/backup": {
       "post": {
         "operationId": "createBackup",
@@ -4520,6 +4622,16 @@
             }
           }
         }
+      },
+      "CursorExpired": {
+        "description": "CURSOR_EXPIRED: the cursor names an event that is no longer retained. details.oldestCursor is the oldest retained id, the point to restart from.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
       }
     },
     "parameters": {
@@ -4560,6 +4672,46 @@
           "type": "string"
         },
         "description": "Filter by user id. userId is accepted as an alias."
+      },
+      "EventSince": {
+        "name": "since",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Cursor to replay after: the id of the last event the client saw. Empty starts at the oldest retained event."
+      },
+      "EventLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "description": "Page size; a larger value is clamped to 500."
+      },
+      "EventWait": {
+        "name": "wait",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "default": "0s"
+        },
+        "description": "Long-poll budget as a Go duration (for example 25s), capped at 25s. Applied only when since is current; the request answers as soon as an event arrives."
+      },
+      "EventLastEventID": {
+        "name": "Last-Event-ID",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Cursor sent by an SSE client on reconnect; wins over since."
       },
       "AccountIdFilter": {
         "name": "account_id",
@@ -4645,6 +4797,65 @@
         ],
         "description": "proxy = seeded/imported panel traffic, mutation-lab = the request lab, gate = a real accepted flow metered by the node controller."
       },
+      "Event": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Monotonic cursor such as evt-000123; pass it back as since or Last-Event-ID."
+          },
+          "type": {
+            "type": "string",
+            "description": "Wire event name, one of the WebhookEvent values."
+          },
+          "ts": {
+            "type": "string",
+            "description": "RFC 3339 publication time, UTC."
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Event payload, scrubbed of credential-shaped keys before it reaches the ring."
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "ts",
+          "data"
+        ]
+      },
+      "EventsPage": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "description": "Retained events after the cursor, oldest first. Never null."
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Id of the last returned event; unchanged when the page is empty."
+          },
+          "oldestCursor": {
+            "type": "string",
+            "description": "Oldest retained id, the restart point after CURSOR_EXPIRED; empty when the ring is empty."
+          },
+          "dropped": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lifetime count of subscriber deliveries skipped because that subscriber could not keep up."
+          }
+        },
+        "required": [
+          "events",
+          "nextCursor",
+          "oldestCursor",
+          "dropped"
+        ]
+      },
       "ErrorDetail": {
         "type": "object",
         "properties": {
@@ -4664,7 +4875,8 @@
               "BACKUP_BUSY",
               "BACKUP_LIVE_NODE",
               "BACKUP_DAEMON_RUNNING",
-              "BACKUP_UNAVAILABLE"
+              "BACKUP_UNAVAILABLE",
+              "CURSOR_EXPIRED"
             ]
           },
           "message": {
@@ -8727,7 +8939,7 @@
       },
       "Scope": {
         "type": "string",
-        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, and accountIds/regions still narrow every account-scoped read. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
+        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, events:read reaches GET /v1/events and GET /v1/events/stream, and accountIds/regions still narrow every account-scoped read. A key restricted by accountIds/regions is refused the global event stream. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
         "enum": [
           "accounts:read",
           "accounts:write",
@@ -8744,6 +8956,7 @@
           "usage:read",
           "renewal:read",
           "health:read",
+          "events:read",
           "admin"
         ]
       },
