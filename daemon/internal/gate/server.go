@@ -1,14 +1,17 @@
 // Package gate implements the per-node SOCKS5 front end that Resin dials.
 //
 // One Server owns one loopback listener for one node (docs/PANEL.md §1–§2).
-// It accepts only the no-auth SOCKS5 CONNECT command, admits at most Limit
-// concurrent flows, relays bytes between the client and one Session flow, and
-// exposes counters plus a drain/undrain state machine for the node supervisor.
+// It accepts the SOCKS5 CONNECT command after negotiating either the no-auth
+// method (AuthLoopback) or RFC 1929 username/password (AuthUserPass), admits
+// at most Limit concurrent flows, relays bytes between the client and one
+// Session flow, and exposes counters plus a drain/undrain state machine for
+// the node supervisor.
 //
 // The Session seam is deliberately one method (OpenFlow), so an
 // account.FlowSession or a test fake satisfies it structurally. The gate never
-// opens a vendor control connection, never holds credentials and never logs
-// the target beyond host:port.
+// opens a vendor control connection, never keeps a credential past the
+// handshake and never logs the target beyond host:port. Authentication only
+// attributes a local admission; it never selects or creates a vendor session.
 package gate
 
 import (
@@ -19,18 +22,27 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// SOCKS5 constants (RFC 1928). Only the no-auth CONNECT method is served.
+// SOCKS5 constants (RFC 1928) plus the RFC 1929 username/password
+// subnegotiation. A gate serves exactly one method per AuthMode.
 const (
 	socks5Version = 0x05
 
 	authNone         = 0x00
+	authUserPass     = 0x02
 	authNoAcceptable = 0xFF
+
+	// RFC 1929: the client sends version 1, a length-prefixed username and a
+	// length-prefixed password; the server answers version 1 plus a status.
+	authVersion      = 0x01
+	authStatusOK     = 0x00
+	authStatusFailed = 0x01
 
 	cmdConnect = 0x01
 
@@ -60,6 +72,11 @@ const (
 	// acceptBackoff is the pause after a transient Accept error before the
 	// loop retries, so a persistent failure cannot spin a core.
 	acceptBackoff = 50 * time.Millisecond
+
+	// defaultAuthTimeout bounds the RFC 1929 subnegotiation after the method
+	// reply, so a client that stops mid-frame cannot pin a handler for the
+	// whole handshake budget.
+	defaultAuthTimeout = 3 * time.Second
 )
 
 var (
@@ -107,6 +124,19 @@ type Config struct {
 	// never calls Session.OpenFlow; used and budget are diagnostics only.
 	// Nil disables quota admission.
 	QuotaCheck func(accountID string) (ok bool, used, budget int64)
+	// AuthMode selects the SOCKS5 authentication method. An empty value keeps
+	// AuthLoopback. AuthUserPass requires Authenticator and UserPolicy; a nil
+	// one fails closed (01 01 / policy_unavailable) rather than falling back
+	// to no-auth.
+	AuthMode AuthMode
+	// AuthTimeout bounds the RFC 1929 subnegotiation. Default 3s.
+	AuthTimeout time.Duration
+	// Authenticator resolves RFC 1929 credentials in AuthUserPass mode. Nil
+	// makes every handshake fail with auth_unavailable.
+	Authenticator Authenticator
+	// UserPolicy is the post-CONNECT per-user policy in AuthUserPass mode.
+	// Nil answers SOCKS5 0x02 with policy_unavailable.
+	UserPolicy UserPolicy
 }
 
 // Session opens one proxied TCP flow. *account.FlowSession satisfies it: the
@@ -192,11 +222,22 @@ func NewServer(cfg Config, session Session) (*Server, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
 	}
+	if err := validateListen(cfg.Listen); err != nil {
+		return nil, err
+	}
+	mode, err := ParseAuthMode(string(cfg.AuthMode))
+	if err != nil {
+		return nil, err
+	}
+	cfg.AuthMode = mode
 	if cfg.Limit <= 0 {
 		cfg.Limit = defaultLimit
 	}
 	if cfg.AdmissionTimeout <= 0 {
 		cfg.AdmissionTimeout = defaultAdmissionTimeout
+	}
+	if cfg.AuthTimeout <= 0 {
+		cfg.AuthTimeout = defaultAuthTimeout
 	}
 	if cfg.DrainGrace <= 0 {
 		cfg.DrainGrace = defaultDrainGrace
@@ -245,6 +286,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("gate: listen %s: %w", s.cfg.Listen, err)
+	}
+	// Recheck the bound address: the configuration was validated in
+	// NewServer, but a listener must never come up public even if that check
+	// is bypassed or the OS resolved something unexpected.
+	if err := validateBoundLoopback(ln.Addr()); err != nil {
+		_ = ln.Close()
+		s.mu.Unlock()
+		return err
 	}
 	s.ln = ln
 	s.started = true
@@ -442,7 +491,19 @@ func (s *Server) handle(client net.Conn) {
 	s.mu.Unlock()
 	if closed {
 		s.rejected.Add(1)
-		s.recordReject(started, target{}, FlowErrorClosed)
+		s.recordReject(started, target{}, Principal{}, FlowErrorClosed)
+		return
+	}
+
+	// A gate is a local front end: refuse a non-loopback peer before reading
+	// one greeting byte. Authentication never makes a remote peer acceptable.
+	if !loopbackPeer(client.RemoteAddr()) {
+		s.rejected.Add(1)
+		s.recordReject(started, target{}, Principal{}, FlowErrorNonLoopbackPeer)
+		s.logger.Warn("gate peer rejected",
+			"node_id", s.cfg.NodeID,
+			"reason", FlowErrorNonLoopbackPeer,
+		)
 		return
 	}
 
@@ -451,19 +512,60 @@ func (s *Server) handle(client net.Conn) {
 	// Count what the peer sends so an idle probe (dial and close) can be told
 	// apart from a real handshake that was truncated mid-frame.
 	handshake := &countingConn{Conn: client}
-	target, err := readRequest(handshake)
+	principal, err := s.negotiate(handshake)
 	if err != nil {
 		if handshake.read == 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 			s.probes.Add(1)
 			s.logger.Debug("gate probe closed", "node_id", s.cfg.NodeID)
 			return
 		}
+		errorClass := FlowErrorHandshake
+		var refusal *handshakeError
+		if errors.As(err, &refusal) {
+			errorClass = refusal.Class
+		}
 		s.rejected.Add(1)
-		s.recordReject(started, target, FlowErrorHandshake)
+		s.recordReject(started, target{}, principal, errorClass)
+		s.logger.Warn("gate handshake rejected",
+			"node_id", s.cfg.NodeID,
+			"reason", errorClass,
+			"error", err,
+		)
+		return
+	}
+	// The RFC 1929 subnegotiation used its own short deadline; restore the
+	// full handshake budget for the CONNECT request.
+	_ = client.SetDeadline(time.Now().Add(handshakeTimeout))
+
+	target, err := readConnect(handshake)
+	if err != nil {
+		s.rejected.Add(1)
+		s.recordReject(started, target, principal, FlowErrorHandshake)
 		s.logger.Warn("gate handshake rejected", "node_id", s.cfg.NodeID, "error", err)
 		return
 	}
 	_ = client.SetDeadline(time.Time{})
+
+	// Per-user policy runs at the one post-parse point: enabled state, the
+	// destination allowlist and the user quota, in that order. It precedes the
+	// account quota, the admission slot and every vendor call.
+	if s.cfg.AuthMode == AuthUserPass {
+		ok, errorClass, used, budget := s.admitUser(principal, target.host)
+		if !ok {
+			s.rejected.Add(1)
+			s.recordReject(started, target, principal, errorClass)
+			_ = writeReply(client, repNotAllowed)
+			s.logger.Warn("gate flow rejected",
+				"node_id", s.cfg.NodeID,
+				"user_id", principal.UserID,
+				"target", target.String(),
+				"reason", errorClass,
+				"used_bytes", used,
+				"budget_bytes", budget,
+			)
+			return
+		}
+	}
 
 	// Quota admission runs before the slot wait and before any vendor
 	// connection: an over-budget account must not consume capacity or open
@@ -471,11 +573,12 @@ func (s *Server) handle(client net.Conn) {
 	if s.cfg.QuotaCheck != nil {
 		if ok, used, budget := s.cfg.QuotaCheck(s.cfg.AccountID); !ok {
 			s.rejected.Add(1)
-			s.recordReject(started, target, FlowErrorQuota)
+			s.recordReject(started, target, principal, FlowErrorQuota)
 			_ = writeReply(client, repNotAllowed)
 			s.logger.Warn("gate flow rejected",
 				"node_id", s.cfg.NodeID,
 				"account_id", s.cfg.AccountID,
+				"user_id", principal.UserID,
 				"target", target.String(),
 				"reason", FlowErrorQuota,
 				"used_bytes", used,
@@ -499,10 +602,11 @@ func (s *Server) handle(client net.Conn) {
 		case errors.Is(err, errDraining):
 			errorClass = FlowErrorDraining
 		}
-		s.recordReject(started, target, errorClass)
+		s.recordReject(started, target, principal, errorClass)
 		_ = writeReply(client, rep)
 		s.logger.Warn("gate flow rejected",
 			"node_id", s.cfg.NodeID,
+			"user_id", principal.UserID,
 			"target", target.String(),
 			"reason", err,
 		)
@@ -523,7 +627,7 @@ func (s *Server) handle(client net.Conn) {
 		if closed {
 			errorClass = FlowErrorClosed
 		}
-		s.recordReject(started, target, errorClass)
+		s.recordReject(started, target, principal, errorClass)
 		_ = writeReply(client, repConnectionRefused)
 		return
 	}
@@ -535,7 +639,7 @@ func (s *Server) handle(client net.Conn) {
 	remote, err := s.session.OpenFlow(ctx, target.host, target.port)
 	if err != nil {
 		s.rejected.Add(1)
-		s.recordReject(started, target, FlowErrorOpenFlow)
+		s.recordReject(started, target, principal, FlowErrorOpenFlow)
 		_ = writeReply(client, repConnectionRefused)
 		s.logger.Warn("gate open flow failed",
 			"node_id", s.cfg.NodeID,
@@ -548,7 +652,7 @@ func (s *Server) handle(client net.Conn) {
 
 	if err := writeReply(client, repSucceeded); err != nil {
 		s.rejected.Add(1)
-		s.recordReject(started, target, FlowErrorReply)
+		s.recordReject(started, target, principal, FlowErrorReply)
 		s.logger.Warn("gate reply failed",
 			"node_id", s.cfg.NodeID,
 			"target", target.String(),
@@ -561,6 +665,8 @@ func (s *Server) handle(client net.Conn) {
 	in, out := relay(client, remote, &s.ingress, &s.egress)
 	s.recordFlow(FlowRecord{
 		StartedAt:  started,
+		UserID:     principal.UserID,
+		UserName:   principal.UserName,
 		Method:     "CONNECT",
 		TargetHost: target.host,
 		TargetPort: target.port,
@@ -570,6 +676,7 @@ func (s *Server) handle(client net.Conn) {
 	})
 	s.logger.Info("gate flow closed",
 		"node_id", s.cfg.NodeID,
+		"user_id", principal.UserID,
 		"target", target.String(),
 		"ingress_bytes", in,
 		"egress_bytes", out,
@@ -689,38 +796,163 @@ func (c *countingConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// readRequest performs the greeting and the CONNECT request. It writes every
-// reply the protocol defines for the failure it finds: 0xFF for no acceptable
-// method, 0x07 for a non-CONNECT command, 0x08 for an unknown address type and
-// 0x01 for a malformed request. A wrong version or truncated frame closes
-// without a reply.
-func readRequest(conn net.Conn) (target, error) {
+// handshakeError is a handshake refusal that already answered the client.
+// Class is the credential-free FlowRecord class; Err never carries a username,
+// a password or buffered frame bytes.
+type handshakeError struct {
+	Class string
+	Err   error
+}
+
+func (e *handshakeError) Error() string { return e.Err.Error() }
+
+func (e *handshakeError) Unwrap() error { return e.Err }
+
+// negotiate performs the SOCKS5 greeting and, in AuthUserPass mode, the RFC
+// 1929 subnegotiation. It writes the protocol reply for every failure it can
+// answer (0xFF when the required method is absent, 01 01 for a bad credential
+// or a complete but invalid auth frame) and returns a handshakeError naming
+// the FlowRecord class. A truncated frame returns the read error without
+// inventing a reply.
+func (s *Server) negotiate(conn net.Conn) (Principal, error) {
 	var greeting [2]byte
 	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
-		return target{}, fmt.Errorf("read greeting: %w", err)
+		return Principal{}, fmt.Errorf("read greeting: %w", err)
 	}
 	if greeting[0] != socks5Version {
-		return target{}, fmt.Errorf("greeting version %d, want 5", greeting[0])
+		return Principal{}, &handshakeError{
+			Class: FlowErrorHandshake,
+			Err:   fmt.Errorf("greeting version %d, want 5", greeting[0]),
+		}
 	}
 	methods := make([]byte, int(greeting[1]))
 	if _, err := io.ReadFull(conn, methods); err != nil {
-		return target{}, fmt.Errorf("read methods: %w", err)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorHandshake,
+			Err:   fmt.Errorf("read methods: %w", err),
+		}
 	}
-	offersNone := false
-	for _, m := range methods {
-		if m == authNone {
-			offersNone = true
+
+	wanted := byte(authNone)
+	if s.cfg.AuthMode == AuthUserPass {
+		wanted = authUserPass
+	}
+	offered := false
+	for _, method := range methods {
+		if method == wanted {
+			offered = true
 			break
 		}
 	}
-	if !offersNone {
+	if !offered {
 		_ = writeMethodReply(conn, authNoAcceptable)
-		return target{}, errors.New("no acceptable authentication method")
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthMethod,
+			Err:   errors.New("no acceptable authentication method"),
+		}
 	}
-	if err := writeMethodReply(conn, authNone); err != nil {
-		return target{}, fmt.Errorf("write method reply: %w", err)
+	if err := writeMethodReply(conn, wanted); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorHandshake,
+			Err:   fmt.Errorf("write method reply: %w", err),
+		}
+	}
+	if wanted == authNone {
+		return Principal{}, nil
 	}
 
+	// The credential frame gets its own short deadline instead of the whole
+	// handshake budget: a client that stops mid-frame must not pin a handler.
+	_ = conn.SetDeadline(time.Now().Add(s.cfg.AuthTimeout))
+	return s.readUserPass(conn)
+}
+
+// readUserPass reads one RFC 1929 frame and verifies it. Every rejection
+// answers the same 01 01 status, so the client cannot tell an unknown user
+// from a wrong secret, a revoked key or a key issued to another user.
+func (s *Server) readUserPass(conn net.Conn) (Principal, error) {
+	var head [2]byte
+	if _, err := io.ReadFull(conn, head[:]); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   fmt.Errorf("read auth frame: %w", err),
+		}
+	}
+	if head[0] != authVersion {
+		_ = writeAuthReply(conn, authStatusFailed)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   errors.New("auth frame version is not RFC 1929"),
+		}
+	}
+	if head[1] == 0 {
+		_ = writeAuthReply(conn, authStatusFailed)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   errors.New("auth frame has an empty username"),
+		}
+	}
+	user := make([]byte, int(head[1]))
+	defer clear(user)
+	if _, err := io.ReadFull(conn, user); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   fmt.Errorf("read auth username: %w", err),
+		}
+	}
+
+	var passLen [1]byte
+	if _, err := io.ReadFull(conn, passLen[:]); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   fmt.Errorf("read auth password length: %w", err),
+		}
+	}
+	if passLen[0] == 0 {
+		_ = writeAuthReply(conn, authStatusFailed)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   errors.New("auth frame has an empty password"),
+		}
+	}
+	pass := make([]byte, int(passLen[0]))
+	defer clear(pass)
+	if _, err := io.ReadFull(conn, pass); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   fmt.Errorf("read auth password: %w", err),
+		}
+	}
+
+	if s.cfg.Authenticator == nil {
+		_ = writeAuthReply(conn, authStatusFailed)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthUnavailable,
+			Err:   errors.New("no authenticator is configured"),
+		}
+	}
+	principal, ok := s.cfg.Authenticator.Authenticate(string(user), string(pass))
+	if !ok || !principal.Authenticated() {
+		_ = writeAuthReply(conn, authStatusFailed)
+		return Principal{}, &handshakeError{
+			Class: FlowErrorAuthFailed,
+			Err:   errors.New("authentication failed"),
+		}
+	}
+	if err := writeAuthReply(conn, authStatusOK); err != nil {
+		return Principal{}, &handshakeError{
+			Class: FlowErrorHandshake,
+			Err:   fmt.Errorf("write auth reply: %w", err),
+		}
+	}
+	return principal, nil
+}
+
+// readConnect parses one SOCKS5 CONNECT request. It writes every reply the
+// protocol defines for the failure it finds: 0x07 for a non-CONNECT command,
+// 0x08 for an unknown address type and 0x01 for a malformed request. A wrong
+// version or truncated frame closes without a reply.
+func readConnect(conn net.Conn) (target, error) {
 	var req [4]byte
 	if _, err := io.ReadFull(conn, req[:]); err != nil {
 		return target{}, fmt.Errorf("read request: %w", err)
@@ -744,7 +976,7 @@ func readRequest(conn net.Conn) (target, error) {
 		if _, err := io.ReadFull(conn, ip); err != nil {
 			return target{}, fmt.Errorf("read IPv4 address: %w", err)
 		}
-		t.host = net.IP(ip).String()
+		t.host = CanonicalHost(net.IP(ip).String())
 	case atypDomain:
 		var length [1]byte
 		if _, err := io.ReadFull(conn, length[:]); err != nil {
@@ -758,13 +990,18 @@ func readRequest(conn net.Conn) (target, error) {
 		if _, err := io.ReadFull(conn, name); err != nil {
 			return target{}, fmt.Errorf("read domain: %w", err)
 		}
-		t.host = string(name)
+		host := CanonicalHost(string(name))
+		if host == "" {
+			_ = writeReply(conn, repGeneralFailure)
+			return target{}, errors.New("empty domain name")
+		}
+		t.host = host
 	case atypIPv6:
 		ip := make([]byte, net.IPv6len)
 		if _, err := io.ReadFull(conn, ip); err != nil {
 			return target{}, fmt.Errorf("read IPv6 address: %w", err)
 		}
-		t.host = net.IP(ip).String()
+		t.host = CanonicalHost(net.IP(ip).String())
 	default:
 		_ = writeReply(conn, repAddrUnsupported)
 		return target{}, fmt.Errorf("address type %d is not supported", req[3])
@@ -778,8 +1015,67 @@ func readRequest(conn net.Conn) (target, error) {
 	return t, nil
 }
 
+// admitUser evaluates the authenticated user's policy at the single
+// post-CONNECT admission point. A nil policy fails closed.
+func (s *Server) admitUser(principal Principal, host string) (bool, string, int64, int64) {
+	if s.cfg.UserPolicy == nil {
+		return false, FlowErrorPolicyUnavailable, 0, 0
+	}
+	ok, errorClass, used, budget := s.cfg.UserPolicy.Admit(principal, host)
+	if ok {
+		return true, "", used, budget
+	}
+	if errorClass == "" {
+		errorClass = FlowErrorPolicyUnavailable
+	}
+	return false, errorClass, used, budget
+}
+
+// loopbackPeer reports whether addr is a literal loopback TCP peer. Any other
+// address, including a non-TCP one, is refused: the listener is TCP, so an
+// unknown transport cannot be the local client this gate serves.
+func loopbackPeer(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
+}
+
+// validateListen refuses anything but a literal loopback host. An empty host
+// (":13000"), a wildcard, a LAN or public IP and a hostname are all rejected:
+// the gate is a local front end and authentication never makes a public bind
+// acceptable.
+func validateListen(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("gate: listen address %q: %w", addr, err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("gate: listen host %q is not a literal IP address", host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("gate: listen host %q is not loopback", host)
+	}
+	return nil
+}
+
+// validateBoundLoopback rechecks the address the OS actually bound.
+func validateBoundLoopback(addr net.Addr) error {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || !tcp.IP.IsLoopback() {
+		return fmt.Errorf("gate: listener bound to %s, which is not loopback", addr)
+	}
+	return nil
+}
+
 func writeMethodReply(w io.Writer, method byte) error {
 	_, err := w.Write([]byte{socks5Version, method})
+	return err
+}
+
+// writeAuthReply answers one RFC 1929 subnegotiation: version 1 plus the
+// status byte.
+func writeAuthReply(w io.Writer, status byte) error {
+	_, err := w.Write([]byte{authVersion, status})
 	return err
 }
 

@@ -95,8 +95,14 @@ func TestRenewalDisabled(t *testing.T) {
 func TestUsageSummaryAndValidation(t *testing.T) {
 	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
 	now := time.Now().UTC()
-	from := now.Add(-48 * time.Hour).Format(time.RFC3339)
-	to := now.Add(time.Hour).Format(time.RFC3339)
+	fromTime := now.Add(-48 * time.Hour)
+	toTime := now.Add(time.Hour)
+	from := fromTime.Format(time.RFC3339)
+	to := toTime.Format(time.RFC3339)
+	// The aggregator buckets by inclusive UTC calendar day, so a 48h window
+	// spans three or four days depending on the current hour. Derive the
+	// expectation instead of pinning 3, which only holds away from midnight.
+	wantDays := int(toTime.Truncate(24*time.Hour).Sub(fromTime.Truncate(24*time.Hour))/(24*time.Hour)) + 1
 
 	resp, body := apiCall(t, ts, http.MethodGet, "/v1/usage?from="+from+"&to="+to, nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -104,8 +110,8 @@ func TestUsageSummaryAndValidation(t *testing.T) {
 	if summary.Requests == 0 {
 		t.Fatalf("usage summary counted no seeded requests (body %s)", body)
 	}
-	if len(summary.Days) != 3 {
-		t.Fatalf("days = %d, want 3 for a 48h window", len(summary.Days))
+	if len(summary.Days) != wantDays {
+		t.Fatalf("days = %d, want %d for a 48h window from %s to %s", len(summary.Days), wantDays, from, to)
 	}
 	if len(summary.Accounts) == 0 {
 		t.Fatalf("usage summary has no account roll-up")

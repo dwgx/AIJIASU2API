@@ -2,8 +2,11 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"sort"
@@ -153,6 +156,13 @@ type NodeControllerConfig struct {
 	// one account. Zero selects DefaultConnectCooldown; a negative value
 	// disables the cooldown (tests only).
 	ConnectCooldown time.Duration
+	// GateAuth selects the SOCKS5 authentication mode of every gate. The zero
+	// value keeps the no-auth loopback compatibility mode; userpass requires
+	// GateIdentity (a nil one fails every handshake closed).
+	GateAuth gate.AuthMode
+	// GateIdentity authenticates RFC 1929 credentials and evaluates the
+	// per-user allowlist and quota in userpass mode. Nil fails closed.
+	GateIdentity *GateIdentity
 }
 
 // nodeGate is one running gate plus the session it serves.
@@ -207,6 +217,12 @@ type NodeController struct {
 	running  map[string]*nodeGate
 	nextPort int
 	stopped  bool
+
+	// gateAuth and identity configure every gate the controller starts. In
+	// loopback mode identity is unused; in userpass mode a nil identity makes
+	// every handshake fail closed rather than falling back to no-auth.
+	gateAuth gate.AuthMode
+	identity *GateIdentity
 }
 
 // NewNodeController validates cfg and returns a controller with no gates. It
@@ -253,6 +269,10 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 	case cooldown < 0:
 		cooldown = 0
 	}
+	gateAuth, err := gate.ParseAuthMode(string(cfg.GateAuth))
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &NodeController{
 		store:       cfg.Store,
@@ -272,6 +292,8 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		cooldown:    cooldown,
 		switching:   make(map[string]struct{}),
 		lastAttempt: make(map[string]time.Time),
+		gateAuth:    gateAuth,
+		identity:    cfg.GateIdentity,
 	}, nil
 }
 
@@ -698,6 +720,11 @@ func (c *NodeController) startGateLocked(id, accountID, serverID string, session
 			Listen:    net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 			Limit:     gateFlowLimit,
 			Logger:    c.logger,
+			AuthMode:  c.gateAuth,
+		}
+		if c.gateAuth == gate.AuthUserPass && c.identity != nil {
+			cfg.Authenticator = c.identity
+			cfg.UserPolicy = c.identity
 		}
 		g, err := c.gates(cfg, session)
 		if err != nil {
@@ -895,4 +922,271 @@ func sessionEgress(session account.FlowSession) string {
 		}
 	}
 	return ""
+}
+
+const (
+	// defaultUserQuotaCacheTTL bounds how stale a cached monthly user total
+	// can be. The flow meter advances the entry after every accepted flow, so
+	// the TTL only covers rows written by another path (a restore, say).
+	defaultUserQuotaCacheTTL = 30 * time.Second
+
+	// defaultDigestRebuildInterval rate-limits rebuilding the key digest index
+	// when an unknown digest arrives, so a flood of wrong passwords cannot
+	// turn every handshake into a key-list snapshot. Revocation never needs a
+	// rebuild: the live key read sees it on the next handshake.
+	defaultDigestRebuildInterval = time.Second
+)
+
+// GateIdentity is the store-backed RFC 1929 authenticator and per-user policy
+// the node controller attaches to every gate in userpass mode. One instance is
+// shared by every gate, so the key digest index, the compiled allowlists and
+// the monthly usage cache are built once per process.
+//
+// Credentials: the username is the exact PanelUser.ID and the password is one
+// of that user's API-key secrets. Only SHA-256 digests are indexed; the
+// plaintext lives for the duration of one Authenticate call and is never
+// stored, logged or attached to a flow record. Every rejection is identical,
+// so an unknown user, a wrong secret, a revoked key and a key issued to another
+// user share one wire result.
+//
+// Freshness: the key row, the user row and the digest index are read live, so
+// revoking a key, suspending a user or replacing the allowlist affects the
+// next new connection while admitted flows finish with their identity. The
+// only lag is a key created after the index was built, discovered within
+// rebuildInterval.
+type GateIdentity struct {
+	store *store.Store
+	now   func() time.Time
+
+	cacheTTL        time.Duration
+	rebuildInterval time.Duration
+
+	mu       sync.Mutex
+	digest   map[[sha256.Size]byte]string
+	policies map[string]*gateUserPolicy
+	usage    map[string]gateUserUsage
+	rebuilt  time.Time
+}
+
+// gateUserPolicy is the immutable part of one user's policy: the compiled
+// allowlist plus a fingerprint of the entries it was built from.
+type gateUserPolicy struct {
+	fingerprint uint64
+	allowlist   gate.Allowlist
+}
+
+// gateUserUsage is one cached monthly total for one user.
+type gateUserUsage struct {
+	month   string
+	bytes   int64
+	expires time.Time
+}
+
+// NewGateIdentity builds the gate identity over st. A nil store fails every
+// authentication and every policy check closed.
+func NewGateIdentity(st *store.Store) *GateIdentity {
+	return &GateIdentity{
+		store:           st,
+		now:             time.Now,
+		cacheTTL:        defaultUserQuotaCacheTTL,
+		rebuildInterval: defaultDigestRebuildInterval,
+		digest:          make(map[[sha256.Size]byte]string),
+		policies:        make(map[string]*gateUserPolicy),
+		usage:           make(map[string]gateUserUsage),
+	}
+}
+
+// Authenticate verifies one RFC 1929 credential pair. It returns ok only for an
+// active key whose secret matches pass and whose UserID equals user.
+func (g *GateIdentity) Authenticate(user, pass string) (gate.Principal, bool) {
+	if g == nil || g.store == nil || user == "" || pass == "" {
+		return gate.Principal{}, false
+	}
+	sum := sha256.Sum256([]byte(pass))
+	keyID, ok := g.keyForDigest(sum)
+	if !ok {
+		return gate.Principal{}, false
+	}
+	key, ok := g.store.Key(keyID)
+	if !ok || key.UserID != user || key.RevokedAt != nil {
+		return gate.Principal{}, false
+	}
+	panelUser, ok := g.store.User(user)
+	if !ok {
+		return gate.Principal{}, false
+	}
+	return gate.Principal{UserID: panelUser.ID, UserName: panelUser.Name}, true
+}
+
+// keyForDigest resolves a secret digest to its key id. A miss rebuilds the
+// index at most once per rebuildInterval, which is how a key created after
+// startup becomes usable without a restart.
+func (g *GateIdentity) keyForDigest(sum [sha256.Size]byte) (string, bool) {
+	g.mu.Lock()
+	keyID, ok := g.digest[sum]
+	rebuild := !ok && g.now().Sub(g.rebuilt) >= g.rebuildInterval
+	g.mu.Unlock()
+	if ok {
+		return keyID, true
+	}
+	if !rebuild {
+		return "", false
+	}
+	g.rebuildDigests()
+	g.mu.Lock()
+	keyID, ok = g.digest[sum]
+	g.mu.Unlock()
+	return keyID, ok
+}
+
+// rebuildDigests replaces the digest index from the store's key rows. Seeded
+// keys have no stored hash and are skipped: their secrets never existed in
+// this process, so they cannot authenticate.
+func (g *GateIdentity) rebuildDigests() {
+	keys := g.store.Keys()
+	next := make(map[[sha256.Size]byte]string, len(keys))
+	for _, key := range keys {
+		if key.RevokedAt != nil {
+			continue
+		}
+		hash, ok := g.store.SecretHash(key.ID)
+		if !ok {
+			continue
+		}
+		raw, err := hex.DecodeString(hash)
+		if err != nil || len(raw) != sha256.Size {
+			continue
+		}
+		var sum [sha256.Size]byte
+		copy(sum[:], raw)
+		next[sum] = key.ID
+	}
+	g.mu.Lock()
+	g.digest = next
+	g.rebuilt = g.now()
+	g.mu.Unlock()
+}
+
+// Admit evaluates the authenticated user's policy for one canonical host, in
+// the order the design fixes: enabled state, allowlist, user quota. The
+// account quota is the gate's separate, later check.
+func (g *GateIdentity) Admit(principal gate.Principal, host string) (bool, string, int64, int64) {
+	if g == nil || g.store == nil || principal.UserID == "" {
+		return false, gate.FlowErrorPolicyUnavailable, 0, 0
+	}
+	panelUser, ok := g.store.User(principal.UserID)
+	if !ok {
+		return false, gate.FlowErrorPolicyUnavailable, 0, 0
+	}
+	if !panelUser.Enabled {
+		return false, gate.FlowErrorUserDisabled, 0, 0
+	}
+	if !g.policyFor(panelUser).allowlist.Match(host) {
+		return false, gate.FlowErrorAllowlist, 0, 0
+	}
+	if panelUser.QuotaBytesMonth == nil {
+		return true, "", 0, 0
+	}
+	budget := *panelUser.QuotaBytesMonth
+	used := g.monthlyUsage(panelUser.ID)
+	if used >= budget {
+		return false, gate.FlowErrorUserQuota, used, budget
+	}
+	return true, "", used, budget
+}
+
+// policyFor returns the compiled allowlist for user, recompiling only when the
+// stored entries changed. The fingerprint keeps the per-flow cost to one small
+// scan, never a parse or an allocation.
+func (g *GateIdentity) policyFor(panelUser model.PanelUser) *gateUserPolicy {
+	fingerprint := allowlistFingerprint(panelUser.Allowlist)
+	g.mu.Lock()
+	cached, ok := g.policies[panelUser.ID]
+	g.mu.Unlock()
+	if ok && cached.fingerprint == fingerprint {
+		return cached
+	}
+	compiled := &gateUserPolicy{
+		fingerprint: fingerprint,
+		allowlist:   gate.CompileAllowlist(panelUser.Allowlist),
+	}
+	g.mu.Lock()
+	g.policies[panelUser.ID] = compiled
+	g.mu.Unlock()
+	return compiled
+}
+
+// allowlistFingerprint hashes the stored entries so a changed list is
+// recompiled and an unchanged one is reused.
+func allowlistFingerprint(entries []string) uint64 {
+	hash := fnv.New64a()
+	for _, entry := range entries {
+		_, _ = hash.Write([]byte(entry))
+		_, _ = hash.Write([]byte{0})
+	}
+	return hash.Sum64()
+}
+
+// monthlyUsage returns the cached current-month total for one user, computing
+// it from the request log on a miss or after the month changed.
+func (g *GateIdentity) monthlyUsage(userID string) int64 {
+	now := g.now()
+	month := now.UTC().Format("2006-01")
+
+	g.mu.Lock()
+	if entry, ok := g.usage[userID]; ok && entry.month == month && now.Before(entry.expires) {
+		g.mu.Unlock()
+		return entry.bytes
+	}
+	g.mu.Unlock()
+
+	used := g.storeUserUsage(userID, now)
+
+	g.mu.Lock()
+	g.usage[userID] = gateUserUsage{month: month, bytes: used, expires: now.Add(g.cacheTTL)}
+	g.mu.Unlock()
+	return used
+}
+
+// AddUsage advances the cached monthly total for one authenticated user after
+// the meter appended an accepted flow. An absent entry stays absent: the next
+// admission recomputes from the request log, which already holds that row.
+func (g *GateIdentity) AddUsage(userID string, bytes int64) {
+	if g == nil || g.store == nil || userID == "" || bytes <= 0 {
+		return
+	}
+	now := g.now()
+	month := now.UTC().Format("2006-01")
+	g.mu.Lock()
+	if entry, ok := g.usage[userID]; ok && entry.month == month {
+		entry.bytes += bytes
+		entry.expires = now.Add(g.cacheTTL)
+		g.usage[userID] = entry
+	}
+	g.mu.Unlock()
+}
+
+// storeUserUsage sums one user's gate-metered bytes in the current UTC month.
+// The scan is bounded by the request-log cap and stops at the first row older
+// than the month start; rows with an unparseable timestamp are skipped rather
+// than ending the scan. It runs on a cache miss only.
+func (g *GateIdentity) storeUserUsage(userID string, now time.Time) int64 {
+	utc := now.UTC()
+	monthStart := time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	var total int64
+	for _, row := range g.store.Requests() {
+		if row.Source != model.SourceGate || row.UserID != userID {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, row.TS)
+		if err != nil {
+			continue
+		}
+		if ts.UTC().Before(monthStart) {
+			break
+		}
+		total += row.Bytes
+	}
+	return total
 }

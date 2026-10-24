@@ -30,6 +30,7 @@ import (
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
 	eventring "ajsaccountd/internal/events"
+	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/health"
 	"ajsaccountd/internal/lablog"
 	"ajsaccountd/internal/model"
@@ -79,6 +80,15 @@ func run() error {
 	// the repository — including the one .env.example ships — so startup
 	// refuses those values. The insecure lab mode is the explicit opt-out.
 	if err := validateAdminToken(*token, *insecure); err != nil {
+		return err
+	}
+
+	// AJS_GATE_AUTH selects the SOCKS5 gate authentication method. An unknown
+	// value aborts startup rather than silently serving a weaker listener; an
+	// unset value keeps the loopback compatibility mode for the rolling
+	// release (DESIGN-GATE-IDENTITY §5).
+	gateAuth, err := gate.ParseAuthMode(os.Getenv("AJS_GATE_AUTH"))
+	if err != nil {
 		return err
 	}
 
@@ -290,7 +300,7 @@ func run() error {
 			return err
 		}
 		nodeLimitValue = limit
-		controller, err = startNodeController(st, logger, panel, service, profile, limit)
+		controller, err = startNodeController(st, logger, panel, service, profile, limit, gateAuth)
 		if err != nil {
 			return err
 		}
@@ -1446,8 +1456,9 @@ func pinState() string {
 // login. A nil panel (Resin disabled) still creates nodes; only the reconcile
 // step is skipped. AJS_NODE_LIMIT caps how many usable servers one account
 // starts (default 1, the vendor's one active data session per account; an
-// explicit 0 = all).
-func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int) (*runtime.NodeController, error) {
+// explicit 0 = all). auth selects the gate's SOCKS5 authentication mode; in
+// userpass mode the meter owns the identity service, so metering must be on.
+func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int, auth gate.AuthMode) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
 	if panel != nil {
@@ -1457,30 +1468,40 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 	// factory attaches one observer callback per gate, so metering costs no
 	// goroutine and no extra copy of the flow.
 	var gates runtime.GateFactory
+	var identity *runtime.GateIdentity
 	if flowMeterEnabled(os.Getenv("AJS_FLOW_METER")) {
 		meter := runtime.NewFlowMeter(st)
 		gates = meter.GateFactory()
+		identity = meter.Identity()
 		logger.Info("flow_meter_enabled", "retention_rows", store.RequestRetention)
 	} else {
 		logger.Info("flow_meter_disabled", "reason", "AJS_FLOW_METER=0")
 	}
+	// Per-user quota is metered from the gate request rows this observer
+	// writes. Without it a userpass gate could only ever see a stale total, so
+	// the combination is refused instead of enforcing an unlimited policy.
+	if auth == gate.AuthUserPass && identity == nil {
+		return nil, errors.New("AJS_GATE_AUTH=userpass requires AJS_FLOW_METER: user quota is metered from gate request rows")
+	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
-		Store:      st,
-		Logins:     logins,
-		Sessions:   factory,
-		Gates:      gates,
-		Reconciler: reconciler,
-		Profile:    profile,
-		MaxServers: limit,
-		Logger:     logger,
+		Store:        st,
+		Logins:       logins,
+		Sessions:     factory,
+		Gates:        gates,
+		Reconciler:   reconciler,
+		Profile:      profile,
+		MaxServers:   limit,
+		Logger:       logger,
+		GateAuth:     auth,
+		GateIdentity: identity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("node controller: %w", err)
 	}
 	if limit > 0 {
-		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", limit)
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", limit, "gate_auth", auth)
 	} else {
-		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all")
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all", "gate_auth", auth)
 	}
 	return controller, nil
 }

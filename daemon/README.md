@@ -577,36 +577,44 @@ _ = srv.Undrain()                // back to service
   `server_test.go` pins the assignment with
   `var _ gate.Session = account.FlowSession(nil)`.
 - `Config`: `NodeID`, `AccountID`, `Listen`, `Limit`, `AdmissionTimeout`,
-  `DrainGrace`, `Now`, `Logger`. Zero values select the defaults
-  (`127.0.0.1:0`, 32, 30s, 30s, `time.Now`, `slog.Default()`).
+  `DrainGrace`, `Now`, `Logger`, `OnFlow`, `QuotaCheck`, `AuthMode`,
+  `AuthTimeout`, `Authenticator`, `UserPolicy`. Zero values select the defaults
+  (`127.0.0.1:0`, 32, 30s, 30s, `time.Now`, `slog.Default()`, `AuthLoopback`,
+  3s). `Listen` must name a literal loopback IP (`127.0.0.1` or `::1`): a
+  wildcard, LAN/public address or hostname fails `NewServer`, and `Start`
+  rechecks the bound address before serving.
 - `State`: `NodeID`, `AccountID`, `Active`, `Limit`, `Draining`, `Accepted`,
   `Rejected`, `Probes`, `IngressBytes`, `EgressBytes`, `StartedAt`. `Accepted`
   counts flows that received the success reply and entered relay; `Rejected`
   counts flows refused before relay (draining, admission timeout, malformed
-  handshake, failed `OpenFlow`); `Probes` counts connections that closed
-  before sending any handshake byte (a health-sampler dial+close), which log
-  at debug and never enter the flow ring. Byte counters are updated live and
-  exclude the handshake.
+  handshake, failed authentication or policy, failed `OpenFlow`); `Probes`
+  counts connections that closed before sending any handshake byte (a
+  health-sampler dial+close), which log at debug and never enter the flow ring.
+  Byte counters are updated live and exclude the handshake.
 - Flow ring: every finished flow, including a refusal, appends one
-  `FlowRecord` (`ID`, `StartedAt`, `DurationMs`, `Method`, `TargetHost`,
-  `TargetPort`, `Status`, `BytesIn`, `BytesOut`, `ErrorClass`) to a bounded
-  500-entry ring. Only host and port are recorded — never a URL, headers or a
-  credential. `Flows(limit)` returns the newest records first and `Dropped()`
-  counts evictions. The runtime joins the records with the node/account ids
-  and a redacted session SID for `GET /v1/lab/flows`.
+  `FlowRecord` (`ID`, `StartedAt`, `DurationMs`, `UserID`, `UserName`,
+  `Method`, `TargetHost`, `TargetPort`, `Status`, `BytesIn`, `BytesOut`,
+  `ErrorClass`) to a bounded 500-entry ring. Only host and port are recorded —
+  never a URL, headers or a credential. `UserID`/`UserName` are attribution
+  only and stay empty in `loopback` mode. `Flows(limit)` returns the newest
+  records first and `Dropped()` counts evictions. The runtime joins the records
+  with the node/account ids and a redacted session SID for
+  `GET /v1/lab/flows`.
 
-Wire contract (RFC 1928, no auth, CONNECT only):
+Wire contract (RFC 1928 + RFC 1929, CONNECT only):
 
 | Step | Bytes | Gate behaviour |
 |---|---|---|
-| Greeting | `05 NMETHODS methods…` | requires method `00`; otherwise replies `05 FF` and closes. A wrong version closes without a reply. |
-| Request | `05 01 00 ATYP addr port` | only CONNECT; `ATYP 01` IPv4, `03` domain (1-byte length), `04` IPv6; RSV must be 0. |
+| Greeting | `05 NMETHODS methods…` | `loopback` requires method `00`; `userpass` requires `02`. A missing required method replies `05 FF` and closes (`auth_method`). A wrong version closes without a reply. |
+| Auth (`userpass`) | `01 ULEN user PLEN pass` | username is the exact `PanelUser.ID`, password an active API-key secret. Success `01 00`; any bad/revoked/mismatched credential or invalid frame `01 01` and close (`auth_failed`). Bounded by `AuthTimeout` (3s). |
+| Request | `05 01 00 ATYP addr port` | only CONNECT; `ATYP 01` IPv4, `03` domain (1-byte length), `04` IPv6; RSV must be 0. The host is canonicalized (ASCII lower case, one terminal dot removed) before policy. |
 | Success | `05 00 00 01 00 00 00 00 00 00` | after `OpenFlow` succeeded; relay starts. |
 | Refused | `05 05 00 01 …` | draining, closed, or `OpenFlow` error. |
 | TTL expired | `05 06 00 01 …` | the admission semaphore stayed full for `AdmissionTimeout`. |
 | Command unsupported | `05 07 00 01 …` | `CMD != 1`. |
 | Address unsupported | `05 08 00 01 …` | `ATYP` not 1/3/4. |
 | Malformed | `05 01 00 01 …` | RSV non-zero or an empty domain name. |
+| Not allowed | `05 02 00 01 …` | user disabled, allowlist miss, user quota or account quota exhausted. |
 
 - Admission: a buffered channel of `Limit` slots. A flow waits at most
   `AdmissionTimeout` (default 30s) and is answered `0x06` on expiry; the slot is
@@ -624,14 +632,68 @@ Wire contract (RFC 1928, no auth, CONNECT only):
   destination is half-closed when it supports `CloseWrite` and closed
   otherwise; both sides are closed when the relay ends.
 - Logging: `gate listening`, one `gate flow closed` per relayed flow
-  (`node_id`, `target`, `ingress_bytes`, `egress_bytes`, `duration`) and warn
-  lines for rejections. The gate never receives a credential; only host:port is
-  logged.
+  (`node_id`, `user_id` after a successful authentication, `target`,
+  `ingress_bytes`, `egress_bytes`, `duration`) and warn lines for rejections.
+  A failed handshake logs the node and the class only: never the claimed
+  username, the password, a key prefix or buffered frame bytes. Only host:port
+  is logged as a target.
 - Limitation: the package is now constructed from a login session by the node
   controller (`internal/runtime/nodes.go`, B0), which allocates the port and
   reconciles Resin. It is still not wired to the node supervisor, publishes no
-  `State` and serves no `GateController` HTTP surface; it binds loopback only
-  and has no per-user auth (P3).
+  `State` and serves no `GateController` HTTP surface; it binds loopback only.
+  Per-user authentication exists but is off by default (see below).
+
+### Per-user identity (AJS-266 / DESIGN-GATE-IDENTITY)
+
+`AJS_GATE_AUTH` selects the SOCKS5 method; unknown values abort startup:
+
+- `loopback` (unset default) keeps the pre-RFC-1929 wire: the client offers
+  `00`, the gate trusts every local process, and user fields stay empty. The
+  loopback peer check and the account quota still run. It is not a secure
+  multi-user mode.
+- `userpass` requires RFC 1929 `02`; the username is the exact `PanelUser.ID`
+  and the password is an existing API-key secret (`POST /v1/keys`). Every
+  rejection is one generic `01 01`, so an unknown user, a wrong secret, a
+  revoked key and another user's key are indistinguishable.
+
+After CONNECT parses and before a slot or `OpenFlow`, the gate evaluates, in
+order: user enabled, the user's allowlist, the user's monthly quota, then the
+existing account quota. A refusal answers `05 02` with its class
+(`user_disabled`, `allowlist`, `user_quota_exceeded`, `policy_unavailable`,
+`quota_exceeded`) and never opens upstream traffic.
+
+- Allowlist entries are exact case-insensitive hostnames, exact IPs or CIDRs;
+  a host rule never implies a subdomain, a CIDR matches only a literal target
+  IP, and nothing is ever resolved. Empty denies every destination in
+  `userpass`; a malformed stored entry denies the user rather than widening the
+  policy.
+- The key digest index, the compiled allowlists and the monthly user total are
+  process-wide caches shared by every gate. Revoking a key, suspending a user or
+  replacing an allowlist affects the next new connection; admitted flows finish
+  with the identity they authenticated. A key created after startup is
+  discovered within one second.
+- Metering attributes accepted flows to `RequestLog.UserID/UserName` and
+  advances the same per-user total the policy reads, so `AJS_GATE_AUTH=userpass`
+  requires `AJS_FLOW_METER` (the daemon refuses the combination otherwise).
+- Migration: create an ordinary user and key, set an explicit allowlist and
+  quota, put the user id and one-time secret in Resin's username/password
+  fields, verify attributed flows, then switch `AJS_GATE_AUTH=userpass`.
+  Rollback is `AJS_GATE_AUTH=loopback` while the listener stays loopback.
+
+`auth_test.go` covers the twelve acceptance rows at the wire and policy seams:
+`05 02`/`01 00`/relay and attribution, the four bad-credential cases, a missing
+`02` method, malformed/truncated frames and the 3s auth deadline, the loopback
+compatibility path, loopback-only binds, a non-loopback injected peer,
+allowlist matching (host/IP/CIDR, subdomain, malformed) and policy ordering
+before the account quota. `runtime/gate_identity_test.go` adds the store seam:
+metered attribution and quota advance, immediate key revocation with the
+admitted flow still relaying, disabled/deleted users, allowlist updates, new-key
+discovery, and 32 concurrent flows under `-race` with live key/allowlist
+mutations. `BenchmarkFlowAdmission` compares a loopback and a userpass flow with
+1 MiB each way; the store-backed `BenchmarkGateIdentityChecks` measures the
+added per-flow authentication and policy cost (about 0.5 µs and 5 allocations
+on the dev host), which is approximately 0.01% of a 1 MiB relay and far below
+the design's 1% budget.
 
 `server_test.go` runs only loopback and in-process fakes: a `net.Pipe` echo
 session for domain/IPv4/IPv6 CONNECT, relay and exact counters; limit 1 with a
@@ -1078,6 +1140,7 @@ test binary as the child.
 | `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
 | `AJS_RENEWAL_TTL` | — | `6h` | how long a live purchase-page snapshot stays fresh (`time.ParseDuration`); a bad or non-positive value keeps the default. On failure the cache serves its last good snapshot, or the built-in static table on a cold cache |
 | `AJS_FLOW_METER` | — | on | `0` disables gate→request-log metering: every completed SOCKS5 flow then stops appending a row, so `GET /v1/usage` and `GET /v1/requests` see only the mutation-lab and seed rows. Any other value keeps metering on. A row is appended only after the gate's success reply, through the same 10,000-row cap as every other writer, and carries no URL, header, session id or credential |
+| `AJS_GATE_AUTH` | — | `loopback` | SOCKS5 gate authentication method: `loopback` keeps the no-auth compatibility path (no user identity, allowlist or user quota; the loopback peer check and the account quota still apply), `userpass` requires RFC 1929 with the username = `PanelUser.ID` and the password = an API-key secret, then enforces the user's allowlist and monthly quota before admission. Any other value fails startup. `userpass` requires `AJS_FLOW_METER` (user quota is metered from the gate's request rows), and Resin needs the user id and secret in its username/password fields |
 | `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most `AJS_HEALTH_MAX_NODES` watched nodes |
 | `AJS_HEALTH_MAX_NODES` | — | `16` | node rings the sampler retains, clamped to 1–64; a non-integer fails startup when the sampler is enabled (an out-of-range integer is clamped, not rejected; the value is not read under `AJS_HEALTH_PROBE=0`). Beyond the cap the sampler evicts an unwatched ring first; when every ring is watched it evicts the least-recently-used one and records it, and the reconciler re-arms a watched-but-evicted key on its next 15 s sweep (one attempt per key per sweep, one log line per minute) |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |

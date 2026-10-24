@@ -27,6 +27,18 @@ const (
 	FlowErrorQuota            = "quota_exceeded"
 	FlowErrorOpenFlow         = "open_flow"
 	FlowErrorReply            = "reply"
+
+	// Per-user identity classes (RFC 1929). auth_method and auth_failed are
+	// the only two a client can distinguish on the wire; every credential
+	// rejection shares auth_failed.
+	FlowErrorNonLoopbackPeer   = "non_loopback_peer"
+	FlowErrorAuthMethod        = "auth_method"
+	FlowErrorAuthFailed        = "auth_failed"
+	FlowErrorAuthUnavailable   = "auth_unavailable"
+	FlowErrorPolicyUnavailable = "policy_unavailable"
+	FlowErrorUserDisabled      = "user_disabled"
+	FlowErrorAllowlist         = "allowlist"
+	FlowErrorUserQuota         = "user_quota_exceeded"
 )
 
 // FlowRecord is one finished gate flow. It deliberately carries the target as
@@ -39,13 +51,19 @@ type FlowRecord struct {
 	DurationMs int64     `json:"durationMs"`
 	NodeID     string    `json:"nodeId,omitempty"`
 	AccountID  string    `json:"accountId,omitempty"`
-	Method     string    `json:"method"`
-	TargetHost string    `json:"targetHost"`
-	TargetPort int       `json:"targetPort"`
-	Status     string    `json:"status"`
-	BytesIn    int64     `json:"bytesIn"`
-	BytesOut   int64     `json:"bytesOut"`
-	ErrorClass string    `json:"errorClass,omitempty"`
+	// UserID and UserName attribute an authenticated flow to a panel user.
+	// They are empty in loopback mode and are attribution only: no key id,
+	// key prefix, username/password frame or authenticator input ever
+	// reaches a record.
+	UserID     string `json:"userId,omitempty"`
+	UserName   string `json:"userName,omitempty"`
+	Method     string `json:"method"`
+	TargetHost string `json:"targetHost"`
+	TargetPort int    `json:"targetPort"`
+	Status     string `json:"status"`
+	BytesIn    int64  `json:"bytesIn"`
+	BytesOut   int64  `json:"bytesOut"`
+	ErrorClass string `json:"errorClass,omitempty"`
 }
 
 // flowRing is a fixed-capacity, concurrency-safe ring of FlowRecords. The
@@ -145,14 +163,17 @@ func (s *Server) recordFlow(record FlowRecord) {
 
 // recordReject records a pre-relay refusal. An empty target host means the
 // handshake never produced a destination; Method stays empty in that case
-// rather than inventing one.
-func (s *Server) recordReject(started time.Time, target target, errorClass string) {
+// rather than inventing one. principal carries attribution only after a
+// successful authentication and stays empty for a failed handshake.
+func (s *Server) recordReject(started time.Time, target target, principal Principal, errorClass string) {
 	method := ""
 	if target.host != "" {
 		method = "CONNECT"
 	}
 	s.recordFlow(FlowRecord{
 		StartedAt:  started,
+		UserID:     principal.UserID,
+		UserName:   principal.UserName,
 		Method:     method,
 		TargetHost: target.host,
 		TargetPort: target.port,
