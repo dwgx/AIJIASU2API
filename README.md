@@ -46,8 +46,12 @@ As of 2026-10-24:
   table fed by `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab
   history; Overview draws no synthetic traffic curve — when the daemon reports
   `telemetryAvailable:false` it shows a no-telemetry empty state beside the real counts. Mock data
-  is the default; a live mode against `ajs-accountd` is opt-in at build time. 131 Vitest tests in
-  19 files. The UI is bilingual: a `中` / `EN` switch in the sidebar footer and a Language card in
+  is the default; a live mode against `ajs-accountd` is opt-in at build time. Form controls are one
+  custom combobox (`dashboard/src/components/Select.tsx`, no native `<select>`) with filter, form,
+  settings, log and region variants; the Nodes drawer leads with the localised region, renders an
+  unmeasured success rate as *Not measured*, flags a far-future probe stamp as clock skew, labels
+  the egress IP as a vendor claim and offers a guarded **Verify egress** check. 154 Vitest tests in
+  21 files. The UI is bilingual: a `中` / `EN` switch in the sidebar footer and a Language card in
   Settings switch every page, default to the browser language, persist in
   `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account labels, server names,
   IPs and API values are data and are never translated. HMC serves the mock build on `18081` and
@@ -230,7 +234,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (131 Vitest tests in 19 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (154 Vitest tests in 21 files), `cd daemon && go test ./...`
 (286 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
