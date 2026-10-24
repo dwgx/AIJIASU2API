@@ -47,7 +47,9 @@ per-account expiry (`/v1/renewal/*`, redirects refused), flow-metered request-lo
 HMAC signing, an SSRF policy and bounded retries (`/v1/webhooks*`), passphrase-encrypted panel
 backup, inspect and restore (`/v1/backup*`), plus least-privilege scoped API keys
 (`/v1/scoped-keys`, `ajs_sk_` secrets with per-route scopes, including the
-`usage:read`/`renewal:read`/`health:read` customer reads). None of them calls a vendor host:
+`usage:read`/`renewal:read`/`health:read`/`events:read` customer reads). The same wave adds
+customer-visible event replay and a server-sent event stream (`/v1/events`,
+`/v1/events/stream`) over the bounded ring the webhook sink fills. None of them calls a vendor host:
 renewal prices come from the public purchase page and are cached, usage is derived from the
 request log, and the health probe dials `127.0.0.1` only.
 
@@ -89,6 +91,7 @@ internal/api/schedules.go    schedule CRUD, preview, run-now and run history han
 internal/api/scoped_keys.go  scope table, scoped-key handlers and the auth identity
 internal/api/device_pool.go  device-pool HTTP lifecycle handlers
 internal/api/platform.go     renewal, usage, health and webhook handlers
+internal/api/events.go       event replay page and server-sent event stream handlers
 internal/api/backup.go       panel backup, inspect and restore handlers (admin-only)
 internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
 internal/store/webhooks.go   persisted webhook receivers
@@ -96,6 +99,7 @@ internal/health/             loopback gate sampler: 30 s probes, 120-sample ring
 internal/renewal/            cached public plan catalogue and per-account expiry
 internal/usage/              request-log aggregation: windows, accounts, users, days, targets, retention
 internal/webhook/            dispatcher, HMAC signing, SSRF policy, retry/backoff, delivery ring, scrub
+internal/events/             bounded event ring: monotonic cursors, scrub, fan-out, cursor expiry
 internal/backup/             passphrase-encrypted panel backup: deterministic tar, manifest, envelope, diff
 internal/ratelimit/          per-scoped-key token bucket (rateLimitPerMin)
 internal/runtime/flow_meter.go  gate flow -> request-log row (AJS_FLOW_METER)
@@ -1111,6 +1115,31 @@ survives a restart, but the secret does not, so the endpoint reports
 `secretAvailable:false` and must be recreated. This is the safer default
 compared with writing the secret into `state.json` in plaintext.
 
+**Event replay and streaming.** `internal/events` keeps a bounded, scrubbed
+ring of the same customer events the webhook dispatcher sends, and
+`internal/api/events.go` is only the HTTP contract. The daemon wires **one**
+ring (`api.DefaultEventRingCapacity`, 4096 events) and the sink mirrors every
+event into it before fanning out, so the replay API and the webhook receivers
+cannot drift. `GET /v1/events?since=&limit=&wait=` replays oldest-first and
+answers `{events,nextCursor,oldestCursor,dropped}`; `wait` (a Go duration,
+capped at 25 s) holds a request whose cursor is current until the next event
+arrives, so a poll never busy-loops. `GET /v1/events/stream` is
+`text/event-stream`: one `id:`/`event:`/`data:` frame per event (the `data` is
+the same JSON object as a page entry), the resume point comes from
+`Last-Event-ID` (a browser reconnect) or `since`, a `: keepalive` comment every
+15 s keeps proxies from closing an idle stream, and the response clears the
+server `WriteTimeout` because the stream is intentionally long-lived. The
+stream subscribes after the first replay and then reads the ring again, so an
+event published during a long replay is delivered exactly once. IDs are
+monotonic (`evt-000123`). A malformed cursor is 400 `INVALID_ARGUMENT`; a
+cursor whose event was evicted is 410 `CURSOR_EXPIRED` with
+`details.oldestCursor`, the point to restart from — the ring never silently
+replays a gap. A subscriber that cannot keep up loses events into `dropped`
+(a lifetime counter) and recovers by reconnecting with its last id. Both routes
+need `events:read`; a scoped key restricted by `accountIds`/`regions` is
+refused 403 because the ring is global and a per-account filter would be
+guesswork.
+
 **Panel backup and restore.** `internal/backup` owns the envelope and
 `internal/api/backup.go` only the HTTP contract. A backup carries `state.json`
 plus whichever of `secrets.json`/`device-secrets.json` exist, so it contains
@@ -1213,6 +1242,7 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 | `usage:read` | `GET /v1/usage` |
 | `renewal:read` | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` |
 | `health:read` | `GET /v1/health/nodes` |
+| `events:read` | `GET /v1/events`, `GET /v1/events/stream`; a key restricted by `accountIds`/`regions` is refused 403 because the ring is global |
 | `admin` | every route, same as the admin token |
 
 Routes absent from the table are admin-only — the scoped-key registry, users, API keys, requests
@@ -1226,8 +1256,9 @@ scope. The three platform reads follow the same rule:
 `GET /v1/renewal/accounts/{id}` answers 403 for an account outside the key's list (404 when the id
 is unknown), `GET /v1/usage` aggregates only visible accounts — an explicit out-of-scope `account`
 filter is a 403, and an unknown label yields an empty 200 summary — and `GET /v1/health/nodes`
-omits nodes belonging to invisible accounts. The scope vocabulary is the OpenAPI `Scope` enum; the
-three read scopes were appended after `settings:write` and before `admin`.
+omits nodes belonging to invisible accounts. `GET /v1/events` and `GET /v1/events/stream` cannot
+be narrowed that way, so a restricted key is refused both. The scope vocabulary is the OpenAPI
+`Scope` enum; the four read scopes were appended after `settings:write` and before `admin`.
 
 Each key also carries a per-minute request budget: `rateLimitPerMin` (default **60**; an explicit
 `0` means unlimited). The token bucket is per key, and every scoped-key response carries
@@ -1729,6 +1760,8 @@ objects.
 | PATCH | `/v1/webhooks/{id}` | `{enabled}` only; enabling a receiver whose secret is gone → 409 |
 | DELETE | `/v1/webhooks/{id}` | remove the row and its sealed secret → 204 |
 | GET | `/v1/webhooks/{id}/deliveries` | the last 200 delivery attempts for that endpoint, oldest first, from memory |
+| GET | `/v1/events?since=&limit=&wait=` | retained customer events after `since`, oldest first: `{events,nextCursor,oldestCursor,dropped}`. `limit` defaults to 100 and is clamped to 500; `wait` (a Go duration, capped at 25 s) turns a current cursor into a long poll that answers as soon as the next event arrives. A malformed cursor → 400 `INVALID_ARGUMENT`; an evicted one → 410 `CURSOR_EXPIRED` with `details.oldestCursor`. Scope `events:read`; a key restricted by `accountIds`/`regions` → 403 |
+| GET | `/v1/events/stream` | `text/event-stream` replay plus live events: one `id:`/`event:`/`data:` frame each (data is the `Event` JSON object), resume from `Last-Event-ID` or `since`, a 15 s `: keepalive` comment, `X-Accel-Buffering: no`; closes when the client disconnects or the daemon stops. Scope `events:read` |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
 | POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
 | POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1` (admin-only) |
@@ -1775,8 +1808,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (77 paths, 95 operations,
-  147 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (79 paths, 97 operations,
+  149 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
@@ -1933,7 +1966,13 @@ fallback and its bounded `Evicted` record; `cmd/ajs-accountd/health_reconcile_te
 `AJS_HEALTH_MAX_NODES` parse (default, clamp, non-integer startup error), the re-arm of an evicted
 watched key, the once-per-minute log throttle, the failure log and the unwatch of a stopped gate;
 `internal/api/platform_scopes_test.go` pins the three new read scopes route by route (200 with the
-scope, 403 without) and the account restriction on those reads.
+scope, 403 without) and the account restriction on those reads. `internal/api/events_test.go`
+pins the replay page order and cursor, the 400/410 cursor split with `details.oldestCursor`, the
+long poll returning on a new event and timing out on its budget, SSE replay/live frames with
+`Last-Event-ID` and `since`, unsubscribe on client cancel, and the `events:read` matrix (403 for
+another read scope and for an account-restricted key, 200 for admin);
+`cmd/ajs-accountd/events_ring_test.go` pins the single emission point: one sink call reaches the
+ring and the webhook dispatcher with the same scrubbed event.
 `internal/api/backup_test.go` covers the three backup routes end to end (create → inspect →
 dry-run → apply, wrong passphrase, tampered header, busy lock, LIVE-node refusal, the
 daemon-running gate, missing state dir, and the restore-never-deletes rule);

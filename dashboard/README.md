@@ -9,7 +9,7 @@ variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 330 tests in 37 files.
+- Tests: Vitest + React Testing Library + jsdom, 341 tests in 38 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 330 tests in 37 files
+npm test           # Vitest, 341 tests in 38 files
 npm run typecheck  # tsc -b
 ```
 
@@ -673,9 +673,9 @@ matching row — captured as `screenshots/palette-data-search.png` (palette open
 
 ## Settings sections
 
-`/settings` is a shell with a sticky left rail and eight anchored sections. The rail is grouped
+`/settings` is a shell with a sticky left rail and nine anchored sections. The rail is grouped
 **Basics** (General, Appearance, Language), **Runtime** (Connection, Leases, Updates) and
-**System** (Integrations, Audit); each item is an `<a href="#section">` with
+**System** (Integrations, Access, Audit); each item is an `<a href="#section">` with
 `aria-current="location"` on the active section. Under 900 px the same rail becomes a horizontal
 scroll strip with a 44 px touch target and a mint underline. Section ids are deep-linkable
 (`/settings#leases`) and the shell scrolls to the target once the settings request resolves.
@@ -689,14 +689,16 @@ scroll strip with a 44 px touch target and a mint underline. Section ids are dee
 | Leases | lease TTL, subscription refresh | TTL **Applied**; refresh **Stored only** (the daemon uses a fixed 30 s window) |
 | Updates | existing read-only release check + deploy command | automatic update/rollback marked **Coming later** |
 | Integrations | Resin and Prometheus rows, plus the live webhook registry | Resin/Prometheus read-only **Not configured**; webhooks are real: endpoint list, create with a one-time signing secret, enable/disable, edit-as-replace, delete confirm and a per-endpoint delivery ring |
-| Audit | audit and request-log retention, source route, link to Logs | retention **Locked** by the daemon; export **Coming later** |
+| Access | scoped API keys: prefix, user, scope chips, rate limit, expiry, last use, revoked state | keys are real: create with user/scopes/account restrictions/expiry/rate limit, one-time secret, typed revoke confirm with 409 refresh |
+| Audit | audit and request-log retention, source route, link to Logs | retention **Locked** by the daemon; CSV export lives on Logs |
 
 The header carries the dirty count (`{count} unsaved`), **Reset changes**, and **Save changes**.
 Dirtiness is per field (`theme`, `transport`, `healthIntervalSec`, `leaseTtl`,
 `subscriptionRefreshSec`), dirty sections get a warning dot in the rail, each editable section has
 its own **Reset section** action, and a dirty form installs a `beforeunload` guard. The settings
 form itself makes two requests on load (`GET /v1/settings` and `GET /v1/lab/overview`) and does not
-poll; the webhook registry below adds its own list and per-endpoint delivery reads.
+poll; the webhook registry and the scoped-key section add their own reads (endpoints plus
+deliveries, keys plus the user and account pickers).
 
 The section registry is `src/lib/settingsSections.ts` (id, group, label/description keys, dirty
 fields, deep-link ids). `src/components/settings/` holds the rail, section shell, field row,
@@ -772,7 +774,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 330 Vitest tests in 37 files (65 at the 2026-10-23 record; see
+- 341 Vitest tests in 38 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -914,10 +916,11 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
-| `/logs` | Logs | severity/actor filters, paginated audit table, export placeholder |
+| `/logs` | Logs | severity/actor filters, paginated audit table, CSV export of `/v1/audit/export.csv` with the active severity filter and an `X-Truncated` warning |
 | `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
-| `/settings` | Settings | eight-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Audit; dirty save/reset, honest **Stored only**/**Coming later** states; Integrations carries the live webhook registry |
+| `/settings` | Settings | nine-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Access, Audit; dirty save/reset, honest **Stored only**/**Coming later** states; Integrations carries the live webhook registry and Access the scoped-key manager |
+| `/backup` | Backup | create a passphrase-sealed `.ajsb` envelope and download it, inspect a pasted/uploaded envelope header plus manifest, and dry-run a restore diff; apply stays disabled with the `AJS_BACKUP_ALLOW_RESTORE`/no-LIVE-node explanation |
 
 `*` redirects to `/`.
 
@@ -937,7 +940,7 @@ src/
     geo.ts                offline province/city resolution and map aggregation
     format.ts             bytes, dates, TTL, proxy URL helpers
     i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
-    settingsSections.ts   eight-section registry: groups, dirty fields, deep-link ids
+    settingsSections.ts   nine-section registry: groups, dirty fields, deep-link ids
     schedules.ts          pure cron/interval/window mirror for the mock and dialog checks
     iconMorph.ts          morph core: path parsing, resampling, Procrustes, polar interpolation, spring
     labels.ts             account/node/severity tone maps
@@ -956,14 +959,15 @@ src/
     schedules/            ScheduleDialog, ScheduleHistoryDrawer, RenewalSweepCard, schedules.css
     usage/                UsageChart
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
-  pages/                  Overview, Usage, Accounts, Nodes, Leases, Users, Requests, Logs, Schedules, Lab, Settings
+  pages/                  Overview, Usage, Accounts, Nodes, Leases, Users, Requests, Logs, Schedules, Lab, Settings, Backup
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
   i18n.test.tsx           dictionary parity, zh/en switching, browser default, ajs.lang, document.lang
   token-gate.test.tsx     401 → runtime token dialog → sessionStorage token + retry
   update-card.test.tsx    Settings Updates card states and deploy command
-  settings-sections.test.tsx  eight-section rail, active state, stored-only controls, save/reset, zh rail
+  settings-sections.test.tsx  nine-section rail, active state, stored-only controls, save/reset, zh rail
+  access-backup.test.tsx  scoped-key create/secret/revoke, audit CSV, backup inspect/dry-run, live bearer header
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
   account-io.test.tsx     export/import dialogs, plaintext gate, bulk delete, mock IO contract
   renewal-card.test.tsx   countdown, public price catalogue, official link, no payment call
