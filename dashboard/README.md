@@ -9,10 +9,11 @@ is opt-in through build-time environment variables (see [Modes](#modes) and
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 182 tests in 25 files.
-- Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings language card.
+- Tests: Vitest + React Testing Library + jsdom, 262 tests in 32 files.
+- Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
-- Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, no live vendor calls.
+- Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
+  the console itself never calls a vendor endpoint — it talks only to `ajs-accountd`.
 
 ## Modes
 
@@ -48,7 +49,7 @@ The console ships in English and Chinese. Both switches are always visible:
 | Surface | Control |
 |---|---|
 | Sidebar footer | `中` / `EN` segmented switch (`role="group"`, `aria-pressed` on the active choice) next to the version and theme button |
-| Settings | **Language** card with a `中文` / `English` segmented control and a note that the choice is per browser |
+| Settings | **Language** section card with a `中文` / `English` segmented control and a note that the choice is per browser |
 
 - **Default.** On first load the stored choice wins; with no stored value the browser hint decides —
   `navigator.language` starting with `zh` selects Chinese, everything else selects English.
@@ -73,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 182 tests in 25 files
+npm test           # Vitest, 262 tests in 32 files
 npm run typecheck  # tsc -b
 ```
 
@@ -152,7 +153,7 @@ Behaviour:
   returns the seeded exit, which the client keeps in the same per-node state as a live observation.
 - **Runtime token gate.** A live build without `VITE_PANEL_TOKEN` still works. `http()` dispatches
   `ajs:unauthorized` on a 401 (except a vendor login rejection on `/actions/login`), and
-  `TokenGate` asks for the admin token; the Settings **Daemon** card dispatches
+  `TokenGate` asks for the admin token; the Settings **General** section's daemon card dispatches
   `ajs:token-required` from **Set token** / **Replace token** for the same dialog. The value is
   kept in `sessionStorage["ajs.panelToken"]` for that tab only, never rendered back, and a submit
   retries every mounted loader with the bearer header. **Clear session token** in Settings drops it.
@@ -240,9 +241,10 @@ the typed-query preservation on unrelated param changes.
 
 - **Catalog** reads one account at a time: the account picker in the page header selects the
   retained login catalog, and `GET /v1/accounts/{id}/servers` is server-paged. The query carries
-  `q`, `region`, `status`, `sort` (`order|title|host|status|region`), `offset` and `limit`
-  (default 50, max 500); the response returns `total`, `regions:[{code,count}]`, `nextOffset` and
-  `hasMore`. The live `acc-07` login result is **2,814 vendor servers**, all carrying region `cn`,
+  `q`, `region`, `status`, `province`, `city`, `sort` (`order|title|host|status|region`), `offset`
+  and `limit` (default 50, max 500); the response returns `total`, `regions:[{code,count}]`,
+  `nextOffset`, `hasMore` and the `geo` aggregate. The live `acc-07` login result is **2,814 vendor
+  servers**, all carrying region `cn`,
   so the footer reads `1–50 of 2,814` and the page shows one *China* group; region labels come
   from `src/lib/regions.ts` (ISO 3166-1 alpha-2 plus a few city subdivisions, English and
   Chinese), and the raw vendor code stays visible as secondary mono text.
@@ -250,10 +252,12 @@ the typed-query preservation on unrelated param changes.
   Group headers group the current page's rows but take their count from the server's `regions[]`
   summary, so a region spanning pages never understates its total; the header notes how many rows
   are on this page when the two differ.
-- Columns: server title/id, account, region (localised name + code), `host:port`, vendor status,
-  runtime state (`Current` for a `LIVE` node, otherwise the node state or `not linked`), selection
-  (`selected` / `not selected` / `skipped by node limit`) and flags (`full load`, `member only`,
-  blocking marks, `ping secret`, `stale snapshot`).
+- Columns: select checkbox, server title/id, account, region (localised name + code), `host:port`,
+  vendor status, runtime state (`Current` for a `LIVE` node, otherwise the node state or
+  `not linked`), target badge and flags (`full load`, `member only`, blocking marks,
+  `stale snapshot`). Ping-secret presence and skipped-by-limit are not row badges (design §4.5):
+  every live row has a ping secret and skipping is the expected state under the node limit, so
+  they stay drawer facts instead of row noise.
 - Search is debounced 250 ms before it reaches the daemon; region, status and sort changes return
   to offset 0, and the footer's page/size controls request the next window instead of slicing a
   full list. Selection is local UI state keyed by account and server — the bulk bar says so and no
@@ -267,31 +271,66 @@ the typed-query preservation on unrelated param changes.
 - Mock mode serves deterministic fixtures from `src/lib/mock.ts` (including the paging envelope),
   so the same layout is reviewable offline.
 
+### Target and session
+
+A catalog row has two independent states: **target** (the server the next login should use, stored
+by the daemon) and **current** (the server whose gate is running). Setting a target writes
+`PUT /v1/accounts/{id}/selection` and starts nothing; clearing it is a `DELETE` and never
+disconnects the session. The row badge and the drawer both name the target, and a target write
+carries the `snapshotId` from the catalog response.
+
+Connect, reconnect and disconnect are the only writes that touch a session, and each goes through
+a confirm dialog:
+
+| Action | Route | Behaviour |
+|---|---|---|
+| **Connect** | `POST /v1/accounts/{id}/actions/connect` `{serverId,snapshotId?,confirm:true}` | opens the new session, commits exactly one `LIVE` node, rolls back on open/gate/store failure; the same server answers `alreadyConnected` without a cooldown |
+| **Reconnect** | `POST /v1/accounts/{id}/actions/reconnect` `{snapshotId?,confirm:true}` | reopens the current server, or the target when nothing runs; `no_target` → 404 |
+| **Disconnect** | `POST /v1/accounts/{id}/actions/disconnect` `{confirm:true}` | drains and closes every gate of the account, keeps the target; a second call answers `alreadyDisconnected` |
+
+A stale `snapshotId` (the catalog changed after the page loaded) answers 409 `snapshot_changed`; an
+ineligible vendor row answers 409 with `details.ineligibleReason`; a repeat inside the 5 s
+per-account cooldown answers 429 `connect_cooldown` with `Retry-After`, and the row actions stay
+disabled until it elapses. The connect dialog's acknowledgement names the consequence — the current
+session will be replaced — because the vendor allows one active FV session per account, so
+connecting a second server moves the session instead of adding one. A P0
+daemon degrades honestly: a 404 on `/selection` reads as "no target", a catalog response with
+`enabled:false` disables every write and shows the daemon's reason, and a missing action route
+surfaces as an error in the dialog instead of a success.
+
 ### China map and province filter
 
 - The Catalog tab renders a province choropleth beside the toolbar. Geometry is committed in
   `src/assets/geo/cn-provinces.json` (31 mainland provinces, pre-projected SVG paths) and the
   city lookup/points in `cn-cities.json`; the page never calls a map or tile service.
-- Province counts come from the whole retained catalog. `api.getCatalogSnapshot()` assembles it by
-  reading every 500-row page and caches it until the daemon's `fetchedAt` changes, so the 30 s
-  table poll does not re-download the catalog. The read starts only after that account's catalog
-  response settles (so the snapshot timestamp is known and one six-page pass is enough), and
-  concurrent callers share one in-flight pass (single-flight). An invalidation epoch keeps a pass
-  started before a reset or explicit refresh from repopulating the cache; the table itself stays
-  server-paged.
+- Province counts come from the daemon's `geo` aggregate on every catalog page
+  (`GET /v1/accounts/{id}/servers`): the map, the city Select and the province/city table filters
+  all read that one response, so `/nodes` no longer downloads the retained catalog to draw the
+  map. The daemon resolves titles with the same exact city table the dashboard bundles.
+- P0 fallback: a daemon without `geo` still works. `api.getCatalogSnapshot()` assembles the
+  retained catalog by reading every 500-row page and caches it until the daemon's `fetchedAt`
+  changes, so the 30 s table poll does not re-download the catalog. The read starts only after that
+  account's catalog response settles, concurrent callers share one in-flight pass (single-flight),
+  and an invalidation epoch keeps a pass started before a reset or refresh from repopulating the
+  cache.
 - Vendor titles are the only geography key (`<city> #<n>`). `src/lib/geo.ts` resolves them with an
-  exact match, a one-directional prefix rule and the reviewed aliases (`济南 - 莱芜` → 济南,
-  `延吉` → 延边); `海南藏族自治州` resolves to Qinghai, not Hainan. Unresolved titles are counted
-  in **Other** and are never assigned a province.
+  exact match against the committed city names and aliases (`镇江` → 镇江市, `济南 - 莱芜` → 济南,
+  `延吉` → 延边, `湘西` → 湘西州); there is deliberately no prefix rule, so `海南 #1` is
+  unresolved instead of prefix-matching `海南藏族自治州` into Qinghai. Unresolved titles are
+  counted in **Other** and are never assigned a province. `scripts/geo/build-cn-geo.mjs` derives
+  the short-name aliases and drops any that would name a different province.
 - Clicking a province filters the table to it and returns to page 1; clicking it again clears the
-  filter. A city Select appears for the selected province. Filtered pages are sliced from the
-  snapshot, while search, status, sort, pagination and the account picker keep working.
+  filter. A city Select appears for the selected province. With the daemon aggregate the filter is
+  a `province`/`city` query parameter; the fallback filters and slices the cached snapshot in the
+  browser. Search, status, sort, pagination and the account picker work in both modes.
 - The current `LIVE` node keeps a mint ring and a city dot even when a filter excludes its row; the
   header chip names it. The SVG is decorative (`aria-hidden`) and the province list under it is the
   keyboard/screen-reader control. Transitions are disabled under `prefers-reduced-motion`.
-- Regenerate both assets with `node scripts/geo/build-cn-geo.mjs` (DataV GeoAtlas is contacted at
-  build time only; `--raw <dir>` reuses a cache and `--check` fails on drift). The committed asset
-  records the source URL and the sha256 of the national boundary file.
+- Regenerate the browser assets with `node scripts/geo/build-cn-geo.mjs` (DataV GeoAtlas is
+  contacted at build time only; `--raw <dir>` reuses a cache and `--check` fails on drift). The
+  committed asset records the source URL and the sha256 of the national boundary file. Then
+  regenerate the daemon's exact-match index from that asset:
+  `node scripts/geo/gen-daemon-geo.mjs` (`--check` fails on drift).
 
 ### Node detail drawer
 
@@ -534,6 +573,37 @@ and clicking it navigated to `/accounts?q=Northwind%20Ops` with the table filter
 matching row — captured as `screenshots/palette-data-search.png` (palette open, 1440×900) and
 `screenshots/palette-data-search-accounts.png` (filtered Accounts page, 1440×900).
 
+## Settings sections
+
+`/settings` is a shell with a sticky left rail and eight anchored sections. The rail is grouped
+**Basics** (General, Appearance, Language), **Runtime** (Connection, Leases, Updates) and
+**System** (Integrations, Audit); each item is an `<a href="#section">` with
+`aria-current="location"` on the active section. Under 900 px the same rail becomes a horizontal
+scroll strip with a 44 px touch target and a mint underline. Section ids are deep-linkable
+(`/settings#leases`) and the shell scrolls to the target once the settings request resolves.
+
+| Section | Contents | Honesty state |
+|---|---|---|
+| General | daemon endpoint, mode, version, commit, stored transport and token; mock-only reset | read-only facts; no hardcoded version fallback |
+| Appearance | dark/light theme, four accents | browser-local; the theme is also saved as the panel default |
+| Language | `中文` / `English` | browser-local |
+| Connection | transport and health interval | **Stored only** — controls disabled with a visible reason; `VersionProfile.Transport` wins and no canary scheduler exists |
+| Leases | lease TTL, subscription refresh | TTL **Applied**; refresh **Stored only** (the daemon uses a fixed 30 s window) |
+| Updates | existing read-only release check + deploy command | automatic update/rollback marked **Coming later** |
+| Integrations | Resin, Prometheus and webhook rows | read-only **Not configured**; webhooks **Coming later**; no fake toggles or deliveries |
+| Audit | audit and request-log retention, source route, link to Logs | retention **Locked** by the daemon; export **Coming later** |
+
+The header carries the dirty count (`{count} unsaved`), **Reset changes**, and **Save changes**.
+Dirtiness is per field (`theme`, `transport`, `healthIntervalSec`, `leaseTtl`,
+`subscriptionRefreshSec`), dirty sections get a warning dot in the rail, each editable section has
+its own **Reset section** action, and a dirty form installs a `beforeunload` guard. The page makes
+two requests on load (`GET /v1/settings` and `GET /v1/lab/overview`) and does not poll.
+
+The section registry is `src/lib/settingsSections.ts` (id, group, label/description keys, dirty
+fields, deep-link ids). `src/components/settings/` holds the rail, section shell, field row,
+provenance badge and the disabled-capable segmented control; shell CSS lives in
+`src/components/settings/settings.css` so `app.css` stays untouched.
+
 ## Update check (Settings → Updates)
 
 The Settings page carries a read-only **Updates** card. It shows the running version and a
@@ -560,7 +630,7 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 
 ## Tests and QA
 
-- 182 Vitest tests in 25 files (65 at the 2026-10-23 record; see
+- 262 Vitest tests in 32 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -635,6 +705,28 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   `tests/token-gate.test.tsx` covers the runtime token gate: a live 401 opens **Panel token
   required**, submitting stores `ajs.panelToken` in `sessionStorage` and retries with the bearer
   header.
+  `tests/catalog-connect.test.tsx` covers the guarded switch UI: target vs current as separate
+  row states, setting and clearing a target, the connect confirm, disconnect and reconnect
+  actions, `alreadyConnected`, the 409 ineligible reason, writes disabled on a stale snapshot,
+  the cooldown 429 with `Retry-After`, snapshot-id forwarding, and the one-session copy.
+  `tests/account-io.test.tsx` covers export/import and bulk delete: encrypted export requires a
+  passphrase, plaintext export requires the capabilities flag plus the `EXPORT` confirmation,
+  import dry-run renders the plan without applying, atomic/partial apply results, row warnings,
+  the single bulk endpoint call, the typed `DELETE` confirmation above ten and not-found rows in
+  the result panel.
+  `tests/renewal-card.test.tsx` pins the renewal drawer: the countdown (days, warning inside five
+  days, overdue and `-0` normalisation), the public plan catalogue and save amounts, the official
+  purchase link carrying no account or token, and that no payment request is made.
+  `tests/icon-morph.test.tsx` covers the morph core and driver: path normalisation and
+  resampling, Procrustes correspondence, spring settling, the instant swap under
+  `prefers-reduced-motion`, and the rendered `d` at rest.
+  `tests/china-map.test.tsx` covers the map end to end: 31 provinces, the 2,814 total, the
+  current-node marker, province and city filtering, the Other bucket for unresolved titles, the
+  daemon `geo` aggregate path with server-side province/city filters, reduced motion and both
+  languages; `tests/catalog-geo.test.ts` checks the choropleth fill contrast.
+  `tests/openapi.test.ts` validates `docs/openapi.json`: it parses, every `$ref` resolves, every
+  `operationId` is unique, each operation declares `x-implementation-phase`, and every route
+  registered in `daemon/internal/api/server.go` appears in the contract.
 - Route sweep on the mock build (2026-10-23, before the Lab page): all 8 routes at 1440×900 and
   390×844.
 
@@ -663,14 +755,14 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | Route | Page | Primary surfaces |
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay) |
-| `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select |
-| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map with province filter, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
+| `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
+| `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, export placeholder |
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
-| `/settings` | Settings | transport, health interval, lease TTL, subscription refresh, theme + accent, language, **Updates** check card, daemon/token card, reset |
+| `/settings` | Settings | eight-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Audit; dirty save/reset, honest **Stored only**/**Coming later** states |
 
 `*` redirects to `/`.
 
@@ -690,6 +782,8 @@ src/
     geo.ts                offline province/city resolution and map aggregation
     format.ts             bytes, dates, TTL, proxy URL helpers
     i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
+    settingsSections.ts   eight-section registry: groups, dirty fields, deep-link ids
+    iconMorph.ts          morph core: path parsing, resampling, Procrustes, polar interpolation, spring
     labels.ts             account/node/severity tone maps
     nav.tsx               navigation + command registry metadata
     theme.tsx             theme + accent provider, localStorage persistence
@@ -699,7 +793,9 @@ src/
     AppShell, Sidebar, Topbar, CommandPalette, Toast, CopyButton, TokenGate
     DataTable, Pagination, Overlay (Drawer/Modal/ConfirmDialog), primitives
     Select.tsx            custom combobox: variants, search, multi, groups, body portal
-    icons/                APC brand, nav, status and shell glyphs (inline SVG)
+    icons/                APC brand, nav, status and shell glyphs (inline SVG) + MorphIcon/morphGlyphs
+    accounts/             export/import dialogs, renewal drawer card, accounts-io.css
+    settings/             SettingsNav rail, section shell, field row, provenance badge, settings.css
     nodes/                CatalogTab (grouped vendor catalog), ChinaMap (offline choropleth), ConnectedTab (runtime nodes)
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
   pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Lab, Settings
@@ -709,7 +805,14 @@ tests/
   i18n.test.tsx           dictionary parity, zh/en switching, browser default, ajs.lang, document.lang
   token-gate.test.tsx     401 → runtime token dialog → sessionStorage token + retry
   update-card.test.tsx    Settings Updates card states and deploy command
+  settings-sections.test.tsx  eight-section rail, active state, stored-only controls, save/reset, zh rail
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
+  account-io.test.tsx     export/import dialogs, plaintext gate, bulk delete, mock IO contract
+  renewal-card.test.tsx   countdown, public price catalogue, official link, no payment call
+  catalog-connect.test.tsx target/session contract, confirm, 409/429, snapshot id, zh copy
+  catalog-geo.test.ts     choropleth fill contrast
+  icon-morph.test.tsx     morph planning, spring, reduced motion, resting paths
+  openapi.test.ts         docs/openapi.json parses, refs, operation ids, route-table parity
   app.test.tsx            all routes, palette open/navigate/Esc/filter
   interactions.test.tsx   copy toast, rotate, release, create account, bulk pause, key show-once, mutation lab
   nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
@@ -759,6 +862,56 @@ keeps its existing below-760 px auto-card behaviour; the explicit card view work
 preference (including an invalid value), card anatomy, bulk selection plus a card action, the mobile
 grid, and the responsive CSS contract.
 
+### Account export, import and bulk delete
+
+The Accounts toolbar carries **Import** and **Export**; the bulk bar carries **Export selected**.
+Export scope is the selected ids, the current filter, or every account, and the file is built in
+memory and downloaded — nothing is written to browser storage.
+
+| Format | Gate | Contents |
+|---|---|---|
+| Encrypted `.ajsx` | always available in live mode | PBKDF2-SHA-256 (600 000 iterations) + AES-256-GCM envelope; the passphrase is required, and device identity is included unless unticked |
+| JSON | `AJS_ALLOW_PLAINTEXT_EXPORT=1` and `confirmPlaintext:"EXPORT"` | versioned `ajs-accounts` document; passwords only when the daemon holds sealed secrets, device identity optional |
+| CSV | same plaintext gate | one row per account; device identity is refused because CSV has no column for it |
+
+The export response sets `X-AJS-Export-Count`, `X-AJS-Export-Missing-Secrets` and
+`X-AJS-Export-Devices` plus `Cache-Control: no-store`, and the daemon writes one `account.export`
+audit row with counts only. Mock mode cannot encrypt: it disables the encrypted option and exports
+JSON/CSV without passwords.
+
+Import accepts `.ajsx`, `.json` or `.csv` (4 MiB UI cap; the daemon accepts a 4 MiB import body and
+at most 1 000 rows) and always previews first: the preview is a `dryRun` call that renders every
+row as create/update/rename/skip/fail plus warnings, and nothing is applied until **Import**.
+Options are mode (`atomic` default, or `partial`), match key (`label`, `username_platform`, `id`),
+conflict policy (`skip`, `update`, `rename`, `fail`), initial state (`paused` default, `active`,
+`from_file`), id policy (`new` default, `preserve`), device policy (`restore_if_missing` default,
+`keep`, `replace`) and timestamp preservation. An atomic import with any failed row is blocked in
+the UI; partial mode applies the valid rows and lists the rest. Passwords never round-trip to the
+screen or to storage.
+
+Bulk delete posts one `POST /v1/accounts/bulk-delete` for the selection (at most 100 ids), with a
+`dryRun` preview, `continue` (default) or `stop` mode, and per-row statuses `deleted`,
+`would_delete`, `not_found`, `failed` or `skipped`; above ten selected accounts the dialog requires
+the typed word `DELETE`. The daemon runs the same stop-gates-then-delete path as a single delete,
+so a failed hook or sealer leaves that account and its secret in place.
+
+### Renewal card
+
+Each Accounts row shows a renewal countdown in the expiry cell (warning inside the vendor's
+five-day window, overdue in red) and a **Renew** action; **Open renewal** in the row menu opens the
+renewal drawer. The card is deliberately read-only:
+
+- it shows the expiry date, whole days remaining, and a warning or overdue status;
+- it lists the public plan catalogue captured on 2026-10-24 (1 month ¥20, 3 months ¥53, 12 months
+  ¥198, 6-hour trial ¥1) with the saving against the monthly price, and the auto-renew variants as
+  a note;
+- its only outbound link is the vendor's official purchase page (`https://www.91ajs.com/purchase`),
+  with no account id, label or token appended.
+
+APC never posts to a payment endpoint, never calls a purchase API and never claims a renewal
+succeeded. The page's prices are a snapshot, not a live quote: the vendor's checkout is
+authoritative.
+
 ## Data layer
 
 `src/lib/api.ts` exposes a typed promise API and switches on `VITE_USE_MOCK`:
@@ -791,7 +944,9 @@ contract only):
 | Metrics | `GET /v1/metrics?range=24h\|7d` | `[PROPOSED]` |
 | Settings | `GET/PATCH /v1/settings` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab telemetry (read-only) | `GET /v1/lab/{overview,flags,gates,flows,sessions,egress,profiles,logs,diagnostics}` | `[PROPOSED]`; served by `ajs-accountd` |
-| Lab account reads | `GET /v1/accounts/{id}/{servers,device}` (`servers` takes `q/region/status/selected/offset/limit/sort`) | `[PROPOSED]`; served by `ajs-accountd` |
+| Lab account reads | `GET /v1/accounts/{id}/{servers,device}` (`servers` takes `q/region/status/province/city/offset/limit/sort` and returns `snapshotId` + `geo`) | `[PROPOSED]`; served by `ajs-accountd` |
+| Account export/import/bulk delete | `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/{export,import,bulk-delete}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Catalog target and session | `GET/PUT/DELETE /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/{connect,disconnect,reconnect}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
 Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
@@ -849,8 +1004,9 @@ never a hex. Dark is canonical, light mirrors every role:
   states and audit severities onto the vocabulary; status is never colour-only.
 - **Icons.** `components/icons/ApcIcons.tsx` draws the brand mark, every nav glyph, the five status
   glyphs and the shell controls inline on a 24 px grid with `currentColor`; `lucide-react` remains
-  for page-level glyphs only. All decorative icons are `aria-hidden`, and the surrounding link or
-  button keeps its label.
+  for page-level glyphs only. Theme, language, collapse and node-state glyphs morph through
+  `MorphIcon` (see [Morph icons](#morph-icons)). All decorative icons are `aria-hidden`, and the
+  surrounding link or button keeps its label.
 - **Geometry.** 248 px sidebar (56 px collapsed rail), 64 px topbar, 32 px controls, 16 px cards,
   24 px modals, 40 px table header, 56 px rows (Accounts opts into the 60 px `comfy` density).
 - **Type.** 13/18 UI, 11/14 uppercase labels with +0.06em, 22/28 page title with −0.02em,
@@ -931,6 +1087,29 @@ Behaviour:
   from above, translate from below) and collapses to 0.001 ms under `prefers-reduced-motion`. The
   open trigger uses the shared mint border and 3 px ring.
 
+### Morph icons
+
+The theme, language, sidebar-collapse and node-state glyphs are not swapped as images: they morph.
+`src/lib/iconMorph.ts` is the pure core — SVG path parsing and primitive→cubic normalisation,
+arc-length resampling at 48 points with anchored corners, a closed-form 2D Procrustes
+correspondence, polar interpolation (rotation/scale/translation) and a damped-spring integrator.
+`src/components/icons/MorphIcon.tsx` is the React driver; glyphs live in `morphGlyphs.ts` and are
+plain single-subpath `d` strings on the 24×24 grid. Subpaths pair one-to-one by centroid and
+length, and a leftover collapses into a point with an opacity fade instead of duplicating a target.
+
+- **Spring.** The default preset is `snappy` (stiffness 420, damping 30); `smooth`, `bouncy` and a
+  custom `{stiffness, damping}` are also accepted. The integrator is interruptible: a target change
+  mid-flight restarts from the shape on screen with velocity carry-over.
+- **Reduced motion.** `prefers-reduced-motion: reduce` (or the `reducedMotion` prop) renders the
+  resting glyph verbatim and schedules no frame; the `progress` prop gives a controlled,
+  spring-free pair for tests and frozen states.
+- **Accessibility.** A settled icon renders its committed `d` strings exactly. Without an
+  `aria-label` the SVG is decorative (`aria-hidden`); with one it exposes that name.
+- **Licence.** The core is adapted from
+  [morphicons](https://github.com/guillermolg00/morphicons) (MIT, © Guillermo) and the MIT notice is
+  reproduced in `MorphIcon.tsx`; the adaptation (glyph list instead of Lucide IconNodes,
+  one-to-one subpath pairing, point-collapse leftovers) is APC's.
+
 ## Keyboard and accessibility
 
 - `Ctrl/Cmd+K` opens the command palette (fuzzy filter, ↑/↓, Enter, Esc, Tab trap). Queries of
@@ -978,8 +1157,15 @@ and reports healthy on `/healthz`.
   so the store survives a restart; SQLite is still the target schema (`docs/PANEL.md` §6),
   not the current storage.
 - The Resin publisher/runtime wiring and the node controller/gate are in place, and vendor
-  login is wired but default-off (`AJS_ACCOUNT_LOGIN=1` opts in). Live vendor login/FV/Resin
-  remains `[UNVERIFIED]` without an Owner account.
+  login is wired but default-off (`AJS_ACCOUNT_LOGIN=1` opts in). Live login/FV/egress was
+  exercised on 2026-10-23 and 2026-10-24 for one account (see the root README); multi-account
+  coexistence and Resin live publish remain `[UNVERIFIED]`.
+- Catalog target/connect, account import/export and bulk delete are wired to the daemon routes;
+  a P0 daemon without them degrades to a read-only catalog and a disabled export option rather
+  than faking success. The dashboard does not surface the daemon's scheduler or device pool.
+- Plaintext export needs `AJS_ALLOW_PLAINTEXT_EXPORT=1` on the daemon and the `EXPORT`
+  confirmation in the dialog; the dashboard cannot override the gate, and encrypted `.ajsx`
+  export is the default.
 - Live mode is verified against the local daemon; the tests use fakes and contact no vendor
   endpoint.
 - The live build hides the mock reset action entirely — the daemon has no reset endpoint.

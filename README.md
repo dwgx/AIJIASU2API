@@ -41,12 +41,18 @@ As of 2026-10-24:
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
   2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
-  `/v1/accounts/{id}/servers` (`q`, `region`, `status`, `sort`, `offset`, `limit`; 50 rows by
-  default, 500 max) with region names localised (`cn` → China / 中国) and the raw vendor code kept
-  as secondary text. The Catalog also draws an offline China map — 31 provinces from committed
-  DataV GeoAtlas-derived assets, so no map or tile service is contacted at runtime — and a
-  province click filters the table. It merges each account's login-retained catalog with the
-  running node marked current; Requests is the real gate-flow table fed by
+  `/v1/accounts/{id}/servers` (`q`, `region`, `status`, `province`, `city`, `sort`, `offset`,
+  `limit`; 50 rows by default, 500 max) with region names localised (`cn` → China / 中国) and the
+  raw vendor code kept as secondary text. The Catalog also draws an offline China map — 31
+  provinces from committed DataV GeoAtlas-derived assets, so no map or tile service is contacted
+  at runtime — and a province click filters the table. Province and city counts arrive in the same
+  catalog response (`geo`, resolved by the daemon's exact-match city index), so the map needs no
+  full-catalog download; a daemon without it falls back to paging the retained catalog in the
+  browser. A row carries the account's target and running state, so the operator can pin a target
+  (starts no session), then connect, reconnect or disconnect under a confirm; the switch keeps one
+  session per account and rejects a stale `snapshotId` or a repeat inside the 5 s cooldown. It
+  merges each account's login-retained catalog with the running node marked current; Requests is
+  the real gate-flow table fed by
   `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab history, and
   Requests, Logs and the Lab tables share a pagination footer. Overview draws no synthetic
   traffic curve — when the daemon reports `telemetryAvailable:false` it shows a no-telemetry empty
@@ -56,10 +62,13 @@ As of 2026-10-24:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 182 Vitest tests in 25 files. The UI is bilingual: a `中` / `EN` switch
-  in the sidebar footer and a Language card in Settings switch every page, default to the browser
+  **Verify egress** check. 262 Vitest tests in 32 files. The UI is bilingual: a `中` / `EN` switch
+  in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
-  labels, server names, IPs and API values are data and are never translated. HMC serves the mock
+  labels, server names, IPs and API values are data and are never translated. Settings is an
+  eight-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
+  Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later** states
+  for controls the daemon does not read yet. HMC serves the mock
   build on `18081` and the live build on `18082`, the latter published on the LAN at
   `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
   bearer token is required (insecure mode is refused off loopback).
@@ -74,6 +83,15 @@ As of 2026-10-24:
   answers `enabled:false` with the switch that is off. The build-time token is optional: on a live
   401 the runtime token gate asks for the admin token and keeps it in `sessionStorage` for that tab
   only.
+  Accounts exports the selected, filtered or all accounts as an encrypted `.ajsx` envelope
+  (passphrase-derived key, device identity optional), imports JSON, CSV or encrypted files with a
+  dry-run preview and an atomic or partial apply, and bulk-deletes up to 100 accounts with per-row
+  results.
+  Plaintext export stays behind `AJS_ALLOW_PLAINTEXT_EXPORT=1` and an `EXPORT` confirmation, and
+  an encrypted export is always available. A read-only renewal drawer shows the vendor's public
+  price snapshot, its official purchase link and a countdown; no payment is automated and no token
+  rides the link. Theme, language, sidebar-collapse and node-state glyphs morph with a spring
+  (an MIT-attributed adapted morphicons core, instant swap under `prefers-reduced-motion`).
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
@@ -84,12 +102,18 @@ As of 2026-10-24:
   sessions, egress, profiles, bounded redacted log ring, diagnostics, plus per-account
   servers/device; the GETs are read-only and one POST (`/v1/lab/egress-check`) runs an explicit
   egress probe that stores nothing), and the account control, FV session factory, node controller,
-  SOCKS5 gate and process-group kill with `WaitDelay` supervisor seams.
+  SOCKS5 gate and process-group kill with `WaitDelay` supervisor seams. The P1 control surface is
+  served too: account export/import/bulk-delete, catalog selection with guarded
+  connect/reconnect/disconnect (one session per account, per-account cooldown, `snapshotId`
+  guard), and a cron/interval/once scheduler behind `AJS_SCHEDULES=1` whose fire journal makes a
+  missed run `unknown` rather than replaying it. The device pool seals each account's vendor
+  identity in a separate file under an HKDF-derived key, restores a retired identity when the same
+  account returns, and converts the v1 plaintext map at startup.
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. 347 Go test
-  functions — 306 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  a second login on the same account) and again on 2026-10-24 after the rebuild. 483 Go test
+  functions — 442 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -151,11 +175,23 @@ As of 2026-10-24:
   macOS or Windows build.
 - **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;
   probes are bookkeeping canaries, not network probes.
+- **The P1 surfaces are offline-tested only.** Catalog selection/connect, account export/import
+  and bulk delete, the device pool and the scheduler have unit and `httptest` coverage but have
+  never been exercised against the live vendor account. The scheduler is off unless
+  `AJS_SCHEDULES=1`; the device pool needs `AJS_MASTER_KEY` (and is off under
+  `AJS_DEVICE_POOL=0`).
 
 The product layer above the daemon — multi-account sessions, lease allocation and per-user
 access — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
 sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the candidate analysis
 behind it.
+
+[`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
+surface: every route registered in `daemon/internal/api/server.go`, plus the proposed P1 account
+IO, catalog selection/connect, schedule and scoped-key interfaces. Each operation carries
+`x-implementation-phase` (`P0` is served today, `P1` is the proposed next phase).
+`dashboard/tests/openapi.test.ts` fails when the document stops parsing, a `$ref` dangles, an
+`operationId` repeats, or the route table and the contract drift apart.
 
 ## Scope and tiers
 
@@ -241,8 +277,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (182 Vitest tests in 25 files), `cd daemon && go test ./...`
-(306 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (262 tests in 32 files), `cd daemon && go test ./...`
+(442 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
@@ -255,6 +291,7 @@ README.md                  this file
 PLAN.md                    campaign plan, slices, acceptance criteria, risks
 LICENSE                    MIT
 docs/PANEL.md              control-plane design: ports, API, data model, phases
+docs/openapi.json          OpenAPI 3.1 contract for the daemon route table (P0 served, P1 proposed)
 dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
 daemon/                    ajs-accountd control-plane skeleton (Go 1.26); see daemon/README.md
 deploy/                    Docker Compose control plane (accountd + dashboard, Resin profile); see deploy/README.md

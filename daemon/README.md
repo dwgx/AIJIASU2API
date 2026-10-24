@@ -31,6 +31,14 @@ vendor, and the single POST runs an explicit egress probe that writes nothing.
 There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md`
 §6, and the node supervisor is implemented but not wired to the controller.
 
+Three P1 surfaces are served in the same process: account export/import/bulk-delete, catalog
+selection with guarded connect/reconnect/disconnect, and a cron/interval/once scheduler behind
+`AJS_SCHEDULES=1`. The device identity pool seals each account's vendor identity in a separate
+file under a key derived with HKDF-SHA-256 from `AJS_MASTER_KEY`, retires a deleted account's
+identity instead of erasing it, and restores it when the same account is added again. The catalog
+page also carries a server-side `geo` aggregate, so the dashboard draws its map without
+downloading the retained catalog.
+
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
 - State: versioned JSON snapshot at `$AJS_STATE_FILE` (default
@@ -39,7 +47,9 @@ There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema i
   store. The daemon does not seed the dashboard mock: `store.New()` is a
   test/mock fixture, and `AJS_DROP_DEMO=1` removes the mock rows from an
   existing snapshot once, before serving. Sealed account secrets are inside the
-  snapshot and, when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`
+  snapshot and, when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`;
+  device material lives in `$AJS_STATE_DIR/device-secrets.json` under a key
+  derived from the same master key
 - Wire contract: `dashboard/src/lib/types.ts` field names and
   `dashboard/src/lib/api.ts` paths/methods
 
@@ -54,6 +64,16 @@ internal/store/seed.go       mock-compatible seed data and health derivation
 internal/store/demo.go       seed-row purge behind AJS_DROP_DEMO
 internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
 internal/store/device.go     stable per-account device identity (snapshot-backed)
+internal/store/device_pool.go  sealed device pool: states, restore, retire/GC, migration, import/export
+internal/store/account_io.go  account export/import formats, encrypted envelope, bulk-delete apply
+internal/store/catalog.go    selection + per-server connect counters
+internal/store/schedules.go  schedule/run/fire/reminder retention and CRUD
+internal/catalog/            offline exact-match city index for the catalog geo aggregate
+internal/schedule/           cron parser, next-run, fire journal (WAL), engine, renewal sweep
+internal/runtime/catalog_connect.go  guarded switch: one session per account, cooldown, snapshot guard
+internal/api/catalog_connect.go  selection/connect/reconnect/disconnect handlers
+internal/api/account_io.go   export/import/bulk-delete handlers
+internal/api/schedules.go    schedule CRUD, preview, run-now and run history handlers
 internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
 internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
@@ -773,6 +793,50 @@ catalog/probe research over the 100+ servers a live account exposes
 (~165 listeners observed without a cap); it is not live-safe, because the
 vendor disconnects every FV data session after the first per account.
 
+## Catalog selection and connect
+
+`internal/runtime/catalog_connect.go` is the guarded switch path behind the selection and
+connect/disconnect/reconnect routes; `internal/api/catalog_connect.go` only validates bodies and
+maps reasons onto HTTP. The surface is wired when `AJS_ACCOUNT_LOGIN=1` (`*runtime.NodeController`
+implements `api.CatalogConnector`); otherwise every write answers 409 `login_disabled` instead of
+pretending a catalog exists.
+
+A **selection** is the account's desired server, persisted in the snapshot (`selections`) and
+surviving a restart. It starts no session: `PUT /v1/accounts/{id}/selection` validates the server
+against the retained login result (unknown → 404 `unknown_server`, ineligible → 409
+`server_ineligible`, no login result → 409 `login_required`) and stores it; `DELETE` is idempotent
+and never disconnects. `updatedBy` is `operator` for API writes and `system` when a login refresh
+drops the target.
+
+**`snapshotId`** is the catalog identity: `cat-` plus 12 hex characters of a SHA-256 over every
+retained login result's account id, fetch time and sorted server ids. It is stable across reads and
+changes on login or `Forget`. Every selection/connect/reconnect write may send it; a mismatch is
+409 `snapshot_changed`, so a page that loaded an older catalog cannot switch to a row that no
+longer exists.
+
+**Connect** (`POST .../actions/connect`, body `{serverId,snapshotId?,confirm:true}`) opens the new
+session before closing the old one, commits exactly one `LIVE` node and rolls the previous state
+back on session/gate/store failure. The same server already running is an idempotent 200 with
+`alreadyConnected:true` — no state change, no audit, and no cooldown. **Reconnect** always reopens
+the current server, or the selection when nothing runs (`no_target` → 404). **Disconnect** drains
+each gate for up to 10 s, closes it, deletes the account's nodes and leases without the generic
+node-delete audit, keeps the selection, writes one `catalog.disconnect` audit row and answers
+`alreadyDisconnected:true` on a second call. A forced close is reported in `warnings`, not hidden.
+
+The guards are per account, not per process:
+
+- one switch at a time — a concurrent write answers 409 `switch_in_progress`;
+- a 5 s cooldown after a real attempt (`DefaultConnectCooldown`), answered as 429 `RATE_LIMITED`
+  with `Retry-After`; the idempotent already-connected path does not start one;
+- one active session per account (`multiple_sessions`), which is the vendor's live-verified rule;
+- the attempt is recorded in `ServerStat` (`attempts`, `successes`, last times, last error class).
+  `lastLatencyMs` is always absent: no real latency probe exists, so none is invented.
+
+Reason mapping: 404 `unknown_server`/`no_target`; 409 `login_required`, `login_disabled`,
+`account_state`, `server_ineligible`, `snapshot_changed`, `switch_in_progress`, `multiple_sessions`;
+429 `connect_cooldown`; 502 `session_open_failed`/`gate_start_failed`; 500 `store_failed`. The
+client-safe message and `details` are serialized; the wrapped cause stays in the log.
+
 ## Supervisor (AJS-43)
 
 `internal/supervisor` owns the per-node child processes (`docs/PANEL.md` §2,
@@ -896,6 +960,7 @@ test binary as the child.
 | `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token unless `AJS_ALLOW_INSECURE=1`; at least 32 characters; the placeholders the repo ships or prints (`change-me`, `changeme`, `change_me`, `admin`, `test`, `password`, `secret`, `local-test-token`, `replace-me-with-openssl-rand-hex-32`) are refused at startup |
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth; refused unless `AJS_LISTEN` is loopback (`127.0.0.1`, `::1` or `localhost`) |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
+| `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
@@ -908,7 +973,16 @@ test binary as the child.
 | `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
 | `AJS_PLATFORM_NAME` | `-platform-name` | subscription name | Resin platform name |
 | `AJS_MASTER_KEY` | — | — | 32-byte secret-encryption key (64 hex characters or base64); set → seal account passwords, empty → `secrets_disabled` |
-| `AJS_STATE_DIR` | — | `./data` | state directory; holds `secrets.json` and the default `state.json` (created `0700`) |
+| `AJS_DEVICE_POOL` | — | on when `AJS_MASTER_KEY` is set | `1` requires `AJS_MASTER_KEY` and enables the sealed device pool; `0` is the test-only kill switch; any other value fails startup. With no master key the pool is off and the legacy plaintext `devices` map is used |
+| `AJS_SCHEDULES` | — | `0` | `1` starts the schedule engine; otherwise the read routes and the pure preview still work, but no goroutine runs and every mutation answers 503 |
+| `AJS_SCHEDULER_TICK` | — | `1s` | engine tick, `1s`–`60s` (bare seconds or a Go duration); out of range fails startup |
+| `AJS_SCHEDULES_MAX_CONCURRENT` | — | `4` | parallel schedule workers, `1`–`16` |
+| `AJS_VENDOR_ONE_SESSION` | — | `1` | the scheduler's one-session guard: only `0` lets it queue a second session for the same account (research only; the vendor disconnects the first) |
+| `AJS_RENEWAL_REMINDERS` | — | on | `0` disables the daily renewal sweep |
+| `AJS_RENEWAL_HOUR` | — | `9` | local hour (`0`–`23`) of the renewal sweep |
+| `AJS_RENEWAL_LEAD_DAYS` | — | `30,14,7,3,1` | comma-separated reminder thresholds, days `1`–`365`, at most six values |
+| `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
+| `AJS_STATE_DIR` | — | `./data` | state directory (created `0700`); holds `state.json`, `secrets.json`, `device-secrets.json` and `schedule-fire.log` |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
 | `AJS_DROP_DEMO` | — | `0` | `1` runs `Store.PurgeDemo` once after loading the snapshot and before the listener starts: removes exactly the `seed.go` mock rows (`acc-01`…`acc-06`, `node-01`…`node-12` plus any node of a removed seed account, `lease-01`…`lease-08`, `u-01`…`u-04`, `key-01`…`key-06`, `req-001`…`req-040`, `audit-001`…`audit-020`), preserves `acc-07`, its runtime node and every other live row, logs the per-collection counts, and saves the snapshot immediately. Destructive: the purge is written through the normal atomic snapshot and survives a restart, so copy the state file first if you need to undo it. Unset it after the first run; a second run is a no-op |
@@ -951,6 +1025,49 @@ the account is stored.
   the next save, while `secrets.json` is pruned immediately. SQLite (PANEL §6)
   is a later slice.
 
+## Account import/export and bulk delete
+
+`internal/store/account_io.go` owns the formats and the atomic store apply;
+`internal/api/account_io.go` parses the strict wrappers, holds one account-IO
+mutex (`TryLock`; a second concurrent call answers 409) and translates errors.
+No function in either file logs a credential, a passphrase or a row password.
+
+| Route | Purpose |
+|---|---|
+| `GET /v1/accounts/io/capabilities` | `encryptedExport` (always true), `plaintextExport` (the env gate), `maxImportRows` 1000, `maxExportAccounts` 1000, `maxDeleteIDs` 100, `maxBodyBytes`, `maxImportBodyBytes` (4 MiB) |
+| `POST /v1/accounts/export` | `{ids?\|filter?, format: encrypted\|json\|csv, passphrase?, includeDevice?, confirmPlaintext?}` → the file, not a JSON wrapper |
+| `POST /v1/accounts/import` | `{source:{kind: json\|csv\|encrypted, content, passphrase?}, options:{…}}` → `ajs-accounts-import-result` |
+| `POST /v1/accounts/bulk-delete` | `{ids[], dryRun?, mode: continue\|stop}` → `ajs-accounts-bulk-delete-result` |
+
+**Export.** Encrypted `.ajsx` is always available and is the default: PBKDF2-HMAC-SHA-256
+(600 000 iterations; an envelope may declare 100 000–2 000 000), AES-256-GCM with a 12-byte nonce,
+and the header authenticated as AAD. The document is `ajs-accounts` v1 with account rows and, by
+default, each account's device identity. JSON is the same document in plaintext; CSV is one row per
+account and refuses device identity (no column for it). Both plaintext formats need
+`AJS_ALLOW_PLAINTEXT_EXPORT=1` **and** `confirmPlaintext:"EXPORT"`; a passphrase is valid only for
+encrypted export. `ids` and `filter` are mutually exclusive, at most 1 000 accounts per file. The
+payload is built in memory before any header is written, so an encryption failure cannot leave a
+truncated credential file. The response carries `Content-Disposition`, `Cache-Control: no-store`,
+`X-AJS-Export-Count`, `X-AJS-Export-Missing-Secrets` and `X-AJS-Export-Devices`; the audit row
+`account.export` carries format and counts only.
+
+**Import.** The preview is the same route with `options.dryRun:true`: it parses, validates and plans
+every row without touching the store. Options default to `mode:"atomic"`, `matchBy:"label"`,
+`onConflict:"skip"`, `initialState:"paused"`, `idPolicy:"new"`,
+`devicePolicy:"restore_if_missing"`, timestamps preserved. `mode:"partial"` applies the valid rows
+and reports the rest; `atomic` applies nothing when any row fails. The response is per-row
+`action` (`create|update|rename|skip|fail`), optional `id`, warnings (`password_kept`,
+`device_restored`, `id_ignored`, …) and counts where `created+updated+skipped+failed == total`.
+Applied creates get their real ids; updated accounts have their retained login result forgotten and
+the snapshot is saved before the response. Passphrases and row passwords are cleared after use.
+
+**Bulk delete.** At most 100 ids, deduplicated; `dryRun` reports `would_delete` with node/lease
+counts, `mode:"stop"` marks the remaining rows `skipped` after the first failure. Each row runs the
+same delete hook as `DELETE /v1/accounts/{id}` (stop gates and sessions first) and then the store
+delete, so a hook or sealer failure leaves that account and its secret in place. Per-row statuses
+are `deleted`, `would_delete`, `not_found`, `failed` and `skipped`, each with a code and a message
+that never carries a credential.
+
 ## Persistence (AJS-45)
 
 The panel store is durable through a whole-store JSON snapshot. This is a
@@ -959,12 +1076,19 @@ but this slice keeps the in-memory store and serialises it as one document.
 
 ```
 $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
-  version          1
+  version          2  (v1 is accepted; its device map migrates at startup)
   accounts         []Account        nodes      []ProxyNode
   leases           []Lease          users      []PanelUser
   keys             []APIKey         requests   []RequestLog
   audit            []AuditEvent     settings   PanelSettings
   keyHashes        {keyId: sha256}  secrets    {accountId: base64(sealed)}
+  deviceBindings   {accountId: deviceId}
+  devicePool       []DeviceRecord   (index only; raw material is sealed elsewhere)
+  selections       {accountId: Selection}
+  serverStats      {"accountId:serverId": ServerStat}
+  schedules        []Schedule       scheduleRuns []ScheduleRun
+  scheduleFires    []ScheduleFire   reminderMarks {key: ReminderMark}
+  scheduleSeq runSeq
   accountSeq userSeq keySeq mutationSeq auditSeq
 ```
 
@@ -1012,9 +1136,96 @@ $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
   opened again.
 - Limitations: the format is JSON rather than SQLite; every save rewrites the
   whole document, so cost grows with request/audit history; a crash can lose up
-  to one snapshot interval of mutations; there is no schema migration beyond
-  rejecting unknown versions; and there is no multi-process writer lock. Keep
-  one daemon per state file.
+  to one snapshot interval of mutations; the only schema migration is v1 → v2
+  (the plaintext device map is converted to pool records at startup, one way: a
+  v2 document is rejected by a v1 binary); and there is no multi-process writer
+  lock. Keep one daemon per state file.
+
+## Device identity pool
+
+`internal/store/device_pool.go` replaces the v1 plaintext `devices` map with a record index plus
+separately sealed material. The pool is on by default when `AJS_MASTER_KEY` is set (it needs the
+sealer); `AJS_DEVICE_POOL=0` is the test-only kill switch. Without a master key the daemon keeps
+the legacy map and the pool is off.
+
+- **Two layers.** The snapshot carries only the non-secret index (`devicePool` records and
+  `deviceBindings`); the raw vendor identifiers and machine code live in
+  `$AJS_STATE_DIR/device-secrets.json`, sealed per record id with AES-256-GCM. The file's key is
+  derived with HKDF-SHA-256 from `AJS_MASTER_KEY` and the info string `ajs/device-pool/v1`, so the
+  password store and the device store never share a key. Neither file ever logs or returns a raw
+  identity.
+- **States.** `available` (generated, unbound), `assigned` (bound to one account), `retired`
+  (tombstone, unbound, kept for restore) and `quarantined` (frozen, no restore edge). A record
+  carries a fingerprint, hashes, non-secret claims, an account key (platform family + username)
+  with aliases, history (capped) and the profile it was generated for.
+- **Login binding.** `BindForLogin` is first-writer-wins: retries, restarts and concurrent first
+  logins get the same identity, and a bound record is re-opened from sealed material and verified
+  against its fingerprint. Missing or corrupt material fails the login closed
+  (`DEVICE_MATERIAL_MISSING`) — an identity is never silently regenerated.
+- **Re-add restore.** Deleting an account retires its record instead of erasing it. When an
+  account with the same account key is created and logs in, the pool finds the tombstone: with
+  `restoreMode:"auto"` (the default) exactly one candidate is re-bound; more than one is a 409
+  `DEVICE_RESTORE_AMBIGUOUS` that names the candidates and requires an explicit restore;
+  `manual` and `off` never auto-restore. `RestoreDevice` binds a named tombstone and refuses a
+  record retired for a different account key, a non-retired record or one past its retention
+  window.
+- **Retire and GC.** `RetireDevice` refuses a record with a live node (`DEVICE_ACTIVE_SESSION`) and
+  never deletes material, so a restore inside the retention window (default 90 days) still works.
+  `GCDevices` removes only expired, unbound tombstones and logs counts, not ids.
+- **Migration.** A v1 snapshot's plaintext device map is converted at startup into deterministic
+  records (`legacy/v1`), sealed through the same sealer; the conversion is idempotent and a
+  failure leaves the map in place. `ReconcileDeviceMaterials` opens every record at load, drops a
+  retired record whose material is gone, and degrades — never fails — on a corrupt one.
+- **Generation and transfer.** Generators are `random/v1` and `hmac-sha256/v1`; `import/v1` and
+  `legacy/v1` records are never selectable for new identities. The pool has versioned export and
+  import envelopes (`ajs-device-pool`, 1 000 records / 16 MiB caps) with passphrase encryption,
+  but **no HTTP route**: today the store API is the only entry point, so the dashboard does not
+  expose it.
+
+## Scheduler
+
+`internal/schedule` is a policy layer: it never opens a session, closes a gate or writes catalog
+state directly. Disruptive actions call the same `runtime.NodeController` the HTTP connect route
+uses, so the one-session guard and cooldown cannot be bypassed. The engine is off by default;
+`AJS_SCHEDULES=1` starts it, and without it the read routes and the pure preview still answer but
+every mutation is 503.
+
+**Trigger.** `kind` is `cron`, `interval` or `once`:
+
+- `cron` is a five-field expression (minute hour day-of-month month day-of-week) with `*`, lists,
+  ranges and steps, plus `@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`, `@yearly` and
+  `@annually`. A restricted day-of-month and day-of-week combine with OR, as in Vixie cron.
+- `interval` is `everySec` 60–2 592 000 (30 days) with optional `jitterSec`.
+- `once` is an RFC 3339 `at`; `misfirePolicy:"run_once"` is refused for it.
+- `timezone` is an IANA name per trigger (empty = UTC); an optional `window` restricts runs to
+  weekdays (`days`, 0 = Sunday) and an `HH:MM` range, where `end < start` crosses midnight.
+
+**Policy.** Defaults are `misfirePolicy:"skip"` (or `run_once`), `misfireGraceSec:300`,
+`concurrencyPolicy:"forbid"` (or `queue`), and a guard of `cooldownSec:600`, `maxRunsPerDay:24`,
+`dryRun:true`. A destructive action (`account.rotate`, `account.reconnect`, `account.switch`) with
+`dryRun:false` needs `confirm:"ARM"` on create/PATCH; a manual run of one needs `confirm:"RUN"`.
+PATCH requires `If-Match: "<id>:<revision>"`. P0 executes `account.rotate` (strategies `pool`,
+`same-region`, `next-server`, `random`) and `account.reconnect`; any other action validates but
+fails as `unsupported_action` and pauses the schedule. Retention is 50 schedules, 1 000 runs,
+200 runs per schedule, 1 000 fire records and 2 000 reminder marks.
+
+**At-most-once fire journal.** Every due slot is claimed through
+`$AJS_STATE_DIR/schedule-fire.log`, an append-only JSONL journal whose `reserve` line is fsynced
+before the action starts. `Reserve` is exclusive: a replayed key returns false, so a crash, a
+restart or a duplicated tick cannot run the same slot twice. A reservation without a terminal
+`finish` is converted to `unknown` on the next open and is **not** retried; it is recorded as an
+`unknown` fire plus a `schedule.fire_unknown` warning audit. The journal and the snapshot's
+`scheduleFires` are complementary: the file is the write-ahead gate, the snapshot is the readable
+history.
+
+**Renewal sweep.** Independently of any schedule, the engine runs one sweep per local day at
+`AJS_RENEWAL_HOUR` (default 9) in `AJS_TIMEZONE`. It reads account expiries and writes only
+reminder marks: each account whose expiry crosses `AJS_RENEWAL_LEAD_DAYS` (default 30/14/7/3/1)
+and each overdue account is marked once per `(account, threshold, expiresAt)`, marks whose expiry
+changed or whose account is gone are pruned, and one `account.renewal_sweep` audit row plus a
+`system:renewal-sweep` run row is written only when something is due.
+`AJS_RENEWAL_REMINDERS=0` disables it. The sweep sends nothing: reminders are state for the UI, not
+mail.
 
 ## Resin integration
 
@@ -1196,9 +1407,13 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 | GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); traffic series is empty and totals are zero with `telemetryAvailable:false` until a real traffic meter exists |
 | GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
+| GET | `/v1/accounts/io/capabilities` | export/import limits and gates: `encryptedExport:true`, `plaintextExport` (`AJS_ALLOW_PLAINTEXT_EXPORT`), `maxImportRows:1000`, `maxExportAccounts:1000`, `maxDeleteIDs:100`, `maxBodyBytes`, `maxImportBodyBytes` |
+| POST | `/v1/accounts/export` | `{ids?\|filter?, format:"encrypted"\|"json"\|"csv", passphrase?, includeDevice?, confirmPlaintext?}` → the file itself (`.ajsx`/`.json`/`.csv`) with `no-store` and `X-AJS-Export-*` headers. Encrypted is the default and always available; JSON/CSV need `AJS_ALLOW_PLAINTEXT_EXPORT=1` **and** `confirmPlaintext:"EXPORT"`; passphrase is encrypted-only; CSV refuses device identity; `ids` and `filter` are mutually exclusive; > 1 000 accounts → 400; a concurrent import/export/bulk-delete → 409 |
+| POST | `/v1/accounts/import` | `{source:{kind:"json"\|"csv"\|"encrypted", content, passphrase?}, options:{mode, matchBy, onConflict, initialState, idPolicy, devicePolicy, preserveTimestamps, dryRun}}` → per-row plan/apply result. Defaults: atomic, label, skip, paused, new, restore_if_missing. `dryRun:true` previews without mutating; atomic applies nothing when a row fails; partial applies the valid rows; > 1 000 rows or a bad envelope → 400 |
+| POST | `/v1/accounts/bulk-delete` | `{ids[], dryRun?, mode:"continue"\|"stop"}` → per-row `deleted`/`would_delete`/`not_found`/`failed`/`skipped` with counts. ≤ 100 ids; each row runs the account delete hook (stop gates/sessions) before the store delete, so a hook or sealer failure leaves that account and its secret intact |
 | GET | `/v1/accounts/{id}` | single account |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt |
-| DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases, its device identity and its sealed secret (sealer file immediately, snapshot at the next save); a sealer failure → 503 with the account and its secret intact; keep audit |
+| DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases and its sealed secret (sealer file immediately, snapshot at the next save) and retire its device identity as a tombstone (pool mode; the legacy plaintext map is deleted) for re-add restore; a sealer failure → 503 with the account and its secret intact; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the account's gates and sessions first (stop failure → 500, account active and nodes unchanged); then pause the account and mark its nodes `DRAINING` |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
@@ -1227,19 +1442,22 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 | POST | `/v1/reconcile` | re-render + PATCH + refresh; 503 without a panel |
 | GET | `/v1/system/update` | read-only GitHub release check. `AJS_UPDATE_REPO` unset → `{"enabled":false,"current":…}` with no network. Otherwise `GET <AJS_UPDATE_API_BASE>/repos/<repo>/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: ajs-accountd` (10 s client) → `{enabled:true,current,latest,updateAvailable,url,name,publishedAt,checkedAt}`. `updateAvailable` uses a simple semver compare (`v` optional, numeric dot segments): a draft or pre-release tag is **not** newer unless the running version is itself a pre-release. GitHub non-200/transport/parse failure → 502 `UPSTREAM_UNAVAILABLE`; no token is used or echoed. Never executes an update — the host runs `deploy/update.sh` |
 
-Errors are always `{"error":{"code":"…","message":"…"}}`:
+Errors are always `{"error":{"code":"…","message":"…","reason?":"…","details?":{…}}}`; `reason`
+is the stable machine token used by the catalog and schedule routes (for example `snapshot_changed`
+or `connect_cooldown`), and `details` carries non-secret hints such as `ineligibleReason`:
 
 | Code | HTTP | Used for |
 |---|---|---|
-| `INVALID_ARGUMENT` | 400 (413 oversize) | malformed JSON, bad enum/range, unknown settings key |
-| `NOT_FOUND` | 404 | unknown id or route |
-| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader |
-| `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel |
+| `INVALID_ARGUMENT` | 400 (413 oversize) | malformed JSON, bad enum/range, unknown settings key, a missing `If-Match` on schedule PATCH |
+| `NOT_FOUND` | 404 | unknown id or route, unknown catalog server, no catalog target |
+| `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete |
+| `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
 | `QUOTA_EXCEEDED` | 429 | repeat Lab egress check for the same node inside the 5 s cooldown; account quotas remain advisory |
+| `RATE_LIMITED` | 429 | catalog connect cooldown; `Retry-After` carries the remaining whole seconds |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
-| `UPSTREAM_UNAVAILABLE` | 502 | update check failure: GitHub unreachable, non-200, malformed response (message is generic; the detail stays in the log) |
+| `UPSTREAM_UNAVAILABLE` | 502 | update check failure: GitHub unreachable, non-200, malformed response; catalog session/gate open failure (message is generic; the detail stays in the log) |
 
 With `AJS_ACCOUNT_LOGIN=1`, the login handler maps the vendor outcome onto the
 same contract:
@@ -1256,6 +1474,13 @@ detail stays in the log. A rejection marks the account `auth_failed`; a
 transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
+
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (55 paths, 70 operations,
+  108 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+  today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
+  when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
+  undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
+  `internal/api/server.go` and the contract drift apart.
 
 - Timestamps are RFC 3339 (nanosecond precision), byte counts are integers.
 - `quotaBytesMonth`, `lastUsedAt`, `revokedAt` are `null` when unset.
@@ -1291,8 +1516,22 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | GET | `/v1/lab/profiles` | supported version profiles plus the sample matrix (versions and carriers, no payloads) |
 | GET | `/v1/lab/logs?level=&component=&limit=&since=` | newest-first window over the bounded log ring; `limit` 1–2000 (default 200), `level` one of debug/info/warn/error, `since` RFC 3339; an invalid value answers 400 instead of silently widening the filter |
 | GET | `/v1/lab/diagnostics` | component health map, state-snapshot facts (basename path, last save, size), build facts (version, Go version, commit) and warnings |
-| GET | `/v1/accounts/{id}/servers?q=&region=&status=&selected=&offset=&limit=&sort=` | vendor server catalog for one account from the retained `LoginResult`; without one it answers `stale:true`, an empty list and `no retained login result; log in to refresh the catalog`; unknown account → 404. `q` is a case-insensitive substring over id/title/host/region, `region`/`status` match case-insensitively, `selected` is `true`/`false`, `offset` ≥ 0, `limit` 1–500 (default 50) and `sort` is `order` (default, vendor ord compared numerically), `title`, `host`, `status` or `region`; an invalid value → 400 `INVALID_ARGUMENT`. The body keeps the existing fields and adds `total` (filtered row count), `offset`, `limit`, `nextOffset`, `hasMore` and `regions:[{code,count}]` (the filtered rows per region). Pagination and filters run over the retained catalog only: no vendor call and no extra store write |
+| GET | `/v1/accounts/{id}/servers?q=&region=&status=&selected=&province=&city=&offset=&limit=&sort=` | vendor server catalog for one account from the retained `LoginResult`; without one it answers `stale:true`, an empty list and `no retained login result; log in to refresh the catalog`; unknown account → 404. `q` is a case-insensitive substring over id/title/host/region, `region`/`status` match case-insensitively, `selected` is `true`/`false`, `province` is a two-digit GB/T 2260 code (`00` selects unresolved titles) and `city` a six-digit city code from the bundled asset, `offset` ≥ 0, `limit` 1–500 (default 50) and `sort` is `order` (default, vendor ord compared numerically), `title`, `host`, `status` or `region`; an invalid value → 400 `INVALID_ARGUMENT`. The body keeps the existing fields and adds `snapshotId` (the same identity the selection/connect guard compares; empty without a catalog connector or a retained result), `total` (filtered row count), `offset`, `limit`, `nextOffset`, `hasMore`, `regions:[{code,count}]` (the filtered rows per region) and `geo:{total,unknown,provinces:[{code,count,connected,cities:[{code,label,count}]}],current,live}` — the map aggregate over the q/region/status scope before the province/city filter, so the dashboard needs no full-catalog download. Pagination and filters run over the retained catalog only: no vendor call and no extra store write |
 | GET | `/v1/accounts/{id}/device` | stable device identity as `sha256:`-prefixed 16-hex hashes plus non-secret claims; unknown account → 404 |
+| GET | `/v1/accounts/{id}/selection` | the persisted target plus its resolved title; no target → 404 `no_target`; a stale catalog leaves `title` empty |
+| PUT | `/v1/accounts/{id}/selection` | `{serverId, snapshotId?}`; persists the desired server and starts nothing. Unknown server → 404; no login result → 409 `login_required`; ineligible → 409 `server_ineligible`; stale snapshot → 409 `snapshot_changed`; login disabled → 409 `login_disabled` |
+| DELETE | `/v1/accounts/{id}/selection` | idempotent; clears the target and never disconnects the session → 204 |
+| POST | `/v1/accounts/{id}/actions/connect` | `{serverId, snapshotId?, confirm:true}` → `SwitchResult`. Opens the new session before closing the old one, commits one `LIVE` node, rolls back on failure; the current server → 200 `alreadyConnected` without cooldown. 429 `connect_cooldown` + `Retry-After` inside the 5 s per-account window; 409 `switch_in_progress`/`multiple_sessions`/`snapshot_changed`/`server_ineligible`/`login_required`; 502 `session_open_failed`/`gate_start_failed` |
+| POST | `/v1/accounts/{id}/actions/disconnect` | `{confirm:true}` → `DisconnectResult`; drains each gate (10 s), closes it, deletes the account's nodes and leases, keeps the target; a second call → `alreadyDisconnected:true` |
+| POST | `/v1/accounts/{id}/actions/reconnect` | `{snapshotId?, confirm:true}` → `SwitchResult`; always reopens the current server, or the target when nothing runs; no current server and no target → 404 `no_target` |
+| GET | `/v1/schedules?accountId=&enabled=` | list schedules in creation order with refreshed run counts |
+| POST | `/v1/schedules` | create; destructive action with `dryRun:false` requires `confirm:"ARM"`; `Location: /v1/schedules/{id}` → 201 |
+| GET/POST | `/v1/schedules/preview` | pure next-run preview (query or body); no store write and no engine required |
+| GET | `/v1/schedules/{id}` | one schedule |
+| PATCH | `/v1/schedules/{id}` | partial update; requires `If-Match: "<id>:<revision>"`, otherwise 400; re-arming a destructive action requires `confirm:"ARM"` |
+| DELETE | `/v1/schedules/{id}` | → 204; a run in flight → 409 `in_flight` |
+| POST | `/v1/schedules/{id}/actions/run` | `{dryRun?, force?, confirm?}` → `{run}`; a manual non-dry run of a destructive action requires `confirm:"RUN"`; a run already in flight → 409 `in_flight`; engine off → 503 |
+| GET | `/v1/schedules/{id}/runs?limit=` | run history, newest first; `limit` default 50, max 200 |
 
 A mode that is off is still HTTP 200 with `{"enabled":false,"reason":"…"}` naming the switch
 (`AJS_ACCOUNT_LOGIN is not 1`, `the runtime log ring is not configured`, or
@@ -1340,6 +1579,39 @@ Prometheus endpoint has its own coverage: bearer-auth 401 vs 200 with the text
 format content type, seeded counts compared against `store.Accounts`, `Nodes`,
 `Leases`, `Users`, `Keys` and `Requests`, zero states present, no id/label/IP
 or secret in the body, and `AllowInsecure` passthrough.
+
+The P1 surfaces have their own files. `internal/api/account_io_test.go` covers capabilities, auth,
+encrypted export roundtrip, the plaintext gate (disabled, missing/incorrect `EXPORT`), unknown ids
+and a short passphrase, import dry-run, atomic failure versus partial apply, CSV and wrong
+passphrase, bulk delete plus hook failure and `stop`, the concurrent-call 409, and log redaction.
+`internal/store/account_io_test.go` covers the formats and the plan matrix: export with password
+and device, missing/corrupt secret, filter and unknown id, seal/open roundtrip, tamper and wrong
+passphrase, exact CSV build/parse and its region-separator refusal, warnings, JSON version/row
+limits, the merge matrix and the ambiguous `username_platform` match. `internal/api/catalog_connect_test.go`
+and `internal/runtime/catalog_connect_test.go` cover selection CRUD and the switch path: one LIVE
+node, already-connected idempotence, cooldown, ineligible/unknown/login-required reasons,
+concurrent switches, open/store failure rollback, multiple sessions, cleanup warnings, disconnect,
+and the HTTP reason mapping. `internal/store/catalog_test.go` pins selection persistence and the
+additive snapshot maps.
+
+`internal/store/device_pool_test.go` covers generation and sealing, the HMAC vector, uniqueness,
+assign/release/quarantine, delete-retires-then-re-add-restores, ambiguous restore, fail-closed
+missing material, v1 migration, binding persistence, export/import, concurrent bind and the
+validation limits; `cmd/ajs-accountd/device_pool_wire_test.go` pins the startup gate
+(`AJS_DEVICE_POOL` with and without a master key, the kill switch, legacy migration).
+`internal/catalog/geo_test.go` pins exact title resolution (`海南 #1` must not resolve to 青海's
+`海南藏族自治州`, `湘西` → 湘西州) and the `#<n>` suffix parse.
+
+`internal/schedule/cron_test.go` covers cron parse/next, rejected syntax, the day-of-month OR
+day-of-week rule, DST gap and fall-back, a brute-force agreement sweep, midnight-crossing windows,
+interval/once next-run and preview; `firelog_test.go` covers exclusive reserve, crash replay →
+unknown, finish/compact and a torn last line; `engine_test.go` covers exactly-once firing, dry-run
+without a catalog call, misfire skip, bounded `run_once` catch-up, one session per account, the
+circuit breaker, pause after five failures and renewal-sweep idempotence;
+`internal/store/schedules_test.go` pins CRUD, run caps, fires/marks and snapshot roundtrip;
+`internal/api/schedules_test.go` covers list/create/patch/delete, preview, validation, `ARM`,
+manual run, the disabled engine and metrics, and `cmd/ajs-accountd/scheduler_test.go` pins the
+default-off switch and start/stop.
 
 `internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
 mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen
@@ -2567,7 +2839,8 @@ header or credential). No live vendor call was made.
 
 - State survives a restart through the JSON snapshot, but there is still no
   SQLite: the snapshot rewrites the whole store, a crash loses up to
-  `AJS_SNAPSHOT_INTERVAL` of mutations, and there is no schema migration path.
+  `AJS_SNAPSHOT_INTERVAL` of mutations, and the only schema migration is the
+  one-way v1 → v2 device-pool conversion.
   Sealed secrets are file-backed only when `AJS_MASTER_KEY` is set.
 - Without `AJS_ACCOUNT_LOGIN=1`, login/logout only update timestamps and state.
   With it, login calls the control API, follows it with `loginSync`, and the
@@ -2589,12 +2862,12 @@ header or credential). No live vendor call was made.
   with 500 if the stop fails. Logout then pauses the account and marks its
   nodes DRAINING, the handler republishes the panel once after the store
   mutation, and the other accounts keep their gates and sessions.
-- The login path has never contacted a live vendor host. The default
-  `linux-4.2.3.0` profile sends unsigned requests because its signing secret is
-  `[UNKNOWN]`, so whether the vendor accepts it remains `[UNVERIFIED]`. The
-  optional `AJS_CONTROL_CERT_SHA256` pin is proven only against an in-process
-  TLS server; matching the live control certificate stays `[UNVERIFIED]`
-  until the actual login is rerun.
+- The login path is confirmed for **one account**: three logins on 2026-10-23 and 2026-10-24
+  accepted the unsigned `linux-4.2.3.0` profile and reached the same node and egress (see
+  “Default node limit 1 (AJS-101)” and the root README). B2 signing was never exercised, the
+  `linux-4.3.0.1` profile has no live acceptance, and the optional `AJS_CONTROL_CERT_SHA256` pin is
+  proven only against an in-process TLS server. Multi-account login and Resin live publish remain
+  `[UNVERIFIED]`.
 - Rotation restores the platform filters before reading the new lease (the
   publisher owns that sequence). The M1 spike recommends restoring only after
   the new lease is observed; changing that needs a publisher change outside
@@ -2636,3 +2909,13 @@ header or credential). No live vendor call was made.
   vendor claim until an operator runs that check.
 - The dashboard lives in a separate tree (`dashboard/`); the Lab page consumes the endpoints
   above and needs no daemon write path.
+- The P1 surfaces are offline-tested only. Catalog selection/connect, account export/import and
+  bulk delete have `httptest` coverage but have never been exercised against the live vendor
+  account; a live switch has not been attempted. The scheduler is off unless `AJS_SCHEDULES=1`,
+  has no dashboard UI, and its only actions are `account.rotate`/`account.reconnect` (the rest
+  validate but fail as `unsupported_action`). The device pool has no HTTP route: generate, retire,
+  restore and export/import are store APIs today, and the pool is off without `AJS_MASTER_KEY`.
+- Plaintext account export is off by default (`AJS_ALLOW_PLAINTEXT_EXPORT=0`), and even when on it
+  writes unencrypted credentials to the operator's disk; the encrypted `.ajsx` envelope is the
+  intended path. The account-IO mutex is per process, so two daemons sharing a state file can
+  still interleave writes (as with any snapshot write).
