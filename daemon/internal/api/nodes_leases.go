@@ -21,7 +21,13 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 
 	nodes := s.store.Nodes()
 	filtered := make([]model.ProxyNode, 0, len(nodes))
+	visible, restricted := s.visibleAccountIDs(r)
 	for _, node := range nodes {
+		if restricted {
+			if _, ok := visible[node.AccountID]; !ok {
+				continue
+			}
+		}
 		if accountID != "" && node.AccountID != accountID {
 			continue
 		}
@@ -142,7 +148,13 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	}
 	leases := s.store.Leases()
 	filtered := make([]model.Lease, 0, len(leases))
+	visible, restricted := s.visibleAccountIDs(r)
 	for _, lease := range leases {
+		if restricted {
+			if _, ok := visible[lease.AccountID]; !ok {
+				continue
+			}
+		}
 		if userID != "" && lease.UserID != userID {
 			continue
 		}

@@ -164,6 +164,12 @@ func (s *Store) DeleteUser(id string) error {
 			keysRevoked++
 		}
 	}
+	for i := range s.scopedKeys {
+		if s.scopedKeys[i].UserID == id && s.scopedKeys[i].RevokedAt == nil {
+			s.scopedKeys[i].RevokedAt = ptrString(now)
+			keysRevoked++
+		}
+	}
 	s.users = append(s.users[:idx], s.users[idx+1:]...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.delete", name,
 		fmt.Sprintf("%d leases released · %d keys revoked", leasesRemoved, keysRevoked))

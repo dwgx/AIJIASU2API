@@ -175,6 +175,85 @@ type APIKey struct {
 	RevokedAt  *string `json:"revokedAt"`
 }
 
+// Scope is one permission carried by a scoped API key. The vocabulary is the
+// OpenAPI Scope enum; accounts:write is part of the daemon contract even
+// though the first published enum only listed accounts:read.
+type Scope string
+
+const (
+	ScopeAccountsRead  Scope = "accounts:read"
+	ScopeAccountsWrite Scope = "accounts:write"
+	ScopeCatalogRead   Scope = "catalog:read"
+	ScopeCatalogWrite  Scope = "catalog:write"
+	ScopeLeasesRead    Scope = "leases:read"
+	ScopeLeasesWrite   Scope = "leases:write"
+	ScopeRequestsRead  Scope = "requests:read"
+	ScopeAuditRead     Scope = "audit:read"
+	ScopeMetricsRead   Scope = "metrics:read"
+	ScopeLabRead       Scope = "lab:read"
+	ScopeSettingsRead  Scope = "settings:read"
+	ScopeSettingsWrite Scope = "settings:write"
+	ScopeAdmin         Scope = "admin"
+)
+
+// ScopedKey is a least-privilege API key. AccountIDs and Regions are
+// restrictions on the accounts the key may read; empty means every account or
+// every region. The secret is never part of this type.
+type ScopedKey struct {
+	ID         string   `json:"id"`
+	UserID     string   `json:"userId"`
+	UserName   string   `json:"userName"`
+	Label      string   `json:"label"`
+	Prefix     string   `json:"prefix"`
+	Scopes     []Scope  `json:"scopes"`
+	AccountIDs []string `json:"accountIds"`
+	Regions    []string `json:"regions"`
+	CreatedAt  string   `json:"createdAt"`
+	ExpiresAt  *string  `json:"expiresAt"`
+	LastUsedAt *string  `json:"lastUsedAt"`
+	RevokedAt  *string  `json:"revokedAt"`
+}
+
+// ScopedKeyCreateRequest is the POST /v1/scoped-keys body. ExpiresAt is an
+// RFC 3339 timestamp; empty means the key does not expire.
+type ScopedKeyCreateRequest struct {
+	UserID     string   `json:"userId"`
+	Label      string   `json:"label"`
+	Scopes     []Scope  `json:"scopes"`
+	AccountIDs []string `json:"accountIds"`
+	Regions    []string `json:"regions"`
+	ExpiresAt  string   `json:"expiresAt"`
+}
+
+// ScopedKeyCreated is the one-time create response. Secret is returned exactly
+// once and only its SHA-256 is persisted.
+type ScopedKeyCreated struct {
+	Key    ScopedKey `json:"key"`
+	Secret string    `json:"secret"`
+}
+
+// WebhookEndpoint is one persisted outbound-webhook receiver. The signing
+// secret is deliberately absent: it is sealed through secret.Store (or kept in
+// process memory when no master key is configured) and returned only by the
+// create call.
+type WebhookEndpoint struct {
+	ID          string   `json:"id"`
+	URL         string   `json:"url"`
+	Events      []string `json:"events,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	Description string   `json:"description,omitempty"`
+	CreatedAt   string   `json:"createdAt"`
+}
+
+// WebhookEndpointInput is the POST /v1/webhooks body. An empty Events list
+// subscribes to every event; an absent Enabled defaults to true.
+type WebhookEndpointInput struct {
+	URL         string   `json:"url"`
+	Events      []string `json:"events,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Enabled     *bool    `json:"enabled,omitempty"`
+}
+
 // RequestLog mirrors the dashboard RequestLog interface.
 type RequestLog struct {
 	ID           string        `json:"id"`

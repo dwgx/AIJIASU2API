@@ -32,17 +32,21 @@ const SnapshotVersion = 2
 type Snapshot struct {
 	Version int `json:"version"`
 
-	Accounts []model.Account     `json:"accounts"`
-	Nodes    []model.ProxyNode   `json:"nodes"`
-	Leases   []model.Lease       `json:"leases"`
-	Users    []model.PanelUser   `json:"users"`
-	Keys     []model.APIKey      `json:"keys"`
-	Requests []model.RequestLog  `json:"requests"`
-	Audit    []model.AuditEvent  `json:"audit"`
-	Settings model.PanelSettings `json:"settings"`
+	Accounts   []model.Account     `json:"accounts"`
+	Nodes      []model.ProxyNode   `json:"nodes"`
+	Leases     []model.Lease       `json:"leases"`
+	Users      []model.PanelUser   `json:"users"`
+	Keys       []model.APIKey      `json:"keys"`
+	ScopedKeys []model.ScopedKey   `json:"scopedKeys,omitempty"`
+	Requests   []model.RequestLog  `json:"requests"`
+	Audit      []model.AuditEvent  `json:"audit"`
+	Settings   model.PanelSettings `json:"settings"`
 
 	KeyHashes map[string]string `json:"keyHashes"`
-	Secrets   map[string][]byte `json:"secrets"`
+	// ScopedKeyHashes is the scoped-key counterpart of KeyHashes. Both hold
+	// only SHA-256 digests.
+	ScopedKeyHashes map[string]string `json:"scopedKeyHashes,omitempty"`
+	Secrets         map[string][]byte `json:"secrets"`
 	// Devices is the version 1 plaintext device map. It is read only for
 	// migration and written only while the device pool is disabled (no
 	// AJS_MASTER_KEY), which keeps the pre-pool test/mock behaviour. A
@@ -71,11 +75,18 @@ type Snapshot struct {
 	ScheduleSeq   int                           `json:"scheduleSeq,omitempty"`
 	RunSeq        int                           `json:"runSeq,omitempty"`
 
-	AccountSeq  int `json:"accountSeq"`
-	UserSeq     int `json:"userSeq"`
-	KeySeq      int `json:"keySeq"`
-	MutationSeq int `json:"mutationSeq"`
-	AuditSeq    int `json:"auditSeq"`
+	// WebhookEndpoints is the persisted receiver metadata. Signing secrets are
+	// deliberately absent: they live in the sealed secret file (or process
+	// memory when no master key is configured), never in state.json.
+	WebhookEndpoints []model.WebhookEndpoint `json:"webhookEndpoints,omitempty"`
+	WebhookSeq       int                     `json:"webhookSeq,omitempty"`
+
+	AccountSeq   int `json:"accountSeq"`
+	UserSeq      int `json:"userSeq"`
+	KeySeq       int `json:"keySeq"`
+	ScopedKeySeq int `json:"scopedKeySeq,omitempty"`
+	MutationSeq  int `json:"mutationSeq"`
+	AuditSeq     int `json:"auditSeq"`
 }
 
 // Snapshot serializes every collection, counter, device identity and sealed
@@ -100,12 +111,20 @@ func (s *Store) Snapshot() ([]byte, error) {
 	for i, key := range s.keys {
 		snap.Keys[i] = cloneKey(key)
 	}
+	snap.ScopedKeys = make([]model.ScopedKey, len(s.scopedKeys))
+	for i, key := range s.scopedKeys {
+		snap.ScopedKeys[i] = cloneScopedKey(key)
+	}
 	snap.Requests = append([]model.RequestLog(nil), s.requests...)
 	snap.Audit = append([]model.AuditEvent(nil), s.audit...)
 	snap.Settings = s.settings
 	snap.KeyHashes = make(map[string]string, len(s.keyHashes))
 	for id, hash := range s.keyHashes {
 		snap.KeyHashes[id] = hash
+	}
+	snap.ScopedKeyHashes = make(map[string]string, len(s.scopedKeyHashes))
+	for id, hash := range s.scopedKeyHashes {
+		snap.ScopedKeyHashes[id] = hash
 	}
 	snap.Secrets = make(map[string][]byte, len(s.secrets))
 	for id, sealed := range s.secrets {
@@ -142,9 +161,15 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	snap.ScheduleSeq = s.scheduleSeq
 	snap.RunSeq = s.runSeq
+	snap.WebhookEndpoints = make([]model.WebhookEndpoint, len(s.webhookEndpoints))
+	for i, endpoint := range s.webhookEndpoints {
+		snap.WebhookEndpoints[i] = cloneWebhookEndpoint(endpoint)
+	}
+	snap.WebhookSeq = s.webhookSeq
 	snap.AccountSeq = s.accountSeq
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
+	snap.ScopedKeySeq = s.scopedKeySeq
 	snap.MutationSeq = s.mutationSeq
 	snap.AuditSeq = s.auditSeq
 	s.mu.RUnlock()
@@ -194,10 +219,19 @@ func (s *Store) Restore(data []byte) error {
 	s.leases = snap.Leases
 	s.users = snap.Users
 	s.keys = snap.Keys
+	s.scopedKeys = snap.ScopedKeys
 	s.requests = snap.Requests
 	s.audit = snap.Audit
 	s.settings = snap.Settings
 	s.keyHashes = snap.KeyHashes
+	s.scopedKeyHashes = snap.ScopedKeyHashes
+	s.scopedKeyUse = make(map[string]int64)
+	if s.scopedKeys == nil {
+		s.scopedKeys = []model.ScopedKey{}
+	}
+	if s.scopedKeyHashes == nil {
+		s.scopedKeyHashes = make(map[string]string)
+	}
 	s.secrets = snap.Secrets
 	s.devices = snap.Devices
 	if s.devices == nil {
@@ -231,9 +265,15 @@ func (s *Store) Restore(data []byte) error {
 	}
 	s.scheduleSeq = snap.ScheduleSeq
 	s.runSeq = snap.RunSeq
+	s.webhookEndpoints = snap.WebhookEndpoints
+	if s.webhookEndpoints == nil {
+		s.webhookEndpoints = []model.WebhookEndpoint{}
+	}
+	s.webhookSeq = snap.WebhookSeq
 	s.accountSeq = snap.AccountSeq
 	s.userSeq = snap.UserSeq
 	s.keySeq = snap.KeySeq
+	s.scopedKeySeq = snap.ScopedKeySeq
 	s.mutationSeq = snap.MutationSeq
 	s.auditSeq = snap.AuditSeq
 	// Both histories are newest first: a snapshot written by an older build
@@ -394,6 +434,16 @@ func (snap *Snapshot) validate() error {
 		}
 		keys[key.ID] = struct{}{}
 	}
+	scopedKeys := make(map[string]struct{}, len(snap.ScopedKeys))
+	for _, key := range snap.ScopedKeys {
+		if key.ID == "" {
+			return errors.New("state snapshot has a scoped key without an id")
+		}
+		if _, ok := scopedKeys[key.ID]; ok {
+			return fmt.Errorf("state snapshot has duplicate scoped key %q", key.ID)
+		}
+		scopedKeys[key.ID] = struct{}{}
+	}
 	for id, dev := range snap.Devices {
 		if _, ok := accounts[id]; !ok {
 			return fmt.Errorf("state snapshot has a device for unknown account %q", id)
@@ -418,6 +468,29 @@ func (snap *Snapshot) validate() error {
 	}
 	if err := snap.validateSchedules(accounts); err != nil {
 		return err
+	}
+	return snap.validateWebhooks()
+}
+
+// validateWebhooks rejects a document whose receiver rows cannot be loaded.
+// The URL scheme and event vocabulary stay the dispatcher's contract; the
+// snapshot only needs unique ids, a URL and a timestamp.
+func (snap *Snapshot) validateWebhooks() error {
+	if len(snap.WebhookEndpoints) > MaxWebhookEndpoints {
+		return fmt.Errorf("state snapshot has %d webhook endpoints (max %d)", len(snap.WebhookEndpoints), MaxWebhookEndpoints)
+	}
+	ids := make(map[string]struct{}, len(snap.WebhookEndpoints))
+	for _, endpoint := range snap.WebhookEndpoints {
+		if strings.TrimSpace(endpoint.ID) == "" {
+			return errors.New("state snapshot has a webhook endpoint without an id")
+		}
+		if _, ok := ids[endpoint.ID]; ok {
+			return fmt.Errorf("state snapshot has duplicate webhook endpoint %q", endpoint.ID)
+		}
+		ids[endpoint.ID] = struct{}{}
+		if strings.TrimSpace(endpoint.URL) == "" {
+			return fmt.Errorf("state snapshot webhook endpoint %q has no url", endpoint.ID)
+		}
 	}
 	return nil
 }
@@ -646,6 +719,12 @@ func (snap *Snapshot) normalize() {
 	if snap.KeyHashes == nil {
 		snap.KeyHashes = make(map[string]string)
 	}
+	if snap.ScopedKeyHashes == nil {
+		snap.ScopedKeyHashes = make(map[string]string)
+	}
+	if snap.ScopedKeys == nil {
+		snap.ScopedKeys = []model.ScopedKey{}
+	}
 	if snap.Secrets == nil {
 		snap.Secrets = make(map[string][]byte)
 	}
@@ -676,6 +755,12 @@ func (snap *Snapshot) normalize() {
 	if snap.ReminderMarks == nil {
 		snap.ReminderMarks = make(map[string]model.ReminderMark)
 	}
+	if snap.WebhookEndpoints == nil {
+		snap.WebhookEndpoints = []model.WebhookEndpoint{}
+	}
+	for _, endpoint := range snap.WebhookEndpoints {
+		snap.WebhookSeq = max(snap.WebhookSeq, sequenceOf(endpoint.ID, "wh-"))
+	}
 	for _, schedule := range snap.Schedules {
 		snap.ScheduleSeq = max(snap.ScheduleSeq, sequenceOf(schedule.ID, "sch-"))
 	}
@@ -690,6 +775,9 @@ func (snap *Snapshot) normalize() {
 	}
 	for _, key := range snap.Keys {
 		snap.KeySeq = max(snap.KeySeq, sequenceOf(key.ID, "key-"))
+	}
+	for _, key := range snap.ScopedKeys {
+		snap.ScopedKeySeq = max(snap.ScopedKeySeq, sequenceOf(key.ID, "sk-"))
 	}
 	for _, request := range snap.Requests {
 		snap.MutationSeq = max(snap.MutationSeq, sequenceOf(request.ID, "req-mut-"))

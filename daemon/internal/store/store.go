@@ -81,6 +81,16 @@ type Store struct {
 	audit    []model.AuditEvent
 	settings model.PanelSettings
 
+	// scopedKeys are the least-privilege keys; scopedKeyHashes maps their id to
+	// the SHA-256 of the secret, never the secret itself.
+	scopedKeys      []model.ScopedKey
+	scopedKeyHashes map[string]string
+
+	// scopedKeyUseMu guards scopedKeyUse, which throttles lastUsedAt writes to
+	// one per key per minute. It is never held while s.mu is taken.
+	scopedKeyUseMu sync.Mutex
+	scopedKeyUse   map[string]int64
+
 	// keyHashes maps key id to the SHA-256 of the secret. Plaintext secrets
 	// exist only in the CreateKey return value.
 	keyHashes map[string]string
@@ -122,18 +132,25 @@ type Store struct {
 	scheduleFires []model.ScheduleFire
 	reminderMarks map[string]model.ReminderMark
 
+	// webhookEndpoints is the persisted receiver metadata. Signing secrets are
+	// not here: they live in secret.Store (or process memory) so a state.json
+	// snapshot never carries a credential.
+	webhookEndpoints []model.WebhookEndpoint
+
 	// pendingLabels holds the lowercased labels of account creates that are
 	// sealing their password outside the write lock. A label is reserved
 	// before the slow call so a concurrent create or rename cannot take it.
 	pendingLabels map[string]struct{}
 
-	accountSeq  int
-	userSeq     int
-	keySeq      int
-	mutationSeq int
-	auditSeq    int
-	scheduleSeq int
-	runSeq      int
+	accountSeq   int
+	userSeq      int
+	keySeq       int
+	scopedKeySeq int
+	mutationSeq  int
+	auditSeq     int
+	scheduleSeq  int
+	runSeq       int
+	webhookSeq   int
 }
 
 // New returns a store seeded with the dashboard mock dataset. It exists for
@@ -182,30 +199,34 @@ func NewWithSealers(password Sealer, device DeviceSealer) *Store {
 
 func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 	return &Store{
-		now:            now,
-		accounts:       []model.Account{},
-		nodes:          []model.ProxyNode{},
-		leases:         []model.Lease{},
-		users:          []model.PanelUser{},
-		keys:           []model.APIKey{},
-		requests:       []model.RequestLog{},
-		audit:          []model.AuditEvent{},
-		settings:       defaultSettings(),
-		keyHashes:      make(map[string]string),
-		sealer:         sealer,
-		secrets:        make(map[string][]byte),
-		devices:        make(map[string]DeviceIdentity),
-		deviceCfg:      defaultDevicePoolConfig(),
-		devicePool:     make(map[string]*DeviceRecord),
-		deviceBindings: make(map[string]string),
-		deviceMaterial: make(map[string]DeviceMaterial),
-		pendingLabels:  make(map[string]struct{}),
-		selections:     make(map[string]model.Selection),
-		serverStats:    make(map[string]model.ServerStat),
-		schedules:      []model.Schedule{},
-		scheduleRuns:   []model.ScheduleRun{},
-		scheduleFires:  []model.ScheduleFire{},
-		reminderMarks:  make(map[string]model.ReminderMark),
+		now:              now,
+		accounts:         []model.Account{},
+		nodes:            []model.ProxyNode{},
+		leases:           []model.Lease{},
+		users:            []model.PanelUser{},
+		keys:             []model.APIKey{},
+		scopedKeys:       []model.ScopedKey{},
+		requests:         []model.RequestLog{},
+		audit:            []model.AuditEvent{},
+		settings:         defaultSettings(),
+		keyHashes:        make(map[string]string),
+		scopedKeyHashes:  make(map[string]string),
+		scopedKeyUse:     make(map[string]int64),
+		sealer:           sealer,
+		secrets:          make(map[string][]byte),
+		devices:          make(map[string]DeviceIdentity),
+		deviceCfg:        defaultDevicePoolConfig(),
+		devicePool:       make(map[string]*DeviceRecord),
+		deviceBindings:   make(map[string]string),
+		deviceMaterial:   make(map[string]DeviceMaterial),
+		pendingLabels:    make(map[string]struct{}),
+		selections:       make(map[string]model.Selection),
+		serverStats:      make(map[string]model.ServerStat),
+		schedules:        []model.Schedule{},
+		scheduleRuns:     []model.ScheduleRun{},
+		scheduleFires:    []model.ScheduleFire{},
+		reminderMarks:    make(map[string]model.ReminderMark),
+		webhookEndpoints: []model.WebhookEndpoint{},
 	}
 }
 
