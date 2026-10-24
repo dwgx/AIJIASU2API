@@ -14,6 +14,7 @@ import (
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/secret"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 const devicePoolTestPassphrase = "device-pool-api-passphrase"
@@ -29,6 +30,11 @@ type devicePoolAPI struct {
 // file, so generate/export/import exercise the same code path as the daemon.
 func newDevicePoolAPI(t *testing.T) *devicePoolAPI {
 	t.Helper()
+	return newDevicePoolAPIWithEvents(t, nil)
+}
+
+func newDevicePoolAPIWithEvents(t *testing.T, events EventSink) *devicePoolAPI {
+	t.Helper()
 	dir := t.TempDir()
 	passwords, err := secret.New(bytes.Repeat([]byte{0x31}, secret.KeySize), filepath.Join(dir, "secrets.json"))
 	if err != nil {
@@ -40,7 +46,7 @@ func newDevicePoolAPI(t *testing.T) *devicePoolAPI {
 	}
 	st := store.NewEmptyWithSealers(passwords, devices)
 	logs := &bytes.Buffer{}
-	server := New(Config{AdminToken: testToken}, st, slog.New(slog.NewTextHandler(logs, nil)))
+	server := New(Config{AdminToken: testToken, Events: events}, st, slog.New(slog.NewTextHandler(logs, nil)))
 	ts := httptest.NewServer(server)
 	t.Cleanup(ts.Close)
 	return &devicePoolAPI{ts: ts, st: st, sealer: devices, logs: logs}
@@ -409,5 +415,52 @@ func TestDevicePoolExportImportRoundTrip(t *testing.T) {
 				t.Fatalf("request log contains raw identity %q", raw)
 			}
 		}
+	}
+}
+
+// TestDeviceRetireEmitsEvent pins the device.retired payload: the retired
+// device id and reason always travel, the account id only when the record was
+// bound at retire time (RetireDevice unbinds it).
+func TestDeviceRetireEmitsEvent(t *testing.T) {
+	sink := &recordingSink{}
+	a := newDevicePoolAPIWithEvents(t, sink)
+	account := a.createAccount(t, "Retire", "retire-user")
+	devices := a.generate(t, 2)
+
+	resp, _ := apiCall(t, a.ts, http.MethodPost, "/v1/device-pool/"+devices[0].ID+"/assign",
+		deviceAssignRequest{AccountID: account.ID})
+	requireStatus(t, resp, http.StatusOK)
+
+	resp, body := apiCall(t, a.ts, http.MethodPost, "/v1/device-pool/"+devices[0].ID+"/retire",
+		deviceReasonConfirmRequest{Reason: "hardware replaced", Confirm: "RETIRE"})
+	requireStatus(t, resp, http.StatusOK)
+	if retired := decodeBody[deviceRecordView](t, body); retired.State != store.DeviceRetired {
+		t.Fatalf("retired view = %+v", retired)
+	}
+
+	if got := sink.count(webhook.EventDeviceRetired); got != 1 {
+		t.Fatalf("device.retired emitted %d times, want 1 (events %v)", got, sink.types())
+	}
+	sink.mu.Lock()
+	events := append([]recordedEvent(nil), sink.events...)
+	sink.mu.Unlock()
+	first := events[len(events)-1].data
+	if first["deviceId"] != devices[0].ID || first["reason"] != "hardware replaced" || first["accountId"] != account.ID {
+		t.Fatalf("device.retired payload = %#v", first)
+	}
+
+	// An unbound retire carries no accountId key at all.
+	resp, _ = apiCall(t, a.ts, http.MethodPost, "/v1/device-pool/"+devices[1].ID+"/retire",
+		deviceReasonConfirmRequest{Reason: "spare", Confirm: "RETIRE"})
+	requireStatus(t, resp, http.StatusOK)
+	sink.mu.Lock()
+	events = append([]recordedEvent(nil), sink.events...)
+	sink.mu.Unlock()
+	second := events[len(events)-1].data
+	if second["deviceId"] != devices[1].ID || second["reason"] != "spare" {
+		t.Fatalf("unbound device.retired payload = %#v", second)
+	}
+	if _, present := second["accountId"]; present {
+		t.Fatalf("unbound retire payload carries accountId: %#v", second)
 	}
 }

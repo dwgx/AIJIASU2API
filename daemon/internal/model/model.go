@@ -49,9 +49,10 @@ const (
 type Severity string
 
 const (
-	SeverityInfo  Severity = "info"
-	SeverityWarn  Severity = "warn"
-	SeverityError Severity = "error"
+	SeverityInfo     Severity = "info"
+	SeverityWarn     Severity = "warn"
+	SeverityError    Severity = "error"
+	SeverityCritical Severity = "critical"
 )
 
 // ThemeName is the dashboard theme.

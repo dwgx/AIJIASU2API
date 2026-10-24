@@ -135,7 +135,10 @@ func TestWebhookSinkReceivesRenewalEvents(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dispatcher := webhook.New(webhook.Config{Logger: logger})
+	dispatcher := webhook.New(webhook.Config{
+		Logger:       logger,
+		AllowPrivate: true, // the receiver is an httptest loopback URL
+	})
 	t.Cleanup(func() {
 		_ = dispatcher.Close()
 		server.Close()

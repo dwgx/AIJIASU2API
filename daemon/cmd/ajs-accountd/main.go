@@ -213,6 +213,19 @@ func run() error {
 	}
 	webhookDispatcher, events := startWebhooks(st, logger, webhookSecrets)
 	defer func() { _ = webhookDispatcher.Close() }()
+	// Every critical audit event (webhook path excluded) reaches subscribed
+	// receivers. The dispatcher fans it out; a nil receiver set is a no-op.
+	st.SetAuditHook(func(ev model.AuditEvent) {
+		if strings.HasPrefix(ev.Action, "webhook.") { // never re-emit the webhook path's own audit
+			return
+		}
+		events.Emit(webhook.EventAuditCritical, map[string]any{
+			"auditId": ev.ID,
+			"action":  ev.Action,
+			"actor":   ev.Actor,
+			"target":  ev.Target,
+		})
+	})
 
 	panel, err := startResinPanel(ctx, st, logger, resinOptions{
 		url:              *resinURL,

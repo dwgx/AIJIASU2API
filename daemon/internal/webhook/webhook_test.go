@@ -49,15 +49,30 @@ func TestScrubRedactsNestedSensitiveKeys(t *testing.T) {
 		"Secret":      "shh",
 		"machineCode": "mc-1",
 		"identity":    "id-1",
+		"passwd":      "pw-1",
+		"apiKey":      "ak-1",
+		"api_key":     "ak-2",
+		"credential":  "cred-1",
+		"private_key": "pk-1",
+		"session":     "sess-1",
+		"bearer":      "bear-1",
 		"nested":      map[string]any{"password": "pw", "label": "keep"},
 		"headers":     map[string]string{"Authorization": "Bearer x", "Accept": "json"},
 		"list":        []any{map[string]any{"cookie": "c=1", "name": "n"}, "plain"},
 		"mapList":     []map[string]any{{"renewalToken": "rt", "ok": true}},
+		"strings":     []string{"keep", "secret=inline-value"},
 		"count":       3,
+		"message":     "login failed password=hunter2 for bob",
+		"query":       "https://x.test/cb?api_key=abc123&ok=1",
+		"quoted":      `token: "two words" trailing`,
+		"benign":      "nothing to hide here",
 	}
 
 	scrubbed := Scrub(original)
-	for _, key := range []string{"token", "Secret", "machineCode", "identity"} {
+	for _, key := range []string{
+		"token", "Secret", "machineCode", "identity", "passwd", "apiKey",
+		"api_key", "credential", "private_key", "session", "bearer",
+	} {
 		if scrubbed[key] != Redacted {
 			t.Fatalf("%s = %v, want %s", key, scrubbed[key], Redacted)
 		}
@@ -82,6 +97,31 @@ func TestScrubRedactsNestedSensitiveKeys(t *testing.T) {
 	if mapList[0]["renewalToken"] != Redacted || mapList[0]["ok"] != true {
 		t.Fatalf("mapList = %#v", mapList)
 	}
+	stringList := scrubbed["strings"].([]string)
+	if stringList[0] != "keep" || stringList[1] != "secret="+Redacted {
+		t.Fatalf("string slice = %#v", stringList)
+	}
+
+	// Values that embed a credential assignment are redacted, but the label
+	// and the rest of the string stay readable.
+	if got := scrubbed["message"]; got != "login failed password="+Redacted+" for bob" {
+		t.Fatalf("message = %q", got)
+	}
+	if got := scrubbed["query"]; got != "https://x.test/cb?api_key="+Redacted+"&ok=1" {
+		t.Fatalf("query = %q", got)
+	}
+	if got := scrubbed["quoted"]; got != `token: `+Redacted+` trailing` {
+		t.Fatalf("quoted = %q", got)
+	}
+	if scrubbed["benign"] != "nothing to hide here" {
+		t.Fatalf("benign string changed: %q", scrubbed["benign"])
+	}
+	if strings.Contains(scrubbed["message"].(string), "hunter2") ||
+		strings.Contains(scrubbed["query"].(string), "abc123") ||
+		strings.Contains(scrubbed["quoted"].(string), "two words") {
+		t.Fatalf("embedded credential survived: %#v", scrubbed)
+	}
+
 	if scrubbed["account"] != "acct-1" || scrubbed["count"] != 3 {
 		t.Fatalf("benign fields changed: %#v", scrubbed)
 	}
@@ -96,30 +136,35 @@ func TestScrubRedactsNestedSensitiveKeys(t *testing.T) {
 }
 
 func TestEndpointValidation(t *testing.T) {
-	valid := Endpoint{ID: "ep", URL: "https://example.com/hook", Secret: "s", Enabled: true}
-	if err := validateEndpoint(valid, false); err != nil {
+	valid := Endpoint{ID: "ep", URL: "https://93.184.216.34/hook", Secret: "s", Enabled: true}
+	if err := validateEndpoint(valid, false, false); err != nil {
 		t.Fatalf("valid https endpoint rejected: %v", err)
 	}
 	cases := []struct {
-		name      string
-		endpoint  Endpoint
-		allowHTTP bool
-		want      bool
+		name         string
+		endpoint     Endpoint
+		allowHTTP    bool
+		allowPrivate bool
+		want         bool
 	}{
-		{"missing id", Endpoint{URL: "https://example.com", Secret: "s"}, false, false},
-		{"missing secret", Endpoint{ID: "ep", URL: "https://example.com"}, false, false},
-		{"http remote", Endpoint{ID: "ep", URL: "http://example.com/hook", Secret: "s"}, false, false},
-		{"http remote allowed", Endpoint{ID: "ep", URL: "http://example.com/hook", Secret: "s"}, true, true},
-		{"http loopback", Endpoint{ID: "ep", URL: "http://127.0.0.1:8080/hook", Secret: "s"}, false, true},
-		{"http ipv6 loopback", Endpoint{ID: "ep", URL: "http://[::1]:8080/hook", Secret: "s"}, false, true},
-		{"http localhost", Endpoint{ID: "ep", URL: "http://localhost:8080/hook", Secret: "s"}, false, true},
-		{"ftp", Endpoint{ID: "ep", URL: "ftp://example.com", Secret: "s"}, false, false},
-		{"userinfo", Endpoint{ID: "ep", URL: "https://user:pass@example.com", Secret: "s"}, false, false},
-		{"unknown event", Endpoint{ID: "ep", URL: "https://example.com", Secret: "s", Events: []EventType{"nope"}}, false, false},
+		{"missing id", Endpoint{URL: "https://93.184.216.34", Secret: "s"}, false, false, false},
+		{"missing secret", Endpoint{ID: "ep", URL: "https://93.184.216.34"}, false, false, false},
+		{"http remote", Endpoint{ID: "ep", URL: "http://93.184.216.34/hook", Secret: "s"}, false, false, false},
+		{"http remote allowed", Endpoint{ID: "ep", URL: "http://93.184.216.34/hook", Secret: "s"}, true, false, true},
+		{"https loopback", Endpoint{ID: "ep", URL: "https://127.0.0.1:8080/hook", Secret: "s"}, false, false, false},
+		{"https private", Endpoint{ID: "ep", URL: "https://10.0.0.5/hook", Secret: "s"}, false, false, false},
+		{"http loopback", Endpoint{ID: "ep", URL: "http://127.0.0.1:8080/hook", Secret: "s"}, false, false, false},
+		{"http loopback lab", Endpoint{ID: "ep", URL: "http://127.0.0.1:8080/hook", Secret: "s"}, false, true, true},
+		{"http ipv6 loopback lab", Endpoint{ID: "ep", URL: "http://[::1]:8080/hook", Secret: "s"}, false, true, true},
+		{"http localhost lab", Endpoint{ID: "ep", URL: "http://localhost:8080/hook", Secret: "s"}, false, true, true},
+		{"metadata with lab opt-in", Endpoint{ID: "ep", URL: "https://metadata.google.internal/hook", Secret: "s"}, false, true, false},
+		{"ftp", Endpoint{ID: "ep", URL: "ftp://93.184.216.34", Secret: "s"}, false, false, false},
+		{"userinfo", Endpoint{ID: "ep", URL: "https://user:pass@93.184.216.34", Secret: "s"}, false, false, false},
+		{"unknown event", Endpoint{ID: "ep", URL: "https://93.184.216.34", Secret: "s", Events: []EventType{"nope"}}, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateEndpoint(tc.endpoint, tc.allowHTTP)
+			err := validateEndpoint(tc.endpoint, tc.allowHTTP, tc.allowPrivate)
 			if tc.want && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

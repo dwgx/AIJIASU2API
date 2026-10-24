@@ -90,16 +90,26 @@ func normalizeConfig(cfg Config) Config {
 		cfg.TTL = ttlFromEnv()
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: cfg.Timeout}
+		cfg.HTTPClient = &http.Client{Timeout: cfg.Timeout, CheckRedirect: refuseRedirect}
 	} else {
 		client := *cfg.HTTPClient
 		// A jar would let a cookie set by the page travel back on a redirect,
 		// turning an anonymous GET into a stateful one. The public catalogue
 		// needs no cookies.
 		client.Jar = nil
+		// The catalogue lives at one fixed vendor URL. Following a Location
+		// would let the origin send the daemon to an arbitrary host and would
+		// put that host in an error message; returning the 3xx lets Fetch
+		// report the status code only.
+		client.CheckRedirect = refuseRedirect
 		cfg.HTTPClient = &client
 	}
 	return cfg
+}
+
+// refuseRedirect turns a redirect into an ordinary non-2xx response.
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // Fetch downloads the public purchase page and returns its plan catalogue. It

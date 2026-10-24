@@ -289,7 +289,12 @@ func waitForSample(t *testing.T, sampler *health.Sampler, key string) health.Sta
 }
 
 func TestWebhookCRUDAndDeliveryRing(t *testing.T) {
-	dispatcher := webhook.New(webhook.Config{Workers: 1, Backoff: []time.Duration{0}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	dispatcher := webhook.New(webhook.Config{
+		Workers: 1, Backoff: []time.Duration{0},
+		// The test receiver is an httptest loopback URL.
+		AllowPrivate: true,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 	t.Cleanup(func() { _ = dispatcher.Close() })
 	ts, _ := newPlatformServer(t, Config{Webhooks: dispatcher})
 

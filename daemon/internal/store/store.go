@@ -81,6 +81,12 @@ type Store struct {
 	audit    []model.AuditEvent
 	settings model.PanelSettings
 
+	// auditHook receives every critical audit event after it is appended. It
+	// is set once during startup (SetAuditHook) and invoked with s.mu held, so
+	// it must neither block nor call back into the Store; the webhook sink only
+	// enqueues. The hook is not part of the snapshot.
+	auditHook func(model.AuditEvent)
+
 	// scopedKeys are the least-privilege keys; scopedKeyHashes maps their id to
 	// the SHA-256 of the secret, never the secret itself.
 	scopedKeys      []model.ScopedKey
@@ -941,7 +947,22 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 		}
 	}
 	s.audit = prependCapped(s.audit, event, AuditRetention)
+	if s.auditHook != nil && severity == model.SeverityCritical {
+		s.auditHook(event)
+	}
 	return event.ID
+}
+
+// SetAuditHook installs the sink for critical audit events. It is meant to be
+// called once during startup, before requests are served. The hook runs with
+// the store lock held and must not block or call back into the Store.
+//
+// The hook fires only for model.SeverityCritical, so the ordinary
+// webhook-lifecycle rows (info/warn) never re-enter the webhook path.
+func (s *Store) SetAuditHook(hook func(model.AuditEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditHook = hook
 }
 
 // prependCapped inserts item at the front of items (newest first) and drops the

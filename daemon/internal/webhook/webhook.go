@@ -146,8 +146,11 @@ var (
 
 // validateEndpoint checks everything that must hold before an endpoint can
 // receive traffic. HTTP is only acceptable for loopback receivers and for
-// deployments that opt in through AJS_WEBHOOK_ALLOW_HTTP.
-func validateEndpoint(ep Endpoint, allowHTTP bool) error {
+// deployments that opt in through AJS_WEBHOOK_ALLOW_HTTP. The host is
+// resolved and rejected when it is loopback, private, link-local or the cloud
+// metadata service; allowPrivate (AJS_WEBHOOK_ALLOW_PRIVATE=1) opts a lab out
+// of the address-class checks.
+func validateEndpoint(ep Endpoint, allowHTTP, allowPrivate bool) error {
 	if ep.ID == "" {
 		return fmt.Errorf("%w: id is required", ErrInvalidEndpoint)
 	}
@@ -169,6 +172,9 @@ func validateEndpoint(ep Endpoint, allowHTTP bool) error {
 	}
 	if parsed.Scheme == "http" && !allowHTTP && !isLoopbackHost(parsed.Hostname()) {
 		return fmt.Errorf("%w: http is only allowed for loopback receivers", ErrInvalidEndpoint)
+	}
+	if err := validateDestinationHost(parsed.Hostname(), allowPrivate); err != nil {
+		return err
 	}
 	for _, event := range ep.Events {
 		if !event.Valid() {

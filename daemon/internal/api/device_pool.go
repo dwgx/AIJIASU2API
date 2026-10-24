@@ -15,6 +15,7 @@ import (
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 // deviceRecordView is the §8.2 pool view. machineCode and identity are
@@ -363,11 +364,22 @@ func (s *Server) handleRetireDevicePoolRecord(w http.ResponseWriter, r *http.Req
 	if !requireDeviceConfirm(w, req.Confirm, "RETIRE") {
 		return
 	}
+	// Read the binding before RetireDevice clears it: the event names the
+	// account whose device was retired, and the stored record no longer does.
+	prior, _ := s.store.DeviceRecord(id)
 	rec, err := s.store.RetireDevice(id, req.Reason)
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
 	}
+	data := map[string]any{
+		"deviceId": rec.ID,
+		"reason":   rec.RetiredReason,
+	}
+	if prior.AssignedAccountID != "" {
+		data["accountId"] = prior.AssignedAccountID
+	}
+	s.emit(webhook.EventDeviceRetired, data)
 	writeJSON(w, http.StatusOK, s.deviceView(rec))
 }
 

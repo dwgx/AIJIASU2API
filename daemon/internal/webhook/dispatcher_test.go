@@ -89,6 +89,8 @@ func newTestDispatcher(cfg Config, clock *fakeClock) *Dispatcher {
 	if cfg.Logger == nil {
 		cfg.Logger = discardLogger()
 	}
+	// Every dispatcher test receiver is an httptest loopback server.
+	cfg.AllowPrivate = true
 	return New(cfg)
 }
 

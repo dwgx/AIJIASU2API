@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -49,6 +50,11 @@ type Config struct {
 	// AllowHTTP permits plain HTTP receivers. Loopback receivers are always
 	// allowed. AJS_WEBHOOK_ALLOW_HTTP=1 in the environment has the same effect.
 	AllowHTTP bool
+	// AllowPrivate permits receivers on loopback and private networks. It is
+	// the lab/test escape hatch; AJS_WEBHOOK_ALLOW_PRIVATE=1 has the same
+	// effect. Without it a receiver may only point at a public address, and
+	// cloud metadata names are rejected regardless.
+	AllowPrivate bool
 
 	Now        func() time.Time
 	Sleep      func(ctx context.Context, d time.Duration) error
@@ -63,6 +69,9 @@ type Dispatcher struct {
 	logger    *slog.Logger
 	client    *http.Client
 	allowHTTP bool
+	// allowPrivate disables the loopback/private address rejection. It is
+	// captured at construction so the environment cannot flip mid-flight.
+	allowPrivate bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -119,7 +128,9 @@ func New(cfg Config) *Dispatcher {
 		cfg.Logger = slog.Default()
 	}
 
+	allowPrivate := cfg.AllowPrivate || os.Getenv(AllowPrivateEnv) == "1"
 	client := &http.Client{
+		Transport: secureTransport(allowPrivate),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -127,22 +138,26 @@ func New(cfg Config) *Dispatcher {
 	if cfg.HTTPClient != nil {
 		copied := *cfg.HTTPClient
 		copied.CheckRedirect = client.CheckRedirect
+		if copied.Transport == nil {
+			copied.Transport = client.Transport
+		}
 		client = &copied
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Dispatcher{
-		cfg:       cfg,
-		logger:    cfg.Logger,
-		client:    client,
-		allowHTTP: cfg.AllowHTTP || os.Getenv("AJS_WEBHOOK_ALLOW_HTTP") == "1",
-		ctx:       ctx,
-		cancel:    cancel,
-		sem:       make(chan struct{}, cfg.Workers),
-		endpoints: make(map[string]Endpoint),
-		states:    make(map[string]*endpointState),
-		dedupe:    make(map[string]time.Time),
-		log:       NewDeliveryLog(cfg.RingSize),
+		cfg:          cfg,
+		logger:       cfg.Logger,
+		client:       client,
+		allowHTTP:    cfg.AllowHTTP || os.Getenv("AJS_WEBHOOK_ALLOW_HTTP") == "1",
+		allowPrivate: allowPrivate,
+		ctx:          ctx,
+		cancel:       cancel,
+		sem:          make(chan struct{}, cfg.Workers),
+		endpoints:    make(map[string]Endpoint),
+		states:       make(map[string]*endpointState),
+		dedupe:       make(map[string]time.Time),
+		log:          NewDeliveryLog(cfg.RingSize),
 	}
 }
 
@@ -150,7 +165,7 @@ func New(cfg Config) *Dispatcher {
 // is loopback or HTTP is explicitly allowed, and the secret must be non-empty
 // because every delivery is signed.
 func (d *Dispatcher) AddEndpoint(ep Endpoint) error {
-	if err := validateEndpoint(ep, d.allowHTTP); err != nil {
+	if err := validateEndpoint(ep, d.allowHTTP, d.allowPrivate); err != nil {
 		return err
 	}
 	if ep.CreatedAt.IsZero() {
@@ -446,6 +461,11 @@ func (d *Dispatcher) send(ep Endpoint, event Event, body []byte, attempt int) (i
 
 	response, err := d.client.Do(request)
 	if err != nil {
+		if errors.Is(err, ErrInvalidEndpoint) {
+			// The dial guard refused a private destination: retrying the same
+			// URL cannot succeed, so record it as a permanent failure.
+			return 0, err.Error(), false
+		}
 		return 0, err.Error(), true
 	}
 	defer response.Body.Close()

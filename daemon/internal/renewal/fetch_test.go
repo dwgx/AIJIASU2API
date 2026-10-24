@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -198,5 +199,51 @@ func TestFetchHonoursTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Fetch took %s, want the 20ms timeout to bound it", elapsed)
+	}
+}
+
+// TestFetchRefusesRedirect pins the redirect policy: the catalogue lives at
+// one fixed URL, so a 302 is reported as a status error instead of being
+// followed to another host. The supplied client follows redirects by default;
+// the fetcher must override that on its copy, not mutate the caller's client.
+func TestFetchRefusesRedirect(t *testing.T) {
+	var targetHits atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		_, _ = io.WriteString(w, livePageFixture)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/purchase", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	followed := false
+	permissive := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			followed = true
+			return nil
+		},
+	}
+	fetcher := NewFetcher(Config{BaseURL: redirector.URL, HTTPClient: permissive})
+	_, err := fetcher.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("Fetch followed a redirect and parsed the target page")
+	}
+	if !strings.Contains(err.Error(), "status 302") {
+		t.Fatalf("error = %q, want status 302", err)
+	}
+	if strings.Contains(err.Error(), redirector.URL) || strings.Contains(err.Error(), target.URL) {
+		t.Fatalf("error leaks a redirect URL: %s", err)
+	}
+	if targetHits.Load() != 0 {
+		t.Fatalf("redirect target was requested %d times, want 0", targetHits.Load())
+	}
+	if permissive.CheckRedirect == nil {
+		t.Fatal("NewFetcher mutated the caller's HTTPClient")
+	}
+	if followed {
+		t.Fatal("the fetcher's copy used the caller's permissive redirect policy")
 	}
 }
