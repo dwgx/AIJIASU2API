@@ -1,15 +1,15 @@
 # AJiaSu Proxy Console
 
-Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, request telemetry, the
-audit trail and a read-only Lab instrument in one graphite-and-mint APC surface. **Mock-first:** the
-default build runs on deterministic in-memory data and never contacts AJiaSu, a vendor binary or a
-live daemon. A live mode against the local `ajs-accountd` skeleton is also built and verified; it
-is opt-in through build-time environment variables (see [Modes](#modes) and
-[Live mode](#live-mode)).
+Operator dashboard for `ajs-accountd` — accounts, nodes, leases, users, usage, request telemetry,
+the audit trail, schedules, webhook receivers, gate health and a read-only Lab instrument in one
+graphite-and-mint APC surface. **Mock-first:** the default build runs on deterministic in-memory
+data and never contacts AJiaSu, a vendor binary or a live daemon. A live mode against the local
+`ajs-accountd` skeleton is also built and verified; it is opt-in through build-time environment
+variables (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 262 tests in 32 files.
+- Tests: Vitest + React Testing Library + jsdom, 323 tests in 37 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 262 tests in 32 files
+npm test           # Vitest, 323 tests in 37 files
 npm run typecheck  # tsc -b
 ```
 
@@ -169,6 +169,10 @@ place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`.
 | Accounts / Nodes / Leases / Users | 15 s | Users polls both users and API keys |
 | Requests flows | 5 s | polls `/v1/lab/flows?limit=200`; mutation history 10 s, node labels 15 s |
 | Logs (audit) | 15 s | SSE runtime logs remain `[PROPOSED]` |
+| Gate health | 15 s | `/v1/health/nodes`; the daemon probes every 30 s, so the panel is one probe behind at most |
+| Schedules | 15 s | schedules poll at 15 s, the account list at 30 s |
+| Usage | — | manual only; the window/filter change triggers the request |
+| Webhooks | — | manual only; load on mount and **Refresh** |
 | Settings | — | manual only |
 
 Rules shared by every polling hook:
@@ -360,6 +364,28 @@ actually observed; it never turns an absence of data into a measurement.
 - **Touch probe honesty.** **Touch probe timestamp** only moves `lastProbeAt`; the drawer then
   notes “Touch only — no latency or egress check.” and the previous measurement stays.
 
+## Gate health panel
+
+`src/components/nodes/HealthPanel.tsx` renders the daemon's loopback sampler
+(`GET /v1/health/nodes`) in two variants: the full table above **Connected** on `/nodes`, and a
+compact summary under the Overview metric tiles. Both poll every 15 s (one probe behind the
+daemon's 30 s cadence), pause while the tab is hidden, and stop polling when the sampler reports
+`enabled:false`.
+
+- **Table.** Node, state, last sample latency (with a failure badge and the `errorClass` label),
+  p50, p95, success rate, consecutive failures and sample count. Percentiles come from successful
+  probes only, so a node with `ok:0` renders `—` instead of the daemon's zero placeholder; a node
+  with `count:0` renders `no sample`.
+- **States.** `ok`, `degraded` (success rate below 0.9 or p95 above 800 ms) and `down` (three
+  consecutive failures or success rate below 0.5), mapped to the shared success/warn/unavailable
+  pills; the card badge counts them.
+- **Compact.** State counts plus the worst node, its success rate and a sparkline built from the
+  page's own successive polls (two samples minimum), with a link to `/nodes`.
+- **Honesty.** A failed poll keeps the last good table with the stale marker; `enabled:false`
+  shows the daemon's reason (`AJS_HEALTH_PROBE=0`) instead of an empty table; an empty sampler
+  explains that no gate is being watched. The probe dials the daemon host's loopback gate port, so
+  the panel is a diagnostic for a running gate, never a vendor-reachability claim.
+
 ## Requests flows
 
 `/requests` is the audit table over the daemon's gate flow ring, not the vendor's request log.
@@ -413,6 +439,60 @@ page composes the two.
 - **Tests.** `tests/pagination.test.tsx` covers the footer range/size/jump, the filter reset, the
   compact layout and the page integrations; `tests/catalog-snapshot.test.ts` covers the paged
   snapshot read and its cache, and `tests/nodes-catalog.test.tsx` the server-offset window.
+
+## Usage page
+
+`/usage` is the aggregation view over the daemon's request log (`GET /v1/usage`), not a traffic
+meter: the daemon sums the same rows `/v1/requests` serves, so the numbers reset with the request
+log's retention. `src/pages/Usage.tsx` loads once per filter change — no polling — with an explicit
+**Refresh**.
+
+- **Window.** A segmented control selects 7, 30, 90 or 366 days; the client sends RFC 3339
+  `from`/`to` bounds (the start is UTC midnight of the first day) and the daemon applies the limits
+  (absent = trailing 30 days, > 366 days → 400). The previous window is sent as bare `YYYY-MM-DD`
+  dates for the baseline request.
+- **Filters.** An account filter is populated from the current summary and sent as `account` (the
+  daemon resolves an id or a label); the API also accepts `userId`, which the page does not expose
+  yet.
+- **Summary.** Four tiles — requests, bytes, errors (with error rate) and average latency — each
+  with the change against the immediately preceding window of the same length, computed from a
+  second `GET /v1/usage`. A failed baseline request drops the deltas instead of failing the page.
+- **Chart and tables.** A per-day bar/area chart fills missing days with zeros across the returned
+  `from`–`to` window; the account and user tables are sortable and the user rows show the monthly
+  quota meter (`quotaBytesMonth` against `usedBytes`); a top-targets card lists the busiest
+  `host:port` targets. An empty window renders an explicit empty state, and `truncated:true` shows
+  a warning callout that the daemon clipped the aggregation.
+- **Mock.** Deterministic fixtures aggregate the seeded request rows, so the page is fully
+  exercisable offline.
+
+## Schedules page
+
+`/schedules` is the UI for the daemon's scheduler (`AJS_SCHEDULES=1`); it lists schedules, previews
+the next runs and records manual runs. It polls `GET /v1/schedules` every 15 s and the account list
+every 30 s.
+
+- **Table.** Name (with action, owner and paused/degraded badges), trigger description
+  (cron/interval/once in the active language, plus the optional window), next run, last result,
+  runs today and the enabled switch. The four summary tiles count total, enabled, paused and the
+  next run.
+- **Create/edit.** `ScheduleDialog` builds the trigger (`cron` expression, `interval` seconds with
+  jitter, or a `once` timestamp), an optional weekday/time window, the guard (`cooldownSec`,
+  `maxRunsPerDay`, `dryRun`), the concurrency and misfire policies and the target account. A
+  destructive action with `dryRun:false` asks for the `ARM` confirmation. The dialog shows the pure
+  next-run preview (`GET /v1/schedules/preview`) before saving.
+- **Edit safety.** PATCH sends `If-Match: "<id>:<revision>"`; on a stale revision (412) the page
+  refetches the schedule and retries once with the new revision, so a concurrent edit surfaces as a
+  retry rather than a lost update.
+- **Actions.** The enabled switch sends `{enabled}`, **Run now** posts
+  `/v1/schedules/{id}/actions/run` with `confirm:"RUN"` for a non-dry destructive action and
+  reports the run result, the history drawer reads `/v1/schedules/{id}/runs`, and delete asks for
+  confirmation. A 503 with the disabled engine renders a banner with the daemon's reason and
+  disables every mutation.
+- **Renewal sweep.** `RenewalSweepCard` surfaces the daemon's built-in daily expiry sweep as
+  read-only state: the system schedule id, owner, action, trigger, enabled state and last run when
+  the daemon lists that row, otherwise an explicit *state unavailable*, plus the reminder marks
+  derived from account expiry inside the 30-day window. The page cannot trigger or edit the sweep
+  and never invents a next run.
 
 ## HMC layout
 
@@ -590,14 +670,15 @@ scroll strip with a 44 px touch target and a mint underline. Section ids are dee
 | Connection | transport and health interval | **Stored only** — controls disabled with a visible reason; `VersionProfile.Transport` wins and no canary scheduler exists |
 | Leases | lease TTL, subscription refresh | TTL **Applied**; refresh **Stored only** (the daemon uses a fixed 30 s window) |
 | Updates | existing read-only release check + deploy command | automatic update/rollback marked **Coming later** |
-| Integrations | Resin, Prometheus and webhook rows | read-only **Not configured**; webhooks **Coming later**; no fake toggles or deliveries |
+| Integrations | Resin and Prometheus rows, plus the live webhook registry | Resin/Prometheus read-only **Not configured**; webhooks are real: endpoint list, create with a one-time signing secret, enable/disable, edit-as-replace, delete confirm and a per-endpoint delivery ring |
 | Audit | audit and request-log retention, source route, link to Logs | retention **Locked** by the daemon; export **Coming later** |
 
 The header carries the dirty count (`{count} unsaved`), **Reset changes**, and **Save changes**.
 Dirtiness is per field (`theme`, `transport`, `healthIntervalSec`, `leaseTtl`,
 `subscriptionRefreshSec`), dirty sections get a warning dot in the rail, each editable section has
-its own **Reset section** action, and a dirty form installs a `beforeunload` guard. The page makes
-two requests on load (`GET /v1/settings` and `GET /v1/lab/overview`) and does not poll.
+its own **Reset section** action, and a dirty form installs a `beforeunload` guard. The settings
+form itself makes two requests on load (`GET /v1/settings` and `GET /v1/lab/overview`) and does not
+poll; the webhook registry below adds its own list and per-endpoint delivery reads.
 
 The section registry is `src/lib/settingsSections.ts` (id, group, label/description keys, dirty
 fields, deep-link ids). `src/components/settings/` holds the rail, section shell, field row,
@@ -628,9 +709,42 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
 `{enabled: false, current: "0.1.0"}`, so the mock build renders the disabled state; tests mock
 `api.getUpdate` for the other states.
 
+## Webhooks (Settings → Integrations)
+
+The Integrations section hosts a live webhook registry; it replaces the earlier **Coming later**
+placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
+
+- **Load.** `GET /v1/webhooks` plus one `GET /v1/webhooks/{id}/deliveries` per endpoint on mount
+  and on **Refresh** — no polling. The list still renders when a deliveries request fails
+  (`deliveriesKnown:false` shows *delivery status unknown*, not an empty ring).
+- **Create.** The dialog takes URL, event subscription (none = every event), description and an
+  initial enabled flag. `POST /v1/webhooks` returns the signing secret exactly once; the show-once
+  panel renders it with a **Copy** button and it is never fetched again. The URL must be absolute
+  `https` unless it is loopback (the daemon's `AJS_WEBHOOK_ALLOW_HTTP` opens plain HTTP too) and
+  may not embed credentials; the dialog rejects those before the request.
+- **Rows.** URL, subscription, enabled switch, last delivery (status, HTTP status, attempt, time)
+  and the edit/deliveries/delete actions. `PATCH /v1/webhooks/{id}` sends only `{enabled}`. A row
+  whose `secretAvailable` is false is flagged *secret unavailable* and cannot be re-enabled (the
+  daemon answers 409) — recreate the endpoint instead.
+- **Edit is a replace.** The daemon only mutates `enabled`, so a changed URL, label or event list
+  is a new receiver: the page creates it first (showing the new signing secret once), then deletes
+  the old row, so a failed create leaves the original endpoint intact.
+- **Deliveries.** The drawer lists the endpoint's retained attempts oldest first with event,
+  attempt number, status (`success`/`failed`/`dead_letter`), HTTP status or transport error, and
+  duration. The ring is the daemon's in-memory last 200 attempts per endpoint: it does not survive
+  a daemon restart, and the dashboard never invents an attempt.
+- **Events.** The subscription list is the daemon's closed catalogue: `account.login`,
+  `account.logout`, `account.expired`, `account.renewal_due`, `node.connected`,
+  `node.disconnected`, `node.switched`, `schedule.fired`, `schedule.failed`, `device.retired`,
+  `audit.critical`. The daemon currently emits `account.login`, `account.logout`,
+  `node.connected`, `node.disconnected`, `node.switched`, `schedule.fired` and `schedule.failed`;
+  the other four are accepted but not emitted yet.
+- **Mock.** The mock store seeds one endpoint (`https://hooks.example.com/ajs`) and three
+  deliveries so the panel is exercisable offline; create, toggle and delete mutate in memory only.
+
 ## Tests and QA
 
-- 262 Vitest tests in 32 files (65 at the 2026-10-23 record; see
+- 323 Vitest tests in 37 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -663,6 +777,15 @@ The dashboard never executes an update — `update.sh` is the host's job. Mock m
   update-available state with tag/date, copying the exact deploy command
   (`cd deploy && ./update.sh --tag v0.2.0`), the release-notes link target, the up-to-date
   badge and the error state (alert, no badge, cleared by a later successful check).
+  The platform wave adds five files. `tests/usage.test.tsx` drives the 7/30/90/366 window, the
+  account filter, the summary tiles with previous-window deltas, the zero-filled chart, the
+  empty and `truncated` states. `tests/schedules.test.tsx` covers the table, the create/edit
+  dialog and its pure preview, `ARM`/`RUN` confirmation, the stale-`If-Match` retry, run history
+  and delete. `tests/health-panel.test.tsx` covers `ok`/`degraded`/`down`, the compact and full
+  variants, `enabled:false`, an empty sampler and the stale poll. `tests/webhooks.test.tsx` covers
+  the registry, the show-once secret, the enable-409 when the secret is gone, delete and the
+  deliveries drawer. `tests/platform-client.test.ts` pins the client contract for renewal, usage,
+  health and webhooks (live URL/query/method/bearer header and deterministic mock data).
   `tests/lab.test.tsx` covers the Lab page: overview posture badges and effective flags (a secret
   value never reaches the DOM), gate counters plus redacted session SIDs, the `enabled:false`
   bodies for gates/sessions and egress, servers/protocol/device tabs, log pause/resume and
@@ -754,15 +877,17 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 | Route | Page | Primary surfaces |
 |---|---|---|
-| `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay) |
+| `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay); a compact gate-health panel sits under the metric tiles |
+| `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas, per-day chart, per-account and per-user tables with quota meters, top targets; an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, rotate, release confirm, TTL |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor |
 | `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, export placeholder |
+| `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
-| `/settings` | Settings | eight-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Audit; dirty save/reset, honest **Stored only**/**Coming later** states |
+| `/settings` | Settings | eight-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Audit; dirty save/reset, honest **Stored only**/**Coming later** states; Integrations carries the live webhook registry |
 
 `*` redirects to `/`.
 
@@ -770,11 +895,11 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 ```text
 src/
-  App.tsx                 lazy routes for all 9 pages
+  App.tsx                 lazy routes for all 11 pages
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
-    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*
+    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*, Schedule*, Usage*, Health*, Webhook*
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
@@ -783,6 +908,7 @@ src/
     format.ts             bytes, dates, TTL, proxy URL helpers
     i18n.tsx              EN/ZH dictionaries, translate(), provider, ajs.lang persistence
     settingsSections.ts   eight-section registry: groups, dirty fields, deep-link ids
+    schedules.ts          pure cron/interval/window mirror for the mock and dialog checks
     iconMorph.ts          morph core: path parsing, resampling, Procrustes, polar interpolation, spring
     labels.ts             account/node/severity tone maps
     nav.tsx               navigation + command registry metadata
@@ -795,10 +921,12 @@ src/
     Select.tsx            custom combobox: variants, search, multi, groups, body portal
     icons/                APC brand, nav, status and shell glyphs (inline SVG) + MorphIcon/morphGlyphs
     accounts/             export/import dialogs, renewal drawer card, accounts-io.css
-    settings/             SettingsNav rail, section shell, field row, provenance badge, settings.css
-    nodes/                CatalogTab (grouped vendor catalog), ChinaMap (offline choropleth), ConnectedTab (runtime nodes)
+    settings/             SettingsNav rail, section shell, field row, provenance badge, WebhooksSection, settings.css
+    nodes/                CatalogTab (grouped vendor catalog), ChinaMap (offline choropleth), ConnectedTab (runtime nodes), HealthPanel
+    schedules/            ScheduleDialog, ScheduleHistoryDrawer, RenewalSweepCard, schedules.css
+    usage/                UsageChart
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
-  pages/                  Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Lab, Settings
+  pages/                  Overview, Usage, Accounts, Nodes, Leases, Users, Requests, Logs, Schedules, Lab, Settings
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
@@ -833,6 +961,11 @@ tests/
   theme-accent.test.tsx   accent switch, persistence, tokens, 8-way WCAG contrast
   theme-contrast.test.ts  token contrast audit for both themes
   useAsync.test.tsx       fake-timer polling: interval, hidden pause, dedupe, stale, reload
+  usage.test.tsx          usage windows, account filter, tiles/deltas, chart, empty/truncated states
+  schedules.test.tsx      schedule table, dialog, preview, ARM/RUN confirm, If-Match retry, history
+  health-panel.test.tsx   health states, compact/full variants, disabled reason, stale poll
+  webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
+  platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
 ```
 
 ### Accounts views
@@ -947,6 +1080,11 @@ contract only):
 | Lab account reads | `GET /v1/accounts/{id}/{servers,device}` (`servers` takes `q/region/status/province/city/offset/limit/sort` and returns `snapshotId` + `geo`) | `[PROPOSED]`; served by `ajs-accountd` |
 | Account export/import/bulk delete | `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/{export,import,bulk-delete}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Catalog target and session | `GET/PUT/DELETE /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/{connect,disconnect,reconnect}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Schedules | `GET/POST /v1/schedules`, `GET/PATCH/DELETE /v1/schedules/{id}`, `GET/POST /v1/schedules/preview`, `POST /v1/schedules/{id}/actions/run`, `GET /v1/schedules/{id}/runs` | `[PROPOSED]`; served by `ajs-accountd` |
+| Renewal | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Usage | `GET /v1/usage?from=&to=&account=&userId=` | `[PROPOSED]`; served by `ajs-accountd` |
+| Gate health | `GET /v1/health/nodes` | `[PROPOSED]`; served by `ajs-accountd` |
+| Webhooks | `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
 Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
@@ -1162,7 +1300,18 @@ and reports healthy on `/healthz`.
   coexistence and Resin live publish remain `[UNVERIFIED]`.
 - Catalog target/connect, account import/export and bulk delete are wired to the daemon routes;
   a P0 daemon without them degrades to a read-only catalog and a disabled export option rather
-  than faking success. The dashboard does not surface the daemon's scheduler or device pool.
+  than faking success. Usage, schedules, gate health and webhooks are surfaced and degrade to an
+  explicit disabled state when the daemon answers `enabled:false` or 503. The device pool has an
+  HTTP API (`/v1/device-pool`) but no dashboard surface yet.
+- Usage aggregates the daemon's in-memory request log, not a traffic meter: its requests and bytes
+  are the recorded rows and reset with the log's retention. The page never extrapolates a missing
+  day; it fills the chart with zeros and shows `truncated:true` when the daemon clipped the window.
+- The gate-health panel is a diagnostic for loopback gates on the daemon host. It does not test
+  vendor reachability, cannot see a node whose gate is not running, and keeps only one hour of
+  samples (120 at 30 s).
+- Webhooks are real daemon deliveries, but the delivery ring is in memory (last 200 attempts per
+  endpoint, lost on a restart) and the signing secret survives a restart only with
+  `AJS_MASTER_KEY`. The page never simulates a delivery or re-shows a secret.
 - Plaintext export needs `AJS_ALLOW_PLAINTEXT_EXPORT=1` on the daemon and the `EXPORT`
   confirmation in the dialog; the dashboard cannot override the gate, and encrypted `.ajsx`
   export is the default.

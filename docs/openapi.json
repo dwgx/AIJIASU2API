@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules, scoped keys) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -90,6 +90,18 @@
     {
       "name": "Scoped Keys",
       "description": "P1: least-privilege API keys."
+    },
+    {
+      "name": "Renewal",
+      "description": "Public plan catalogue and per-account expiry state; read-only."
+    },
+    {
+      "name": "Usage",
+      "description": "Request-log usage aggregated over an inclusive UTC window."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Outbound webhook receivers, one-time signing secrets and the delivery ring."
     }
   ],
   "paths": {
@@ -804,6 +816,579 @@
             "$ref": "#/components/parameters/PathID"
           }
         ]
+      }
+    },
+    "/v1/device-pool": {
+      "get": {
+        "operationId": "listDevicePool",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "List the device pool; records carry hashes only.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Pool counts and one filtered page. A disabled pool answers enabled:false plus reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicePoolView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "available",
+                "assigned",
+                "retired",
+                "quarantined"
+              ]
+            }
+          },
+          {
+            "name": "platform",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/Platform"
+            }
+          },
+          {
+            "name": "profile",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "accountId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/generate": {
+      "post": {
+        "operationId": "generateDevicePool",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Generate sealed, unbound records in one all-or-nothing batch.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Generated records, hash-only views.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicePoolGenerateResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/device-pool/{id}": {
+      "get": {
+        "operationId": "getDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Read one pool record (hashes only).",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Pool record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "patchDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Edit the operator label and notes.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolPatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/{id}/assign": {
+      "post": {
+        "operationId": "assignDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Bind an available or restorable record to an account.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolAssignRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Assigned record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/{id}/release": {
+      "post": {
+        "operationId": "releaseDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Unbind a record; requires confirm RELEASE and no live session.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Released record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/{id}/retire": {
+      "post": {
+        "operationId": "retireDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Retire a record; requires confirm RETIRE.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolReasonConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retired record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/{id}/quarantine": {
+      "post": {
+        "operationId": "quarantineDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Quarantine an unassigned record; requires confirm QUARANTINE.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolReasonConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Quarantined record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRecordView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/{id}/purge": {
+      "post": {
+        "operationId": "purgeDevicePoolRecord",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Delete a record and its sealed material; requires confirm PURGE.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Record purged."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/device-pool/export": {
+      "post": {
+        "operationId": "exportDevicePool",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Export selected records as a passphrase-encrypted envelope.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Encrypted envelope; raw identity exists only inside ciphertext.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceExportEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/device-pool/import": {
+      "post": {
+        "operationId": "importDevicePool",
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Decrypt and import an envelope; dryRun reports without mutating.",
+        "x-implementation-phase": "P0",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePoolImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "DEVICE_IMPORT_CONFLICT: all-or-nothing conflict, no record mutated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceImportConflictResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
       }
     },
     "/v1/accounts/{id}/selection": {
@@ -2337,6 +2922,89 @@
         ]
       }
     },
+    "/v1/audit/export.csv": {
+      "get": {
+        "operationId": "exportAuditCSV",
+        "tags": [
+          "Audit"
+        ],
+        "summary": "Stream the retained audit history as CSV.",
+        "description": "Columns are ts,severity,actor,action,target,detail,meta. Bounds are RFC 3339 and inclusive; the default window is the last seven days and the maximum is 366 days. At most 50000 rows are returned; when older matches are dropped the response carries X-Truncated: true. Audit rows are sanitized before they are stored, and credential-looking assignments are scrubbed again before export.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive RFC 3339 lower bound. Defaults to seven days before to.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Inclusive RFC 3339 upper bound. Defaults to now.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "description": "Only rows with this severity.",
+            "schema": {
+              "$ref": "#/components/schemas/Severity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV export with a fixed header row.",
+            "headers": {
+              "Content-Disposition": {
+                "description": "attachment; filename=\"apc-audit-<from>-<to>.csv\"",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Truncated": {
+                "description": "Present and true when the 50000-row cap dropped older matching rows.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              },
+              "Cache-Control": {
+                "description": "Always no-store.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
     "/v1/settings": {
       "get": {
         "operationId": "getSettings",
@@ -2462,6 +3130,52 @@
           },
           "502": {
             "$ref": "#/components/responses/BadGateway"
+          }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenAPISpec",
+        "tags": [
+          "System"
+        ],
+        "summary": "Serve the embedded OpenAPI 3.1 contract.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "The same document as docs/openapi.json.",
+            "headers": {
+              "ETag": {
+                "description": "Strong validator: the SHA-256 of the document.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "no-cache; revalidate with If-None-Match.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified; If-None-Match matched the current ETag."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
           }
         }
       }
@@ -2975,7 +3689,7 @@
           "Scoped Keys"
         ],
         "summary": "List least-privilege keys.",
-        "x-implementation-phase": "P1",
+        "x-implementation-phase": "P0",
         "responses": {
           "200": {
             "description": "One page of scoped keys.",
@@ -2995,6 +3709,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3018,7 +3735,7 @@
           "Scoped Keys"
         ],
         "summary": "Issue a scoped key; the secret is returned exactly once.",
-        "x-implementation-phase": "P1",
+        "x-implementation-phase": "P0",
         "responses": {
           "201": {
             "description": "Key and one-time secret.",
@@ -3035,6 +3752,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -3062,7 +3782,7 @@
           "Scoped Keys"
         ],
         "summary": "Read one scoped key (never the secret).",
-        "x-implementation-phase": "P1",
+        "x-implementation-phase": "P0",
         "responses": {
           "200": {
             "description": "Scoped key.",
@@ -3076,6 +3796,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3096,10 +3819,83 @@
           "Scoped Keys"
         ],
         "summary": "Revoke a scoped key.",
-        "x-implementation-phase": "P1",
+        "x-implementation-phase": "P0",
         "responses": {
           "204": {
             "description": "Key revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/renewal/plans": {
+      "get": {
+        "operationId": "getRenewalPlans",
+        "tags": [
+          "Renewal"
+        ],
+        "summary": "Read the public plan catalogue with its provenance.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Plan catalogue; a failed refresh is soft and reports source/stale.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenewalPlansView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/renewal/accounts/{id}": {
+      "get": {
+        "operationId": "getRenewalAccount",
+        "tags": [
+          "Renewal"
+        ],
+        "summary": "Read one account's expiry state and the official renewal URL.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Expiry state; the URL carries no account id or credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenewalAccountView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3109,6 +3905,305 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "getUsage",
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Aggregate the request log over an inclusive UTC window.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Usage summary; the window defaults to the trailing 30 days.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). Empty means unbounded and defaults to 30 days before to."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). Empty defaults to the daemon clock."
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact account label; an account id is resolved to its label."
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact user id. user_id is accepted as an alias."
+          }
+        ]
+      }
+    },
+    "/v1/health/nodes": {
+      "get": {
+        "operationId": "getNodeHealth",
+        "tags": [
+          "Health"
+        ],
+        "summary": "Read loopback gate health for every watched node.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Watched nodes; enabled=false carries the daemon's reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/webhooks": {
+      "get": {
+        "operationId": "listWebhooks",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhook receivers; the signing secret is never returned.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Receivers in creation order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookEndpoint"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWebhook",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Create a receiver; the signing secret is returned exactly once.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "201": {
+            "description": "Created receiver and its one-time signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookCreate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{id}": {
+      "patch": {
+        "operationId": "updateWebhook",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Enable or disable a receiver; only enabled is mutable.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Updated receiver.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookPatch"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteWebhook",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Delete a receiver and its sealed signing secret.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "204": {
+            "description": "Receiver deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/webhooks/{id}/deliveries": {
+      "get": {
+        "operationId": "listWebhookDeliveries",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Read the bounded delivery-attempt ring for one receiver, oldest first.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Delivery attempts, oldest first; empty when none were recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Delivery"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "parameters": [
@@ -3124,7 +4219,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback."
+        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback."
       }
     },
     "responses": {
@@ -3140,6 +4235,16 @@
       },
       "Unauthorized": {
         "description": "UNAUTHORIZED: missing or invalid bearer token.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "FORBIDDEN: the scoped key is valid but lacks the route scope or the requested account is outside its accountIds/regions.",
         "content": {
           "application/json": {
             "schema": {
@@ -3353,6 +4458,7 @@
               "QUOTA_EXCEEDED",
               "RATE_LIMITED",
               "UNAUTHORIZED",
+              "FORBIDDEN",
               "METHOD_NOT_ALLOWED",
               "INTERNAL"
             ]
@@ -4490,6 +5596,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "probes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Connections that closed before sending a handshake byte: a health sampler dial-and-close. A probe is not a rejection."
+          },
           "ingressBytes": {
             "type": "integer",
             "format": "int64"
@@ -4515,6 +5626,7 @@
           "limit",
           "accepted",
           "rejected",
+          "probes",
           "ingressBytes",
           "egressBytes",
           "draining",
@@ -5072,6 +6184,576 @@
           "servers"
         ],
         "description": "One page of the filtered catalog. total and regions count every row matching the filters."
+      },
+      "DevicePoolView": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Stable reason such as DEVICE_POOL_DISABLED when enabled is false."
+          },
+          "total": {
+            "type": "integer"
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Whole-pool counts by state, independent of the page."
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceRecordView"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "enabled",
+          "total",
+          "counts",
+          "devices"
+        ]
+      },
+      "DeviceRecordView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "assigned",
+              "retired",
+              "quarantined"
+            ]
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "algorithm": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "Full sha256:<64 hex> identity fingerprint."
+          },
+          "hashes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "sha256:<16 hex> for uid, osdid, cuid, cseid and machine. Raw values never leave the daemon."
+          },
+          "claims": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Public vendor claims (site, version, osp, osd, osv, lang); cseid is hashed instead."
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "accountLabel": {
+            "type": "string"
+          },
+          "accountKey": {
+            "type": "string",
+            "description": "sha256:<16 hex> account key."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "assignedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "presentedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "firstSeenAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastSeenAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loginCount": {
+            "type": "integer"
+          },
+          "retiredAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retiredReason": {
+            "type": "string"
+          },
+          "materialPresent": {
+            "type": "boolean"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "notes",
+          "state",
+          "platform",
+          "profile",
+          "algorithm",
+          "fingerprint",
+          "hashes",
+          "claims",
+          "createdAt",
+          "assignedAt",
+          "presentedAt",
+          "firstSeenAt",
+          "lastSeenAt",
+          "loginCount",
+          "retiredAt",
+          "retiredReason",
+          "materialPresent",
+          "warnings"
+        ]
+      },
+      "DevicePoolGenerateRequest": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 1
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "linux-4.2.3.0-binary",
+              "linux-4.3.0.1-binary",
+              "openajs-4.11.10.0-rawtcp"
+            ]
+          },
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "random/v1",
+              "hmac-sha256/v1"
+            ]
+          },
+          "labelPrefix": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      },
+      "DevicePoolGenerateResult": {
+        "type": "object",
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceRecordView"
+            }
+          }
+        },
+        "required": [
+          "devices"
+        ]
+      },
+      "DevicePoolPatchRequest": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "DevicePoolAssignRequest": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ]
+      },
+      "DevicePoolConfirmRequest": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "Exact action token: RELEASE or PURGE."
+          }
+        },
+        "required": [
+          "confirm"
+        ]
+      },
+      "DevicePoolReasonConfirmRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "confirm": {
+            "type": "string",
+            "description": "Exact action token: RETIRE or QUARANTINE."
+          }
+        },
+        "required": [
+          "confirm"
+        ]
+      },
+      "DevicePoolExportRequest": {
+        "type": "object",
+        "properties": {
+          "passphrase": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 12,
+            "maxLength": 1024
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "assigned",
+              "retired",
+              "all"
+            ],
+            "default": "assigned"
+          },
+          "deviceIds": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "string"
+            }
+          },
+          "includeAccountKeys": {
+            "type": "boolean",
+            "default": true
+          },
+          "includeLabels": {
+            "type": "boolean",
+            "default": true
+          },
+          "confirm": {
+            "type": "string",
+            "enum": [
+              "EXPORT"
+            ],
+            "description": "Optional; when supplied it must be EXPORT."
+          }
+        },
+        "required": [
+          "passphrase"
+        ]
+      },
+      "DeviceExportEnvelope": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "ajs-device-pool"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "kdf": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "iterations": {
+                "type": "integer"
+              },
+              "salt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "iterations",
+              "salt"
+            ]
+          },
+          "cipher": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "nonce": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "nonce"
+            ]
+          },
+          "payloadSha256": {
+            "type": "string"
+          },
+          "ciphertext": {
+            "type": "string"
+          },
+          "deviceCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "version",
+          "createdAt",
+          "kdf",
+          "cipher",
+          "payloadSha256",
+          "ciphertext",
+          "deviceCount"
+        ]
+      },
+      "DevicePoolImportRequest": {
+        "type": "object",
+        "properties": {
+          "passphrase": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 12,
+            "maxLength": 1024
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/DeviceExportEnvelope"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "default": false
+          },
+          "bind": {
+            "type": "boolean",
+            "default": false
+          },
+          "confirm": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "passphrase",
+          "envelope"
+        ]
+      },
+      "DeviceImportResult": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "format": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "added": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "integer"
+          },
+          "conflicts": {
+            "type": "integer"
+          },
+          "bound": {
+            "type": "integer"
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "deviceId": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "available",
+                    "assigned",
+                    "retired",
+                    "quarantined"
+                  ]
+                },
+                "fingerprint": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "deviceId",
+                "state",
+                "fingerprint",
+                "action"
+              ]
+            }
+          },
+          "bindingConflicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "deviceId": {
+                  "type": "string"
+                },
+                "accountId": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "deviceId",
+                "reason"
+              ]
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "format",
+          "version",
+          "added",
+          "skipped",
+          "conflicts",
+          "bound",
+          "devices",
+          "bindingConflicts",
+          "warnings"
+        ]
+      },
+      "DeviceImportConflictResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "deviceId": {
+                  "type": "string"
+                },
+                "existingFingerprint": {
+                  "type": "string"
+                },
+                "importedFingerprint": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "deviceId",
+                "existingFingerprint",
+                "importedFingerprint",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "error",
+          "conflicts"
+        ]
       },
       "DeviceView": {
         "type": "object",
@@ -6843,6 +8525,7 @@
         "type": "string",
         "enum": [
           "accounts:read",
+          "accounts:write",
           "catalog:read",
           "catalog:write",
           "leases:read",
@@ -6998,6 +8681,657 @@
         "required": [
           "key",
           "secret"
+        ]
+      },
+      "RenewalPlan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Vendor period code: M1/M3/M12 months, H6 trial."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human period label published by the vendor."
+          },
+          "months": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Whole months covered by the term; 0 for the trial."
+          },
+          "priceCny": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Vendor list price in CNY, not a quote."
+          },
+          "autoRenewPriceCny": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Auto-renew list price when the vendor publishes a variant."
+          },
+          "trial": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "months",
+          "priceCny"
+        ]
+      },
+      "RenewalPlansView": {
+        "type": "object",
+        "properties": {
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenewalPlan"
+            }
+          },
+          "fetchedAt": {
+            "type": "string",
+            "description": "RFC 3339 instant of the last live fetch; the zero instant for a static table."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "live",
+              "cache",
+              "static"
+            ]
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "True when the snapshot outlived its TTL or is the static fallback."
+          }
+        },
+        "required": [
+          "plans",
+          "fetchedAt",
+          "source",
+          "stale"
+        ]
+      },
+      "RenewalAccountView": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "RFC 3339 expiry echoed from the account row."
+          },
+          "daysLeft": {
+            "type": "integer",
+            "description": "Whole days to expiry, rounded away from zero; negative once past it."
+          },
+          "urgency": {
+            "type": "string",
+            "enum": [
+              "none",
+              "soon",
+              "due",
+              "overdue"
+            ]
+          },
+          "renewalUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Official public purchase page; never carries an account id or credential."
+          }
+        },
+        "required": [
+          "accountId",
+          "expiresAt",
+          "daysLeft",
+          "urgency",
+          "renewalUrl"
+        ]
+      },
+      "UsageBucket": {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "description": "UTC calendar day (YYYY-MM-DD)."
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "avgLatencyMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "day",
+          "requests",
+          "bytes",
+          "errors",
+          "avgLatencyMs"
+        ]
+      },
+      "UsageAccount": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "Account label."
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "avgLatencyMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageBucket"
+            },
+            "description": "Covers every day in the window so a chart can render a continuous series."
+          }
+        },
+        "required": [
+          "account",
+          "requests",
+          "bytes",
+          "errors",
+          "avgLatencyMs",
+          "buckets"
+        ]
+      },
+      "UsageUser": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string"
+          },
+          "userName": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "quotaBytesMonth": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null means no monthly quota."
+          },
+          "usedBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Byte total inside the queried window."
+          }
+        },
+        "required": [
+          "userId",
+          "userName",
+          "requests",
+          "bytes",
+          "quotaBytesMonth",
+          "usedBytes"
+        ]
+      },
+      "UsageTarget": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Host label only; no scheme, path, query string or port."
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "target",
+          "requests",
+          "bytes"
+        ]
+      },
+      "UsageSummary": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "RFC 3339 inclusive lower bound after the daemon applies its defaults."
+          },
+          "to": {
+            "type": "string",
+            "description": "RFC 3339 inclusive upper bound after the daemon applies its defaults."
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageAccount"
+            }
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageUser"
+            }
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageBucket"
+            }
+          },
+          "topTargets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageTarget"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the row cap clipped the window; totals cover the first rows only."
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "requests",
+          "bytes",
+          "errors",
+          "accounts",
+          "users",
+          "days",
+          "topTargets",
+          "truncated"
+        ]
+      },
+      "HealthSample": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "RFC 3339 instant the probe started, with nanoseconds."
+          },
+          "latencyMs": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "errorClass": {
+            "type": "string",
+            "enum": [
+              "timeout",
+              "refused",
+              "unreachable",
+              "other"
+            ],
+            "description": "Absent when ok is true."
+          }
+        },
+        "required": [
+          "at",
+          "latencyMs",
+          "ok"
+        ]
+      },
+      "NodeHealth": {
+        "type": "object",
+        "properties": {
+          "nodeId": {
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "serverId": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "down"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "successRate": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "p50Ms": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "p95Ms": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "minMs": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "maxMs": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "consecutiveFailures": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last": {
+            "$ref": "#/components/schemas/HealthSample"
+          }
+        },
+        "required": [
+          "nodeId",
+          "state",
+          "count",
+          "ok",
+          "successRate",
+          "p50Ms",
+          "p95Ms",
+          "minMs",
+          "maxMs",
+          "consecutiveFailures"
+        ]
+      },
+      "HealthView": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Present when probes are disabled."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeHealth"
+            }
+          }
+        },
+        "required": [
+          "enabled",
+          "nodes"
+        ]
+      },
+      "WebhookEvent": {
+        "type": "string",
+        "enum": [
+          "account.login",
+          "account.logout",
+          "account.expired",
+          "account.renewal_due",
+          "node.connected",
+          "node.disconnected",
+          "node.switched",
+          "schedule.fired",
+          "schedule.failed",
+          "device.retired",
+          "audit.critical"
+        ]
+      },
+      "WebhookEndpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            },
+            "description": "Empty or absent subscribes to every event."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "secretAvailable": {
+            "type": "boolean",
+            "description": "Whether the sealed signing secret can still be opened."
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "enabled",
+          "createdAt",
+          "secretAvailable"
+        ]
+      },
+      "WebhookCreate": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "https receiver; http is only allowed for loopback hosts."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            },
+            "description": "Empty or absent subscribes to every event."
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Defaults to true."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "WebhookCreated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "secretAvailable": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "string",
+            "description": "HMAC-SHA256 signing secret, returned exactly once."
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "enabled",
+          "createdAt",
+          "secretAvailable",
+          "secret"
+        ]
+      },
+      "WebhookPatch": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "Delivery": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "endpointId": {
+            "type": "string"
+          },
+          "event": {
+            "$ref": "#/components/schemas/WebhookEvent"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failed",
+              "dead_letter"
+            ]
+          },
+          "httpStatus": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599,
+            "description": "Absent when the attempt never got a response."
+          },
+          "error": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "durationMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "endpointId",
+          "event",
+          "attempt",
+          "status",
+          "at",
+          "durationMs"
         ]
       }
     }

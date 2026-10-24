@@ -189,8 +189,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(55)
-    expect(entries).toHaveLength(70)
+    expect(Object.keys(doc.paths)).toHaveLength(74)
+    expect(entries).toHaveLength(92)
   })
 
   it('resolves every $ref', () => {
@@ -264,10 +264,6 @@ describe('docs/openapi.json', () => {
       ['get', '/v1/schedules/preview'],
       ['post', '/v1/schedules/{id}/actions/run'],
       ['get', '/v1/schedules/{id}/runs'],
-      ['get', '/v1/scoped-keys'],
-      ['post', '/v1/scoped-keys'],
-      ['get', '/v1/scoped-keys/{id}'],
-      ['delete', '/v1/scoped-keys/{id}'],
     ]
     const byRoute = new Map(entries.map((entry) => [`${entry.method} ${entry.path}`, entry.operation]))
     for (const [method, path] of expected) {
@@ -275,7 +271,7 @@ describe('docs/openapi.json', () => {
     }
     // The paged catalog read is P0 even though selection/connect are P1.
     expect(byRoute.get('get /v1/accounts/{id}/servers')?.['x-implementation-phase']).toBe('P0')
-    expect(entries.filter(({ operation }) => operation['x-implementation-phase'] === 'P1')).toHaveLength(23)
+    expect(entries.filter(({ operation }) => operation['x-implementation-phase'] === 'P1')).toHaveLength(19)
   })
 
   it('documents the schemas named by the contract', () => {
@@ -287,6 +283,9 @@ describe('docs/openapi.json', () => {
       'DiagnosticsView', 'ServersView', 'RegionCount', 'CatalogSelection', 'ConnectResult',
       'DisconnectResult', 'AccountIOCapabilities', 'AccountExport', 'AccountImportRequest',
       'AccountImportResult', 'BulkDeleteRequest', 'BulkDeleteResult', 'Schedule', 'ScopedKey',
+      'RenewalPlan', 'RenewalPlansView', 'RenewalAccountView', 'UsageBucket', 'UsageAccount',
+      'UsageUser', 'UsageTarget', 'UsageSummary', 'HealthSample', 'NodeHealth', 'HealthView',
+      'WebhookEndpoint', 'WebhookCreate', 'WebhookCreated', 'WebhookPatch', 'Delivery',
       'ErrorResponse',
     ]
     for (const name of names) {
@@ -326,6 +325,55 @@ describe('docs/openapi.json', () => {
     ]))
     expect(view.properties?.servers?.items).toEqual({ $ref: '#/components/schemas/ServerView' })
     expect(view.properties?.regions?.items).toEqual({ $ref: '#/components/schemas/RegionCount' })
+  })
+
+  it('documents the platform surfaces as P0 with one-time webhook secrets', () => {
+    const expected: Array<[string, string]> = [
+      ['get', '/v1/renewal/plans'],
+      ['get', '/v1/renewal/accounts/{id}'],
+      ['get', '/v1/usage'],
+      ['get', '/v1/health/nodes'],
+      ['get', '/v1/webhooks'],
+      ['post', '/v1/webhooks'],
+      ['patch', '/v1/webhooks/{id}'],
+      ['delete', '/v1/webhooks/{id}'],
+      ['get', '/v1/webhooks/{id}/deliveries'],
+    ]
+    for (const [method, path] of expected) {
+      const operation = doc.paths[path]?.[method]
+      expect(operation, `${method} ${path}`).toBeDefined()
+      expect(operation?.['x-implementation-phase'], `${method} ${path}`).toBe('P0')
+    }
+
+    const usage = doc.paths['/v1/usage']?.get
+    expect(usage).toBeDefined()
+    if (usage) {
+      expect(parameterNames(usage)).toEqual(
+        expect.arrayContaining(['query:from', 'query:to', 'query:account', 'query:userId']),
+      )
+      expect(responseSchema(usage, '200')).toEqual({ $ref: '#/components/schemas/UsageSummary' })
+    }
+
+    const health = doc.paths['/v1/health/nodes']?.get
+    expect(health && responseSchema(health, '200')).toEqual({ $ref: '#/components/schemas/HealthView' })
+
+    const create = doc.paths['/v1/webhooks']?.post
+    expect(create).toBeDefined()
+    if (create) {
+      expect(responseSchema(create, '201')).toEqual({ $ref: '#/components/schemas/WebhookCreated' })
+      expect(create.responses['400']).toEqual({ $ref: '#/components/responses/BadRequest' })
+    }
+    // The signing secret exists only in the create response.
+    expect(schema('WebhookCreated').properties?.secret).toBeTruthy()
+    expect(schema('WebhookEndpoint').properties?.secret).toBeUndefined()
+    expect(schema('WebhookEndpoint').required).toEqual(
+      expect.arrayContaining(['id', 'url', 'enabled', 'createdAt', 'secretAvailable']),
+    )
+    expect(schema('Delivery').properties?.status?.enum).toEqual([
+      'success',
+      'failed',
+      'dead_letter',
+    ])
   })
 
   it('shares the error envelope across failure responses', () => {

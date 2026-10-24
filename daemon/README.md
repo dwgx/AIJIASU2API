@@ -35,9 +35,18 @@ Three P1 surfaces are served in the same process: account export/import/bulk-del
 selection with guarded connect/reconnect/disconnect, and a cron/interval/once scheduler behind
 `AJS_SCHEDULES=1`. The device identity pool seals each account's vendor identity in a separate
 file under a key derived with HKDF-SHA-256 from `AJS_MASTER_KEY`, retires a deleted account's
-identity instead of erasing it, and restores it when the same account is added again. The catalog
-page also carries a server-side `geo` aggregate, so the dashboard draws its map without
-downloading the retained catalog.
+identity instead of erasing it, and restores it when the same account is added again; it is served
+over `/v1/device-pool` as well as through the store API. The catalog page also carries a
+server-side `geo` aggregate, so the dashboard draws its map without downloading the retained
+catalog.
+
+The platform wave adds four read views and two registries: cached renewal plans and per-account
+expiry (`/v1/renewal/*`), request-log usage aggregation (`/v1/usage`), a loopback gate health
+sampler (`/v1/health/nodes`), outbound webhooks with HMAC signing and bounded retries
+(`/v1/webhooks*`), plus least-privilege scoped API keys (`/v1/scoped-keys`, `ajs_sk_` secrets with
+per-route scopes). None of them calls a vendor host: renewal prices come from the public purchase
+page and are cached, usage is derived from the in-memory request log, and the health probe dials
+`127.0.0.1` only.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -74,6 +83,15 @@ internal/runtime/catalog_connect.go  guarded switch: one session per account, co
 internal/api/catalog_connect.go  selection/connect/reconnect/disconnect handlers
 internal/api/account_io.go   export/import/bulk-delete handlers
 internal/api/schedules.go    schedule CRUD, preview, run-now and run history handlers
+internal/api/scoped_keys.go  scope table, scoped-key handlers and the auth identity
+internal/api/device_pool.go  device-pool HTTP lifecycle handlers
+internal/api/platform.go     renewal, usage, health and webhook handlers
+internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
+internal/store/webhooks.go   persisted webhook receivers
+internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states
+internal/renewal/            cached public plan catalogue and per-account expiry
+internal/usage/              request-log aggregation: windows, accounts, users, days, targets
+internal/webhook/            dispatcher, HMAC signing, retry/backoff, delivery ring, scrub
 internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
 internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
@@ -550,11 +568,13 @@ _ = srv.Undrain()                // back to service
   `DrainGrace`, `Now`, `Logger`. Zero values select the defaults
   (`127.0.0.1:0`, 32, 30s, 30s, `time.Now`, `slog.Default()`).
 - `State`: `NodeID`, `AccountID`, `Active`, `Limit`, `Draining`, `Accepted`,
-  `Rejected`, `IngressBytes`, `EgressBytes`, `StartedAt`. `Accepted` counts
-  flows that received the success reply and entered relay; `Rejected` counts
-  flows refused before relay (draining, admission timeout, malformed
-  handshake, failed `OpenFlow`). Byte counters are updated live and exclude
-  the handshake.
+  `Rejected`, `Probes`, `IngressBytes`, `EgressBytes`, `StartedAt`. `Accepted`
+  counts flows that received the success reply and entered relay; `Rejected`
+  counts flows refused before relay (draining, admission timeout, malformed
+  handshake, failed `OpenFlow`); `Probes` counts connections that closed
+  before sending any handshake byte (a health-sampler dial+close), which log
+  at debug and never enter the flow ring. Byte counters are updated live and
+  exclude the handshake.
 - Flow ring: every finished flow, including a refusal, appends one
   `FlowRecord` (`ID`, `StartedAt`, `DurationMs`, `Method`, `TargetHost`,
   `TargetPort`, `Status`, `BytesIn`, `BytesOut`, `ErrorClass`) to a bounded
@@ -982,12 +1002,119 @@ test binary as the child.
 | `AJS_RENEWAL_HOUR` | — | `9` | local hour (`0`–`23`) of the renewal sweep |
 | `AJS_RENEWAL_LEAD_DAYS` | — | `30,14,7,3,1` | comma-separated reminder thresholds, days `1`–`365`, at most six values |
 | `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
+| `AJS_RENEWAL_TTL` | — | `6h` | how long a live purchase-page snapshot stays fresh (`time.ParseDuration`); a bad or non-positive value keeps the default. On failure the cache serves its last good snapshot, or the built-in static table on a cold cache |
+| `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most **8** watched nodes (LRU eviction) |
+| `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
 | `AJS_STATE_DIR` | — | `./data` | state directory (created `0700`); holds `state.json`, `secrets.json`, `device-secrets.json` and `schedule-fire.log` |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
 | `AJS_DROP_DEMO` | — | `0` | `1` runs `Store.PurgeDemo` once after loading the snapshot and before the listener starts: removes exactly the `seed.go` mock rows (`acc-01`…`acc-06`, `node-01`…`node-12` plus any node of a removed seed account, `lease-01`…`lease-08`, `u-01`…`u-04`, `key-01`…`key-06`, `req-001`…`req-040`, `audit-001`…`audit-020`), preserves `acc-07`, its runtime node and every other live row, logs the per-collection counts, and saves the snapshot immediately. Destructive: the purge is written through the normal atomic snapshot and survives a restart, so copy the state file first if you need to undo it. Unset it after the first run; a second run is a no-op |
 | `AJS_UPDATE_REPO` | `-update-repo` | — | GitHub `owner/repo` checked by `GET /v1/system/update`; empty disables the check (the endpoint answers `enabled:false` and no network is made). Read-only: the daemon never executes an update — the host runs `deploy/update.sh` |
 | `AJS_UPDATE_API_BASE` | `-update-api-base` | `https://api.github.com` | GitHub API root for the update check; tests point it at an httptest server |
+
+## Platform routes (AJS-205)
+
+Four read views and the webhook registry are wired in `cmd/ajs-accountd`:
+
+| Route | Source |
+|---|---|
+| `GET /v1/renewal/plans` | `internal/renewal` cached public purchase page; response carries `source` (`live`/`cache`/`static`) and `stale`. A failed refresh is soft and still answers 200 with the fallback table. The prices are the vendor's public list; the daemon never posts to a payment endpoint or calls a purchase API |
+| `GET /v1/renewal/accounts/{id}` | account `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL (never carries an account id or token); unknown account → 404 |
+| `GET /v1/usage?from=&to=&account=&userId=` | `internal/usage` over `store.Requests()`; `from`/`to` accept RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or >366-day windows → 400 |
+| `GET /v1/health/nodes` | `internal/health` sampler over live gate ports; one row per watched node with `count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`minMs`/`maxMs`/`state` and the newest sample. `AJS_HEALTH_PROBE=0` → `enabled:false` |
+| `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `internal/webhook` dispatcher plus the persisted receiver rows in `state.json` |
+
+Health sampling follows the live gate set: a successful connect/switch watches
+the committed gate, login watches every gate the sync opened, and
+disconnect/logout/delete unwatch it. The sampler is started with the signal
+context and stopped after the node controller closes its gates. It dials
+**`127.0.0.1` only** — the gate binds loopback, so a probe can never leave the
+host — once every **30 s** with a 3 s dial timeout, keeping **120 samples per
+node** (one hour) and at most **8 watched nodes** (the sampler evicts the
+least-recently-used ring beyond that) with 8 probes in flight. Percentiles,
+`minMs` and `maxMs` are computed over successful probes only; `successRate` is
+`ok/count` over the whole window and `last` is the newest sample whatever its
+outcome. States are `ok`, `degraded` (success rate below 0.9 or p95 above
+800 ms) and `down` (three consecutive failures or a success rate below 0.5);
+failed samples carry `errorClass` (`timeout`, `refused`, `unreachable`,
+`other`). A node that was never watched is omitted from the response.
+
+Webhook events emitted by the daemon: `account.login`, `account.logout`,
+`node.connected`, `node.disconnected`, `node.switched`, `schedule.fired`,
+`schedule.failed` (the scheduler calls `Config.OnRun` after recording a run),
+and `account.renewal_due`/`account.expired` (the once-per-local-day renewal
+sweep calls `Config.OnReminder` for each newly armed
+`(account, threshold, expiresAt)` mark: a due threshold becomes
+`account.renewal_due`, a lapsed membership becomes `account.expired`, and the
+payload carries only `accountId`, `expiresAt`, `daysLeft` and `threshold`).
+The receiver may also subscribe to the rest of the closed catalogue —
+`device.retired` and `audit.critical` — which the daemon validates but does not
+emit yet; an empty `events` list subscribes to everything. Each delivery
+carries `X-APC-Event`,
+`X-APC-Delivery`, `X-APC-Timestamp` (Unix seconds) and
+`X-APC-Signature: sha256=<hex HMAC-SHA256 of "timestamp.body">`; the payload is
+scrubbed of credential-shaped keys before it leaves the process.
+
+**Delivery.** The dispatcher has a 256-event queue and four workers, keeps
+per-endpoint FIFO order, times each attempt out after 10 s and retries up to
+five attempts with backoff 1 s, 5 s, 30 s, 2 min and 10 min. A delivery that
+exhausts its attempts is recorded as `dead_letter` and is not retried again; an
+identical event id inside the 60 s dedupe window is dropped. The last 200
+attempts per endpoint (and globally) are kept in memory for
+`GET /v1/webhooks/{id}/deliveries`, oldest first; the ring does not survive a
+restart. Receivers must be `https` unless they are loopback or
+`AJS_WEBHOOK_ALLOW_HTTP=1`, and the registry is capped at 32 endpoints.
+`PATCH /v1/webhooks/{id}` changes only `enabled`: enabling a receiver whose
+signing secret is gone is a 409 because every delivery must be signed, and the
+URL/events/description are fixed at create time (recreate the endpoint to
+change them).
+
+**Webhook secret storage.** The signing secret is returned exactly once by
+`POST /v1/webhooks` and never appears in a read response. With
+`AJS_MASTER_KEY` set it is sealed in `$AJS_STATE_DIR/secrets.json` under the
+`webhook/<id>` namespace (AAD-bound, pruned with the endpoint). Without a
+master key the secret is kept in process memory only: the endpoint row still
+survives a restart, but the secret does not, so the endpoint reports
+`secretAvailable:false` and must be recreated. This is the safer default
+compared with writing the secret into `state.json` in plaintext.
+
+## Scoped API keys
+
+`internal/api/scoped_keys.go` and `internal/store/scoped_keys.go` implement least-privilege API
+keys. A key secret is `ajs_sk_` plus 48 hex characters (24 random bytes); only its SHA-256 and the
+first 16 characters (the `prefix`) are persisted. `POST /v1/scoped-keys` returns `{key,secret}`
+with **201** and the secret exactly once — no read response ever carries it. A key may carry an
+`expiresAt` (RFC 3339; empty = never), a `label` (≤ 80 characters) and a user owner;
+`DELETE /v1/scoped-keys/{id}` sets `revokedAt` and keeps the row, and `lastUsedAt` moves on every
+authenticated request.
+
+Authentication tries the admin bearer token first in constant time, then resolves an `ajs_sk_`
+secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz` stays open and
+`AJS_ALLOW_INSECURE=1` skips the check entirely. The router then enforces one scope per route:
+
+| Scope | Routes |
+|---|---|
+| `accounts:read` | `GET /v1/accounts`, `GET /v1/accounts/{id}`, `GET /v1/accounts/{id}/device`, `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/export` |
+| `accounts:write` | `POST /v1/accounts`, `PATCH`/`DELETE /v1/accounts/{id}`, login/logout, `POST /v1/accounts/import`, `POST /v1/accounts/bulk-delete` |
+| `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology` |
+| `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, node drain/undrain/probe |
+| `leases:read` | `GET /v1/leases` |
+| `leases:write` | `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
+| `requests:read` | `GET /v1/requests` |
+| `audit:read` | `GET /v1/audit` |
+| `metrics:read` | `GET /metrics`, `GET /v1/metrics` |
+| `lab:read` | every `/v1/lab/*` route, including `POST /v1/lab/egress-check` |
+| `settings:read` | `GET /v1/settings`, schedule reads and preview |
+| `settings:write` | `PATCH /v1/settings`, schedule create/patch/delete/run |
+| `admin` | every route, same as the admin token |
+
+Routes absent from the table are admin-only — the scoped-key registry, users, API keys, requests
+mutation, reconcile, update and the platform routes (`/v1/renewal/*`, `/v1/usage`,
+`/v1/health/nodes`, `/v1/webhooks*`, `/v1/device-pool*`) — so a key without `admin` gets 403
+`FORBIDDEN` there. `accountIds` and `regions` narrow what a key may **read**: a `GET`/`HEAD` for an
+account outside the list, or a list filtered by such an `account_id`, answers 403 `FORBIDDEN`;
+writes are governed by the scope alone. An unknown scope is a 400, and a create needs at least one
+scope.
 
 ## Secret storage
 
@@ -1178,9 +1305,22 @@ the legacy map and the pool is off.
   retired record whose material is gone, and degrades — never fails — on a corrupt one.
 - **Generation and transfer.** Generators are `random/v1` and `hmac-sha256/v1`; `import/v1` and
   `legacy/v1` records are never selectable for new identities. The pool has versioned export and
-  import envelopes (`ajs-device-pool`, 1 000 records / 16 MiB caps) with passphrase encryption,
-  but **no HTTP route**: today the store API is the only entry point, so the dashboard does not
-  expose it.
+  import envelopes (`ajs-device-pool`, 1 000 records / 16 MiB caps) with passphrase encryption.
+- **HTTP API.** `internal/api/device_pool.go` serves the pool under `/v1/device-pool`:
+  `GET /v1/device-pool` (`state`, `platform`, `profile`, `accountId`, `q`, `offset`, `limit`; 50
+  rows by default, 200 max) returns `{enabled,total,counts,devices,warnings}`, and a disabled pool
+  is a 200 with `enabled:false` and `DEVICE_POOL_DISABLED` rather than an error;
+  `POST /v1/device-pool/generate` creates records (201); `GET`/`PATCH /v1/device-pool/{id}` read a
+  record and change its `label`/`notes`; `assign`, `release`, `retire`, `quarantine` and `purge`
+  are the lifecycle actions. The destructive ones need an exact `confirm` token (`RELEASE`,
+  `RETIRE`, `QUARANTINE`, `PURGE`); retire and quarantine also take a `reason`. Export/import use
+  the passphrase envelope (`scope` is `assigned` — the default —, `retired` or `all`; import
+  supports `dryRun` and `bind`), and a hard import conflict is a 409 that carries per-record
+  `conflicts` with nothing mutated. The record view exposes hashes, public claims and lifecycle
+  metadata only — never the machine code or raw identity — and `materialPresent`/`warnings` flag a
+  record whose sealed material is missing. Failures carry the stable `DEVICE_*` token in
+  `error.reason` (`DEVICE_ALREADY_BOUND`, `DEVICE_ACTIVE_SESSION`, `DEVICE_MATERIAL_MISSING`, …).
+  The dashboard does not surface the pool yet.
 
 ## Scheduler
 
@@ -1397,14 +1537,17 @@ Two deviations, both deliberate:
 ## API
 
 All `/v1/*` routes — including the Lab `/v1/lab/*` set below — and `GET /metrics` require
-`Authorization: Bearer $AJS_ADMIN_TOKEN`. `/healthz` is unauthenticated. List endpoints return bare
-JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper objects.
+`Authorization: Bearer <token>`: either `AJS_ADMIN_TOKEN` or an `ajs_sk_` scoped key that carries
+the route's scope (see [Scoped API keys](#scoped-api-keys)). `/healthz` is unauthenticated. List
+endpoints return bare JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper
+objects.
 
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/healthz` | process status + account-state counts |
 | GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
 | GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); traffic series is empty and totals are zero with `telemetryAvailable:false` until a real traffic meter exists |
+| GET | `/v1/openapi.json` | the OpenAPI 3.1 contract, served from the embedded byte-for-byte copy of `docs/openapi.json` with a strong `ETag` (SHA-256) and `If-None-Match` → 304; same bearer auth as the rest of `/v1/*` |
 | GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
 | GET | `/v1/accounts/io/capabilities` | export/import limits and gates: `encryptedExport:true`, `plaintextExport` (`AJS_ALLOW_PLAINTEXT_EXPORT`), `maxImportRows:1000`, `maxExportAccounts:1000`, `maxDeleteIDs:100`, `maxBodyBytes`, `maxImportBodyBytes` |
@@ -1416,6 +1559,17 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 | DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases and its sealed secret (sealer file immediately, snapshot at the next save) and retire its device identity as a tombstone (pool mode; the legacy plaintext map is deleted) for re-add restore; a sealer failure → 503 with the account and its secret intact; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
 | POST | `/v1/accounts/{id}/actions/logout` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the account's gates and sessions first (stop failure → 500, account active and nodes unchanged); then pause the account and mark its nodes `DRAINING` |
+| GET | `/v1/device-pool?state=&platform=&profile=&accountId=&q=&offset=&limit=` | `{enabled,total,counts,devices,warnings}`; 50 rows by default, 200 max; a disabled pool is a 200 with `enabled:false` and `DEVICE_POOL_DISABLED`; records carry hashes/claims/lifecycle only, never the machine code |
+| POST | `/v1/device-pool/generate` | `{count,platform,profile,algorithm,labelPrefix}` → 201 `{devices}`; unknown algorithm/profile → 400 `DEVICE_ALGORITHM_UNKNOWN`/`DEVICE_PROFILE_MISMATCH` |
+| POST | `/v1/device-pool/export` | passphrase-encrypted `ajs-device-pool` envelope; `scope` is `assigned` (default), `retired` or `all`; optional `deviceIds`, `includeAccountKeys`, `includeLabels`, `confirm:"EXPORT"` |
+| POST | `/v1/device-pool/import` | `{passphrase,envelope,dryRun,bind}`; all-or-nothing; a hard conflict → 409 with per-record `conflicts` and nothing mutated |
+| GET | `/v1/device-pool/{id}` | one record; `materialPresent:false` warns that the sealed material is gone |
+| PATCH | `/v1/device-pool/{id}` | `{label?,notes?}` |
+| POST | `/v1/device-pool/{id}/assign` | `{accountId}`; a bound record → 409 `DEVICE_ALREADY_BOUND` |
+| POST | `/v1/device-pool/{id}/release` | `confirm:"RELEASE"` |
+| POST | `/v1/device-pool/{id}/retire` | `confirm:"RETIRE"` plus optional `reason`; a live node → 409 `DEVICE_ACTIVE_SESSION` |
+| POST | `/v1/device-pool/{id}/quarantine` | `confirm:"QUARANTINE"` plus optional `reason` |
+| POST | `/v1/device-pool/{id}/purge` | `confirm:"PURGE"` → 204; removes the record and its sealed material |
 | GET | `/v1/nodes` | list; filters `account_id`, `state`, `region` |
 | POST | `/v1/nodes/{id}/actions/drain` | with `AJS_ACCOUNT_LOGIN=1`: controller closes the gate first (hook failure → 500, node unchanged); → `DRAINING`; unpublishes through the panel when configured; DOWN → 409 |
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
@@ -1433,14 +1587,31 @@ JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper ob
 | GET | `/v1/apikeys` | list; filter `user_id` |
 | POST | `/v1/apikeys` | `{userId,label}` → `{key,secret}`; secret shown once |
 | DELETE | `/v1/apikeys/{id}` | revoke (`revokedAt` set; row retained) |
+| GET | `/v1/scoped-keys?user_id=&limit=&offset=` | least-privilege keys; the secret is never returned |
+| POST | `/v1/scoped-keys` | `{userId,label,scopes[],accountIds[],regions[],expiresAt}` → 201 `{key,secret}`; secret shown once |
+| GET | `/v1/scoped-keys/{id}` | one key |
+| DELETE | `/v1/scoped-keys/{id}` | revoke (`revokedAt` set; row retained) → 204 |
 | GET | `/v1/requests` | request log, newest first |
 | POST | `/v1/requests/mutations` | append a `mutation-lab` row + audit event |
 | GET | `/v1/audit?limit=` | newest-first audit, default 20, max 500 |
+| GET | `/v1/audit/export.csv?from=&to=&severity=` | retained audit history as CSV (`ts,severity,actor,action,target,detail,meta`), oldest-first, `text/csv` with an attachment filename and `no-store`. `from`/`to` are RFC 3339 and inclusive; absent `from` = seven days before `to` (or now); a reversed or >366-day window → 400, an unknown `severity` → 400; over 50 000 matching rows the older ones are dropped with `X-Truncated: true` |
 | GET | `/v1/settings` | runtime settings |
 | PATCH | `/v1/settings` | partial; unknown keys → 400 |
 | GET | `/v1/topology` | store `ajs-live` map when Resin is disabled; live panel view when enabled |
 | POST | `/v1/reconcile` | re-render + PATCH + refresh; 503 without a panel |
 | GET | `/v1/system/update` | read-only GitHub release check. `AJS_UPDATE_REPO` unset → `{"enabled":false,"current":…}` with no network. Otherwise `GET <AJS_UPDATE_API_BASE>/repos/<repo>/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: ajs-accountd` (10 s client) → `{enabled:true,current,latest,updateAvailable,url,name,publishedAt,checkedAt}`. `updateAvailable` uses a simple semver compare (`v` optional, numeric dot segments): a draft or pre-release tag is **not** newer unless the running version is itself a pre-release. GitHub non-200/transport/parse failure → 502 `UPSTREAM_UNAVAILABLE`; no token is used or echoed. Never executes an update — the host runs `deploy/update.sh` |
+| GET | `/v1/renewal/plans` | cached public price table (`source` `live`/`cache`/`static`, `stale`); a failed refresh still answers 200 with the fallback |
+| GET | `/v1/renewal/accounts/{id}` | `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL, never an account id or token; unknown account → 404 |
+| GET | `/v1/usage?from=&to=&account=&userId=` | `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated}` over the request log; `from`/`to` take RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or > 366-day windows → 400 |
+| GET | `/v1/health/nodes` | loopback probe aggregate per watched node (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `minMs`, `maxMs`, `consecutiveFailures`, `last`); `AJS_HEALTH_PROBE=0` → `{enabled:false,reason}` |
+| GET | `/v1/webhooks` | persisted receivers plus `secretAvailable`; never the signing secret |
+| POST | `/v1/webhooks` | `{url,events?,description?,enabled?}` → 201 with the signing secret exactly once; `https` unless loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`; max 32 endpoints |
+| PATCH | `/v1/webhooks/{id}` | `{enabled}` only; enabling a receiver whose secret is gone → 409 |
+| DELETE | `/v1/webhooks/{id}` | remove the row and its sealed secret → 204 |
+| GET | `/v1/webhooks/{id}/deliveries` | the last 200 delivery attempts for that endpoint, oldest first, from memory |
+
+The catalog selection/connect, schedule and Lab routes are listed in the
+[Lab telemetry](#lab-telemetry) table below rather than repeated here.
 
 Errors are always `{"error":{"code":"…","message":"…","reason?":"…","details?":{…}}}`; `reason`
 is the stable machine token used by the catalog and schedule routes (for example `snapshot_changed`
@@ -1455,6 +1626,8 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 | `QUOTA_EXCEEDED` | 429 | repeat Lab egress check for the same node inside the 5 s cooldown; account quotas remain advisory |
 | `RATE_LIMITED` | 429 | catalog connect cooldown; `Retry-After` carries the remaining whole seconds |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
+| `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account |
+| `PRECONDITION_FAILED` | 412 | a stale `If-Match` revision on schedule PATCH (`reason:"stale_revision"`) |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
 | `UPSTREAM_UNAVAILABLE` | 502 | update check failure: GitHub unreachable, non-200, malformed response; catalog session/gate open failure (message is generic; the detail stays in the log) |
@@ -1475,8 +1648,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (55 paths, 70 operations,
-  108 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (74 paths, 92 operations,
+  138 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
@@ -1508,7 +1681,7 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 |---|---|---|
 | GET | `/v1/lab/overview` | version, commit, uptime, effective modes (login, Resin, update check, secrets, cert pin), aggregate counts and warnings |
 | GET | `/v1/lab/flags` | effective startup flags with provenance (`env`/`flag`/`default`); secret flags carry `set` + `redacted`, never a value |
-| GET | `/v1/lab/gates` | per-node gate listener, state and ingress/egress byte counters from the controller snapshot |
+| GET | `/v1/lab/gates` | per-node gate listener, state, the accepted/rejected/probe counters and ingress/egress bytes from the controller snapshot; `probes` counts health-sampler connections that closed before sending a handshake byte, so it is separate from `rejected` |
 | GET | `/v1/lab/flows?limit=` | newest-first finished flows across every running gate, joined with node/account ids and a redacted SID; `limit` 1–500 (default 200), invalid → 400; the body is `{enabled,flows,dropped}` and a flow carries only `targetHost`/`targetPort` (no URL, headers or credential) |
 | GET | `/v1/lab/sessions` | FV session health with a redacted SID (`a1b2…(32)`), age, last-flow time, claimed egress and keepalive support |
 | GET | `/v1/lab/egress` | the vendor's claimed exit address per running node (`source:"fv-claim"`); this GET never probes, so `verified` stays empty, `match` null and `checkedAt` null — a POST result is returned to its caller, not stored |
@@ -1524,11 +1697,11 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | POST | `/v1/accounts/{id}/actions/connect` | `{serverId, snapshotId?, confirm:true}` → `SwitchResult`. Opens the new session before closing the old one, commits one `LIVE` node, rolls back on failure; the current server → 200 `alreadyConnected` without cooldown. 429 `connect_cooldown` + `Retry-After` inside the 5 s per-account window; 409 `switch_in_progress`/`multiple_sessions`/`snapshot_changed`/`server_ineligible`/`login_required`; 502 `session_open_failed`/`gate_start_failed` |
 | POST | `/v1/accounts/{id}/actions/disconnect` | `{confirm:true}` → `DisconnectResult`; drains each gate (10 s), closes it, deletes the account's nodes and leases, keeps the target; a second call → `alreadyDisconnected:true` |
 | POST | `/v1/accounts/{id}/actions/reconnect` | `{snapshotId?, confirm:true}` → `SwitchResult`; always reopens the current server, or the target when nothing runs; no current server and no target → 404 `no_target` |
-| GET | `/v1/schedules?accountId=&enabled=` | list schedules in creation order with refreshed run counts |
+| GET | `/v1/schedules?accountId=&enabled=&limit=&offset=` | list schedules in creation order with refreshed run counts and each schedule's `nextRunAt`/`lastRunAt` |
 | POST | `/v1/schedules` | create; destructive action with `dryRun:false` requires `confirm:"ARM"`; `Location: /v1/schedules/{id}` → 201 |
-| GET/POST | `/v1/schedules/preview` | pure next-run preview (query or body); no store write and no engine required |
+| GET/POST | `/v1/schedules/preview` | pure next-run preview (query or body; `count` defaults to 5); no store write and no engine required |
 | GET | `/v1/schedules/{id}` | one schedule |
-| PATCH | `/v1/schedules/{id}` | partial update; requires `If-Match: "<id>:<revision>"`, otherwise 400; re-arming a destructive action requires `confirm:"ARM"` |
+| PATCH | `/v1/schedules/{id}` | partial update; requires `If-Match: "<id>:<revision>"`, otherwise 400; a stale revision → 412 `PRECONDITION_FAILED`; re-arming a destructive action requires `confirm:"ARM"` |
 | DELETE | `/v1/schedules/{id}` | → 204; a run in flight → 409 `in_flight` |
 | POST | `/v1/schedules/{id}/actions/run` | `{dryRun?, force?, confirm?}` → `{run}`; a manual non-dry run of a destructive action requires `confirm:"RUN"`; a run already in flight → 409 `in_flight`; engine off → 503 |
 | GET | `/v1/schedules/{id}/runs?limit=` | run history, newest first; `limit` default 50, max 200 |
@@ -1567,6 +1740,9 @@ Deterministic values match `dashboard/src/lib/mock.ts`:
 Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
+
+The tree holds **549 `func Test` functions across 64 `_test.go` files** (recounted 2026-10-24);
+the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
 200, seed counts and exact field names, account create/409/delete, node
@@ -1612,6 +1788,19 @@ circuit breaker, pause after five failures and renewal-sweep idempotence;
 `internal/api/schedules_test.go` covers list/create/patch/delete, preview, validation, `ARM`,
 manual run, the disabled engine and metrics, and `cmd/ajs-accountd/scheduler_test.go` pins the
 default-off switch and start/stop.
+
+The platform wave has its own coverage. `internal/api/scoped_keys_test.go` covers the scope table,
+the 403 for a missing scope, account/region read restrictions and the one-time secret;
+`internal/store/scoped_keys_test.go` pins hashing, prefixes, expiry, revocation and pagination.
+`internal/api/device_pool_test.go` and `cmd/ajs-accountd/device_pool_wire_test.go` cover the HTTP
+lifecycle (list/generate/assign/release/retire/quarantine/purge, confirm tokens, export/import,
+409 conflicts) and the startup gate. `internal/api/platform_test.go` covers renewal plans/status,
+usage windows and filters, the health view and the webhook registry (one-time secret, PATCH
+`enabled`, deliveries, 409 when the secret is gone); `internal/webhook/dispatcher_test.go` and
+`webhook_test.go` pin signing, retry/backoff, dead-letter, dedupe, the 200-attempt ring and payload
+scrubbing; `internal/health/health_test.go` pins the 30 s/120-sample window, states, error
+classes and loopback-only dials; `internal/usage/usage_test.go` and `internal/renewal/*_test.go`
+cover the aggregation windows and the cached/fallback catalogue.
 
 `internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
 mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen
@@ -2907,14 +3096,27 @@ header or credential). No live vendor call was made.
   (`/v1/lab/egress-check`) dials the node's loopback gate and reads an HTTPS echo — a real
   outbound request, though not a vendor call — and persists nothing. The GET egress panel is a
   vendor claim until an operator runs that check.
+- The platform views are read-mostly and offline-tested. Renewal returns the vendor's public price
+  snapshot and an official purchase URL; the daemon never posts to a payment endpoint, never calls
+  a purchase API and never marks an account renewed — renewal is an operator action at the vendor.
+  `GET /v1/usage` aggregates the in-memory request log (the same rows `/v1/requests` serves), not
+  a traffic meter, so its bytes are the recorded request bytes and it resets with the snapshot's
+  retention. `/v1/health/nodes` probes loopback gate ports only: it is a diagnostic for a running
+  gate, not a vendor reachability check, and it keeps one hour of samples in memory. Webhook
+  deliveries are in-memory (a restart drops the ring and any queued retry), and the signing secret
+  survives a restart only with `AJS_MASTER_KEY`.
+- Scoped keys are a least-privilege credential, not an operator model: every key belongs to a
+  stored user, there is no per-key rate limit, and the `admin` scope is equivalent to the admin
+  bearer token.
 - The dashboard lives in a separate tree (`dashboard/`); the Lab page consumes the endpoints
   above and needs no daemon write path.
 - The P1 surfaces are offline-tested only. Catalog selection/connect, account export/import and
   bulk delete have `httptest` coverage but have never been exercised against the live vendor
-  account; a live switch has not been attempted. The scheduler is off unless `AJS_SCHEDULES=1`,
-  has no dashboard UI, and its only actions are `account.rotate`/`account.reconnect` (the rest
-  validate but fail as `unsupported_action`). The device pool has no HTTP route: generate, retire,
-  restore and export/import are store APIs today, and the pool is off without `AJS_MASTER_KEY`.
+  account; a live switch has not been attempted. The scheduler is off unless `AJS_SCHEDULES=1`
+  and its only actions are `account.rotate`/`account.reconnect` (the rest validate but fail as
+  `unsupported_action`); the dashboard surfaces it now. The device pool is served over
+  `/v1/device-pool` as well as through the store API, and is off without `AJS_MASTER_KEY`; the
+  dashboard does not surface it yet.
 - Plaintext account export is off by default (`AJS_ALLOW_PLAINTEXT_EXPORT=0`), and even when on it
   writes unencrypted credentials to the operator's disk; the encrypted `.ajsx` envelope is the
   intended path. The account-IO mutex is per process, so two daemons sharing a state file can

@@ -26,7 +26,9 @@ artifact or credential from those runs is committed.
 Resin M1 integration spike is PASS. Live vendor runs on 2026-10-23 and 2026-10-24 (three logins,
 one account): original app and daemon egress parity through one node, device identity stable
 across logins; the `2261` deployment now runs login-enabled with that account active and is
-demo-free (one account, one node; gate port read from `/v1/lab/gates`). Panel state survives a
+demo-free (one account, one node; gate port read from `/v1/lab/gates`). The platform wave — scoped
+keys, the device-pool HTTP API, renewal, usage, webhooks and loopback gate health — is served by
+the daemon and covered offline, but not yet exercised against the vendor. Panel state survives a
 restart only as a versioned JSON snapshot, not SQLite.**
 
 As of 2026-10-24:
@@ -35,9 +37,10 @@ As of 2026-10-24:
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
   live calls and holds no credentials.
 - `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
-  Vite 6, TypeScript, 9 pages (Overview, Accounts, Nodes, Leases, Users, Requests, Logs, Settings,
-  Lab) in a graphite-and-mint design system with accent themes (Mint/Indigo/Violet/Orange), a
-  table/cards switch for Accounts, and command-palette search for accounts and nodes. The sidebar
+  Vite 6, TypeScript, 11 pages (Overview, Usage, Accounts, Nodes, Leases, Users, Requests, Logs,
+  Schedules, Settings, Lab) in a graphite-and-mint design system with accent themes
+  (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and command-palette search for
+  accounts and nodes. The sidebar
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
   2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
@@ -62,13 +65,14 @@ As of 2026-10-24:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 262 Vitest tests in 32 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 323 Vitest tests in 37 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
   labels, server names, IPs and API values are data and are never translated. Settings is an
   eight-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
   Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later** states
-  for controls the daemon does not read yet. HMC serves the mock
+  for controls the daemon does not read yet; Integrations now carries the live webhook registry
+  (one-time signing secret, enable/disable, per-endpoint delivery ring). HMC serves the mock
   build on `18081` and the live build on `18082`, the latter published on the LAN at
   `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
   bearer token is required (insecure mode is refused off loopback).
@@ -83,6 +87,13 @@ As of 2026-10-24:
   answers `enabled:false` with the switch that is off. The build-time token is optional: on a live
   401 the runtime token gate asks for the admin token and keeps it in `sessionStorage` for that tab
   only.
+  The platform wave adds a `/usage` page (7/30/90/366-day window over `/v1/usage` with
+  previous-window deltas, a zero-filled per-day chart, per-account and per-user tables with quota
+  meters, and top targets), a `/schedules` page (cron/interval/once schedules with a pure
+  next-run preview, `ARM`/`RUN` confirmations, an `If-Match` revision retry, run history and the
+  read-only renewal-sweep card), a gate-health panel on Overview (compact) and Nodes → Connected
+  (full) fed by the daemon's loopback sampler, and a live webhook registry in Settings →
+  Integrations (one-time signing secret, enable/disable, per-endpoint delivery ring).
   Accounts exports the selected, filtered or all accounts as an encrypted `.ajsx` envelope
   (passphrase-derived key, device identity optional), imports JSON, CSV or encrypted files with a
   dry-run preview and an atomic or partial apply, and bulk-deletes up to 100 accounts with per-row
@@ -108,12 +119,18 @@ As of 2026-10-24:
   guard), and a cron/interval/once scheduler behind `AJS_SCHEDULES=1` whose fire journal makes a
   missed run `unknown` rather than replaying it. The device pool seals each account's vendor
   identity in a separate file under an HKDF-derived key, restores a retired identity when the same
-  account returns, and converts the v1 plaintext map at startup.
+  account returns, and converts the v1 plaintext map at startup. The same process serves the
+  platform wave: `/v1/device-pool` (list, generate, assign/release/retire/quarantine/purge with
+  confirm tokens, passphrase export/import), `/v1/scoped-keys` (`ajs_sk_` least-privilege keys
+  with a per-route scope table and account/region read restrictions), `/v1/renewal/*` (cached
+  public plan table and per-account expiry, with no payment call), `/v1/usage` (request-log
+  aggregation), `/v1/health/nodes` (loopback gate sampler: 30 s probes, 120 samples per node) and
+  `/v1/webhooks*` (HMAC-SHA256 delivery with five attempts and a 200-attempt ring).
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. 483 Go test
-  functions — 442 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  a second login on the same account) and again on 2026-10-24 after the rebuild. 590 Go test
+  functions — 549 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -180,6 +197,15 @@ As of 2026-10-24:
   never been exercised against the live vendor account. The scheduler is off unless
   `AJS_SCHEDULES=1`; the device pool needs `AJS_MASTER_KEY` (and is off under
   `AJS_DEVICE_POOL=0`).
+- **The platform wave is offline-tested only.** Scoped keys, the device-pool HTTP API, renewal
+  plans/status, usage aggregation, the health sampler and webhook delivery have unit and
+  `httptest` coverage but have never run against the live vendor account or a real webhook
+  receiver. Renewal returns the vendor's public price snapshot and its official purchase page —
+  nothing posts to a payment endpoint and no account id or token rides the link. The health probe
+  dials `127.0.0.1` only, so it reports gate reachability on the daemon host, not vendor
+  reachability; it keeps one hour of samples (120 at 30 s). Webhook retries and the delivery ring
+  live in memory, so a restart drops queued retries and the ring, and the signing secret survives
+  a restart only with `AJS_MASTER_KEY`.
 
 The product layer above the daemon — multi-account sessions, lease allocation and per-user
 access — is designed but not implemented. See [`docs/PANEL.md`](docs/PANEL.md) for the build
@@ -187,8 +213,11 @@ sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the c
 behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface: every route registered in `daemon/internal/api/server.go`, plus the proposed P1 account
-IO, catalog selection/connect, schedule and scoped-key interfaces. Each operation carries
+surface (72 paths, 90 operations, 138 schemas at the last sync): every route registered in
+`daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
+schedules, scoped keys, the platform views (renewal, usage, health, webhooks) and the Lab — plus
+the proposed P1 interfaces. Scoped API keys (`ajs_sk_`, least privilege with per-route scopes and
+account/region restrictions) are served as P0. Each operation carries
 `x-implementation-phase` (`P0` is served today, `P1` is the proposed next phase).
 `dashboard/tests/openapi.test.ts` fails when the document stops parsing, a `$ref` dangles, an
 `operationId` repeats, or the route table and the contract drift apart.
@@ -277,8 +306,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (262 tests in 32 files), `cd daemon && go test ./...`
-(442 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (323 tests in 37 files), `cd daemon && go test ./...`
+(549 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
