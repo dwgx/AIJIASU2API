@@ -102,6 +102,10 @@
     {
       "name": "Webhooks",
       "description": "Outbound webhook receivers, one-time signing secrets and the delivery ring."
+    },
+    {
+      "name": "Backup",
+      "description": "Admin-only full-panel backup: seal the state directory into an encrypted envelope, inspect it, and restore it."
     }
   ],
   "paths": {
@@ -222,6 +226,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -268,6 +275,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3851,6 +3861,7 @@
           "Renewal"
         ],
         "summary": "Read the public plan catalogue with its provenance.",
+        "description": "Requires renewal:read for a scoped key; the catalogue is anonymous vendor data and carries no account id.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -3865,6 +3876,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3882,6 +3896,7 @@
           "Renewal"
         ],
         "summary": "Read one account's expiry state and the official renewal URL.",
+        "description": "Requires renewal:read for a scoped key. A key restricted by accountIds/regions answers 403 FORBIDDEN for another account and 404 for an unknown id.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -3899,6 +3914,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3924,6 +3942,7 @@
           "Usage"
         ],
         "summary": "Aggregate the request log over an inclusive UTC window.",
+        "description": "Requires usage:read for a scoped key. A key restricted by accountIds/regions aggregates only its accounts' rows, and an explicit account filter outside them answers 403 FORBIDDEN.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -3941,6 +3960,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3964,7 +3986,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). Empty defaults to the daemon clock."
+            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). A date-only value means the end of that UTC day (23:59:59.999999999Z), so the final day is included. Empty defaults to the daemon clock."
           },
           {
             "name": "account",
@@ -3992,6 +4014,7 @@
           "Health"
         ],
         "summary": "Read loopback gate health for every watched node.",
+        "description": "Requires health:read for a scoped key. A key restricted by accountIds/regions only sees nodes of its own accounts; enabled=false carries the daemon's reason when probing is off.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -4006,6 +4029,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4212,6 +4238,178 @@
           }
         ]
       }
+    },
+    "/v1/backup": {
+      "post": {
+        "operationId": "createBackup",
+        "tags": [
+          "Backup"
+        ],
+        "summary": "Seal the panel state files into an encrypted envelope download.",
+        "description": "Admin only: no scoped key can reach this route. Reads state.json (AJS_STATE_FILE when set, otherwise AJS_STATE_DIR), secrets.json and device-secrets.json and returns the envelope as application/octet-stream. The body holds ciphertext only; no path, blob or passphrase is logged. Answers 409 BACKUP_BUSY while another backup or restore runs, 409 CONFLICT when no state.json snapshot exists yet, and 400 for a passphrase outside 12-1024 bytes.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Encrypted envelope download.",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename=\"ajs-backup-<timestamp>.ajsb\""
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-AJS-Backup-Blobs": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Number of blobs sealed into the envelope."
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/backup/inspect": {
+      "post": {
+        "operationId": "inspectBackup",
+        "tags": [
+          "Backup"
+        ],
+        "summary": "Read a backup header, and its manifest when the passphrase is supplied.",
+        "description": "Admin only. Parses the envelope without decrypting it, so no passphrase is required: the response carries version, supported, app, createdAt and envelopeBytes. The manifest lives inside the encrypted payload, so it is returned only when a passphrase is supplied; names, sizes and SHA-256 digests are reported and no blob content is ever returned. A document whose app is not \"apc\" answers 400.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Envelope header, plus the manifest when a passphrase was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupInspectView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupInspectRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/backup/restore": {
+      "post": {
+        "operationId": "restoreBackup",
+        "tags": [
+          "Backup"
+        ],
+        "summary": "Compare a backup with the live panel, then optionally replace the state files.",
+        "description": "Admin only. dryRun defaults to true and writes nothing, returning the diff only. dryRun:false additionally needs confirm:\"RESTORE\" and a correct passphrase. An apply is refused with 409 BACKUP_LIVE_NODE while any proxy node is LIVE, and with 409 BACKUP_DAEMON_RUNNING unless AJS_BACKUP_ALLOW_RESTORE=1, because the running daemon would write its stale in-memory panel over the restored state.json on its next snapshot. Files are replaced atomically (0600 temporary file plus rename) and a file the backup omits is never deleted. A successful apply answers restartRequired:true.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Diff report; applied, files and restartRequired after an apply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupRestoreView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRestoreRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4274,7 +4472,7 @@
         }
       },
       "PayloadTooLarge": {
-        "description": "INVALID_ARGUMENT: request body exceeds the route limit (1 MiB, 4 MiB for import).",
+        "description": "INVALID_ARGUMENT: request body exceeds the route limit (1 MiB, 4 MiB for account import, 16 MiB for device-pool import, 97 MiB for backup inspect/restore).",
         "content": {
           "application/json": {
             "schema": {
@@ -4442,8 +4640,10 @@
         "type": "string",
         "enum": [
           "proxy",
-          "mutation-lab"
-        ]
+          "mutation-lab",
+          "gate"
+        ],
+        "description": "proxy = seeded/imported panel traffic, mutation-lab = the request lab, gate = a real accepted flow metered by the node controller."
       },
       "ErrorDetail": {
         "type": "object",
@@ -4460,7 +4660,11 @@
               "UNAUTHORIZED",
               "FORBIDDEN",
               "METHOD_NOT_ALLOWED",
-              "INTERNAL"
+              "INTERNAL",
+              "BACKUP_BUSY",
+              "BACKUP_LIVE_NODE",
+              "BACKUP_DAEMON_RUNNING",
+              "BACKUP_UNAVAILABLE"
             ]
           },
           "message": {
@@ -8523,6 +8727,7 @@
       },
       "Scope": {
         "type": "string",
+        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, and accountIds/regions still narrow every account-scoped read. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
         "enum": [
           "accounts:read",
           "accounts:write",
@@ -8536,6 +8741,9 @@
           "lab:read",
           "settings:read",
           "settings:write",
+          "usage:read",
+          "renewal:read",
+          "health:read",
           "admin"
         ]
       },
@@ -8576,6 +8784,11 @@
               "type": "string"
             },
             "description": "Empty means every region."
+          },
+          "rateLimitPerMin": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Requests per minute; 0 means unlimited."
           },
           "createdAt": {
             "type": "string",
@@ -8624,6 +8837,7 @@
           "scopes",
           "accountIds",
           "regions",
+          "rateLimitPerMin",
           "createdAt",
           "expiresAt",
           "lastUsedAt",
@@ -8656,6 +8870,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "rateLimitPerMin": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 60,
+            "description": "Requests per minute; 0 means unlimited. Defaults to 60."
           },
           "expiresAt": {
             "type": "string"
@@ -8997,6 +9217,16 @@
           "truncated": {
             "type": "boolean",
             "description": "True when the row cap clipped the window; totals cover the first rows only."
+          },
+          "rowsRetained": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The store's request-log cap (10000). A client combines it with retentionDays to label bounded history."
+          },
+          "retentionDays": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "UTC calendar days covered by the retained rows, counted inclusively from the oldest row through now. Zero when the store holds no request rows."
           }
         },
         "required": [
@@ -9009,7 +9239,9 @@
           "users",
           "days",
           "topTargets",
-          "truncated"
+          "truncated",
+          "rowsRetained",
+          "retentionDays"
         ]
       },
       "HealthSample": {
@@ -9332,6 +9564,318 @@
           "status",
           "at",
           "durationMs"
+        ]
+      },
+      "BackupCreateRequest": {
+        "type": "object",
+        "properties": {
+          "passphrase": {
+            "type": "string",
+            "description": "12-1024 bytes. Never logged and never stored.",
+            "writeOnly": true,
+            "format": "password",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "passphrase"
+        ]
+      },
+      "BackupEnvelope": {
+        "type": "object",
+        "description": "Encrypted panel backup. The payload is AES-256-GCM ciphertext over a tar that starts with manifest.json; the whole header is authenticated as additional data.",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Envelope format version; this build writes 1."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp the envelope was sealed at (UTC)."
+          },
+          "app": {
+            "type": "string",
+            "enum": [
+              "apc"
+            ]
+          },
+          "kdf": {
+            "type": "object",
+            "properties": {
+              "algo": {
+                "type": "string",
+                "enum": [
+                  "pbkdf2-sha256"
+                ]
+              },
+              "iter": {
+                "type": "integer",
+                "description": "PBKDF2 iterations (600000 in this build)."
+              },
+              "salt": {
+                "type": "string",
+                "description": "Base64 salt."
+              }
+            },
+            "required": [
+              "algo",
+              "iter",
+              "salt"
+            ]
+          },
+          "cipher": {
+            "type": "string",
+            "enum": [
+              "aes-256-gcm"
+            ]
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Base64 GCM nonce."
+          },
+          "payload": {
+            "type": "string",
+            "description": "Base64 AES-256-GCM ciphertext of the tar payload."
+          }
+        },
+        "required": [
+          "version",
+          "createdAt",
+          "app",
+          "kdf",
+          "cipher",
+          "nonce",
+          "payload"
+        ]
+      },
+      "BackupInspectRequest": {
+        "type": "object",
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/BackupEnvelope"
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "Optional. Without it the response carries the header only, because the manifest lives inside the encrypted payload.",
+            "writeOnly": true,
+            "format": "password"
+          }
+        },
+        "required": [
+          "envelope"
+        ]
+      },
+      "BackupManifestEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "state.json",
+              "secrets.json",
+              "device-secrets.json"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "description": "Blob size in bytes."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Lowercase hex digest of the blob."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "True for state.json whenever the backup carries it."
+          }
+        },
+        "required": [
+          "name",
+          "size",
+          "sha256",
+          "required"
+        ]
+      },
+      "BackupManifest": {
+        "type": "object",
+        "description": "Blob index stored inside the encrypted payload. It names sizes and digests only; no blob content is returned.",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackupManifestEntry"
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "BackupInspectView": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "False when this build cannot open the envelope (a backup from a newer daemon)."
+          },
+          "app": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "envelopeBytes": {
+            "type": "integer",
+            "description": "Size of the submitted envelope."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/BackupManifest"
+          }
+        },
+        "required": [
+          "version",
+          "supported",
+          "app",
+          "createdAt",
+          "envelopeBytes"
+        ]
+      },
+      "BackupRestoreRequest": {
+        "type": "object",
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/BackupEnvelope"
+          },
+          "passphrase": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "12-1024 bytes."
+          },
+          "dryRun": {
+            "type": "boolean",
+            "default": true,
+            "description": "Defaults to true: an omitted field never writes a file."
+          },
+          "confirm": {
+            "type": "string",
+            "description": "Must be \"RESTORE\" when dryRun is false."
+          }
+        },
+        "required": [
+          "envelope",
+          "passphrase"
+        ]
+      },
+      "BackupDiff": {
+        "type": "object",
+        "description": "Dry-run comparison of the live state directory with the backup. Byte sizes only; blob contents never leave the daemon.",
+        "properties": {
+          "added": {
+            "type": "integer"
+          },
+          "removed": {
+            "type": "integer"
+          },
+          "changed": {
+            "type": "integer"
+          },
+          "same": {
+            "type": "integer"
+          },
+          "addedBytes": {
+            "type": "integer"
+          },
+          "removedBytes": {
+            "type": "integer"
+          },
+          "changedBytes": {
+            "type": "integer"
+          },
+          "sameBytes": {
+            "type": "integer"
+          },
+          "addedNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "removedNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "changedNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sameNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "added",
+          "removed",
+          "changed",
+          "same",
+          "addedBytes",
+          "removedBytes",
+          "changedBytes",
+          "sameBytes",
+          "addedNames",
+          "removedNames",
+          "changedNames",
+          "sameNames"
+        ]
+      },
+      "BackupRestoreView": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "restartRequired": {
+            "type": "boolean",
+            "description": "True after an apply: the running daemon still holds the replaced panel and must be restarted."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/BackupManifest"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/BackupDiff"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Blobs an apply wrote, in write order. Empty for a dry run."
+          },
+          "warning": {
+            "type": "string",
+            "description": "What the caller must do next: nothing was written (dry run) or the daemon must restart (apply)."
+          }
+        },
+        "required": [
+          "dryRun",
+          "applied",
+          "restartRequired",
+          "manifest",
+          "diff"
         ]
       }
     }

@@ -40,13 +40,16 @@ over `/v1/device-pool` as well as through the store API. The catalog page also c
 server-side `geo` aggregate, so the dashboard draws its map without downloading the retained
 catalog.
 
-The platform wave adds four read views and two registries: cached renewal plans and per-account
-expiry (`/v1/renewal/*`), request-log usage aggregation (`/v1/usage`), a loopback gate health
-sampler (`/v1/health/nodes`), outbound webhooks with HMAC signing and bounded retries
-(`/v1/webhooks*`), plus least-privilege scoped API keys (`/v1/scoped-keys`, `ajs_sk_` secrets with
-per-route scopes). None of them calls a vendor host: renewal prices come from the public purchase
-page and are cached, usage is derived from the in-memory request log, and the health probe dials
-`127.0.0.1` only.
+The platform wave adds the customer read views and registries: cached renewal plans and
+per-account expiry (`/v1/renewal/*`, redirects refused), flow-metered request-log usage
+(`/v1/usage`; gate flows append rows unless `AJS_FLOW_METER=0`), a loopback gate health sampler
+(`/v1/health/nodes`, `AJS_HEALTH_MAX_NODES` rings with eviction healing), outbound webhooks with
+HMAC signing, an SSRF policy and bounded retries (`/v1/webhooks*`), passphrase-encrypted panel
+backup, inspect and restore (`/v1/backup*`), plus least-privilege scoped API keys
+(`/v1/scoped-keys`, `ajs_sk_` secrets with per-route scopes, including the
+`usage:read`/`renewal:read`/`health:read` customer reads). None of them calls a vendor host:
+renewal prices come from the public purchase page and are cached, usage is derived from the
+request log, and the health probe dials `127.0.0.1` only.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -86,12 +89,16 @@ internal/api/schedules.go    schedule CRUD, preview, run-now and run history han
 internal/api/scoped_keys.go  scope table, scoped-key handlers and the auth identity
 internal/api/device_pool.go  device-pool HTTP lifecycle handlers
 internal/api/platform.go     renewal, usage, health and webhook handlers
+internal/api/backup.go       panel backup, inspect and restore handlers (admin-only)
 internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
 internal/store/webhooks.go   persisted webhook receivers
-internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states
+internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states, eviction healing
 internal/renewal/            cached public plan catalogue and per-account expiry
-internal/usage/              request-log aggregation: windows, accounts, users, days, targets
-internal/webhook/            dispatcher, HMAC signing, retry/backoff, delivery ring, scrub
+internal/usage/              request-log aggregation: windows, accounts, users, days, targets, retention
+internal/webhook/            dispatcher, HMAC signing, SSRF policy, retry/backoff, delivery ring, scrub
+internal/backup/             passphrase-encrypted panel backup: deterministic tar, manifest, envelope, diff
+internal/ratelimit/          per-scoped-key token bucket (rateLimitPerMin)
+internal/runtime/flow_meter.go  gate flow -> request-log row (AJS_FLOW_METER)
 internal/store/persist_test.go  roundtrip, mode, corrupt/version, counters
 internal/secret/             AES-256-GCM sealed secrets (0600 file, rotation)
 internal/resin/              Resin admin-API client (stdlib net/http)
@@ -1003,8 +1010,12 @@ test binary as the child.
 | `AJS_RENEWAL_LEAD_DAYS` | — | `30,14,7,3,1` | comma-separated reminder thresholds, days `1`–`365`, at most six values |
 | `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
 | `AJS_RENEWAL_TTL` | — | `6h` | how long a live purchase-page snapshot stays fresh (`time.ParseDuration`); a bad or non-positive value keeps the default. On failure the cache serves its last good snapshot, or the built-in static table on a cold cache |
-| `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most **8** watched nodes (LRU eviction) |
+| `AJS_FLOW_METER` | — | on | `0` disables gate→request-log metering: every completed SOCKS5 flow then stops appending a row, so `GET /v1/usage` and `GET /v1/requests` see only the mutation-lab and seed rows. Any other value keeps metering on. A row is appended only after the gate's success reply, through the same 10,000-row cap as every other writer, and carries no URL, header, session id or credential |
+| `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most `AJS_HEALTH_MAX_NODES` watched nodes |
+| `AJS_HEALTH_MAX_NODES` | — | `16` | node rings the sampler retains, clamped to 1–64; a non-integer fails startup when the sampler is enabled (an out-of-range integer is clamped, not rejected; the value is not read under `AJS_HEALTH_PROBE=0`). Beyond the cap the sampler evicts an unwatched ring first; when every ring is watched it evicts the least-recently-used one and records it, and the reconciler re-arms a watched-but-evicted key on its next 15 s sweep (one attempt per key per sweep, one log line per minute) |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
+| `AJS_WEBHOOK_ALLOW_PRIVATE` | — | `0` | lab/test opt-out: `1` lets a receiver point at loopback, RFC 1918, IPv6 unique-local and link-local addresses. Without it a resolved private address is rejected (an unresolvable name is allowed at registration and re-checked at dial time); cloud metadata names (`metadata`, `metadata.google.internal`) are rejected either way |
+| `AJS_BACKUP_ALLOW_RESTORE` | — | `0` | `1` lets `POST /v1/backup/restore` write the panel files while the daemon runs; the request still needs `dryRun:false` and `confirm:"RESTORE"`, and the response sets `restartRequired`. Off by default because the running process would overwrite the restored `state.json` with its stale in-memory panel on the next snapshot. Startup logs a warning when set |
 | `AJS_STATE_DIR` | — | `./data` | state directory (created `0700`); holds `state.json`, `secrets.json`, `device-secrets.json` and `schedule-fire.log` |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
@@ -1014,15 +1025,18 @@ test binary as the child.
 
 ## Platform routes (AJS-205)
 
-Four read views and the webhook registry are wired in `cmd/ajs-accountd`:
+Four read views, the webhook registry and the panel backup routes are wired in `cmd/ajs-accountd`:
 
 | Route | Source |
 |---|---|
-| `GET /v1/renewal/plans` | `internal/renewal` cached public purchase page; response carries `source` (`live`/`cache`/`static`) and `stale`. A failed refresh is soft and still answers 200 with the fallback table. The prices are the vendor's public list; the daemon never posts to a payment endpoint or calls a purchase API |
+| `GET /v1/renewal/plans` | `internal/renewal` cached public purchase page; response carries `source` (`live`/`cache`/`static`) and `stale`. A failed refresh is soft and still answers 200 with the fallback table. The fetch refuses redirects (a 3xx is an ordinary non-2xx failure, so the cache or static table answers) and sends no cookie jar and no authorization header. The prices are the vendor's public list; the daemon never posts to a payment endpoint or calls a purchase API |
 | `GET /v1/renewal/accounts/{id}` | account `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL (never carries an account id or token); unknown account → 404 |
-| `GET /v1/usage?from=&to=&account=&userId=` | `internal/usage` over `store.Requests()`; `from`/`to` accept RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or >366-day windows → 400 |
-| `GET /v1/health/nodes` | `internal/health` sampler over live gate ports; one row per watched node with `count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`minMs`/`maxMs`/`state` and the newest sample. `AJS_HEALTH_PROBE=0` → `enabled:false` |
+| `GET /v1/usage?from=&to=&account=&userId=` | `internal/usage` over `store.Requests()`; `from`/`to` accept RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or >366-day windows → 400. The body is `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}`: `rowsRetained` is the request-log cap (10 000) and `retentionDays` the inclusive UTC-day span the retained rows actually cover (`0` = no rows), so a wide window can be labelled as partial. Rows come from completed gate flows (`AJS_FLOW_METER`, on by default; those rows carry `source:"gate"`), the mutation lab (`source:"mutation-lab"`) and the seed (`source:"proxy"`) |
+| `GET /v1/health/nodes` | `internal/health` sampler over live gate ports; one row per watched node with `count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`minMs`/`maxMs`/`state` and the newest sample. `AJS_HEALTH_PROBE=0` → `enabled:false`; `AJS_HEALTH_MAX_NODES` bounds the retained rings |
 | `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `internal/webhook` dispatcher plus the persisted receiver rows in `state.json` |
+| `POST /v1/backup` | seals `state.json`, `secrets.json` and `device-secrets.json` into one passphrase-encrypted `.ajsb` envelope (AES-256-GCM over a deterministic tar, PBKDF2-SHA256 at 600 000 iterations, the whole header authenticated) and answers the file itself with `no-store` and `X-AJS-Backup-Blobs`. Admin-only |
+| `POST /v1/backup/inspect` | header-only inspect of a posted envelope; with `passphrase` it also returns the decrypted manifest (`name`, `size`, `sha256`, `required`). It never touches the state directory and returns no blob, so it works on a daemon with no state dir. Admin-only |
+| `POST /v1/backup/restore` | compares an envelope with the panel files and returns a per-blob diff (`added`/`removed`/`changed`/`same` with counts, names and byte totals). `dryRun` defaults to **true**; an apply needs `dryRun:false` and `confirm:"RESTORE"`, is refused while any node is `LIVE`, and writes only while the daemon is stopped unless `AJS_BACKUP_ALLOW_RESTORE=1`. Admin-only |
 
 Health sampling follows the live gate set: a successful connect/switch watches
 the committed gate, login watches every gate the sync opened, and
@@ -1030,8 +1044,12 @@ disconnect/logout/delete unwatch it. The sampler is started with the signal
 context and stopped after the node controller closes its gates. It dials
 **`127.0.0.1` only** — the gate binds loopback, so a probe can never leave the
 host — once every **30 s** with a 3 s dial timeout, keeping **120 samples per
-node** (one hour) and at most **8 watched nodes** (the sampler evicts the
-least-recently-used ring beyond that) with 8 probes in flight. Percentiles,
+node** (one hour) and at most **`AJS_HEALTH_MAX_NODES`** watched nodes
+(default **16**, clamped 1–64) with 8 probes in flight. Beyond that cap the
+sampler evicts an unwatched ring first; when every retained ring is watched it
+evicts the least-recently-used one and records the key, and the reconciler
+re-arms a watched-but-evicted key on its next sweep (one attempt per key per
+15 s sweep, one log line per minute). Percentiles,
 `minMs` and `maxMs` are computed over successful probes only; `successRate` is
 `ok/count` over the whole window and `last` is the newest sample whatever its
 outcome. States are `ok`, `degraded` (success rate below 0.9 or p95 above
@@ -1042,18 +1060,32 @@ failed samples carry `errorClass` (`timeout`, `refused`, `unreachable`,
 Webhook events emitted by the daemon: `account.login`, `account.logout`,
 `node.connected`, `node.disconnected`, `node.switched`, `schedule.fired`,
 `schedule.failed` (the scheduler calls `Config.OnRun` after recording a run),
-and `account.renewal_due`/`account.expired` (the once-per-local-day renewal
+`account.renewal_due`/`account.expired` (the once-per-local-day renewal
 sweep calls `Config.OnReminder` for each newly armed
 `(account, threshold, expiresAt)` mark: a due threshold becomes
 `account.renewal_due`, a lapsed membership becomes `account.expired`, and the
-payload carries only `accountId`, `expiresAt`, `daysLeft` and `threshold`).
-The receiver may also subscribe to the rest of the closed catalogue —
-`device.retired` and `audit.critical` — which the daemon validates but does not
-emit yet; an empty `events` list subscribes to everything. Each delivery
-carries `X-APC-Event`,
+payload carries only `accountId`, `expiresAt`, `daysLeft` and `threshold`),
+`device.retired` (`{deviceId, accountId?, reason}`, emitted by the retire
+handler after the record reaches `retired`) and `audit.critical`
+(`{auditId, action, actor, target}`, emitted for every audit row whose
+severity is `critical`; the hook is wired through the store and skips actions
+under the `webhook.` prefix so the webhook path cannot re-emit its own audit
+rows). An empty `events` list subscribes to everything. Each delivery carries
+`X-APC-Event`,
 `X-APC-Delivery`, `X-APC-Timestamp` (Unix seconds) and
 `X-APC-Signature: sha256=<hex HMAC-SHA256 of "timestamp.body">`; the payload is
 scrubbed of credential-shaped keys before it leaves the process.
+
+**SSRF policy.** A receiver URL is operator-supplied but a compromised panel
+must not turn the daemon into a probe of its own host or the cloud metadata
+service. Registration resolves the host (literal and DNS) and rejects
+loopback, RFC 1918, `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10`,
+unspecified/multicast addresses and the names `metadata` /
+`metadata.google.internal`. An unresolvable name is allowed (DNS may be
+transient), and the client transport re-checks the address the resolver
+actually produced in its `DialContext` control hook, so a DNS rebind between
+registration and delivery is refused too. `AJS_WEBHOOK_ALLOW_PRIVATE=1` is
+the lab/test opt-out for the address classes; the metadata names stay blocked.
 
 **Delivery.** The dispatcher has a 256-event queue and four workers, keeps
 per-endpoint FIFO order, times each attempt out after 10 s and retries up to
@@ -1063,7 +1095,8 @@ identical event id inside the 60 s dedupe window is dropped. The last 200
 attempts per endpoint (and globally) are kept in memory for
 `GET /v1/webhooks/{id}/deliveries`, oldest first; the ring does not survive a
 restart. Receivers must be `https` unless they are loopback or
-`AJS_WEBHOOK_ALLOW_HTTP=1`, and the registry is capped at 32 endpoints.
+`AJS_WEBHOOK_ALLOW_HTTP=1`, must not resolve to a private address unless
+`AJS_WEBHOOK_ALLOW_PRIVATE=1`, and the registry is capped at 32 endpoints.
 `PATCH /v1/webhooks/{id}` changes only `enabled`: enabling a receiver whose
 signing secret is gone is a 409 because every delivery must be signed, and the
 URL/events/description are fixed at create time (recreate the endpoint to
@@ -1077,6 +1110,77 @@ master key the secret is kept in process memory only: the endpoint row still
 survives a restart, but the secret does not, so the endpoint reports
 `secretAvailable:false` and must be recreated. This is the safer default
 compared with writing the secret into `state.json` in plaintext.
+
+**Panel backup and restore.** `internal/backup` owns the envelope and
+`internal/api/backup.go` only the HTTP contract. A backup carries `state.json`
+plus whichever of `secrets.json`/`device-secrets.json` exist, so it contains
+sealed credentials: no handler logs a path, blob or passphrase. The passphrase
+is 12–1024 bytes, the envelope is capped at 96 MiB (64 MiB of blob data), and
+a wrong passphrase, a tampered header or a truncated payload is a 400
+`INVALID_ARGUMENT`. Restore never deletes a file the envelope omits — an older
+backup without `secrets.json` cannot silently drop the live sealed secrets —
+and it writes each file through a `0600` temp-file rename. Codes:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `BACKUP_BUSY` | 409 | another backup or restore holds the panel-file lock |
+| `BACKUP_LIVE_NODE` | 409 | a node is `LIVE`; `details.liveNodes` and `details.firstLiveNode` name it |
+| `BACKUP_DAEMON_RUNNING` | 409 | an apply was sent while the daemon runs and `AJS_BACKUP_ALLOW_RESTORE` is not `1` |
+| `BACKUP_UNAVAILABLE` | 503 | a create or restore was called on a daemon with no state directory (inspect still works) |
+| `CONFLICT` | 409 | `state.json` is missing, so there is nothing to seal |
+| `INVALID_ARGUMENT` | 400 | bad passphrase, malformed or oversized envelope, missing `confirm:"RESTORE"`, or a backup without `state.json` |
+| `INTERNAL` | 500 | a read or write failed; a failed apply reports the files already written in `details.written` |
+
+### Verifying webhook signatures
+
+Every delivery is signed, and a receiver should verify before parsing the
+body. `X-APC-Timestamp` is the Unix second at which that attempt was signed
+(each retry is re-signed at send time) and `X-APC-Signature` is
+`sha256=<lowercase hex HMAC-SHA256(secret, timestamp + "." + raw body)>`.
+`X-APC-Event` and `X-APC-Delivery` (`<eventId>:<attempt>`) are not covered by
+the digest, so use them for routing only after the signature passes. Verify
+the exact raw bytes — a re-serialized JSON body will not match — with a
+constant-time compare, and reject a timestamp more than **300 s** from local
+time: five minutes leaves room for clock skew and still stops a replay, and
+because every attempt is re-signed it does not reject the later retries.
+
+Node:
+
+```js
+const crypto = require('node:crypto')
+
+function verify(secret, headers, rawBody) {
+  const timestamp = headers['x-apc-timestamp'] || ''
+  const received = headers['x-apc-signature'] || ''
+  if (!/^\d+$/.test(timestamp)) return false
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret)
+    .update(timestamp + '.' + rawBody).digest('hex')
+  const a = Buffer.from(expected), b = Buffer.from(received)
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+```
+
+Go:
+
+```go
+func verify(secret, timestamp, signature string, body []byte) bool {
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || time.Since(time.Unix(ts, 0)).Abs() > 5*time.Minute {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+```
+
+In both snippets `timestamp` must be the header value exactly as sent — do not
+re-format it — and `rawBody`/`body` must be the bytes received, not a decoded
+and re-encoded document.
 
 ## Scoped API keys
 
@@ -1101,20 +1205,36 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 | `leases:read` | `GET /v1/leases` |
 | `leases:write` | `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `requests:read` | `GET /v1/requests` |
-| `audit:read` | `GET /v1/audit` |
+| `audit:read` | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | `GET /metrics`, `GET /v1/metrics` |
 | `lab:read` | every `/v1/lab/*` route, including `POST /v1/lab/egress-check` |
 | `settings:read` | `GET /v1/settings`, schedule reads and preview |
 | `settings:write` | `PATCH /v1/settings`, schedule create/patch/delete/run |
+| `usage:read` | `GET /v1/usage` |
+| `renewal:read` | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` |
+| `health:read` | `GET /v1/health/nodes` |
 | `admin` | every route, same as the admin token |
 
 Routes absent from the table are admin-only — the scoped-key registry, users, API keys, requests
-mutation, reconcile, update and the platform routes (`/v1/renewal/*`, `/v1/usage`,
-`/v1/health/nodes`, `/v1/webhooks*`, `/v1/device-pool*`) — so a key without `admin` gets 403
-`FORBIDDEN` there. `accountIds` and `regions` narrow what a key may **read**: a `GET`/`HEAD` for an
+mutation, reconcile, update, the webhook registry (`/v1/webhooks*`), the panel backup routes
+(`/v1/backup*`) and `/v1/device-pool*` — so a key without `admin` gets 403 `FORBIDDEN` there.
+The three read scopes cover one read route family each; they grant no write and do not bypass the
+account/region filter. `accountIds` and `regions` narrow what a key may **read**: a `GET`/`HEAD` for an
 account outside the list, or a list filtered by such an `account_id`, answers 403 `FORBIDDEN`;
 writes are governed by the scope alone. An unknown scope is a 400, and a create needs at least one
-scope.
+scope. The three platform reads follow the same rule:
+`GET /v1/renewal/accounts/{id}` answers 403 for an account outside the key's list (404 when the id
+is unknown), `GET /v1/usage` aggregates only visible accounts — an explicit out-of-scope `account`
+filter is a 403, and an unknown label yields an empty 200 summary — and `GET /v1/health/nodes`
+omits nodes belonging to invisible accounts. The scope vocabulary is the OpenAPI `Scope` enum; the
+three read scopes were appended after `settings:write` and before `admin`.
+
+Each key also carries a per-minute request budget: `rateLimitPerMin` (default **60**; an explicit
+`0` means unlimited). The token bucket is per key, and every scoped-key response carries
+`X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (Unix seconds); a refused
+request answers 429 `RATE_LIMITED` with `Retry-After` set to one refill interval, so a retry at
+that point finds a token. A 403 still carries the headers, so a caller can tell a scope failure
+from a budget failure. The admin bearer token is never rate-limited.
 
 ## Secret storage
 
@@ -1546,7 +1666,7 @@ objects.
 |---|---|---|
 | GET | `/healthz` | process status + account-state counts |
 | GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
-| GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); traffic series is empty and totals are zero with `telemetryAvailable:false` until a real traffic meter exists |
+| GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); the traffic series is empty and totals are zero with `telemetryAvailable:false` — the gate meter feeds the request log (`/v1/usage`), not this series |
 | GET | `/v1/openapi.json` | the OpenAPI 3.1 contract, served from the embedded byte-for-byte copy of `docs/openapi.json` with a strong `ETag` (SHA-256) and `If-None-Match` → 304; same bearer auth as the rest of `/v1/*` |
 | GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
@@ -1588,7 +1708,7 @@ objects.
 | POST | `/v1/apikeys` | `{userId,label}` → `{key,secret}`; secret shown once |
 | DELETE | `/v1/apikeys/{id}` | revoke (`revokedAt` set; row retained) |
 | GET | `/v1/scoped-keys?user_id=&limit=&offset=` | least-privilege keys; the secret is never returned |
-| POST | `/v1/scoped-keys` | `{userId,label,scopes[],accountIds[],regions[],expiresAt}` → 201 `{key,secret}`; secret shown once |
+| POST | `/v1/scoped-keys` | `{userId,label,scopes[],accountIds[],regions[],expiresAt,rateLimitPerMin}` → 201 `{key,secret}`; secret shown once; `rateLimitPerMin` defaults to 60, `0` = unlimited |
 | GET | `/v1/scoped-keys/{id}` | one key |
 | DELETE | `/v1/scoped-keys/{id}` | revoke (`revokedAt` set; row retained) → 204 |
 | GET | `/v1/requests` | request log, newest first |
@@ -1602,13 +1722,16 @@ objects.
 | GET | `/v1/system/update` | read-only GitHub release check. `AJS_UPDATE_REPO` unset → `{"enabled":false,"current":…}` with no network. Otherwise `GET <AJS_UPDATE_API_BASE>/repos/<repo>/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: ajs-accountd` (10 s client) → `{enabled:true,current,latest,updateAvailable,url,name,publishedAt,checkedAt}`. `updateAvailable` uses a simple semver compare (`v` optional, numeric dot segments): a draft or pre-release tag is **not** newer unless the running version is itself a pre-release. GitHub non-200/transport/parse failure → 502 `UPSTREAM_UNAVAILABLE`; no token is used or echoed. Never executes an update — the host runs `deploy/update.sh` |
 | GET | `/v1/renewal/plans` | cached public price table (`source` `live`/`cache`/`static`, `stale`); a failed refresh still answers 200 with the fallback |
 | GET | `/v1/renewal/accounts/{id}` | `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL, never an account id or token; unknown account → 404 |
-| GET | `/v1/usage?from=&to=&account=&userId=` | `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated}` over the request log; `from`/`to` take RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or > 366-day windows → 400 |
-| GET | `/v1/health/nodes` | loopback probe aggregate per watched node (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `minMs`, `maxMs`, `consecutiveFailures`, `last`); `AJS_HEALTH_PROBE=0` → `{enabled:false,reason}` |
+| GET | `/v1/usage?from=&to=&account=&userId=` | `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}` over the request log (gate flows, mutation lab and seed); `rowsRetained` is the 10 000-row cap, `retentionDays` the inclusive UTC-day span the retained rows cover (`0` = no rows), so a wide window can be labelled as partial. `from`/`to` take RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or > 366-day windows → 400 |
+| GET | `/v1/health/nodes` | loopback probe aggregate per watched node (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `minMs`, `maxMs`, `consecutiveFailures`, `last`); `AJS_HEALTH_PROBE=0` → `{enabled:false,reason}`; `AJS_HEALTH_MAX_NODES` (default 16, 1–64) bounds the retained rings |
 | GET | `/v1/webhooks` | persisted receivers plus `secretAvailable`; never the signing secret |
-| POST | `/v1/webhooks` | `{url,events?,description?,enabled?}` → 201 with the signing secret exactly once; `https` unless loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`; max 32 endpoints |
+| POST | `/v1/webhooks` | `{url,events?,description?,enabled?}` → 201 with the signing secret exactly once; `https` unless loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`; non-private destination unless `AJS_WEBHOOK_ALLOW_PRIVATE=1`; max 32 endpoints |
 | PATCH | `/v1/webhooks/{id}` | `{enabled}` only; enabling a receiver whose secret is gone → 409 |
 | DELETE | `/v1/webhooks/{id}` | remove the row and its sealed secret → 204 |
 | GET | `/v1/webhooks/{id}/deliveries` | the last 200 delivery attempts for that endpoint, oldest first, from memory |
+| POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
+| POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
+| POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1` (admin-only) |
 
 The catalog selection/connect, schedule and Lab routes are listed in the
 [Lab telemetry](#lab-telemetry) table below rather than repeated here.
@@ -1624,9 +1747,13 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 | `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
 | `QUOTA_EXCEEDED` | 429 | repeat Lab egress check for the same node inside the 5 s cooldown; account quotas remain advisory |
-| `RATE_LIMITED` | 429 | catalog connect cooldown; `Retry-After` carries the remaining whole seconds |
+| `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds) or a scoped key over its per-minute budget (`Retry-After` is one refill interval) |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account |
+| `BACKUP_BUSY` | 409 | a backup or restore already holds the panel-file lock |
+| `BACKUP_LIVE_NODE` | 409 | a restore was asked for while a node is `LIVE`; `details` names the count and the first node |
+| `BACKUP_DAEMON_RUNNING` | 409 | an apply was asked for while the daemon runs and `AJS_BACKUP_ALLOW_RESTORE` is not `1` |
+| `BACKUP_UNAVAILABLE` | 503 | a backup create or restore was called on a daemon with no state directory |
 | `PRECONDITION_FAILED` | 412 | a stale `If-Match` revision on schedule PATCH (`reason:"stale_revision"`) |
 | `METHOD_NOT_ALLOWED` | 405 | path exists, method does not |
 | `INTERNAL` | 500 | unexpected store failure or node drain hook failure (details stay in the log) |
@@ -1648,8 +1775,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (74 paths, 92 operations,
-  138 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (77 paths, 95 operations,
+  147 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
@@ -1741,7 +1868,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **549 `func Test` functions across 64 `_test.go` files** (recounted 2026-10-24);
+The tree holds **634 `func Test` functions across 77 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -1797,10 +1924,26 @@ lifecycle (list/generate/assign/release/retire/quarantine/purge, confirm tokens,
 409 conflicts) and the startup gate. `internal/api/platform_test.go` covers renewal plans/status,
 usage windows and filters, the health view and the webhook registry (one-time secret, PATCH
 `enabled`, deliveries, 409 when the secret is gone); `internal/webhook/dispatcher_test.go` and
-`webhook_test.go` pin signing, retry/backoff, dead-letter, dedupe, the 200-attempt ring and payload
-scrubbing; `internal/health/health_test.go` pins the 30 s/120-sample window, states, error
-classes and loopback-only dials; `internal/usage/usage_test.go` and `internal/renewal/*_test.go`
-cover the aggregation windows and the cached/fallback catalogue.
+`webhook_test.go`/`ssrf_test.go` pin signing, retry/backoff, dead-letter, dedupe, the 200-attempt
+ring, payload scrubbing (including embedded `password=…` values) and the private/metadata-host
+probe table plus dial-guard recheck; `internal/store/audit_hook_test.go` pins critical-audit
+delivery; `internal/health/health_test.go` pins the 30 s/120-sample window, states, error
+classes, loopback-only dials, the configurable cap, unwatched-first eviction, the watched-LRU
+fallback and its bounded `Evicted` record; `cmd/ajs-accountd/health_reconcile_test.go` pins the
+`AJS_HEALTH_MAX_NODES` parse (default, clamp, non-integer startup error), the re-arm of an evicted
+watched key, the once-per-minute log throttle, the failure log and the unwatch of a stopped gate;
+`internal/api/platform_scopes_test.go` pins the three new read scopes route by route (200 with the
+scope, 403 without) and the account restriction on those reads.
+`internal/api/backup_test.go` covers the three backup routes end to end (create → inspect →
+dry-run → apply, wrong passphrase, tampered header, busy lock, LIVE-node refusal, the
+daemon-running gate, missing state dir, and the restore-never-deletes rule);
+`internal/backup/*_test.go` pins the deterministic tar, manifest, envelope authentication and the
+diff matrix. `internal/runtime/flow_meter_test.go` pins one row
+per accepted flow with the `gate` source, label join, `host:port` target and the dropped rejected
+flow; `internal/ratelimit/ratelimit_test.go` and `internal/api/ratelimit_test.go` pin the
+scoped-key request budget and its 429. `internal/usage/usage_test.go` and
+`internal/renewal/*_test.go` cover the aggregation windows, `rowsRetained`/`retentionDays`, the
+cached/fallback catalogue and redirect refusal.
 
 `internal/secret/store_test.go` covers AES-256-GCM roundtrip, account-id AAD
 mismatch, tampered ciphertext/nonce/version, wrong key, rotation and reopen
@@ -3086,8 +3229,10 @@ header or credential). No live vendor call was made.
   and `/v1/nodes/{id}/flows` are out of this slice.
 - Quotas are advisory; the only `QUOTA_EXCEEDED` is the Lab egress-check cooldown (429), a probe
   rate limit rather than an account quota.
-- No TLS, request-wide rate limiting, multi-process coordination, or CSRF surface; the only rate
-  limit is the per-node Lab egress-check cooldown. The Lab endpoints inherit the same single
+- No TLS, request-wide rate limiting, multi-process coordination, or CSRF surface; the rate limits
+  are the per-node Lab egress-check cooldown and the per-scoped-key request budget
+  (`rateLimitPerMin`, default 60), and the admin bearer token is not rate-limited. The Lab
+  endpoints inherit the same single
   bearer token, so anyone who can reach `2261` and holds the token can read the
   whole panel; the HMC deployment keeps bearer auth (no `AJS_ALLOW_INSECURE`) and restricts
   `2261`/`18082` to the `192.168.11.0/24` segment, but the API is still plain HTTP — run it on a
@@ -3099,15 +3244,19 @@ header or credential). No live vendor call was made.
 - The platform views are read-mostly and offline-tested. Renewal returns the vendor's public price
   snapshot and an official purchase URL; the daemon never posts to a payment endpoint, never calls
   a purchase API and never marks an account renewed — renewal is an operator action at the vendor.
-  `GET /v1/usage` aggregates the in-memory request log (the same rows `/v1/requests` serves), not
-  a traffic meter, so its bytes are the recorded request bytes and it resets with the snapshot's
-  retention. `/v1/health/nodes` probes loopback gate ports only: it is a diagnostic for a running
-  gate, not a vendor reachability check, and it keeps one hour of samples in memory. Webhook
+  `GET /v1/usage` aggregates the request log (the same rows `/v1/requests` serves); with gate
+  metering on each completed flow appends one row, but it is still recorded rows rather than a
+  byte counter, and it resets with the 10 000-row retention — `rowsRetained`/`retentionDays`
+  label how much history actually exists. `/v1/health/nodes` probes loopback gate ports only: it
+  is a diagnostic for a running gate, not a vendor reachability check, and it keeps one hour of
+  samples in memory for at most `AJS_HEALTH_MAX_NODES` nodes (default 16). Webhook
   deliveries are in-memory (a restart drops the ring and any queued retry), and the signing secret
-  survives a restart only with `AJS_MASTER_KEY`.
+  survives a restart only with `AJS_MASTER_KEY`. Panel backup/restore is offline-tested against a
+  temporary state directory: a backup carries sealed credentials and an apply replaces the panel
+  files, so the daemon must be restarted afterwards.
 - Scoped keys are a least-privilege credential, not an operator model: every key belongs to a
-  stored user, there is no per-key rate limit, and the `admin` scope is equivalent to the admin
-  bearer token.
+  stored user, its `rateLimitPerMin` budget is a per-key token bucket rather than a quota, and the
+  `admin` scope is equivalent to the admin bearer token.
 - The dashboard lives in a separate tree (`dashboard/`); the Lab page consumes the endpoints
   above and needs no daemon write path.
 - The P1 surfaces are offline-tested only. Catalog selection/connect, account export/import and
