@@ -103,6 +103,43 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 	b.WriteString("# HELP ajs_requests_total Recorded requests.\n")
 	b.WriteString("# TYPE ajs_requests_total gauge\n")
 	fmt.Fprintf(&b, "ajs_requests_total %d\n", len(s.store.Requests()))
+	if s.cfg.Schedules != nil {
+		metrics := s.cfg.Schedules.Metrics()
+		b.WriteString("# HELP ajs_schedule_runs_total Schedule runs by result.\n")
+		b.WriteString("# TYPE ajs_schedule_runs_total counter\n")
+		for _, result := range []string{"ok", "skipped", "error", "dry_run", "unknown"} {
+			fmt.Fprintf(&b, "ajs_schedule_runs_total{result=%q} %d\n", result, metrics.Runs[result])
+		}
+		b.WriteString("# HELP ajs_schedule_fire_unknown_total Fire reservations recovered as unknown.\n")
+		b.WriteString("# TYPE ajs_schedule_fire_unknown_total counter\n")
+		fmt.Fprintf(&b, "ajs_schedule_fire_unknown_total %d\n", metrics.FireUnknown)
+		b.WriteString("# HELP ajs_scheduler_inflight Runs currently executing.\n")
+		b.WriteString("# TYPE ajs_scheduler_inflight gauge\n")
+		fmt.Fprintf(&b, "ajs_scheduler_inflight %d\n", metrics.Inflight)
+		b.WriteString("# HELP ajs_schedule_paused Schedules disabled or paused.\n")
+		b.WriteString("# TYPE ajs_schedule_paused gauge\n")
+		fmt.Fprintf(&b, "ajs_schedule_paused %d\n", metrics.Paused)
+		b.WriteString("# HELP ajs_schedules_total Configured schedules.\n")
+		b.WriteString("# TYPE ajs_schedules_total gauge\n")
+		fmt.Fprintf(&b, "ajs_schedules_total %d\n", metrics.Schedules)
+		b.WriteString("# HELP ajs_schedule_last_run_timestamp_seconds Last run start per schedule.\n")
+		b.WriteString("# TYPE ajs_schedule_last_run_timestamp_seconds gauge\n")
+		for id, at := range metrics.LastRunUnix {
+			fmt.Fprintf(&b, "ajs_schedule_last_run_timestamp_seconds{schedule=%q} %d\n", id, at)
+		}
+		b.WriteString("# HELP ajs_schedule_next_run_timestamp_seconds Next run per schedule.\n")
+		b.WriteString("# TYPE ajs_schedule_next_run_timestamp_seconds gauge\n")
+		for id, at := range metrics.NextRunUnix {
+			fmt.Fprintf(&b, "ajs_schedule_next_run_timestamp_seconds{schedule=%q} %d\n", id, at)
+		}
+		b.WriteString("# HELP ajs_account_circuit_open Account switch circuit breaker state.\n")
+		b.WriteString("# TYPE ajs_account_circuit_open gauge\n")
+		for account, open := range metrics.CircuitOpen {
+			if open {
+				fmt.Fprintf(&b, "ajs_account_circuit_open{account=%q} 1\n", account)
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(b.String()))
