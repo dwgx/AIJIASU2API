@@ -998,7 +998,11 @@ export default function Accounts() {
         onClose={() => setRenewalId(null)}
       >
         {renewalAccount ? (
-          <RenewalCard accountLabel={renewalAccount.label} expiresAt={renewalAccount.expiresAt} />
+          <RenewalCard
+            accountId={renewalAccount.id}
+            accountLabel={renewalAccount.label}
+            expiresAt={renewalAccount.expiresAt}
+          />
         ) : null}
       </Drawer>
 

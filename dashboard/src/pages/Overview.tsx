@@ -16,6 +16,7 @@ import { useI18n } from '../lib/i18n'
 import { ACCOUNT_STATE, SEVERITY } from '../lib/labels'
 import type { MetricRange } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
+import { HealthPanel } from '../components/nodes/HealthPanel'
 import {
   Badge,
   Card,
@@ -244,6 +245,8 @@ export default function Overview() {
               </>
             ) : null}
           </div>
+
+          <HealthPanel variant="compact" />
 
           <div className="grid-2-1">
             <Card

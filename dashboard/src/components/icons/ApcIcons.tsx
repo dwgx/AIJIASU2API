@@ -65,6 +65,16 @@ export const ApcOverviewIcon = createIcon(
   </>,
 )
 
+export const ApcUsageIcon = createIcon(
+  'ApcUsageIcon',
+  <>
+    <path d="M4 20h16" />
+    <path d="M7 20v-6" />
+    <path d="M12 20V8" />
+    <path d="M17 20v-9" />
+  </>,
+)
+
 export const ApcAccountsIcon = createIcon(
   'ApcAccountsIcon',
   <>
@@ -124,6 +134,16 @@ export const ApcSettingsIcon = createIcon(
     <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
     <circle cx="16" cy="7" r="2" />
     <circle cx="10" cy="17" r="2" />
+  </>,
+)
+
+export const ApcSchedulesIcon = createIcon(
+  'ApcSchedulesIcon',
+  <>
+    <path d="M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+    <path d="M3 10h18" />
+    <path d="M8 3v4M16 3v4" />
+    <path d="M12 13v3l2 1.5" />
   </>,
 )
 

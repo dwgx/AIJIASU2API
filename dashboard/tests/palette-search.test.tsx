@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { api } from '../src/lib/api'
+import { NAV_ITEMS } from '../src/lib/nav'
 
 function openPalette() {
   act(() => {
@@ -83,7 +84,8 @@ describe('command palette data search', () => {
         .getAllByRole('option')
         .map((option) => within(option).getByText(/^(Navigate|Action|Account|Node)$/).textContent)
 
-    expect(within(dialog).getAllByRole('option').length).toBe(12)
+    // Every nav page plus the three palette actions (add, refresh, theme).
+    expect(within(dialog).getAllByRole('option').length).toBe(NAV_ITEMS.length + 3)
     expect(new Set(sections())).toEqual(new Set(['Navigate', 'Action']))
 
     await user.type(input, 'c')

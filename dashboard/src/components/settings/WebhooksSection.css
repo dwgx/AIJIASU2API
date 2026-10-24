@@ -1,0 +1,267 @@
+/* Webhook receiver list, create/edit dialogs and the delivery drawer.
+   Layout only: every colour, radius and duration comes from the app tokens. */
+
+.webhooks-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.webhooks-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.webhooks-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Receiver rows ---------------------------------------------------------- */
+
+.webhooks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.webhooks-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.webhooks-row:hover {
+  border-color: var(--border);
+}
+
+.webhooks-row__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.webhooks-row__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.webhooks-row__name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.webhooks-row__url {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhooks-row__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.webhooks-chip {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--wash);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.webhooks-chip--all {
+  border-style: dashed;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-weight: 600;
+}
+
+.webhooks-row__delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+}
+
+.webhooks-row__delivery-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.webhooks-row__delivery-time,
+.webhooks-row__muted {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.webhooks-row__warning {
+  margin: 0;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.webhooks-row__actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.webhooks-row__actions .switch {
+  margin-right: 4px;
+}
+
+/* Dialog ---------------------------------------------------------------- */
+
+.webhooks-form {
+  gap: 14px;
+}
+
+.webhooks-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+}
+
+.webhooks-toggle__label {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.webhooks-toggle__hint {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+/* One-time secret -------------------------------------------------------- */
+
+.webhooks-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.webhooks-secret__warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.webhooks-secret__value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--sunken);
+}
+
+.webhooks-secret__value code {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhooks-secret__url {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Deliveries ------------------------------------------------------------- */
+
+.webhooks-deliveries__empty {
+  margin: 0;
+  padding: 20px 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.webhooks-deliveries__when {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.webhooks-deliveries__when time {
+  color: var(--text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .webhooks-count {
+    display: none;
+  }
+
+  .webhooks-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .webhooks-row__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

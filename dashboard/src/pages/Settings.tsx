@@ -28,6 +28,7 @@ import { SettingsField } from '../components/settings/SettingsField'
 import { SettingsNav } from '../components/settings/SettingsNav'
 import { SettingsSection } from '../components/settings/SettingsSection'
 import { SettingsSegmented } from '../components/settings/SettingsSegmented'
+import { WebhooksSection } from '../components/settings/WebhooksSection'
 import {
   SETTINGS_FIELD_KEYS,
   SETTINGS_SECTIONS,
@@ -721,26 +722,13 @@ export default function Settings() {
                       {t('settings.integrations.notConfigured')}
                     </Badge>
                   </div>
-                  <div className="settings-facts__row">
-                    <span className="settings-facts__label">
-                      {t('settings.integrations.webhook')}
-                    </span>
-                    <span className="settings-facts__value">
-                      {t('settings.integrations.webhookDesc')}
-                    </span>
-                    <span className="settings-facts__badge">
-                      <EffectiveBadge
-                        kind="later"
-                        reason={t('settings.integrations.webhookReason')}
-                      />
-                    </span>
-                  </div>
                 </div>
                 <p className="setting-note">
                   {t('settings.integrations.docs')} <code>docs/PANEL.md</code> ·{' '}
                   <code>daemon/README.md</code> · <code>dashboard/README.md</code>
                 </p>
               </Card>
+              <WebhooksSection />
             </SettingsSection>
 
             <SettingsSection

@@ -51,7 +51,11 @@ export function Sidebar({
                   onClick={onClose}
                   title={label}
                 >
-                  <item.icon size={17} aria-hidden="true" />
+                  {item.glyph ? (
+                    <MorphIcon icon={item.glyph} size={17} strokeWidth={1.6} />
+                  ) : (
+                    <item.icon size={17} aria-hidden="true" />
+                  )}
                   <span className="nav-item__label sidebar__label">{label}</span>
                 </NavLink>
               )

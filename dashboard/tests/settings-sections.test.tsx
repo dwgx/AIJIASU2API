@@ -126,13 +126,15 @@ describe('settings sections', () => {
     expect(screen.queryByText('1 unsaved')).not.toBeInTheDocument()
   })
 
-  it('keeps integrations read-only and points at the audit trail', async () => {
+  it('keeps Resin and Prometheus read-only and exposes live webhooks', async () => {
     await openSettings()
 
     const integrations = section('integrations')
     expect(within(integrations).getAllByText('Not configured')).toHaveLength(2)
-    expect(within(integrations).getByText('Coming later')).toBeInTheDocument()
-    expect(within(integrations).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(integrations).queryByText('Coming later')).not.toBeInTheDocument()
+    expect(
+      within(integrations).getByRole('button', { name: 'New webhook' }),
+    ).toBeInTheDocument()
     expect(within(integrations).getByText('docs/PANEL.md')).toBeInTheDocument()
 
     const audit = section('audit')

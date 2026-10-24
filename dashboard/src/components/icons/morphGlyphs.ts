@@ -51,6 +51,17 @@ export const LATIN_GLYPH: MorphGlyph = {
   paths: ['M5 19 12 5l7 14', 'M8.4 13h7.2'],
 }
 
+/** Sidebar Schedules: a calendar whose clock hand is a separate subpath. */
+export const SCHEDULES_GLYPH: MorphGlyph = {
+  paths: [
+    'M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z',
+    'M3 10h18',
+    'M8 3v4',
+    'M16 3v4',
+    'M12 13v3l2 1.5',
+  ],
+}
+
 /** Status pills: disc/triangle frames and their mark morph in place; a mark
  *  that the next status does not have collapses and fades. */
 export const STATUS_GLYPHS: Record<Status, MorphGlyph> = {

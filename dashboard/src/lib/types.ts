@@ -32,16 +32,56 @@ export interface Account {
 /**
  * One row of the vendor's public plan catalogue, captured from
  * `https://www.91ajs.com/purchase`. Prices are CNY list prices, not quotes.
+ *
+ * The live daemon (GET /v1/renewal/plans) also fills `label`, `months` and
+ * `notes`; the static card snapshot predates that endpoint and carries only
+ * the fields it renders, so the wire-only fields stay optional here.
  */
 export interface RenewalPlan {
   /** Vendor period code: M1/M3/M12 months, H6 trial. */
   id: string
+  /** Human period label published by the vendor, e.g. "1 month". */
+  label?: string
+  /** Whole months covered by the term; 0 for the trial. */
+  months?: number
   /** Public list price in CNY. */
   priceCny: number
+  /** Auto-renew list price when the vendor publishes a variant. */
+  autoRenewPriceCny?: number | null
   /** CNY saved against paying month by month. */
   saveCny?: number
   /** A trial window rather than a renewable term. */
   trial?: boolean
+  /** Vendor-side notes, e.g. "TrialPackage". */
+  notes?: string
+}
+
+/** Where a plan catalogue came from: this call, memory, or the built-in table. */
+export type RenewalSource = 'live' | 'cache' | 'static'
+
+/** Time-to-expiry bucket for one account. */
+export type RenewalUrgency = 'none' | 'soon' | 'due' | 'overdue'
+
+/** GET /v1/renewal/plans — catalogue plus provenance; a failed refresh is soft. */
+export interface RenewalPlansView {
+  plans: RenewalPlan[]
+  /** RFC 3339 instant of the last live fetch; the zero instant for `static`. */
+  fetchedAt: string
+  source: RenewalSource
+  /** True when the snapshot outlived its TTL or is the static fallback. */
+  stale: boolean
+}
+
+/** GET /v1/renewal/accounts/{id} — expiry state; the URL carries no credential. */
+export interface RenewalAccountView {
+  accountId: string
+  /** RFC 3339 expiry echoed from the account row. */
+  expiresAt: string
+  /** Whole days to expiry, rounded away from zero; negative once past it. */
+  daysLeft: number
+  urgency: RenewalUrgency
+  /** Always the vendor's public purchase page. */
+  renewalUrl: string
 }
 
 export interface ProxyNode {
@@ -801,4 +841,384 @@ export interface CatalogSnapshot {
   stale: boolean
   total: number
   servers: ServerView[]
+}
+
+/* --------------------------------------------------------------------------
+ * Schedules — daemon/internal/model/schedule.go
+ *
+ * The live daemon is the contract: action values are the model's closed set,
+ * previews carry `{at,utc,inWindow}`, and a run carries `state`/`result`/
+ * `errorClass`. `system:renewal-sweep` is a daemon-owned pseudo schedule: it
+ * has runs but no row in GET /v1/schedules on this daemon, so the page derives
+ * its reminder card from account expiry and marks it read-only.
+ * ------------------------------------------------------------------------ */
+
+export type ScheduleAction =
+  | 'account.switch'
+  | 'account.rotate'
+  | 'account.reconnect'
+  | 'account.login'
+  | 'account.logout'
+  | 'node.drain'
+  | 'node.undrain'
+  | 'lease.rotate'
+  | 'subscription.refresh'
+  | 'egress.check'
+  | 'account.renewal_reminder'
+
+export type ScheduleTriggerKind = 'cron' | 'interval' | 'once'
+export type MisfirePolicy = 'skip' | 'run_once'
+export type ConcurrencyPolicy = 'forbid' | 'queue'
+export type ScheduleRunState =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped'
+  | 'dry_run'
+  | 'unknown'
+export type ScheduleResult = 'ok' | 'skipped' | 'error' | 'dry_run' | 'unknown'
+
+export interface ScheduleTarget {
+  kind: string
+  id?: string
+  /** Action-specific body; strict-decoded by the daemon. */
+  params?: Record<string, unknown> | null
+}
+
+export interface ScheduleTrigger {
+  kind: ScheduleTriggerKind
+  /** Five-field cron when kind=cron. */
+  expr?: string
+  /** 60..2592000 when kind=interval. */
+  everySec?: number
+  jitterSec?: number
+  /** RFC 3339 instant when kind=once. */
+  at?: string
+  /** IANA name; empty means UTC. */
+  timezone?: string
+}
+
+/** 0=Sunday..6=Saturday; an empty `days` means every day. */
+export interface ScheduleWindow {
+  days: number[]
+  start: string
+  end: string
+}
+
+export interface ScheduleGuard {
+  cooldownSec: number
+  maxRunsPerDay: number
+  /** Daemon default: true. A destructive action only arms with confirm:"ARM". */
+  dryRun: boolean
+}
+
+export interface Schedule {
+  id: string
+  revision: number
+  name: string
+  enabled: boolean
+  owner: string
+  action: ScheduleAction
+  target: ScheduleTarget
+  trigger: ScheduleTrigger
+  window?: ScheduleWindow | null
+  guard: ScheduleGuard
+  misfirePolicy?: MisfirePolicy
+  misfireGraceSec?: number
+  concurrencyPolicy?: ConcurrencyPolicy
+  createdAt: string
+  updatedAt: string
+  lastRunAt?: string
+  lastScheduledAt?: string
+  lastResult?: ScheduleResult
+  lastError?: string
+  nextRunAt?: string
+  runCountToday: number
+  consecutiveFailures: number
+  pausedReason?: string
+  degraded: boolean
+  cursor?: number
+}
+
+export interface ScheduleRun {
+  id: string
+  scheduleId: string
+  fireKey?: string
+  /** cron|interval|once|manual */
+  trigger: string
+  scheduledFor?: string
+  startedAt: string
+  finishedAt?: string
+  state: ScheduleRunState
+  result?: ScheduleResult
+  reason?: string
+  errorClass?: string
+  detail?: string
+  auditId?: string
+  operationId?: string
+  actor?: string
+}
+
+export interface SchedulePreviewRun {
+  at: string
+  utc: string
+  inWindow: boolean
+}
+
+export interface SchedulePreview {
+  serverTime: string
+  runs: SchedulePreviewRun[]
+  warnings: string[]
+}
+
+export interface ScheduleCreateInput {
+  name: string
+  enabled?: boolean
+  action: ScheduleAction
+  target: ScheduleTarget
+  trigger: ScheduleTrigger
+  window?: ScheduleWindow
+  guard?: Partial<ScheduleGuard>
+  misfirePolicy?: MisfirePolicy
+  misfireGraceSec?: number
+  concurrencyPolicy?: ConcurrencyPolicy
+  /** Deliberate-arm token; the daemon requires it for an armed destructive job. */
+  confirm?: 'ARM'
+}
+
+export interface SchedulePatchInput {
+  name?: string
+  enabled?: boolean
+  action?: ScheduleAction
+  target?: ScheduleTarget
+  trigger?: ScheduleTrigger
+  window?: ScheduleWindow
+  guard?: Partial<ScheduleGuard>
+  misfirePolicy?: MisfirePolicy
+  misfireGraceSec?: number
+  concurrencyPolicy?: ConcurrencyPolicy
+  confirm?: 'ARM'
+}
+
+export interface ScheduleRunInput {
+  /** Required for a manual run of an armed destructive action. */
+  confirm?: 'RUN'
+  dryRun?: boolean
+  force?: boolean
+}
+
+export interface SchedulePreviewInput {
+  action?: ScheduleAction
+  target?: ScheduleTarget
+  trigger: ScheduleTrigger
+  window?: ScheduleWindow
+}
+
+/** A daemon that reports the scheduler off; reads stay available. */
+export interface SchedulesDisabled {
+  enabled: false
+  reason: string
+  schedules?: Schedule[]
+}
+
+/**
+ * GET /v1/schedules is a bare array on the deployed daemon. A newer daemon may
+ * wrap it as `{enabled,reason,schedules}`; the page accepts both so an off
+ * scheduler can explain itself instead of looking like an empty list.
+ */
+export type SchedulesPayload = Schedule[] | SchedulesDisabled
+
+/* --------------------------------------------------------------------------
+ * Usage — daemon/internal/usage/usage.go
+ *
+ * GET /v1/usage aggregates the request log over an inclusive UTC window. All
+ * day boundaries are UTC calendar days and every account bucket covers the
+ * whole window, so a chart can render a continuous series.
+ * ------------------------------------------------------------------------ */
+
+/** One UTC day of usage. */
+export interface UsageBucket {
+  /** `YYYY-MM-DD` in UTC. */
+  day: string
+  requests: number
+  bytes: number
+  errors: number
+  avgLatencyMs: number
+}
+
+/** Per-account roll-up; `buckets` covers every day in the window. */
+export interface UsageAccount {
+  /** Account label; the daemon maps an account id to its label. */
+  account: string
+  requests: number
+  bytes: number
+  errors: number
+  avgLatencyMs: number
+  buckets: UsageBucket[]
+}
+
+/** Per-user roll-up; `usedBytes` is the byte total inside the window. */
+export interface UsageUser {
+  userId: string
+  userName: string
+  requests: number
+  bytes: number
+  quotaBytesMonth: number | null
+  usedBytes: number
+}
+
+/** One host-only target label; never carries a scheme, path, query or port. */
+export interface UsageTarget {
+  target: string
+  requests: number
+  bytes: number
+}
+
+/** GET /v1/usage. `truncated` reports that the row cap clipped the window. */
+export interface UsageSummary {
+  /** RFC 3339 window bounds after the daemon applies its defaults. */
+  from: string
+  to: string
+  requests: number
+  bytes: number
+  errors: number
+  accounts: UsageAccount[]
+  users: UsageUser[]
+  days: UsageBucket[]
+  topTargets: UsageTarget[]
+  truncated: boolean
+}
+
+/** Query for GET /v1/usage; empty fields are omitted from the request. */
+export interface UsageQuery {
+  /** RFC 3339 timestamp or `YYYY-MM-DD`; defaults to 30 days before `to`. */
+  from?: string
+  /** RFC 3339 timestamp or `YYYY-MM-DD`; defaults to the daemon clock. */
+  to?: string
+  /** Account id or label; the daemon resolves an id to its label. */
+  account?: string
+  /** Exact user id. */
+  userId?: string
+}
+
+/* --------------------------------------------------------------------------
+ * Health — daemon/internal/health/health.go
+ *
+ * GET /v1/health/nodes samples loopback gates only. Percentiles, min and max
+ * are computed over successful probes; `last` is the newest sample regardless
+ * of outcome.
+ * ------------------------------------------------------------------------ */
+
+export type NodeHealthState = 'ok' | 'degraded' | 'down'
+export type HealthErrorClass = 'timeout' | 'refused' | 'unreachable' | 'other'
+
+/** One loopback probe. `at` is the instant the probe started. */
+export interface HealthSample {
+  /** RFC 3339 with nanoseconds. */
+  at: string
+  latencyMs: number
+  ok: boolean
+  /** Empty/absent when `ok` is true. */
+  errorClass?: HealthErrorClass | string
+}
+
+/** One watched node's retained-window aggregate plus its newest sample. */
+export interface NodeHealth {
+  nodeId: string
+  accountId?: string
+  serverId?: string
+  label?: string
+  state: NodeHealthState
+  count: number
+  ok: number
+  /** OK/Count over the whole window, 0..1. */
+  successRate: number
+  p50Ms: number
+  p95Ms: number
+  minMs: number
+  maxMs: number
+  consecutiveFailures: number
+  last?: HealthSample
+}
+
+/** GET /v1/health/nodes; `enabled:false` carries the daemon's reason. */
+export interface HealthView {
+  enabled: boolean
+  reason?: string
+  nodes: NodeHealth[]
+}
+
+/* --------------------------------------------------------------------------
+ * Webhooks — daemon/internal/webhook/webhook.go
+ *
+ * The signing secret exists only in the create response. A read reports
+ * `secretAvailable` so the panel can explain why an endpoint cannot be
+ * re-enabled, and every delivery attempt is kept in a bounded ring.
+ * ------------------------------------------------------------------------ */
+
+/** The daemon's closed event catalogue; an empty subscription means every event. */
+export const WEBHOOK_EVENTS = [
+  'account.login',
+  'account.logout',
+  'account.expired',
+  'account.renewal_due',
+  'node.connected',
+  'node.disconnected',
+  'node.switched',
+  'schedule.fired',
+  'schedule.failed',
+  'device.retired',
+  'audit.critical',
+] as const
+
+export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number]
+
+export type WebhookDeliveryStatus = 'success' | 'failed' | 'dead_letter'
+
+/** One persisted receiver. The signing secret is never part of a read. */
+export interface WebhookEndpoint {
+  id: string
+  url: string
+  /** Empty/absent subscribes to every event. */
+  events?: WebhookEvent[]
+  enabled: boolean
+  description?: string
+  /** RFC 3339 timestamp. */
+  createdAt: string
+  /** Whether the sealed signing secret can still be opened. */
+  secretAvailable: boolean
+}
+
+/** POST /v1/webhooks body. An absent `enabled` defaults to true. */
+export interface WebhookCreate {
+  url: string
+  /** Empty/absent subscribes to every event. */
+  events?: WebhookEvent[]
+  description?: string
+  enabled?: boolean
+}
+
+/** POST /v1/webhooks response; `secret` is returned exactly once. */
+export interface WebhookCreated extends WebhookEndpoint {
+  secret: string
+}
+
+/** PATCH /v1/webhooks/{id} body; only `enabled` is mutable. */
+export interface WebhookPatch {
+  enabled: boolean
+}
+
+/** One delivery attempt from the dispatcher's bounded ring. */
+export interface Delivery {
+  id: string
+  endpointId: string
+  event: WebhookEvent
+  attempt: number
+  status: WebhookDeliveryStatus
+  /** Receiver HTTP status; absent when the attempt never got a response. */
+  httpStatus?: number
+  error?: string
+  /** RFC 3339 timestamp. */
+  at: string
+  durationMs: number
 }

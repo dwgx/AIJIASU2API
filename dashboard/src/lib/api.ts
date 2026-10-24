@@ -22,6 +22,7 @@ import {
   syncAccountCounts,
 } from './mock'
 import { ApiError, UnauthorizedError } from './errors'
+import { WEBHOOK_EVENTS } from './types'
 import type {
   Account,
   AccountExportDownload,
@@ -41,6 +42,7 @@ import type {
   CreateAccountInput,
   CreateKeyInput,
   CreateKeyResult,
+  Delivery,
   DeviceView,
   DiagnosticsView,
   DisconnectResult,
@@ -48,6 +50,7 @@ import type {
   EgressView,
   FlowsView,
   GateView,
+  HealthView,
   LabFlags,
   LabDisabled,
   LabLogQuery,
@@ -58,16 +61,45 @@ import type {
   Metrics,
   MetricRange,
   MutationLabInput,
+  NodeHealth,
   NodeState,
   PanelSettings,
   PanelUser,
   ProxyNode,
+  RenewalAccountView,
+  RenewalPlan,
+  RenewalPlansView,
   RequestLog,
+  Schedule,
+  ScheduleCreateInput,
+  ScheduleGuard,
+  SchedulePatchInput,
+  SchedulePreview,
+  SchedulePreviewInput,
+  ScheduleRun,
+  ScheduleRunInput,
+  ScheduleTrigger,
+  SchedulesPayload,
   ServerCatalogQuery,
   ServerView,
   SessionView,
   UpdateInfo,
+  UsageQuery,
+  UsageSummary,
+  UsageTarget,
+  WebhookCreate,
+  WebhookCreated,
+  WebhookEndpoint,
+  WebhookEvent,
+  WebhookPatch,
 } from './types'
+import {
+  SYSTEM_SCHEDULE_ID,
+  computeSchedulePreview,
+  isDestructiveAction,
+  nextRunAtFor,
+  parseCronExpression,
+} from './schedules'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '')
@@ -179,6 +211,45 @@ function defaultHttpError(context: HttpErrorContext): ApiError {
 function catalogActionError(context: HttpErrorContext): ApiError {
   const suffix = context.detail ? ` — ${context.detail.slice(0, 200)}` : ''
   return new CatalogActionError(
+    context.status,
+    `${context.status} ${context.statusText}${suffix}`,
+    context.code,
+    context.reason,
+    context.details,
+    context.retryAfterSec,
+  )
+}
+
+/**
+ * A schedule write rejected by the daemon. 409/412/429 carry a machine
+ * `reason`; the page maps `confirmation_required`, `in_flight` and
+ * `stale_revision` to localized copy and keeps the row disabled for a 429
+ * `Retry-After`.
+ */
+export class ScheduleActionError extends ApiError {
+  readonly reason: string | null
+  readonly details: Record<string, unknown> | null
+  readonly retryAfterSec: number | null
+
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    reason: string | null = null,
+    details: Record<string, unknown> | null = null,
+    retryAfterSec: number | null = null,
+  ) {
+    super(status, message, code)
+    this.name = 'ScheduleActionError'
+    this.reason = reason
+    this.details = details
+    this.retryAfterSec = retryAfterSec
+  }
+}
+
+function scheduleActionError(context: HttpErrorContext): ApiError {
+  const suffix = context.detail ? ` — ${context.detail.slice(0, 200)}` : ''
+  return new ScheduleActionError(
     context.status,
     `${context.status} ${context.statusText}${suffix}`,
     context.code,
@@ -738,6 +809,1170 @@ async function requestCatalogSnapshot(
 
   snapshotInFlight.set(id, request)
   return request
+}
+
+/* --------------------------------------------------------------------------
+ * Schedules — mock parity with daemon/internal/model/schedule.go
+ *
+ * Mirrors the parts the UI can observe: revision/If-Match, dry-run defaults,
+ * ARM/RUN confirm tokens, trigger validation, preview and run history. Cron is
+ * evaluated in UTC; the live daemon owns IANA timezone math.
+ * ------------------------------------------------------------------------ */
+
+interface MockScheduleState {
+  schedules: Schedule[]
+  runs: ScheduleRun[]
+  seq: number
+  runSeq: number
+}
+
+let mockScheduleState: MockScheduleState | null = null
+
+function mockDefaultGuard(): ScheduleGuard {
+  return { cooldownSec: 600, maxRunsPerDay: 24, dryRun: true }
+}
+
+function buildMockScheduleState(now = Date.now()): MockScheduleState {
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const nightlyTrigger: ScheduleTrigger = { kind: 'cron', expr: '0 3 * * *', timezone: 'UTC' }
+  const watchdogTrigger: ScheduleTrigger = {
+    kind: 'interval',
+    everySec: 3600,
+    jitterSec: 120,
+    timezone: 'UTC',
+  }
+  const weekendTrigger: ScheduleTrigger = { kind: 'cron', expr: '0 6 * * 6', timezone: 'UTC' }
+  const onceTrigger: ScheduleTrigger = { kind: 'once', at: iso(now + 2 * 3_600_000), timezone: 'UTC' }
+  const nightly: Schedule = {
+    id: 'sch-001',
+    revision: 1,
+    name: 'Nightly rotate',
+    enabled: true,
+    owner: 'admin',
+    action: 'account.rotate',
+    target: {
+      kind: 'account',
+      id: 'acc-01',
+      params: {
+        strategy: 'pool',
+        serverIds: ['cn-sh-01', 'hk-01'],
+        excludeCurrent: true,
+        rollback: true,
+      },
+    },
+    trigger: nightlyTrigger,
+    guard: { cooldownSec: 600, maxRunsPerDay: 6, dryRun: false },
+    misfirePolicy: 'skip',
+    misfireGraceSec: 300,
+    concurrencyPolicy: 'forbid',
+    createdAt: iso(now - 20 * 86_400_000),
+    updatedAt: iso(now - 2 * 86_400_000),
+    lastRunAt: iso(now - 21 * 3_600_000),
+    lastScheduledAt: iso(now - 21 * 3_600_000),
+    lastResult: 'ok',
+    nextRunAt: nextRunAtFor(nightlyTrigger, undefined, now),
+    runCountToday: 1,
+    consecutiveFailures: 0,
+    degraded: false,
+    cursor: 1,
+  }
+  const watchdog: Schedule = {
+    id: 'sch-002',
+    revision: 1,
+    name: 'Reconnect watchdog',
+    enabled: true,
+    owner: 'admin',
+    action: 'account.reconnect',
+    target: { kind: 'account', id: 'acc-03', params: { timeoutSeconds: 30 } },
+    trigger: watchdogTrigger,
+    guard: { cooldownSec: 600, maxRunsPerDay: 24, dryRun: true },
+    misfirePolicy: 'skip',
+    misfireGraceSec: 300,
+    concurrencyPolicy: 'forbid',
+    createdAt: iso(now - 9 * 86_400_000),
+    updatedAt: iso(now - 86_400_000),
+    lastRunAt: iso(now - 20 * 60_000),
+    lastScheduledAt: iso(now - 20 * 60_000),
+    lastResult: 'dry_run',
+    nextRunAt: nextRunAtFor(watchdogTrigger, undefined, now),
+    runCountToday: 2,
+    consecutiveFailures: 0,
+    degraded: false,
+  }
+  const weekend: Schedule = {
+    id: 'sch-003',
+    revision: 3,
+    name: 'Weekend rotate',
+    enabled: true,
+    owner: 'admin',
+    action: 'account.rotate',
+    target: { kind: 'account', id: 'acc-02', params: { strategy: 'same-region', region: 'jp-tyo' } },
+    trigger: weekendTrigger,
+    window: { days: [6], start: '06:00', end: '08:00' },
+    guard: { cooldownSec: 0, maxRunsPerDay: 4, dryRun: true },
+    misfirePolicy: 'skip',
+    misfireGraceSec: 300,
+    concurrencyPolicy: 'queue',
+    createdAt: iso(now - 40 * 86_400_000),
+    updatedAt: iso(now - 6 * 3_600_000),
+    lastRunAt: iso(now - 6 * 3_600_000),
+    lastScheduledAt: iso(now - 6 * 3_600_000),
+    lastResult: 'error',
+    lastError: 'transient · network',
+    nextRunAt: nextRunAtFor(weekendTrigger, { days: [6], start: '06:00', end: '08:00' }, now),
+    runCountToday: 0,
+    consecutiveFailures: 3,
+    pausedReason: 'network',
+    degraded: true,
+  }
+  const oneShot: Schedule = {
+    id: 'sch-004',
+    revision: 1,
+    name: 'One-shot rotate',
+    enabled: true,
+    owner: 'admin',
+    action: 'account.rotate',
+    target: { kind: 'account', id: 'acc-04', params: { strategy: 'next-server' } },
+    trigger: onceTrigger,
+    guard: { cooldownSec: 0, maxRunsPerDay: 1, dryRun: true },
+    misfirePolicy: 'skip',
+    misfireGraceSec: 300,
+    concurrencyPolicy: 'forbid',
+    createdAt: iso(now - 3 * 3_600_000),
+    updatedAt: iso(now - 3 * 3_600_000),
+    nextRunAt: nextRunAtFor(onceTrigger, undefined, now),
+    runCountToday: 0,
+    consecutiveFailures: 0,
+    degraded: false,
+  }
+  const runs: ScheduleRun[] = [
+    {
+      id: 'run-0008',
+      scheduleId: 'sch-001',
+      trigger: 'cron',
+      startedAt: iso(now - 21 * 3_600_000),
+      finishedAt: iso(now - 21 * 3_600_000 + 2_400),
+      state: 'succeeded',
+      result: 'ok',
+      detail: 'rotated to hk-01',
+      actor: 'system',
+    },
+    {
+      id: 'run-0007',
+      scheduleId: 'sch-002',
+      trigger: 'interval',
+      startedAt: iso(now - 20 * 60_000),
+      finishedAt: iso(now - 20 * 60_000 + 180),
+      state: 'dry_run',
+      result: 'dry_run',
+      detail: 'dry run · reconnect acc-03',
+      actor: 'system',
+    },
+    {
+      id: 'run-0006',
+      scheduleId: 'sch-003',
+      trigger: 'cron',
+      startedAt: iso(now - 6 * 3_600_000),
+      finishedAt: iso(now - 6 * 3_600_000 + 540),
+      state: 'failed',
+      result: 'error',
+      reason: 'no_eligible_server',
+      errorClass: 'permanent',
+      detail: 'catalog has no eligible jp-tyo server',
+      actor: 'system',
+    },
+    {
+      id: 'run-0005',
+      scheduleId: 'sch-002',
+      trigger: 'interval',
+      startedAt: iso(now - 1 * 3_600_000),
+      finishedAt: iso(now - 1 * 3_600_000 + 220),
+      state: 'dry_run',
+      result: 'dry_run',
+      detail: 'dry run · reconnect acc-03',
+      actor: 'system',
+    },
+    {
+      id: 'run-0004',
+      scheduleId: 'sch-003',
+      trigger: 'cron',
+      startedAt: iso(now - 12 * 3_600_000),
+      finishedAt: iso(now - 12 * 3_600_000 + 610),
+      state: 'failed',
+      result: 'error',
+      reason: 'no_eligible_server',
+      errorClass: 'permanent',
+      detail: 'catalog has no eligible jp-tyo server',
+      actor: 'system',
+    },
+    {
+      id: 'run-0003',
+      scheduleId: 'sch-001',
+      trigger: 'cron',
+      startedAt: iso(now - 2 * 86_400_000),
+      finishedAt: iso(now - 2 * 86_400_000 + 1_900),
+      state: 'failed',
+      result: 'error',
+      reason: 'network',
+      errorClass: 'transient',
+      detail: 'upstream timeout after 30s',
+      actor: 'system',
+    },
+    {
+      id: 'run-0002',
+      scheduleId: 'sch-001',
+      trigger: 'cron',
+      startedAt: iso(now - 3 * 86_400_000),
+      finishedAt: iso(now - 3 * 86_400_000 + 120),
+      state: 'skipped',
+      result: 'skipped',
+      reason: 'cooldown',
+      detail: 'cooldown guard',
+      actor: 'system',
+    },
+    {
+      id: 'run-0001',
+      scheduleId: SYSTEM_SCHEDULE_ID,
+      trigger: 'cron',
+      startedAt: iso(now - 4 * 3_600_000),
+      finishedAt: iso(now - 4 * 3_600_000 + 40),
+      state: 'succeeded',
+      result: 'ok',
+      detail: 'due 1 · overdue 1',
+      actor: 'system',
+    },
+  ]
+  return { schedules: [nightly, watchdog, weekend, oneShot], runs, seq: 4, runSeq: 8 }
+}
+
+function mockSchedules(): MockScheduleState {
+  if (!mockScheduleState) mockScheduleState = buildMockScheduleState()
+  return mockScheduleState
+}
+
+function scheduleFieldError(field: string, message: string): never {
+  throw new ApiError(400, `${field}: ${message}`, 'INVALID_ARGUMENT')
+}
+
+function confirmationRequired(token: 'ARM' | 'RUN'): ScheduleActionError {
+  return new ScheduleActionError(
+    409,
+    `confirm:"${token}" is required for a destructive schedule action`,
+    'CONFLICT',
+    'confirmation_required',
+  )
+}
+
+function validateMockSchedule(schedule: Schedule, state: MockScheduleState): void {
+  const name = schedule.name.trim()
+  if (!name) scheduleFieldError('name', 'is required')
+  if ([...name].length > 60) scheduleFieldError('name', 'must be at most 60 characters')
+  const duplicate = state.schedules.find(
+    (candidate) => candidate.id !== schedule.id && candidate.name.toLowerCase() === name.toLowerCase(),
+  )
+  if (duplicate) throw new ApiError(409, `a schedule named “${name}” already exists`, 'CONFLICT')
+  if (schedule.action !== 'account.rotate' && schedule.action !== 'account.reconnect') {
+    scheduleFieldError('action', `“${schedule.action}” is not supported in P0`)
+  }
+  if (schedule.target.kind !== 'account') {
+    scheduleFieldError('target.kind', `must be account for ${schedule.action}`)
+  }
+  const accountId = schedule.target.id?.trim() ?? ''
+  if (!accountId) scheduleFieldError('target.id', 'is required')
+  if (!getDb().accounts.some((account) => account.id === accountId)) {
+    scheduleFieldError('target.id', `account “${accountId}” not found`)
+  }
+  const params = (schedule.target.params ?? {}) as Record<string, unknown>
+  const allowedParams =
+    schedule.action === 'account.rotate'
+      ? new Set([
+          'strategy',
+          'serverIds',
+          'region',
+          'excludeCurrent',
+          'drainSeconds',
+          'timeoutSeconds',
+          'rollback',
+        ])
+      : new Set(['timeoutSeconds'])
+  for (const key of Object.keys(params)) {
+    if (!allowedParams.has(key)) scheduleFieldError('target.params', `unknown field “${key}”`)
+  }
+  const drainSeconds = params.drainSeconds
+  if (drainSeconds !== undefined) {
+    if (typeof drainSeconds !== 'number' || drainSeconds < 0 || drainSeconds > 60) {
+      scheduleFieldError('target.params.drainSeconds', 'must be between 0 and 60')
+    }
+  }
+  const timeoutSeconds = params.timeoutSeconds
+  if (timeoutSeconds !== undefined) {
+    if (
+      typeof timeoutSeconds !== 'number' ||
+      (timeoutSeconds !== 0 && (timeoutSeconds < 10 || timeoutSeconds > 120))
+    ) {
+      scheduleFieldError('target.params.timeoutSeconds', 'must be between 10 and 120')
+    }
+  }
+  if (params.region !== undefined && typeof params.region !== 'string') {
+    scheduleFieldError('target.params.region', 'must be a string')
+  }
+  if (params.serverIds !== undefined) {
+    if (!Array.isArray(params.serverIds)) {
+      scheduleFieldError('target.params.serverIds', 'must be an array of server ids')
+    }
+    if (params.serverIds.some((value) => typeof value !== 'string')) {
+      scheduleFieldError('target.params.serverIds', 'must contain only string ids')
+    }
+  }
+  if (params.strategy !== undefined && typeof params.strategy !== 'string') {
+    scheduleFieldError('target.params.strategy', 'must be a string')
+  }
+  if (params.excludeCurrent !== undefined && typeof params.excludeCurrent !== 'boolean') {
+    scheduleFieldError('target.params.excludeCurrent', 'must be a boolean')
+  }
+  if (params.rollback !== undefined && typeof params.rollback !== 'boolean') {
+    scheduleFieldError('target.params.rollback', 'must be a boolean')
+  }
+  if (schedule.action === 'account.rotate') {
+    const strategy =
+      typeof params.strategy === 'string' && params.strategy ? params.strategy : 'same-region'
+    if (!['pool', 'same-region', 'next-server', 'random'].includes(strategy)) {
+      scheduleFieldError('target.params.strategy', 'must be pool, same-region, next-server or random')
+    }
+    if (strategy === 'pool') {
+      const ids = Array.isArray(params.serverIds)
+        ? params.serverIds.filter((value): value is string => typeof value === 'string')
+        : []
+      if (ids.length < 2) scheduleFieldError('target.params.serverIds', 'a pool needs at least 2 server ids')
+      if (new Set(ids).size !== ids.length) scheduleFieldError('target.params.serverIds', 'must not contain duplicates')
+      const catalog = buildAccountServers(getDb(), accountId)
+      const rows = new Map(catalog.servers.map((row) => [row.id, row]))
+      for (const id of ids) {
+        const row = rows.get(id)
+        if (!row) scheduleFieldError('target.params.serverIds', `server “${id}” is not in the retained catalog`)
+        if (
+          row.eligible === false ||
+          row.status !== 'ok' ||
+          row.fullLoad === true ||
+          row.blockingMarks.length > 0 ||
+          row.memberOnly === true
+        ) {
+          scheduleFieldError('target.params.serverIds', `server “${id}” is not eligible`)
+        }
+      }
+    }
+  }
+
+  const trigger = schedule.trigger
+  if (trigger.timezone) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: trigger.timezone })
+    } catch {
+      scheduleFieldError('trigger.timezone', `“${trigger.timezone}” is not an IANA timezone`)
+    }
+  }
+  if (trigger.kind === 'cron') {
+    if (!trigger.expr?.trim()) scheduleFieldError('trigger.expr', 'is required')
+    try {
+      parseCronExpression(trigger.expr ?? '')
+    } catch (cause) {
+      scheduleFieldError('trigger.expr', cause instanceof Error ? cause.message : String(cause))
+    }
+    if ((trigger.everySec ?? 0) !== 0 || trigger.at) {
+      scheduleFieldError('trigger', 'cron accepts only expr, timezone and jitterSec')
+    }
+    const jitter = trigger.jitterSec ?? 0
+    if (jitter < 0 || jitter > 300) scheduleFieldError('trigger.jitterSec', 'must be between 0 and 300 for cron')
+  } else if (trigger.kind === 'interval') {
+    const every = trigger.everySec ?? 0
+    if (every < 60 || every > 2_592_000) {
+      scheduleFieldError('trigger.everySec', 'must be between 60 and 2592000')
+    }
+    const maxJitter = Math.min(300, Math.floor(every / 2))
+    const jitter = trigger.jitterSec ?? 0
+    if (jitter < 0 || jitter > maxJitter) {
+      scheduleFieldError('trigger.jitterSec', `must be between 0 and ${maxJitter}`)
+    }
+    if (trigger.expr || trigger.at) {
+      scheduleFieldError('trigger', 'interval accepts only everySec, timezone and jitterSec')
+    }
+  } else if (trigger.kind === 'once') {
+    if (!trigger.at) scheduleFieldError('trigger.at', 'is required')
+    if (trigger.expr || (trigger.everySec ?? 0) !== 0 || (trigger.jitterSec ?? 0) !== 0) {
+      scheduleFieldError('trigger', 'once accepts only at and timezone')
+    }
+    const at = Date.parse(trigger.at ?? '')
+    if (!Number.isFinite(at)) scheduleFieldError('trigger.at', 'must be an RFC 3339 timestamp')
+    if (at <= Date.now()) scheduleFieldError('trigger.at', 'must be in the future')
+    if (at > Date.now() + 366 * 86_400_000) scheduleFieldError('trigger.at', 'must be at most 366 days away')
+  } else {
+    scheduleFieldError('trigger.kind', 'must be cron, interval or once')
+  }
+
+  if (schedule.window) {
+    const { days, start, end } = schedule.window
+    if (!Array.isArray(days)) scheduleFieldError('window.days', 'must be an array')
+    if (new Set(days).size !== days.length) scheduleFieldError('window.days', 'contains a duplicate day')
+    for (const day of days) {
+      if (!Number.isInteger(day) || day < 0 || day > 6) scheduleFieldError('window.days', 'must be 0-6')
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) scheduleFieldError('window.start', 'must be HH:MM')
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(end)) scheduleFieldError('window.end', 'must be HH:MM')
+    if (start === end) scheduleFieldError('window', 'start and end must differ')
+  }
+
+  const guard = schedule.guard
+  if (guard.cooldownSec < 0 || guard.cooldownSec > 86_400) {
+    scheduleFieldError('guard.cooldownSec', 'must be between 0 and 86400')
+  }
+  if (guard.maxRunsPerDay < 1 || guard.maxRunsPerDay > 1_000) {
+    scheduleFieldError('guard.maxRunsPerDay', 'must be between 1 and 1000')
+  }
+  if (schedule.misfirePolicy !== 'skip' && schedule.misfirePolicy !== 'run_once') {
+    scheduleFieldError('misfirePolicy', 'must be skip or run_once')
+  }
+  if ((schedule.misfireGraceSec ?? 0) < 0 || (schedule.misfireGraceSec ?? 0) > 3_600) {
+    scheduleFieldError('misfireGraceSec', 'must be between 0 and 3600')
+  }
+  if (schedule.trigger.kind === 'once' && schedule.misfirePolicy === 'run_once') {
+    scheduleFieldError('misfirePolicy', 'run_once is not allowed for a once trigger')
+  }
+  if (schedule.concurrencyPolicy !== 'forbid' && schedule.concurrencyPolicy !== 'queue') {
+    scheduleFieldError('concurrencyPolicy', 'must be forbid or queue')
+  }
+  if (schedule.enabled && !nextRunAtFor(schedule.trigger, schedule.window)) {
+    scheduleFieldError('trigger', 'has no reachable next run')
+  }
+}
+
+function mockCreateSchedule(input: ScheduleCreateInput): Schedule {
+  const state = mockSchedules()
+  if (state.schedules.length >= 50) throw new ApiError(409, 'at most 50 schedules are allowed', 'CONFLICT')
+  const now = Date.now()
+  const createdAt = new Date(now).toISOString()
+  const schedule: Schedule = {
+    id: `sch-${String(state.seq + 1).padStart(3, '0')}`,
+    revision: 1,
+    name: input.name.trim(),
+    enabled: input.enabled === true,
+    owner: 'admin',
+    action: input.action,
+    target: input.target,
+    trigger: input.trigger,
+    window: input.window,
+    guard: { ...mockDefaultGuard(), ...input.guard },
+    misfirePolicy: input.misfirePolicy ?? 'skip',
+    misfireGraceSec: input.misfireGraceSec ?? 300,
+    concurrencyPolicy: input.concurrencyPolicy ?? 'forbid',
+    createdAt,
+    updatedAt: createdAt,
+    runCountToday: 0,
+    consecutiveFailures: 0,
+    degraded: false,
+  }
+  if (schedule.enabled) schedule.nextRunAt = nextRunAtFor(schedule.trigger, schedule.window)
+  validateMockSchedule(schedule, state)
+  if (isDestructiveAction(schedule.action) && !schedule.guard.dryRun && input.confirm !== 'ARM') {
+    throw confirmationRequired('ARM')
+  }
+  state.seq += 1
+  state.schedules.push(schedule)
+  return clone(schedule)
+}
+
+function mockPatchSchedule(id: string, expectedRevision: number, input: SchedulePatchInput): Schedule {
+  const state = mockSchedules()
+  const index = state.schedules.findIndex((schedule) => schedule.id === id)
+  if (index < 0) throw new ApiError(404, `schedule “${id}” not found`, 'NOT_FOUND')
+  const current = state.schedules[index]
+  if (current.revision !== expectedRevision) {
+    throw new ScheduleActionError(
+      412,
+      `schedule “${id}” revision is ${current.revision}`,
+      'PRECONDITION_FAILED',
+      'stale_revision',
+      { currentRevision: String(current.revision) },
+    )
+  }
+  const next = clone(current)
+  if (input.name !== undefined) next.name = input.name.trim()
+  if (input.enabled !== undefined) next.enabled = input.enabled
+  if (input.action !== undefined) next.action = input.action
+  if (input.target !== undefined) next.target = input.target
+  if (input.trigger !== undefined) next.trigger = input.trigger
+  if (input.window !== undefined) next.window = input.window
+  if (input.guard !== undefined) next.guard = { ...next.guard, ...input.guard }
+  if (input.misfirePolicy !== undefined) next.misfirePolicy = input.misfirePolicy
+  if (input.misfireGraceSec !== undefined) next.misfireGraceSec = input.misfireGraceSec
+  if (input.concurrencyPolicy !== undefined) next.concurrencyPolicy = input.concurrencyPolicy
+  if (input.enabled === true) {
+    next.pausedReason = ''
+    next.consecutiveFailures = 0
+    next.degraded = false
+  }
+  validateMockSchedule(next, state)
+  const actionChanged = input.action !== undefined
+  const dryRunFlipped = input.guard?.dryRun === false && current.guard.dryRun
+  if (
+    (actionChanged || dryRunFlipped) &&
+    isDestructiveAction(next.action) &&
+    !next.guard.dryRun &&
+    input.confirm !== 'ARM'
+  ) {
+    throw confirmationRequired('ARM')
+  }
+  next.revision += 1
+  next.updatedAt = new Date().toISOString()
+  if (input.enabled === false) next.nextRunAt = undefined
+  else if (next.enabled) next.nextRunAt = nextRunAtFor(next.trigger, next.window)
+  state.schedules[index] = next
+  return clone(next)
+}
+
+function mockDeleteSchedule(id: string): void {
+  const state = mockSchedules()
+  const index = state.schedules.findIndex((schedule) => schedule.id === id)
+  if (index < 0) throw new ApiError(404, `schedule “${id}” not found`, 'NOT_FOUND')
+  state.schedules.splice(index, 1)
+}
+
+function mockRunSchedule(id: string, input: ScheduleRunInput): ScheduleRun {
+  const state = mockSchedules()
+  const schedule = state.schedules.find((candidate) => candidate.id === id)
+  if (!schedule) throw new ApiError(404, `schedule “${id}” not found`, 'NOT_FOUND')
+  const dryRun = input.dryRun ?? schedule.guard.dryRun
+  if (!dryRun && isDestructiveAction(schedule.action) && input.confirm !== 'RUN') {
+    throw confirmationRequired('RUN')
+  }
+  const now = Date.now()
+  const startedAt = new Date(now).toISOString()
+  const run: ScheduleRun = {
+    id: `run-${String(state.runSeq + 1).padStart(4, '0')}`,
+    scheduleId: id,
+    trigger: 'manual',
+    startedAt,
+    finishedAt: new Date(now + 140).toISOString(),
+    state: dryRun ? 'dry_run' : 'succeeded',
+    result: dryRun ? 'dry_run' : 'ok',
+    detail: dryRun ? 'dry run · manual run' : 'manual run',
+    actor: 'admin',
+    operationId: `op-mock-${state.runSeq + 1}`,
+  }
+  state.runSeq += 1
+  state.runs.unshift(run)
+  schedule.lastRunAt = startedAt
+  schedule.lastResult = run.result
+  schedule.runCountToday += 1
+  if (schedule.action === 'account.rotate') schedule.cursor = (schedule.cursor ?? 0) + 1
+  schedule.nextRunAt = nextRunAtFor(schedule.trigger, schedule.window)
+  return clone(run)
+}
+
+function mockScheduleRuns(id: string, limit = 50): ScheduleRun[] {
+  const state = mockSchedules()
+  if (id !== SYSTEM_SCHEDULE_ID && !state.schedules.some((schedule) => schedule.id === id)) {
+    throw new ApiError(404, `schedule “${id}” not found`, 'NOT_FOUND')
+  }
+  const cap = Math.max(0, Math.min(200, Math.trunc(limit)))
+  return clone(state.runs.filter((run) => run.scheduleId === id).slice(0, cap))
+}
+
+function mockSchedulePreview(input: SchedulePreviewInput, count = 5): SchedulePreview {
+  try {
+    const { runs, warnings } = computeSchedulePreview(input.trigger, input.window, count)
+    return { serverTime: new Date().toISOString(), runs, warnings }
+  } catch (cause) {
+    throw new ApiError(400, cause instanceof Error ? cause.message : String(cause), 'INVALID_ARGUMENT')
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Platform surfaces — renewal / usage / health / webhooks
+ *
+ * The daemon owns the four contracts (daemon/internal/api/platform.go). The
+ * browser mock mirrors the wire shapes with deterministic data so the panel
+ * and the suite can run without a daemon: a static plan table, a seeded usage
+ * series aggregated with the same window rules, a health mix of ok/degraded/
+ * down nodes, and one webhook receiver with a bounded delivery ring.
+ * ------------------------------------------------------------------------ */
+
+const MOCK_RENEWAL_FETCHED_AT = '2026-10-24T00:00:00Z'
+const MOCK_RENEWAL_URL = 'https://www.91ajs.com/purchase'
+const MOCK_RENEWAL_SOON_DAYS = 5
+const MOCK_DAY_MS = 86_400_000
+const MOCK_USAGE_MAX_DAYS = 366
+const MOCK_USAGE_DEFAULT_DAYS = 30
+const MOCK_USAGE_TOP_TARGETS = 10
+const MOCK_WEBHOOK_MAX = 32
+
+/** The daemon's built-in fallback table (renewal.StaticPlans), verbatim. */
+const MOCK_RENEWAL_PLANS: readonly RenewalPlan[] = [
+  { id: 'M1', label: '1 month', months: 1, priceCny: 20 },
+  { id: 'M3', label: '3 months', months: 3, priceCny: 53 },
+  { id: 'M12', label: '12 months', months: 12, priceCny: 198 },
+  { id: 'H6', label: '6-hour trial', months: 0, priceCny: 1, trial: true, notes: 'TrialPackage' },
+]
+
+function platformError(status: number, code: string, message: string): ApiError {
+  return new ApiError(status, message, code)
+}
+
+function mockRFC3339(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/** Whole days to expiry, rounded away from zero like renewal.daysLeft. */
+function mockDaysLeft(expiresMs: number, now: number): number {
+  const remaining = expiresMs - now
+  if (remaining === 0) return 0
+  let days = Math.trunc(remaining / MOCK_DAY_MS)
+  const rest = remaining % MOCK_DAY_MS
+  if (remaining > 0 && rest > 0) days += 1
+  if (remaining < 0 && rest < 0) days -= 1
+  return days
+}
+
+function mockRenewalAccount(id: string): RenewalAccountView {
+  const account = getDb().accounts.find((candidate) => candidate.id === id)
+  if (!account) throw platformError(404, 'NOT_FOUND', `account "${id}" not found`)
+  const expiresMs = Date.parse(account.expiresAt)
+  if (!Number.isFinite(expiresMs)) {
+    throw platformError(400, 'INVALID_ARGUMENT', 'account expiry is invalid')
+  }
+  const daysLeft = mockDaysLeft(expiresMs, Date.now())
+  const urgency =
+    daysLeft < 0 ? 'overdue' : daysLeft === 0 ? 'due' : daysLeft <= MOCK_RENEWAL_SOON_DAYS ? 'soon' : 'none'
+  return {
+    accountId: account.id,
+    expiresAt: account.expiresAt,
+    daysLeft,
+    urgency,
+    renewalUrl: MOCK_RENEWAL_URL,
+  }
+}
+
+/** FNV-1a over the seed text; the usage series must not depend on Math.random. */
+function mockSeed(text: string): number {
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/** mulberry32 — a tiny deterministic PRNG for the seeded usage series. */
+function mockRandom(seed: number): () => number {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let value = state
+    value = Math.imul(value ^ (value >>> 15), value | 1)
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+const MOCK_USAGE_TARGETS = [
+  'api.example.com',
+  'cdn.example.net',
+  'auth.example.org',
+  'telemetry.example.dev',
+  'registry.example.io',
+]
+
+/** Accepts RFC 3339 or a bare UTC date, mirroring parseUsageTime. */
+function parseMockUsageTime(raw: string | undefined, field: string): number | null {
+  const value = raw?.trim()
+  if (!value) return null
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value)
+  const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  const parsed = dateOnly || timestamp ? Date.parse(value) : Number.NaN
+  if (!Number.isFinite(parsed)) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      `${field} must be an RFC 3339 timestamp or a UTC date (YYYY-MM-DD)`,
+    )
+  }
+  return parsed
+}
+
+interface MockUsageWindow {
+  from: number
+  to: number
+  days: string[]
+}
+
+/** Mirrors usage.Aggregator.window: inclusive UTC days, 30-day default, 366 cap. */
+function mockUsageWindow(query: UsageQuery): MockUsageWindow {
+  const now = Date.now()
+  let from = parseMockUsageTime(query.from, 'from')
+  let to = parseMockUsageTime(query.to, 'to')
+  if (from === null && to === null) to = now
+  if (to === null) to = now
+  if (from === null) {
+    const start = new Date(to)
+    start.setUTCDate(start.getUTCDate() - MOCK_USAGE_DEFAULT_DAYS)
+    from = start.getTime()
+  }
+  if (to < from) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      `usage: invalid window: to ${mockRFC3339(to)} is before from ${mockRFC3339(from)}`,
+    )
+  }
+  const fromDay = Math.floor(from / MOCK_DAY_MS) * MOCK_DAY_MS
+  const toDay = Math.floor(to / MOCK_DAY_MS) * MOCK_DAY_MS
+  const count = Math.round((toDay - fromDay) / MOCK_DAY_MS) + 1
+  if (count > MOCK_USAGE_MAX_DAYS) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      `usage: window exceeds the maximum span: ${count} days, maximum ${MOCK_USAGE_MAX_DAYS}`,
+    )
+  }
+  const days = Array.from({ length: count }, (_, index) =>
+    new Date(fromDay + index * MOCK_DAY_MS).toISOString().slice(0, 10),
+  )
+  return { from, to, days }
+}
+
+/**
+ * One deterministic request row per (day, account, user, slot). The seed is
+ * the day and ids, so the same window always aggregates to the same summary.
+ */
+function mockUsageRows(days: string[]): RequestLog[] {
+  const db = getDb()
+  const rows: RequestLog[] = []
+  for (const day of days) {
+    for (const account of db.accounts) {
+      for (const user of db.users) {
+        const rand = mockRandom(mockSeed(`${day}|${account.id}|${user.id}`))
+        const node = db.nodes.find((candidate) => candidate.accountId === account.id)
+        const count = 1 + Math.floor(rand() * 3)
+        for (let slot = 0; slot < count; slot += 1) {
+          const failed = rand() < 0.06
+          const throttled = !failed && rand() < 0.03
+          const status = failed ? 502 : throttled ? 407 : 200
+          const latencyMs = failed
+            ? 900 + Math.round(rand() * 1400)
+            : throttled
+              ? 9 + Math.round(rand() * 20)
+              : 38 + Math.round(rand() * 260)
+          rows.push({
+            id: `usage-${day}-${account.id}-${user.id}-${slot}`,
+            ts: `${day}T00:${String(5 + slot).padStart(2, '0')}:00Z`,
+            userId: user.id,
+            userName: user.name,
+            accountLabel: account.label,
+            nodeLabel: node?.label ?? '',
+            region: node?.region ?? '',
+            method: 'CONNECT',
+            target: MOCK_USAGE_TARGETS[Math.floor(rand() * MOCK_USAGE_TARGETS.length)] ?? 'unknown',
+            status,
+            bytes: 1_200 + Math.round(rand() * 8_500_000),
+            latencyMs,
+            source: 'proxy',
+          })
+        }
+      }
+    }
+  }
+  return rows
+}
+
+interface MockUsageTotals {
+  requests: number
+  bytes: number
+  errors: number
+  latency: number
+}
+
+function mockUsageTotals(): MockUsageTotals {
+  return { requests: 0, bytes: 0, errors: 0, latency: 0 }
+}
+
+function mockUsageAdd(total: MockUsageTotals, row: RequestLog): void {
+  total.requests += 1
+  total.bytes += row.bytes
+  if (row.status >= 400) total.errors += 1
+  total.latency += row.latencyMs
+}
+
+/** Round half up with integer arithmetic, matching usage.totals.avgLatency. */
+function mockUsageAvg(total: MockUsageTotals): number {
+  if (total.requests === 0) return 0
+  return Math.floor((total.latency + Math.floor(total.requests / 2)) / total.requests)
+}
+
+function mockUsageSummary(query: UsageQuery): UsageSummary {
+  const { from, to, days } = mockUsageWindow(query)
+  const db = getDb()
+  const accountQuery = query.account?.trim() ?? ''
+  const accountFilter =
+    db.accounts.find((account) => account.id === accountQuery)?.label ?? accountQuery
+  const userFilter = query.userId?.trim() ?? ''
+  const dayIndex = new Map(days.map((day, index) => [day, index]))
+  const quotas = new Map<string, number>()
+  for (const user of db.users) {
+    if (user.quotaBytesMonth !== null) quotas.set(user.id, user.quotaBytesMonth)
+  }
+
+  const total = mockUsageTotals()
+  const dayTotals = days.map(() => mockUsageTotals())
+  const accounts = new Map<string, { total: MockUsageTotals; days: Map<string, MockUsageTotals> }>()
+  const users = new Map<string, { name: string; total: MockUsageTotals }>()
+  const targets = new Map<string, UsageTarget>()
+
+  for (const row of mockUsageRows(days)) {
+    if (accountFilter && row.accountLabel !== accountFilter) continue
+    if (userFilter && row.userId !== userFilter) continue
+    const ts = Date.parse(row.ts)
+    if (!Number.isFinite(ts) || ts < from || ts > to) continue
+    const day = row.ts.slice(0, 10)
+    const index = dayIndex.get(day)
+    if (index === undefined) continue
+
+    mockUsageAdd(total, row)
+    mockUsageAdd(dayTotals[index], row)
+
+    let account = accounts.get(row.accountLabel)
+    if (!account) {
+      account = { total: mockUsageTotals(), days: new Map() }
+      accounts.set(row.accountLabel, account)
+    }
+    mockUsageAdd(account.total, row)
+    let accountDay = account.days.get(day)
+    if (!accountDay) {
+      accountDay = mockUsageTotals()
+      account.days.set(day, accountDay)
+    }
+    mockUsageAdd(accountDay, row)
+
+    let user = users.get(row.userId)
+    if (!user) {
+      user = { name: row.userName, total: mockUsageTotals() }
+      users.set(row.userId, user)
+    }
+    if (!user.name && row.userName) user.name = row.userName
+    mockUsageAdd(user.total, row)
+
+    const target = targets.get(row.target)
+    if (target) {
+      target.requests += 1
+      target.bytes += row.bytes
+    } else {
+      targets.set(row.target, { target: row.target, requests: 1, bytes: row.bytes })
+    }
+  }
+
+  const summary: UsageSummary = {
+    from: mockRFC3339(from),
+    to: mockRFC3339(to),
+    requests: total.requests,
+    bytes: total.bytes,
+    errors: total.errors,
+    accounts: [],
+    users: [],
+    days: days.map((day, index) => ({
+      day,
+      requests: dayTotals[index].requests,
+      bytes: dayTotals[index].bytes,
+      errors: dayTotals[index].errors,
+      avgLatencyMs: mockUsageAvg(dayTotals[index]),
+    })),
+    topTargets: [],
+    truncated: false,
+  }
+
+  for (const [label, account] of accounts) {
+    summary.accounts.push({
+      account: label,
+      requests: account.total.requests,
+      bytes: account.total.bytes,
+      errors: account.total.errors,
+      avgLatencyMs: mockUsageAvg(account.total),
+      buckets: days.map((day) => {
+        const bucket = account.days.get(day)
+        return {
+          day,
+          requests: bucket?.requests ?? 0,
+          bytes: bucket?.bytes ?? 0,
+          errors: bucket?.errors ?? 0,
+          avgLatencyMs: bucket ? mockUsageAvg(bucket) : 0,
+        }
+      }),
+    })
+  }
+  summary.accounts.sort(
+    (left, right) => right.bytes - left.bytes || left.account.localeCompare(right.account),
+  )
+
+  for (const [userId, user] of users) {
+    summary.users.push({
+      userId,
+      userName: user.name,
+      requests: user.total.requests,
+      bytes: user.total.bytes,
+      quotaBytesMonth: quotas.get(userId) ?? null,
+      usedBytes: user.total.bytes,
+    })
+  }
+  summary.users.sort(
+    (left, right) =>
+      right.bytes - left.bytes ||
+      left.userName.localeCompare(right.userName) ||
+      left.userId.localeCompare(right.userId),
+  )
+
+  summary.topTargets = [...targets.values()]
+    .sort(
+      (left, right) =>
+        right.requests - left.requests ||
+        right.bytes - left.bytes ||
+        left.target.localeCompare(right.target),
+    )
+    .slice(0, MOCK_USAGE_TOP_TARGETS)
+
+  return summary
+}
+
+/** Deterministic loopback health: one down node and a degraded every fifth. */
+function mockNodeHealth(node: ProxyNode, index: number): NodeHealth {
+  const count = 120
+  const down = node.state === 'DOWN'
+  const degraded = !down && index % 5 === 2
+  const successRate = down ? 0 : degraded ? 0.87 : Math.min(0.999, node.successRate / 100)
+  const ok = Math.round(count * successRate)
+  const p50 = down ? 0 : node.latencyMs > 0 ? node.latencyMs : 40
+  return {
+    nodeId: node.id,
+    accountId: node.accountId,
+    label: node.label,
+    state: down ? 'down' : degraded ? 'degraded' : 'ok',
+    count,
+    ok,
+    successRate,
+    p50Ms: p50,
+    p95Ms: down ? 0 : degraded ? 940 : Math.round(p50 * 1.6),
+    minMs: down ? 0 : Math.round(p50 * 0.8),
+    maxMs: down ? 0 : Math.round(p50 * 2.4),
+    consecutiveFailures: down ? 5 : 0,
+    last: {
+      at: node.lastProbeAt,
+      latencyMs: down ? 3_000 : p50,
+      ok: !down,
+      ...(down ? { errorClass: 'timeout' } : {}),
+    },
+  }
+}
+
+interface MockWebhookState {
+  endpoints: WebhookEndpoint[]
+  secrets: Map<string, string>
+  deliveries: Map<string, Delivery[]>
+  seq: number
+}
+
+let mockWebhookState: MockWebhookState | null = null
+
+/** 32 deterministic bytes as hex — the same one-time secret shape as the daemon. */
+function mockWebhookSecret(seq: number): string {
+  let secret = ''
+  for (let block = 0; block < 8; block += 1) {
+    const rand = mockRandom(mockSeed(`ajs-webhook-secret:${seq}:${block}`))
+    secret += Math.floor(rand() * 0x1_0000_0000)
+      .toString(16)
+      .padStart(8, '0')
+  }
+  return secret
+}
+
+function mockWebhookStateValue(): MockWebhookState {
+  if (mockWebhookState) return mockWebhookState
+  const now = Date.now()
+  const endpoint: WebhookEndpoint = {
+    id: 'wh-001',
+    url: 'https://hooks.example.com/ajs',
+    events: ['node.connected', 'node.disconnected'],
+    enabled: true,
+    description: 'Ops relay',
+    createdAt: new Date(now - 12 * MOCK_DAY_MS).toISOString(),
+    secretAvailable: true,
+  }
+  const deliveries: Delivery[] = [
+    {
+      id: 'dlv-001',
+      endpointId: 'wh-001',
+      event: 'node.connected',
+      attempt: 1,
+      status: 'success',
+      httpStatus: 202,
+      at: new Date(now - 3 * 3_600_000).toISOString(),
+      durationMs: 118,
+    },
+    {
+      id: 'dlv-002',
+      endpointId: 'wh-001',
+      event: 'node.disconnected',
+      attempt: 1,
+      status: 'failed',
+      httpStatus: 503,
+      error: 'HTTP 503',
+      at: new Date(now - 2 * 3_600_000).toISOString(),
+      durationMs: 240,
+    },
+    {
+      id: 'dlv-003',
+      endpointId: 'wh-001',
+      event: 'node.disconnected',
+      attempt: 2,
+      status: 'success',
+      httpStatus: 200,
+      at: new Date(now - 2 * 3_600_000 + 30_000).toISOString(),
+      durationMs: 96,
+    },
+  ]
+  mockWebhookState = {
+    endpoints: [endpoint],
+    secrets: new Map([['wh-001', mockWebhookSecret(1)]]),
+    deliveries: new Map([['wh-001', deliveries]]),
+    seq: 1,
+  }
+  return mockWebhookState
+}
+
+function mockWebhookView(endpoint: WebhookEndpoint): WebhookEndpoint {
+  return { ...clone(endpoint), secretAvailable: mockWebhookStateValue().secrets.has(endpoint.id) }
+}
+
+function mockWebhookURL(raw: string): string {
+  const value = raw.trim()
+  if (!value) throw platformError(400, 'INVALID_ARGUMENT', 'webhook url is required')
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw platformError(400, 'INVALID_ARGUMENT', 'webhook: invalid endpoint: url is not absolute')
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw platformError(400, 'INVALID_ARGUMENT', 'webhook: invalid endpoint: scheme must be https')
+  }
+  if (!parsed.hostname) {
+    throw platformError(400, 'INVALID_ARGUMENT', 'webhook: invalid endpoint: host is required')
+  }
+  if (parsed.username || parsed.password) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      'webhook: invalid endpoint: credentials must not be embedded in the URL',
+    )
+  }
+  if (parsed.protocol === 'http:' && !mockLoopbackHost(parsed.hostname)) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      'webhook: invalid endpoint: http is only allowed for loopback receivers',
+    )
+  }
+  return value
+}
+
+/** Mirrors webhook.isLoopbackHost: localhost, 127.0.0.0/8 or ::1. */
+function mockLoopbackHost(host: string): boolean {
+  const value = host.toLowerCase()
+  return (
+    value === 'localhost' ||
+    value === '::1' ||
+    value === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(value)
+  )
+}
+
+function mockWebhookEvents(raw: WebhookEvent[] | undefined): WebhookEvent[] {
+  const seen = new Set<string>()
+  const events: WebhookEvent[] = []
+  for (const candidate of raw ?? []) {
+    const value = String(candidate).trim()
+    if (!value || seen.has(value)) continue
+    if (!(WEBHOOK_EVENTS as readonly string[]).includes(value)) {
+      throw platformError(
+        400,
+        'INVALID_ARGUMENT',
+        `webhook: invalid endpoint: unknown event type "${value}"`,
+      )
+    }
+    seen.add(value)
+    events.push(value as WebhookEvent)
+  }
+  return events
+}
+
+function mockCreateWebhook(input: WebhookCreate): WebhookCreated {
+  const state = mockWebhookStateValue()
+  const url = mockWebhookURL(input.url)
+  const events = mockWebhookEvents(input.events)
+  if (state.endpoints.length >= MOCK_WEBHOOK_MAX) {
+    throw platformError(
+      400,
+      'INVALID_ARGUMENT',
+      `at most ${MOCK_WEBHOOK_MAX} webhook endpoints are allowed`,
+    )
+  }
+  state.seq += 1
+  const id = `wh-${String(state.seq).padStart(3, '0')}`
+  const description = input.description?.trim() ?? ''
+  const endpoint: WebhookEndpoint = {
+    id,
+    url,
+    enabled: input.enabled ?? true,
+    createdAt: new Date().toISOString(),
+    secretAvailable: true,
+    ...(events.length > 0 ? { events } : {}),
+    ...(description ? { description } : {}),
+  }
+  const secret = mockWebhookSecret(state.seq)
+  state.endpoints.push(endpoint)
+  state.secrets.set(id, secret)
+  state.deliveries.set(id, [])
+  return { ...clone(endpoint), secret }
+}
+
+function mockPatchWebhook(id: string, patch: WebhookPatch): WebhookEndpoint {
+  const state = mockWebhookStateValue()
+  const endpoint = state.endpoints.find((candidate) => candidate.id === id)
+  if (!endpoint) throw platformError(404, 'NOT_FOUND', `webhook "${id}" not found`)
+  if (typeof patch?.enabled !== 'boolean') {
+    throw platformError(400, 'INVALID_ARGUMENT', 'enabled is required')
+  }
+  if (patch.enabled && !state.secrets.has(id)) {
+    throw platformError(
+      409,
+      'CONFLICT',
+      'webhook signing secret is unavailable; recreate the endpoint',
+    )
+  }
+  endpoint.enabled = patch.enabled
+  return mockWebhookView(endpoint)
+}
+
+function mockDeleteWebhook(id: string): void {
+  const state = mockWebhookStateValue()
+  const index = state.endpoints.findIndex((candidate) => candidate.id === id)
+  if (index < 0) throw platformError(404, 'NOT_FOUND', `webhook "${id}" not found`)
+  state.endpoints.splice(index, 1)
+  state.secrets.delete(id)
+  state.deliveries.delete(id)
+}
+
+function mockWebhookDeliveries(id: string): Delivery[] {
+  const state = mockWebhookStateValue()
+  if (!state.endpoints.some((candidate) => candidate.id === id)) {
+    throw platformError(404, 'NOT_FOUND', `webhook "${id}" not found`)
+  }
+  return clone(state.deliveries.get(id) ?? [])
 }
 
 export const api = {
@@ -1344,11 +2579,226 @@ export const api = {
     return clone(mockReconnect(id, Date.now()))
   },
 
+  /* ------------------------------------------------------------------------
+   * Schedules — live daemon contract (daemon/internal/api/schedules.go)
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * GET /v1/schedules. The deployed daemon returns a bare array; a daemon that
+   * reports the engine off may wrap it as `{enabled:false, reason, schedules}`.
+   */
+  async listSchedules(): Promise<SchedulesPayload> {
+    if (!USE_MOCK) return http<SchedulesPayload>('/v1/schedules')
+    await wait()
+    return clone(mockSchedules().schedules)
+  },
+
+  async getSchedule(id: string): Promise<Schedule> {
+    if (!USE_MOCK) return http<Schedule>(`/v1/schedules/${encodeURIComponent(id)}`)
+    await wait()
+    const schedule = mockSchedules().schedules.find((candidate) => candidate.id === id)
+    if (!schedule) throw new ApiError(404, `schedule “${id}” not found`, 'NOT_FOUND')
+    return clone(schedule)
+  },
+
+  /** POST /v1/schedules. The daemon returns 201 + ETag. */
+  async createSchedule(input: ScheduleCreateInput): Promise<Schedule> {
+    if (!USE_MOCK) {
+      return http<Schedule>(
+        '/v1/schedules',
+        { method: 'POST', body: JSON.stringify(input) },
+        scheduleActionError,
+      )
+    }
+    await wait()
+    return mockCreateSchedule(input)
+  },
+
+  /**
+   * PATCH /v1/schedules/{id}. The daemon requires `If-Match: "id:revision"`;
+   * a mismatch is 412 PRECONDITION_FAILED / stale_revision.
+   */
+  async patchSchedule(
+    id: string,
+    revision: number,
+    input: SchedulePatchInput,
+  ): Promise<Schedule> {
+    if (!USE_MOCK) {
+      return http<Schedule>(
+        `/v1/schedules/${encodeURIComponent(id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'If-Match': `"${id}:${revision}"` },
+          body: JSON.stringify(input),
+        },
+        scheduleActionError,
+      )
+    }
+    await wait()
+    return mockPatchSchedule(id, revision, input)
+  },
+
+  async deleteSchedule(id: string): Promise<void> {
+    if (!USE_MOCK) {
+      await http<void>(
+        `/v1/schedules/${encodeURIComponent(id)}`,
+        { method: 'DELETE' },
+        scheduleActionError,
+      )
+      return
+    }
+    await wait()
+    mockDeleteSchedule(id)
+  },
+
+  /** POST /v1/schedules/{id}/actions/run — 409 in_flight / confirmation_required. */
+  async runSchedule(id: string, input: ScheduleRunInput = { confirm: 'RUN' }): Promise<ScheduleRun> {
+    if (!USE_MOCK) {
+      const response = await http<{ run: ScheduleRun }>(
+        `/v1/schedules/${encodeURIComponent(id)}/actions/run`,
+        { method: 'POST', body: JSON.stringify(input) },
+        scheduleActionError,
+      )
+      return response.run
+    }
+    await wait()
+    return mockRunSchedule(id, input)
+  },
+
+  /** GET /v1/schedules/{id}/runs — newest first, daemon caps limit at 200. */
+  async listScheduleRuns(id: string, limit = 50): Promise<ScheduleRun[]> {
+    if (!USE_MOCK) {
+      return http<ScheduleRun[]>(
+        `/v1/schedules/${encodeURIComponent(id)}/runs?limit=${limit}`,
+      )
+    }
+    await wait()
+    return mockScheduleRuns(id, limit)
+  },
+
+  /** POST /v1/schedules/preview — pure; nothing is written. */
+  async previewSchedule(input: SchedulePreviewInput, count = 5): Promise<SchedulePreview> {
+    if (!USE_MOCK) {
+      return http<SchedulePreview>(
+        `/v1/schedules/preview?count=${count}`,
+        { method: 'POST', body: JSON.stringify(input) },
+        scheduleActionError,
+      )
+    }
+    await wait()
+    return mockSchedulePreview(input, count)
+  },
+
+  /* --------------------------------------------------------------------
+   * Platform surfaces — daemon/internal/api/platform.go
+   * ------------------------------------------------------------------ */
+
+  /** GET /v1/renewal/plans — catalogue plus provenance; a failed refresh is soft. */
+  async getRenewalPlans(): Promise<RenewalPlansView> {
+    if (!USE_MOCK) return http<RenewalPlansView>('/v1/renewal/plans')
+    await wait()
+    return clone({
+      plans: [...MOCK_RENEWAL_PLANS],
+      fetchedAt: MOCK_RENEWAL_FETCHED_AT,
+      source: 'static' as const,
+      stale: true,
+    })
+  },
+
+  /** GET /v1/renewal/accounts/{id} — expiry state; the URL is the public page. */
+  async getRenewalAccount(id: string): Promise<RenewalAccountView> {
+    if (!USE_MOCK) {
+      return http<RenewalAccountView>(`/v1/renewal/accounts/${encodeURIComponent(id)}`)
+    }
+    await wait()
+    return clone(mockRenewalAccount(id))
+  },
+
+  /**
+   * GET /v1/usage — inclusive UTC window aggregated over the request log.
+   * Empty query fields are omitted; the daemon owns the window defaults.
+   */
+  async getUsage(query: UsageQuery = {}): Promise<UsageSummary> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.from) params.set('from', query.from)
+      if (query.to) params.set('to', query.to)
+      if (query.account) params.set('account', query.account)
+      if (query.userId) params.set('userId', query.userId)
+      const suffix = params.toString()
+      return http<UsageSummary>(`/v1/usage${suffix ? `?${suffix}` : ''}`)
+    }
+    await wait()
+    return mockUsageSummary(query)
+  },
+
+  /** GET /v1/health/nodes — loopback gate aggregates; `enabled:false` explains itself. */
+  async getNodeHealth(): Promise<HealthView> {
+    if (!USE_MOCK) return http<HealthView>('/v1/health/nodes')
+    await wait()
+    return clone({
+      enabled: true,
+      nodes: getDb().nodes.map((node, index) => mockNodeHealth(node, index)),
+    })
+  },
+
+  /** GET /v1/webhooks — receivers only; the signing secret is never returned. */
+  async listWebhooks(): Promise<WebhookEndpoint[]> {
+    if (!USE_MOCK) return http<WebhookEndpoint[]>('/v1/webhooks')
+    await wait()
+    return clone(mockWebhookStateValue().endpoints.map((endpoint) => mockWebhookView(endpoint)))
+  },
+
+  /** POST /v1/webhooks — returns the signing secret exactly once. */
+  async createWebhook(input: WebhookCreate): Promise<WebhookCreated> {
+    if (!USE_MOCK) {
+      return http<WebhookCreated>('/v1/webhooks', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+    }
+    await wait()
+    return clone(mockCreateWebhook(input))
+  },
+
+  /** PATCH /v1/webhooks/{id} — only `enabled` is mutable; 409 without a secret. */
+  async updateWebhook(id: string, patch: WebhookPatch): Promise<WebhookEndpoint> {
+    if (!USE_MOCK) {
+      return http<WebhookEndpoint>(`/v1/webhooks/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      })
+    }
+    await wait()
+    return clone(mockPatchWebhook(id, patch))
+  },
+
+  /** DELETE /v1/webhooks/{id} — 204, and the sealed secret goes with the row. */
+  async deleteWebhook(id: string): Promise<void> {
+    if (!USE_MOCK) {
+      await http<void>(`/v1/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      return
+    }
+    await wait()
+    mockDeleteWebhook(id)
+  },
+
+  /** GET /v1/webhooks/{id}/deliveries — bounded attempt ring, oldest first. */
+  async listWebhookDeliveries(id: string): Promise<Delivery[]> {
+    if (!USE_MOCK) {
+      return http<Delivery[]>(`/v1/webhooks/${encodeURIComponent(id)}/deliveries`)
+    }
+    await wait()
+    return clone(mockWebhookDeliveries(id))
+  },
+
   async resetMock(): Promise<void> {
     if (!USE_MOCK) return
     await wait()
     resetMockDb()
     mockSelections.clear()
+    mockScheduleState = null
+    mockWebhookState = null
     mockCatalogSeq = 0
     snapshotEpoch += 1
     snapshotCache.clear()

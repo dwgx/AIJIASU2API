@@ -10,6 +10,7 @@ import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { Button, PageHeader, SegmentedControl, Select } from '../components/primitives'
 import { CatalogTab } from '../components/nodes/CatalogTab'
 import { ConnectedTab } from '../components/nodes/ConnectedTab'
+import { HealthPanel } from '../components/nodes/HealthPanel'
 
 type NodesTab = 'catalog' | 'connected'
 
@@ -231,7 +232,10 @@ export default function Nodes() {
           onSelectedChange={setSelectedServers}
         />
       ) : (
-        <ConnectedTab nodes={nodes} query={query} onQueryChange={setQuery} />
+        <>
+          <HealthPanel />
+          <ConnectedTab nodes={nodes} query={query} onQueryChange={setQuery} />
+        </>
       )}
     </div>
   )

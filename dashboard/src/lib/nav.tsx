@@ -6,16 +6,22 @@ import {
   ApcNodesIcon,
   ApcOverviewIcon,
   ApcRequestsIcon,
+  ApcSchedulesIcon,
   ApcSettingsIcon,
+  ApcUsageIcon,
   ApcUsersIcon,
 } from '../components/icons/ApcIcons'
 import type { ApcIcon } from '../components/icons/ApcIcons'
+import { SCHEDULES_GLYPH } from '../components/icons/morphGlyphs'
+import type { MorphGlyph } from './iconMorph'
 import type { TranslationKey } from './i18n'
 
 export interface NavItem {
   to: string
   labelKey: TranslationKey
   icon: ApcIcon
+  /** Optional morph glyph; the sidebar renders it instead of the static icon. */
+  glyph?: MorphGlyph
   /** Search terms in both languages so the command palette matches either. */
   keywords: string
 }
@@ -34,6 +40,13 @@ export const NAV_SECTIONS: NavSection[] = [
         labelKey: 'nav.overview',
         icon: ApcOverviewIcon,
         keywords: 'home dashboard metrics traffic health 首页 仪表盘 指标 流量 健康',
+      },
+      {
+        to: '/usage',
+        labelKey: 'nav.usage',
+        icon: ApcUsageIcon,
+        keywords:
+          'usage requests bytes errors latency quota billing 用量 请求 流量 错误 延迟 配额 计费',
       },
       {
         to: '/accounts',
@@ -81,6 +94,14 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     labelKey: 'nav.system',
     items: [
+      {
+        to: '/schedules',
+        labelKey: 'nav.schedules',
+        icon: ApcSchedulesIcon,
+        glyph: SCHEDULES_GLYPH,
+        keywords:
+          'schedules cron interval once rotate reconnect renewal preview runs history dry run 计划 任务 定时 轮换 重连 续费 预览 运行 历史 试运行',
+      },
       {
         to: '/settings',
         labelKey: 'nav.settings',

@@ -13,7 +13,9 @@ const Logs = lazy(() => import('./pages/Logs'))
 const Nodes = lazy(() => import('./pages/Nodes'))
 const Overview = lazy(() => import('./pages/Overview'))
 const Requests = lazy(() => import('./pages/Requests'))
+const Schedules = lazy(() => import('./pages/Schedules'))
 const Settings = lazy(() => import('./pages/Settings'))
+const Usage = lazy(() => import('./pages/Usage'))
 const Users = lazy(() => import('./pages/Users'))
 
 function RouteFallback() {
@@ -36,12 +38,14 @@ export default function App() {
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
                   <Route path="/" element={<Overview />} />
+                  <Route path="/usage" element={<Usage />} />
                   <Route path="/accounts" element={<Accounts />} />
                   <Route path="/nodes" element={<Nodes />} />
                   <Route path="/leases" element={<Leases />} />
                   <Route path="/users" element={<Users />} />
                   <Route path="/requests" element={<Requests />} />
                   <Route path="/logs" element={<Logs />} />
+                  <Route path="/schedules" element={<Schedules />} />
                   <Route path="/lab" element={<Lab />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="*" element={<Navigate to="/" replace />} />

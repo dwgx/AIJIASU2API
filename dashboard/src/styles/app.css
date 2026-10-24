@@ -4130,6 +4130,58 @@ svg {
   gap: 8px;
 }
 
+/* Live-data chrome: provenance badge, freshness and the soft-refresh retry.
+   Additive to the static-snapshot layout above. */
+.renewal-card__meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.renewal-card__freshness {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.renewal-card__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.renewal-card__stale {
+  margin: 0;
+  color: var(--warning);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.renewal-card__empty {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.renewal-plans__auto {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    Responsive
    ========================================================================== */
@@ -4701,4 +4753,240 @@ svg {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* ==========================================================================
+   Usage page
+   ========================================================================== */
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.sort-btn:hover,
+.sort-btn.is-active {
+  color: var(--text);
+}
+
+.sort-btn:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--mint);
+  outline-offset: 2px;
+}
+
+.sort-btn__mark {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.usage-error-count {
+  color: var(--danger);
+}
+
+.usage-target {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.usage-target:last-child {
+  border-bottom: 0;
+}
+
+.usage-tip {
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--elevated);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.usage-tip__day {
+  margin-bottom: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.usage-tip__rows {
+  display: grid;
+  gap: 2px;
+}
+
+.usage-tip__rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.usage-tip__rows dt {
+  color: var(--muted);
+}
+
+.usage-tip__rows dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Node health panel (AJS-209)
+   ========================================================================== */
+.health-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.health-table-wrap {
+  overflow-x: auto;
+}
+
+.health-table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.health-table th,
+.health-table td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-faint);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.health-table thead th {
+  border-top: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.health-table tbody th {
+  font-weight: 500;
+}
+
+.health-table tbody tr:hover {
+  background: var(--wash);
+}
+
+.health-table .is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-last {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.health-spark {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--mint);
+}
+
+.health-spark--degraded {
+  color: var(--warning);
+}
+
+.health-spark--down {
+  color: var(--danger);
+}
+
+.health-spark .sparkline {
+  max-width: none;
+}
+
+.health-spark__pending {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.health-disabled {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+}
+
+.health-disabled__title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.health-disabled__desc {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.health-disabled__reason {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.health-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.health-compact__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.health-compact__worst {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.health-compact__worst .label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.health-compact__ok {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .health-table th,
+  .health-table td {
+    padding: 8px;
+  }
+
+  .health-compact {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
