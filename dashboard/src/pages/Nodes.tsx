@@ -112,6 +112,8 @@ export default function Nodes() {
             q: catalogQuery.trim() || undefined,
             region: catalogFilters.region === 'all' ? undefined : catalogFilters.region,
             status: catalogFilters.status === 'all' ? undefined : catalogFilters.status,
+            province: catalogFilters.province || undefined,
+            city: catalogFilters.city || undefined,
             sort: catalogFilters.sort,
             offset: catalogFilters.offset,
             limit: catalogFilters.limit,
@@ -122,6 +124,8 @@ export default function Nodes() {
       catalogQuery,
       catalogFilters.region,
       catalogFilters.status,
+      catalogFilters.province,
+      catalogFilters.city,
       catalogFilters.sort,
       catalogFilters.offset,
       catalogFilters.limit,
@@ -129,21 +133,24 @@ export default function Nodes() {
     { intervalMs: 30_000 },
   )
 
-  // The whole retained catalog for the map and the province filter. Wait for
-  // this account's catalog response before reading it: the first pass then
-  // carries the daemon's real snapshot timestamp, so the follow-up effect
-  // cannot start a second six-page pass. A failed catalog still gets one
-  // attempt so the map can show its own error.
+  // The whole retained catalog is the P0 fallback for the map and the
+  // province filter. A daemon that returns the `geo` aggregate needs no
+  // snapshot: the map, city counts and geo table filters all come from the
+  // same catalog page. Wait for this account's catalog response before
+  // reading the fallback so the first pass carries the real timestamp.
+  const serverGeo =
+    catalog.data?.accountId === catalogAccount ? (catalog.data.geo ?? undefined) : undefined
+  const hasServerGeo = serverGeo !== undefined
   const catalogSettled =
     catalog.data?.accountId === catalogAccount ||
     catalog.status === 'error' ||
     (catalog.error !== undefined && catalog.data?.accountId !== catalogAccount)
   const snapshot = useAsync(
     () =>
-      catalogAccount && catalogSettled
+      catalogAccount && catalogSettled && !hasServerGeo
         ? api.getCatalogSnapshot(catalogAccount, catalog.data?.fetchedAt)
         : Promise.resolve(EMPTY_SNAPSHOT),
-    [catalogAccount, catalogSettled, catalog.data?.fetchedAt],
+    [catalogAccount, catalogSettled, catalog.data?.fetchedAt, hasServerGeo],
   )
 
   const changeQuery = (value: string) => {

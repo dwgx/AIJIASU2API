@@ -29,6 +29,21 @@ export interface Account {
   createdAt: string
 }
 
+/**
+ * One row of the vendor's public plan catalogue, captured from
+ * `https://www.91ajs.com/purchase`. Prices are CNY list prices, not quotes.
+ */
+export interface RenewalPlan {
+  /** Vendor period code: M1/M3/M12 months, H6 trial. */
+  id: string
+  /** Public list price in CNY. */
+  priceCny: number
+  /** CNY saved against paying month by month. */
+  saveCny?: number
+  /** A trial window rather than a renewable term. */
+  trial?: boolean
+}
+
 export interface ProxyNode {
   id: string
   accountId: string
@@ -160,6 +175,194 @@ export interface CreateAccountInput {
   platform: Platform
   concurrency: number
   regions: string[]
+}
+
+/* --------------------------------------------------------------------------
+ * Account import / export / bulk delete — DESIGN-ACCOUNT-IO v1
+ * ------------------------------------------------------------------------ */
+
+export type ExportFormat = 'encrypted' | 'json' | 'csv'
+export type ImportSourceKind = 'json' | 'csv' | 'encrypted'
+export type ImportMode = 'atomic' | 'partial'
+export type ImportMatchBy = 'label' | 'username_platform' | 'id'
+export type ImportConflict = 'skip' | 'update' | 'rename' | 'fail'
+export type ImportInitialState = 'paused' | 'active' | 'from_file'
+export type ImportIdPolicy = 'new' | 'preserve'
+export type ImportDevicePolicy = 'keep' | 'restore_if_missing' | 'replace'
+export type AccountImportAction = 'create' | 'update' | 'skip' | 'rename' | 'fail'
+export type BulkDeleteStatus = 'deleted' | 'would_delete' | 'not_found' | 'failed' | 'skipped'
+
+/** Structured, non-secret notes attached to export rows and import results. */
+export type AccountIOWarning =
+  | 'password_kept'
+  | 'password_unavailable'
+  | 'device_kept'
+  | 'device_restored'
+  | 'device_generated_on_login'
+  | 'device_replaced'
+  | 'id_ignored'
+  | 'platform_device_mismatch'
+  | 'counts_mismatch'
+  | 'unknown_column'
+  | 'secret_orphaned'
+
+/** Device identity as stored by the daemon; non-secret but vendor-visible. */
+export interface AccountDevice {
+  uid: string
+  osdid: string
+  cuid: string
+  cseid: string
+  osp: string
+  osd: string
+  osv: string
+  dim: string
+  version: string
+  site: string
+  hw?: string
+  osLang?: string
+  tzMin?: number
+  lang?: string
+  instMkt?: string
+  vrf?: string
+}
+
+export interface AccountExportRow {
+  id?: string
+  label: string
+  username: string
+  password: string | null
+  platform: Platform
+  concurrency?: number
+  regions?: string[]
+  state?: AccountState
+  expiresAt?: string
+  lastLoginAt?: string
+  createdAt?: string
+  device?: AccountDevice | null
+  warnings?: AccountIOWarning[]
+}
+
+export interface AccountExportDocument {
+  format: 'ajs-accounts'
+  version: 1
+  exportedAt: string
+  source?: { daemonVersion?: string; secretsSealed?: boolean }
+  counts?: { accounts: number; passwords: number; devices: number }
+  accounts: AccountExportRow[]
+}
+
+export interface AccountIOCapabilities {
+  encryptedExport: boolean
+  plaintextExport: boolean
+  maxImportRows: number
+  maxExportAccounts: number
+  maxDeleteIDs: number
+  maxBodyBytes: number
+  maxImportBodyBytes: number
+}
+
+export interface AccountExportRequest {
+  ids?: string[]
+  filter?: { state?: AccountState; platform?: Platform; q?: string }
+  format: ExportFormat
+  passphrase?: string
+  includeDevice?: boolean
+  confirmPlaintext?: 'EXPORT'
+}
+
+export interface AccountExportDownload {
+  blob: Blob
+  filename: string
+  counts: { accounts: number; missingSecrets: number; devices: number }
+}
+
+export interface AccountImportOptions {
+  mode?: ImportMode
+  matchBy?: ImportMatchBy
+  onConflict?: ImportConflict
+  initialState?: ImportInitialState
+  idPolicy?: ImportIdPolicy
+  devicePolicy?: ImportDevicePolicy
+  preserveTimestamps?: boolean
+  dryRun?: boolean
+}
+
+export interface AccountImportSource {
+  kind: ImportSourceKind
+  content: unknown
+  passphrase?: string
+}
+
+export interface AccountImportRequest {
+  source: AccountImportSource
+  options: AccountImportOptions
+}
+
+export interface AccountImportCounts {
+  total: number
+  created: number
+  updated: number
+  skipped: number
+  renamed: number
+  failed: number
+}
+
+export interface AccountImportRowResult {
+  row: number
+  action: AccountImportAction
+  id: string | null
+  label: string
+  existingId: string | null
+  renamedTo: string | null
+  warnings?: AccountIOWarning[]
+  code: string | null
+  message: string | null
+}
+
+export interface AccountImportResult {
+  format: string
+  version: number
+  dryRun: boolean
+  applied: boolean
+  mode: ImportMode
+  counts: AccountImportCounts
+  results: AccountImportRowResult[]
+  warnings?: AccountIOWarning[]
+}
+
+export interface BulkDeleteRequest {
+  ids: string[]
+  mode?: 'continue' | 'stop'
+  dryRun?: boolean
+}
+
+export interface BulkDeleteCounts {
+  total: number
+  deleted: number
+  wouldDelete: number
+  notFound: number
+  failed: number
+  skipped: number
+}
+
+export interface BulkDeleteItem {
+  id: string
+  label: string | null
+  status: BulkDeleteStatus
+  nodes: number
+  leases: number
+  code: string | null
+  message: string | null
+  warnings?: AccountIOWarning[]
+}
+
+export interface BulkDeleteResult {
+  format: string
+  version: number
+  dryRun: boolean
+  mode: string
+  counts: BulkDeleteCounts
+  results: BulkDeleteItem[]
 }
 
 export interface CreateKeyInput {
@@ -436,13 +639,66 @@ export interface ServerView {
   status: string
   nodeId: string | null
   nodeState: NodeState | string | null
+  /**
+   * P0 field: "a node exists for this server", not the operator's target.
+   * P1 reads {@link desired} for the persisted target.
+   */
   selected: boolean
   skippedByLimit: boolean
   memberOnly: boolean | null
-  fullLoad: boolean
+  /** `null` when the vendor payload carries no marks/load (P1 backend). */
+  fullLoad: boolean | null
   blockingMarks: string[]
   hasPingSecret: boolean
   latencyMs: number | null
+  /** P1 overlay: the runtime has a gate for this server (LIVE or DRAINING). */
+  connected?: boolean
+  /** P1 overlay: the gate is LIVE and not draining. */
+  serving?: boolean
+  /** P1 overlay: this server is the persisted operator target. */
+  desired?: boolean
+  /** P1 overlay: derived by the daemon from the fields above. */
+  eligible?: boolean
+  ineligibleReason?: string
+  /** In the effective `AJS_NODE_LIMIT` set; not the same as eligible. */
+  autoStarted?: boolean
+  runtimeWarning?: 'gate_missing' | 'orphan_gate' | 'runtime_unavailable' | string
+}
+
+/**
+ * One persisted target per account: the server the operator wants the next
+ * login sync to use. A target is not a session; it never starts a connect.
+ */
+export interface CatalogSelection {
+  accountId: string
+  serverId: string
+  title: string
+  updatedAt: string
+  updatedBy: string
+}
+
+/** 200 response for POST /v1/accounts/{id}/actions/connect and /reconnect. */
+export interface ConnectResult {
+  accountId: string
+  serverId: string
+  nodeId: string
+  nodeState: NodeState | string
+  gatePort: number
+  egressIp: string
+  switchedFrom?: string
+  durationMs: number
+  warnings: string[]
+  auditId?: string
+  alreadyConnected?: boolean
+}
+
+/** 200 response for POST /v1/accounts/{id}/actions/disconnect. */
+export interface DisconnectResult {
+  accountId: string
+  disconnected: boolean
+  alreadyDisconnected?: boolean
+  warnings?: string[]
+  auditId?: string
 }
 
 /** One entry of the catalog's per-region summary (all filtered rows). */
@@ -462,15 +718,59 @@ export interface ServerCatalogQuery {
   region?: string
   status?: string
   selected?: boolean
+  /** GB/T 2260 two-digit province code, `00` for the unresolved bucket. */
+  province?: string
+  /** GB/T 2260 city code from the bundled geo asset. */
+  city?: string
   offset?: number
   limit?: number
   sort?: ServerCatalogSort
+}
+
+/** One resolved city inside a server-side province bucket. */
+export interface CatalogGeoCity {
+  code: string
+  /** The vendor title prefix, e.g. `济南 - 莱芜`. */
+  label: string
+  count: number
+}
+
+/** Per-province aggregate over the rows matching the search/region/status. */
+export interface CatalogGeoProvince {
+  code: string
+  count: number
+  connected: number
+  cities: CatalogGeoCity[]
+}
+
+/** A running catalog row named by the geo summary. */
+export interface CatalogGeoRow {
+  id: string
+  title: string
+  nodeState: ServerView['nodeState']
+  cityCode?: string
+  provinceCode?: string
+}
+
+/**
+ * Server-side geography summary carried by every catalog page. The dashboard
+ * draws the map from this instead of downloading the retained catalog; the
+ * `snapshot` path stays as the P0 fallback for daemons without it.
+ */
+export interface CatalogGeo {
+  total: number
+  unknown: number
+  provinces: CatalogGeoProvince[]
+  current: CatalogGeoRow | null
+  live: CatalogGeoRow[]
 }
 
 export interface AccountServers {
   enabled?: boolean
   reason?: string
   accountId: string
+  /** Changes only on login/forget; sent back with target/connect writes. */
+  snapshotId?: string
   fetchedAt: string | null
   stale: boolean
   /** Every row matching the filters, not just this page. */
@@ -481,6 +781,8 @@ export interface AccountServers {
   hasMore: boolean
   /** Counts over all filtered rows, sorted by region code. */
   regions: RegionCount[]
+  /** Map aggregate; absent on a P0 daemon, which falls back to the snapshot. */
+  geo?: CatalogGeo
   /** One page of the filtered catalog. */
   servers: ServerView[]
 }
@@ -494,6 +796,7 @@ export interface CatalogSnapshot {
   enabled: boolean
   reason?: string
   accountId: string
+  snapshotId?: string
   fetchedAt: string | null
   stale: boolean
   total: number

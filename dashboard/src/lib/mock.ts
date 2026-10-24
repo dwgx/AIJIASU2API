@@ -1,8 +1,19 @@
 import type {
   Account,
+  AccountExportDocument,
+  AccountExportRow,
+  AccountIOCapabilities,
+  AccountIOWarning,
+  AccountImportOptions,
+  AccountImportRequest,
+  AccountImportResult,
+  AccountImportRowResult,
   AccountServers,
+  AccountState,
   ApiKey,
   AuditEvent,
+  BulkDeleteItem,
+  BulkDeleteResult,
   DeviceView,
   DiagnosticsView,
   EgressCheckResult,
@@ -20,6 +31,7 @@ import type {
   Metrics,
   PanelSettings,
   PanelUser,
+  Platform,
   ProfileView,
   ProxyNode,
   RequestLog,
@@ -368,6 +380,825 @@ export function syncAccountCounts(): void {
     const nodes = db.nodes.filter((node) => node.accountId === account.id)
     account.nodeCount = nodes.length
     account.liveNodeCount = nodes.filter((node) => node.state === 'LIVE').length
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Account import / export / bulk delete — mock parity
+ *
+ * The mock has no sealed-secret store and no crypto path, so JSON/CSV export
+ * emits `password: null` with a warning and import discards any password it
+ * reads. Encrypted files are a live-daemon-only feature; capabilities reports
+ * `encryptedExport: false` and the dialogs disable that format.
+ * ------------------------------------------------------------------------ */
+
+export const MOCK_IO_CAPABILITIES: AccountIOCapabilities = {
+  encryptedExport: false,
+  plaintextExport: true,
+  maxImportRows: 1000,
+  maxExportAccounts: 1000,
+  maxDeleteIDs: 100,
+  maxBodyBytes: 1_048_576,
+  maxImportBodyBytes: 4_194_304,
+}
+
+const MOCK_PLATFORMS: Platform[] = ['android', 'ios', 'windows', 'linux']
+const MOCK_STATES: AccountState[] = ['active', 'paused', 'auth_failed', 'expired']
+const IMPORT_LABEL_SUFFIX = ' (imported)'
+
+export interface MockExportFile {
+  content: string
+  mime: string
+  extension: 'json' | 'csv'
+  counts: { accounts: number; passwords: number; devices: number }
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let out = ''
+  let bytes = 0
+  for (const char of value) {
+    const size = utf8Length(char)
+    if (bytes + size > maxBytes) break
+    out += char
+    bytes += size
+  }
+  return out
+}
+
+function hasControlChars(value: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(value)
+}
+
+function csvCell(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+
+function toExportRow(account: Account): AccountExportRow {
+  return {
+    id: account.id,
+    label: account.label,
+    username: account.username,
+    // The mock never holds a vendor password; say so instead of inventing one.
+    password: null,
+    platform: account.platform,
+    concurrency: account.concurrency,
+    regions: [...account.regions],
+    state: account.state,
+    expiresAt: account.expiresAt,
+    lastLoginAt: account.lastLoginAt,
+    createdAt: account.createdAt,
+    warnings: ['password_unavailable'],
+  }
+}
+
+/** Builds a plaintext export exactly as the live daemon would for a mock DB. */
+export function buildMockExport(ids: string[], format: 'json' | 'csv'): MockExportFile {
+  const db = getDb()
+  const rows = ids.map((id) => {
+    const account = db.accounts.find((item) => item.id === id)
+    if (!account) throw new ApiError(404, `account ${id} not found`, 'NOT_FOUND')
+    return toExportRow(account)
+  })
+  const counts = { accounts: rows.length, passwords: 0, devices: 0 }
+  if (format === 'csv') {
+    const header = 'label,username,password,platform,concurrency,regions,state,expiresAt'
+    const lines = rows.map((row) => {
+      const regions = row.regions ?? []
+      if (regions.some((region) => /[|\r\n]/.test(region))) {
+        throw new ApiError(
+          409,
+          'CSV cannot represent a region containing "|", CR or LF; use JSON instead',
+          'CONFLICT',
+        )
+      }
+      return [
+        row.label,
+        row.username,
+        '',
+        row.platform,
+        String(row.concurrency ?? 1),
+        regions.join('|'),
+        row.state ?? 'paused',
+        row.expiresAt ?? '',
+      ]
+        .map(csvCell)
+        .join(',')
+    })
+    return {
+      content: `${header}\n${lines.join('\n')}\n`,
+      mime: 'text/csv; charset=utf-8',
+      extension: 'csv',
+      counts,
+    }
+  }
+  const doc: AccountExportDocument = {
+    format: 'ajs-accounts',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    source: { daemonVersion: '0.1.0-mock', secretsSealed: false },
+    counts,
+    accounts: rows,
+  }
+  return {
+    content: JSON.stringify(doc, null, 2),
+    mime: 'application/json; charset=utf-8',
+    extension: 'json',
+    counts,
+  }
+}
+
+interface ParsedImport {
+  rows: Array<AccountExportRow | null>
+  /** 1-based data-row structural failures (CSV field count). */
+  rowIssues: Map<number, { code: string; message: string }>
+  warnings: AccountIOWarning[]
+}
+
+function splitCsvRows(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let quoted = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          field += '"'
+          index += 1
+        } else {
+          quoted = false
+        }
+      } else {
+        field += char
+      }
+      continue
+    }
+    if (char === '"') {
+      quoted = true
+    } else if (char === ',') {
+      row.push(field)
+      field = ''
+    } else if (char === '\n' || char === '\r') {
+      if (char === '\r' && text[index + 1] === '\n') index += 1
+      row.push(field)
+      field = ''
+      if (row.length > 1 || row[0] !== '') rows.push(row)
+      row = []
+    } else {
+      field += char
+    }
+  }
+  row.push(field)
+  if (row.length > 1 || row[0] !== '') rows.push(row)
+  return rows
+}
+
+function parseMockCsv(text: string): ParsedImport {
+  const table = splitCsvRows(text.replace(/^\uFEFF/, ''))
+  if (table.length === 0) throw new ApiError(400, 'file has no accounts', 'INVALID_ARGUMENT')
+  const headers = table[0].map((header) => header.trim().toLowerCase())
+  if (new Set(headers).size !== headers.length) {
+    throw new ApiError(400, 'CSV header has duplicate columns', 'INVALID_ARGUMENT')
+  }
+  for (const required of ['label', 'username', 'password', 'platform']) {
+    if (!headers.includes(required)) {
+      throw new ApiError(400, `CSV header is missing "${required}"`, 'INVALID_ARGUMENT')
+    }
+  }
+  const warnings: AccountIOWarning[] = []
+  const known = new Set(['label', 'username', 'password', 'platform', 'concurrency', 'regions', 'state', 'expiresAt'])
+  if (headers.some((header) => !known.has(header))) warnings.push('unknown_column')
+  const data = table.slice(1)
+  if (data.length > MOCK_IO_CAPABILITIES.maxImportRows) {
+    throw new ApiError(400, 'at most 1000 account rows can be imported', 'INVALID_ARGUMENT')
+  }
+  const rows: Array<AccountExportRow | null> = []
+  const rowIssues = new Map<number, { code: string; message: string }>()
+  data.forEach((cells, index) => {
+    const rowNumber = index + 1
+    if (cells.length !== headers.length) {
+      rows.push(null)
+      rowIssues.set(rowNumber, {
+        code: 'INVALID_ARGUMENT',
+        message: `row ${rowNumber}: field count does not match the header`,
+      })
+      return
+    }
+    const value = (key: string) => {
+      const column = headers.indexOf(key)
+      return column >= 0 ? cells[column] : ''
+    }
+    const password = value('password')
+    const concurrency = value('concurrency').trim()
+    rows.push({
+      label: value('label'),
+      username: value('username'),
+      password: password === '' ? null : password,
+      platform: value('platform').trim() as Platform,
+      concurrency: concurrency === '' ? 1 : Number(concurrency),
+      regions: value('regions')
+        .split('|')
+        .map((region) => region.trim())
+        .filter(Boolean),
+      state: (value('state').trim() || undefined) as AccountState | undefined,
+      expiresAt: value('expiresAt').trim() || undefined,
+    })
+  })
+  return { rows, rowIssues, warnings }
+}
+
+function parseMockJson(content: unknown): ParsedImport {
+  if (typeof content !== 'object' || content === null || Array.isArray(content)) {
+    throw new ApiError(400, 'JSON export must be an object', 'INVALID_ARGUMENT')
+  }
+  const doc = content as { format?: unknown; version?: unknown; accounts?: unknown }
+  if (doc.format !== 'ajs-accounts' || doc.version !== 1) {
+    throw new ApiError(400, 'unsupported account export format or version', 'INVALID_ARGUMENT')
+  }
+  if (!Array.isArray(doc.accounts) || doc.accounts.length === 0) {
+    throw new ApiError(400, 'file has no accounts', 'INVALID_ARGUMENT')
+  }
+  if (doc.accounts.length > MOCK_IO_CAPABILITIES.maxImportRows) {
+    throw new ApiError(400, 'at most 1000 account rows can be imported', 'INVALID_ARGUMENT')
+  }
+  const rows: Array<AccountExportRow | null> = []
+  const rowIssues = new Map<number, { code: string; message: string }>()
+  doc.accounts.forEach((entry, index) => {
+    const rowNumber = index + 1
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      rows.push(null)
+      rowIssues.set(rowNumber, {
+        code: 'INVALID_ARGUMENT',
+        message: `row ${rowNumber}: account must be an object`,
+      })
+      return
+    }
+    rows.push(entry as AccountExportRow)
+  })
+  return { rows, rowIssues, warnings: [] }
+}
+
+function parseMockImport(req: AccountImportRequest): ParsedImport {
+  switch (req.source.kind) {
+    case 'json':
+      return parseMockJson(req.source.content)
+    case 'csv':
+      if (typeof req.source.content !== 'string') {
+        throw new ApiError(400, 'CSV content must be a string', 'INVALID_ARGUMENT')
+      }
+      return parseMockCsv(req.source.content)
+    case 'encrypted':
+      throw new ApiError(
+        409,
+        'Encrypted files require the live daemon',
+        'CONFLICT',
+      )
+    default:
+      throw new ApiError(400, 'unsupported import source kind', 'INVALID_ARGUMENT')
+  }
+}
+
+interface MockImportOptions {
+  mode: 'atomic' | 'partial'
+  matchBy: 'label' | 'username_platform' | 'id'
+  onConflict: 'skip' | 'update' | 'rename' | 'fail'
+  initialState: 'paused' | 'active' | 'from_file'
+  idPolicy: 'new' | 'preserve'
+  devicePolicy: 'keep' | 'restore_if_missing' | 'replace'
+  preserveTimestamps: boolean
+  dryRun: boolean
+}
+
+function normalizeMockOptions(options: AccountImportOptions): MockImportOptions {
+  const result: MockImportOptions = {
+    mode: options.mode ?? 'atomic',
+    matchBy: options.matchBy ?? 'label',
+    onConflict: options.onConflict ?? 'skip',
+    initialState: options.initialState ?? 'paused',
+    idPolicy: options.idPolicy ?? 'new',
+    devicePolicy: options.devicePolicy ?? 'restore_if_missing',
+    preserveTimestamps: options.preserveTimestamps ?? true,
+    dryRun: options.dryRun ?? false,
+  }
+  if (result.mode !== 'atomic' && result.mode !== 'partial') {
+    throw new ApiError(400, 'mode must be atomic or partial', 'INVALID_ARGUMENT')
+  }
+  if (!['label', 'username_platform', 'id'].includes(result.matchBy)) {
+    throw new ApiError(400, 'unsupported matchBy value', 'INVALID_ARGUMENT')
+  }
+  if (!['skip', 'update', 'rename', 'fail'].includes(result.onConflict)) {
+    throw new ApiError(400, 'unsupported onConflict value', 'INVALID_ARGUMENT')
+  }
+  if (!['paused', 'active', 'from_file'].includes(result.initialState)) {
+    throw new ApiError(400, 'unsupported initialState value', 'INVALID_ARGUMENT')
+  }
+  if (result.idPolicy !== 'new' && result.idPolicy !== 'preserve') {
+    throw new ApiError(400, 'idPolicy must be new or preserve', 'INVALID_ARGUMENT')
+  }
+  if (!['keep', 'restore_if_missing', 'replace'].includes(result.devicePolicy)) {
+    throw new ApiError(400, 'unsupported devicePolicy value', 'INVALID_ARGUMENT')
+  }
+  if (result.onConflict === 'rename' && result.idPolicy === 'preserve') {
+    throw new ApiError(400, 'rename requires idPolicy "new"', 'INVALID_ARGUMENT')
+  }
+  return result
+}
+
+interface ValidatedRow {
+  id?: string
+  label: string
+  username: string
+  password: string | null
+  platform: Platform
+  concurrency: number
+  regions: string[]
+  state?: AccountState
+  expiresAt?: string
+  createdAt?: string
+  lastLoginAt?: string
+  hasDevice: boolean
+}
+
+function validateMockRow(row: AccountExportRow): { row?: ValidatedRow; code?: string; message?: string } {
+  const label = typeof row.label === 'string' ? row.label.trim() : ''
+  if (!label || utf8Length(label) > 80 || hasControlChars(label)) {
+    return { code: 'INVALID_ARGUMENT', message: 'label must be 1–80 bytes without control characters' }
+  }
+  const username = typeof row.username === 'string' ? row.username.trim() : ''
+  if (!username || utf8Length(username) > 80 || hasControlChars(username)) {
+    return {
+      code: 'INVALID_ARGUMENT',
+      message: 'username must be 1–80 bytes without control characters',
+    }
+  }
+  const password = row.password == null ? null : row.password
+  if (password !== null) {
+    if (typeof password !== 'string') {
+      return { code: 'INVALID_ARGUMENT', message: 'password must be a string or null' }
+    }
+    if (utf8Length(password) > 512 || password.includes('\u0000')) {
+      return { code: 'INVALID_ARGUMENT', message: 'password must be 1–512 bytes' }
+    }
+    if (password !== '' && password.trim() === '') {
+      return { code: 'INVALID_ARGUMENT', message: 'password must contain a non-whitespace character' }
+    }
+  }
+  const platform = row.platform
+  if (!MOCK_PLATFORMS.includes(platform)) {
+    return { code: 'INVALID_ARGUMENT', message: 'platform must be android, ios, windows or linux' }
+  }
+  const rawConcurrency = row.concurrency ?? 0
+  if (
+    typeof rawConcurrency !== 'number' ||
+    !Number.isInteger(rawConcurrency) ||
+    rawConcurrency < 0 ||
+    rawConcurrency > 2000
+  ) {
+    return { code: 'INVALID_ARGUMENT', message: 'concurrency must be an integer from 1 to 2000' }
+  }
+  const regions = Array.isArray(row.regions) ? row.regions : []
+  if (regions.length > 64) {
+    return { code: 'INVALID_ARGUMENT', message: 'at most 64 regions are allowed' }
+  }
+  const cleanRegions: string[] = []
+  for (const region of regions) {
+    if (typeof region !== 'string') {
+      return { code: 'INVALID_ARGUMENT', message: 'region tags must be strings' }
+    }
+    const tag = region.trim()
+    if (!tag || utf8Length(tag) > 64 || hasControlChars(tag)) {
+      return { code: 'INVALID_ARGUMENT', message: 'region tags must be 1–64 bytes' }
+    }
+    if (!cleanRegions.includes(tag)) cleanRegions.push(tag)
+  }
+  if (row.state !== undefined && !MOCK_STATES.includes(row.state)) {
+    return { code: 'INVALID_ARGUMENT', message: 'state is not a known account state' }
+  }
+  for (const field of ['expiresAt', 'createdAt', 'lastLoginAt'] as const) {
+    const value = row[field]
+    if (value !== undefined && value !== '' && Number.isNaN(Date.parse(value))) {
+      return { code: 'INVALID_ARGUMENT', message: `${field} must be an RFC 3339 timestamp` }
+    }
+  }
+  return {
+    row: {
+      id: typeof row.id === 'string' ? row.id.trim() : undefined,
+      label,
+      username,
+      password: password === '' ? null : password,
+      platform,
+      concurrency: rawConcurrency === 0 ? 1 : rawConcurrency,
+      regions: cleanRegions,
+      state: row.state,
+      expiresAt: row.expiresAt || undefined,
+      createdAt: row.createdAt || undefined,
+      lastLoginAt: row.lastLoginAt || undefined,
+      hasDevice: typeof row.device === 'object' && row.device !== null,
+    },
+  }
+}
+
+function mockAccountKey(row: ValidatedRow, matchBy: MockImportOptions['matchBy']): string | null {
+  if (matchBy === 'label') return row.label.toLowerCase()
+  if (matchBy === 'username_platform') return `${row.username}\u0000${row.platform}`
+  return row.id ?? null
+}
+
+function findMockMatches(
+  db: MockDb,
+  row: ValidatedRow,
+  matchBy: MockImportOptions['matchBy'],
+): Account[] {
+  if (matchBy === 'label') {
+    return db.accounts.filter((account) => account.label.toLowerCase() === row.label.toLowerCase())
+  }
+  if (matchBy === 'username_platform') {
+    return db.accounts.filter(
+      (account) => account.username === row.username && account.platform === row.platform,
+    )
+  }
+  return row.id ? db.accounts.filter((account) => account.id === row.id) : []
+}
+
+function renameMockLabel(base: string, taken: Set<string>): string {
+  let suffix = IMPORT_LABEL_SUFFIX
+  let candidate = truncateUtf8(base, 80 - utf8Length(suffix)) + suffix
+  let attempt = 2
+  while (taken.has(candidate.toLowerCase())) {
+    suffix = ` (imported ${attempt})`
+    candidate = truncateUtf8(base, 80 - utf8Length(suffix)) + suffix
+    attempt += 1
+    if (attempt > 1000) throw new ApiError(409, 'could not find a free label', 'CONFLICT')
+  }
+  return candidate
+}
+
+function nextMockAccountId(db: MockDb, reserved: Set<string>): string {
+  let highest = 0
+  for (const account of db.accounts) {
+    const match = /^acc-(\d+)$/.exec(account.id)
+    if (match) highest = Math.max(highest, Number(match[1]))
+  }
+  for (const id of reserved) {
+    const match = /^acc-(\d+)$/.exec(id)
+    if (match) highest = Math.max(highest, Number(match[1]))
+  }
+  let next = highest + 1
+  while (reserved.has(`acc-${String(next).padStart(2, '0')}`)) next += 1
+  return `acc-${String(next).padStart(2, '0')}`
+}
+
+interface MockCreatePlan {
+  kind: 'create'
+  row: ValidatedRow
+  label: string
+  id: string | null
+  warnings: AccountIOWarning[]
+}
+interface MockUpdatePlan {
+  kind: 'update'
+  row: ValidatedRow
+  accountId: string
+  warnings: AccountIOWarning[]
+}
+type MockPlan = MockCreatePlan | MockUpdatePlan
+
+/** Dry-run or apply a JSON/CSV import against the in-memory mock database. */
+export function mockImportAccounts(req: AccountImportRequest): AccountImportResult {
+  const options = normalizeMockOptions(req.options)
+  const parsed = parseMockImport(req)
+  const db = getDb()
+  const results: AccountImportRowResult[] = []
+  const plan: MockPlan[] = []
+  const plannedKeys = new Set<string>()
+  const plannedLabels = new Set(db.accounts.map((account) => account.label.toLowerCase()))
+  const usedIds = new Set(db.accounts.map((account) => account.id))
+  const reservedIds = new Set<string>()
+  let nextId = nextMockAccountId(db, reservedIds)
+
+  const fail = (
+    row: number,
+    label: string,
+    code: string,
+    message: string,
+    existingId: string | null = null,
+  ) => {
+    results.push({
+      row,
+      action: 'fail',
+      id: null,
+      label,
+      existingId,
+      renamedTo: null,
+      code,
+      message,
+    })
+  }
+
+  parsed.rows.forEach((input, index) => {
+    const rowNumber = index + 1
+    const structural = parsed.rowIssues.get(rowNumber)
+    if (structural || !input) {
+      fail(rowNumber, '', structural?.code ?? 'INVALID_ARGUMENT', structural?.message ?? 'invalid row')
+      return
+    }
+    const validated = validateMockRow(input)
+    if (!validated.row) {
+      fail(rowNumber, typeof input.label === 'string' ? input.label.trim() : '', validated.code ?? 'INVALID_ARGUMENT', validated.message ?? 'invalid row')
+      return
+    }
+    const row = validated.row
+    const key = mockAccountKey(row, options.matchBy)
+    if (options.matchBy === 'id' && !key) {
+      fail(rowNumber, row.label, 'INVALID_ARGUMENT', 'id is required when matching by id')
+      return
+    }
+    if (key !== null && plannedKeys.has(key)) {
+      fail(rowNumber, row.label, 'DUPLICATE_ROW', 'duplicate row in file')
+      return
+    }
+    if (key !== null) plannedKeys.add(key)
+
+    const matches = findMockMatches(db, row, options.matchBy)
+    if (matches.length > 1) {
+      fail(rowNumber, row.label, 'CONFLICT', 'multiple accounts match this row')
+      return
+    }
+    const existing = matches[0]
+    const baseWarnings: AccountIOWarning[] = []
+    if (row.hasDevice && options.devicePolicy !== 'keep') {
+      // The mock has no device store; be explicit instead of pretending.
+      baseWarnings.push('device_generated_on_login')
+    }
+
+    if (!existing) {
+      let finalId: string | null = null
+      const warnings = [...baseWarnings]
+      if (options.idPolicy === 'preserve' && row.id) {
+        if (/^acc-\d{2,}$/.test(row.id) && !usedIds.has(row.id) && !reservedIds.has(row.id)) {
+          finalId = row.id
+          reservedIds.add(finalId)
+        } else if (/^acc-\d{2,}$/.test(row.id)) {
+          fail(rowNumber, row.label, 'CONFLICT', `id ${row.id} is already in use`)
+          return
+        } else {
+          warnings.push('id_ignored')
+        }
+      } else if (options.idPolicy === 'new' && row.id) {
+        warnings.push('id_ignored')
+      }
+      if (!row.password) warnings.push('password_unavailable')
+      plan.push({ kind: 'create', row, label: row.label, id: finalId, warnings })
+      results.push({
+        row: rowNumber,
+        action: 'create',
+        id: finalId,
+        label: row.label,
+        existingId: null,
+        renamedTo: null,
+        warnings,
+        code: null,
+        message: null,
+      })
+      plannedLabels.add(row.label.toLowerCase())
+      return
+    }
+
+    if (options.onConflict === 'skip') {
+      results.push({
+        row: rowNumber,
+        action: 'skip',
+        id: existing.id,
+        label: row.label,
+        existingId: existing.id,
+        renamedTo: null,
+        warnings: baseWarnings,
+        code: null,
+        message: null,
+      })
+      return
+    }
+    if (options.onConflict === 'update') {
+      const warnings = [...baseWarnings]
+      if (!row.password) warnings.push('password_kept')
+      plan.push({ kind: 'update', row, accountId: existing.id, warnings })
+      results.push({
+        row: rowNumber,
+        action: 'update',
+        id: existing.id,
+        label: row.label,
+        existingId: existing.id,
+        renamedTo: null,
+        warnings,
+        code: null,
+        message: null,
+      })
+      return
+    }
+    if (options.onConflict === 'rename') {
+      const renamed = renameMockLabel(row.label, plannedLabels)
+      const warnings = [...baseWarnings]
+      if (!row.password) warnings.push('password_unavailable')
+      plan.push({ kind: 'create', row, label: renamed, id: null, warnings })
+      results.push({
+        row: rowNumber,
+        action: 'rename',
+        id: null,
+        label: row.label,
+        existingId: existing.id,
+        renamedTo: renamed,
+        warnings,
+        code: null,
+        message: null,
+      })
+      plannedLabels.add(renamed.toLowerCase())
+      return
+    }
+    fail(
+      rowNumber,
+      row.label,
+      'CONFLICT',
+      `account ${existing.id} already uses this key`,
+      existing.id,
+    )
+  })
+
+  const counts = {
+    total: results.length,
+    created:
+      results.filter((row) => row.action === 'create' || row.action === 'rename').length,
+    updated: results.filter((row) => row.action === 'update').length,
+    skipped: results.filter((row) => row.action === 'skip').length,
+    renamed: results.filter((row) => row.action === 'rename').length,
+    failed: results.filter((row) => row.action === 'fail').length,
+  }
+  const atomicFailure = options.mode === 'atomic' && counts.failed > 0
+  const applied =
+    !options.dryRun && !atomicFailure && counts.created + counts.updated > 0
+
+  if (!options.dryRun && !atomicFailure) {
+    const now = Date.now()
+    for (const item of plan) {
+      if (item.kind === 'update') {
+        const account = db.accounts.find((entry) => entry.id === item.accountId)
+        if (!account) continue
+        account.label = item.row.label
+        account.username = item.row.username
+        account.platform = item.row.platform
+        account.concurrency = item.row.concurrency
+        account.regions = [...item.row.regions]
+        if (item.row.expiresAt) account.expiresAt = item.row.expiresAt
+        if (options.initialState === 'from_file' && item.row.state) account.state = item.row.state
+        continue
+      }
+      let id = item.id
+      if (!id) {
+        id = nextId
+        let candidate = id
+        while (usedIds.has(candidate) || reservedIds.has(candidate)) {
+          const numeric = Number(/^acc-(\d+)$/.exec(candidate)?.[1] ?? 0) + 1
+          candidate = `acc-${String(numeric).padStart(2, '0')}`
+        }
+        id = candidate
+        reservedIds.add(id)
+        nextId = `acc-${String(Number(/^acc-(\d+)$/.exec(id)?.[1] ?? 0) + 1).padStart(2, '0')}`
+      }
+      const state: AccountState =
+        options.initialState === 'from_file'
+          ? item.row.state ?? 'paused'
+          : options.initialState
+      const created: Account = {
+        id,
+        label: item.label,
+        username: item.row.username,
+        platform: item.row.platform,
+        state,
+        concurrency: item.row.concurrency,
+        regions: [...item.row.regions],
+        nodeCount: 0,
+        liveNodeCount: 0,
+        usageBytes: 0,
+        expiresAt: item.row.expiresAt ?? new Date(now + 30 * 86_400_000).toISOString(),
+        lastLoginAt: options.preserveTimestamps ? item.row.lastLoginAt ?? '' : '',
+        createdAt: options.preserveTimestamps
+          ? item.row.createdAt ?? new Date(now).toISOString()
+          : new Date(now).toISOString(),
+      }
+      db.accounts.unshift(created)
+      usedIds.add(id)
+    }
+    syncAccountCounts()
+  }
+
+  return {
+    format: 'ajs-accounts-import-result',
+    version: 1,
+    dryRun: options.dryRun,
+    applied,
+    mode: options.mode,
+    counts,
+    results,
+    warnings: parsed.warnings,
+  }
+}
+
+/** Sequential per-item bulk delete, mirroring the daemon's result shape. */
+export function mockBulkDelete(
+  ids: string[],
+  mode: 'continue' | 'stop' = 'continue',
+  dryRun = false,
+): BulkDeleteResult {
+  if (ids.length === 0) throw new ApiError(400, 'ids is required', 'INVALID_ARGUMENT')
+  if (ids.length > MOCK_IO_CAPABILITIES.maxDeleteIDs) {
+    throw new ApiError(400, 'at most 100 accounts can be deleted at once', 'INVALID_ARGUMENT')
+  }
+  if (mode !== 'continue' && mode !== 'stop') {
+    throw new ApiError(400, 'mode must be continue or stop', 'INVALID_ARGUMENT')
+  }
+  const db = getDb()
+  const seen = new Set<string>()
+  const unique = ids.filter((id) => {
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+  const results: BulkDeleteItem[] = []
+  let stopped = false
+  for (const id of unique) {
+    if (stopped) {
+      results.push({
+        id,
+        label: null,
+        status: 'skipped',
+        nodes: 0,
+        leases: 0,
+        code: null,
+        message: null,
+      })
+      continue
+    }
+    const account = db.accounts.find((item) => item.id === id)
+    if (!account) {
+      results.push({
+        id,
+        label: null,
+        status: 'not_found',
+        nodes: 0,
+        leases: 0,
+        code: 'NOT_FOUND',
+        message: 'account not found',
+      })
+      continue
+    }
+    const nodes = db.nodes.filter((node) => node.accountId === id).length
+    const leases = db.leases.filter((lease) => lease.accountId === id).length
+    if (dryRun) {
+      results.push({
+        id,
+        label: account.label,
+        status: 'would_delete',
+        nodes,
+        leases,
+        code: null,
+        message: null,
+      })
+      continue
+    }
+    db.accounts = db.accounts.filter((item) => item.id !== id)
+    db.nodes = db.nodes.filter((node) => node.accountId !== id)
+    db.leases = db.leases.filter((lease) => lease.accountId !== id)
+    results.push({
+      id,
+      label: account.label,
+      status: 'deleted',
+      nodes,
+      leases,
+      code: null,
+      message: null,
+    })
+  }
+  syncAccountCounts()
+  const count = (status: BulkDeleteItem['status']) =>
+    results.filter((item) => item.status === status).length
+  return {
+    format: 'ajs-accounts-bulk-delete-result',
+    version: 1,
+    dryRun,
+    mode,
+    counts: {
+      total: results.length,
+      deleted: count('deleted'),
+      wouldDelete: count('would_delete'),
+      notFound: count('not_found'),
+      failed: count('failed'),
+      skipped: count('skipped'),
+    },
+    results,
   }
 }
 

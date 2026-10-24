@@ -1,6 +1,6 @@
 import citiesAsset from '../assets/geo/cn-cities.json'
 import provincesAsset from '../assets/geo/cn-provinces.json'
-import type { ServerView } from './types'
+import type { CatalogGeo, ServerView } from './types'
 
 /**
  * Offline geography for the vendor catalog.
@@ -38,8 +38,10 @@ export const PROVINCES: readonly ProvinceShape[] = provincesAsset.provinces as P
 const CITY_POINTS: readonly CityPoint[] = citiesAsset.cities as CityPoint[]
 
 const CITY_BY_NAME = new Map<string, CityPoint>()
+const CITY_BY_CODE = new Map<string, CityPoint>()
 for (const city of CITY_POINTS) {
   CITY_BY_NAME.set(city.name, city)
+  CITY_BY_CODE.set(city.code, city)
   for (const alias of city.aliases ?? []) CITY_BY_NAME.set(alias, city)
 }
 
@@ -56,22 +58,24 @@ export function parseServerTitle(title: string): string {
 const cityCache = new Map<string, CityPoint | null>()
 
 /**
- * Exact match first, then the one-directional prefix rule the geo research
- * validated (`feature_name.startswith(base)`): `延边朝鲜族自治州` starts with
- * `延边`, while `宿州` never matches `宿迁`. An ambiguous prefix resolves to
- * nothing rather than guessing. Aliases (`济南 - 莱芜`, `延吉`) are exact keys.
+ * Exact match only. Every vendor label is either a DataV full name or a
+ * committed short-name alias (`镇江`, `湘西`, `延吉`); there is no prefix rule,
+ * because `海南` would otherwise resolve to 青海's 海南藏族自治州. An unknown
+ * label resolves to nothing and lands in the `unknown` bucket.
  */
 export function resolveServerCity(title: string): CityPoint | null {
   const base = parseServerTitle(title)
   if (!base) return null
   if (cityCache.has(base)) return cityCache.get(base) ?? null
-  let hit = CITY_BY_NAME.get(base) ?? null
-  if (!hit) {
-    const matches = CITY_POINTS.filter((city) => city.name.startsWith(base))
-    if (matches.length === 1) hit = matches[0]
-  }
+  const hit = CITY_BY_NAME.get(base) ?? null
   cityCache.set(base, hit)
   return hit
+}
+
+/** Looks up a city point by GB/T 2260 code (the daemon's geo summary). */
+export function resolveCityByCode(code: string | null | undefined): CityPoint | null {
+  if (!code) return null
+  return CITY_BY_CODE.get(code) ?? null
 }
 
 export function provinceCodeForTitle(title: string): string {
@@ -96,7 +100,8 @@ export interface CatalogGeoSummary {
   /** Servers whose title does not resolve to a province. */
   unknown: number
   total: number
-  current: ServerView | null
+  /** The first LIVE row, as the map chip and marker need it. */
+  current: { id: string; title: string; nodeState: ServerView['nodeState'] } | null
   currentCity: CityPoint | null
   currentProvince: string | null
 }
@@ -170,4 +175,36 @@ export function fillBin(count: number): 0 | 1 | 2 | 3 | 4 | 5 {
   if (count <= 150) return 3
   if (count <= 300) return 4
   return 5
+}
+
+/**
+ * Joins the daemon's per-province counts onto the committed province shapes.
+ * The server sends only non-zero buckets; every other province still renders
+ * with count 0 so the choropleth keeps its 31 shapes.
+ */
+export function summarizeServerGeo(geo: CatalogGeo): CatalogGeoSummary {
+  const byCode = new Map(geo.provinces.map((province) => [province.code, province]))
+  const currentProvince = geo.current?.provinceCode || null
+  return {
+    provinces: PROVINCES.map((shape) => {
+      const bucket = byCode.get(shape.code)
+      return {
+        code: shape.code,
+        name: shape.shortName,
+        nameEn: shape.nameEn,
+        count: bucket?.count ?? 0,
+        cities: bucket?.cities.length ?? 0,
+        connected: bucket?.connected ?? 0,
+        current: shape.code === currentProvince,
+        shape,
+      }
+    }),
+    unknown: geo.unknown,
+    total: geo.total,
+    current: geo.current
+      ? { id: geo.current.id, title: geo.current.title, nodeState: geo.current.nodeState }
+      : null,
+    currentCity: resolveCityByCode(geo.current?.cityCode),
+    currentProvince,
+  }
 }

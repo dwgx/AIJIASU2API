@@ -1,0 +1,191 @@
+/* Account import/export dialogs — local chrome only; shared tokens come from app.css. */
+
+.account-io-form {
+  gap: 14px;
+}
+
+.account-io-group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.account-io-group > legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.account-io-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.account-io-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.account-io-choice:hover {
+  border-color: var(--border-strong);
+}
+
+.account-io-choice.is-active {
+  border-color: color-mix(in srgb, var(--mint) 55%, var(--border));
+  background: color-mix(in srgb, var(--mint) 8%, transparent);
+  color: var(--text);
+}
+
+.account-io-choice.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.account-io-choice input {
+  margin: 0;
+  accent-color: var(--mint-strong);
+}
+
+.account-io-secret {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-io-secret .input {
+  flex: 1;
+}
+
+.account-io-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-menu);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.account-io-drop.is-over {
+  border-color: var(--mint);
+  background: color-mix(in srgb, var(--mint) 6%, transparent);
+}
+
+.account-io-drop__hint {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.account-io-drop .field__hint {
+  margin: 0;
+}
+
+.account-io-drop label.btn {
+  cursor: pointer;
+}
+
+.account-io-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.account-io-file-meta {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.account-io-advanced {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.account-io-advanced > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 12px;
+  user-select: none;
+}
+
+.account-io-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.account-io-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.account-io-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.account-io-table th,
+.account-io-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.account-io-table th {
+  color: var(--text-tertiary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.account-io-counts {
+  margin: 0;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.account-io-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.account-io-result-list {
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.account-io-toolbar {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 8px;
+}

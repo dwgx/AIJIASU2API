@@ -3,8 +3,10 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { api } from '../src/lib/api'
+import { provinceCodeForTitle } from '../src/lib/geo'
 import type {
   AccountServers,
+  CatalogGeo,
   CatalogSnapshot,
   ServerCatalogQuery,
   ServerView,
@@ -105,11 +107,16 @@ function buildCatalog(): ServerView[] {
   return rows
 }
 
-function pagedCatalog(all: ServerView[], query: ServerCatalogQuery = {}): AccountServers {
+function pagedCatalog(
+  all: ServerView[],
+  query: ServerCatalogQuery = {},
+  geo?: CatalogGeo,
+): AccountServers {
   const needle = (query.q ?? '').trim().toLowerCase()
   const filtered = all.filter((server) => {
     if (query.region && query.region !== server.region) return false
     if (query.status && query.status !== server.status) return false
+    if (query.province && provinceCodeForTitle(server.title) !== query.province) return false
     if (needle && !`${server.id} ${server.title} ${server.host} ${server.region}`.toLowerCase().includes(needle)) {
       return false
     }
@@ -133,6 +140,7 @@ function pagedCatalog(all: ServerView[], query: ServerCatalogQuery = {}): Accoun
     regions: [...counts.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([code, count]) => ({ code, count })),
+    geo,
     servers,
   }
 }
@@ -255,6 +263,72 @@ describe('china map', () => {
     expect(screen.getByText('Offshore #1')).toBeInTheDocument()
     expect(screen.getByText('Offshore #4')).toBeInTheDocument()
     expect(other).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('draws from the daemon geo aggregate and filters provinces server-side', async () => {
+    const user = userEvent.setup()
+    const rows = [
+      serverView(1, '镇江 #1', { nodeState: 'LIVE', nodeId: `${ACCOUNT}:srv-1` }),
+      serverView(2, '南京 #1'),
+      serverView(3, '杭州 #1'),
+      serverView(4, '海南 #1'),
+    ]
+    const geo: CatalogGeo = {
+      total: 4,
+      unknown: 1,
+      provinces: [
+        {
+          code: '32',
+          count: 2,
+          connected: 1,
+          cities: [
+            { code: '321100', label: '镇江', count: 1 },
+            { code: '320100', label: '南京', count: 1 },
+          ],
+        },
+        { code: '33', count: 1, connected: 0, cities: [{ code: '330100', label: '杭州', count: 1 }] },
+      ],
+      current: {
+        id: 'srv-1',
+        title: '镇江 #1',
+        nodeState: 'LIVE',
+        cityCode: '321100',
+        provinceCode: '32',
+      },
+      live: [{ id: 'srv-1', title: '镇江 #1', nodeState: 'LIVE' }],
+    }
+    const getServers = vi
+      .spyOn(api, 'getAccountServers')
+      .mockImplementation(async (_accountId: string, query: ServerCatalogQuery = {}) =>
+        pagedCatalog(rows, query, geo),
+      )
+    const getSnapshot = vi.spyOn(api, 'getCatalogSnapshot')
+
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Mainland China' })).toBeInTheDocument()
+    expect(await screen.findByText('Servers: 4')).toBeInTheDocument()
+    expect(screen.getByText('Current: 镇江 #1')).toBeInTheDocument()
+    expect(screen.getByTestId('catalog-map-current-dot')).toBeInTheDocument()
+
+    const jiangsu = await screen.findByRole('button', { name: 'Jiangsu, 2 servers' })
+    expect(screen.getByRole('button', { name: 'Other, 1 servers' })).toBeInTheDocument()
+    // The map came from the page envelope: no retained-catalog download.
+    expect(getSnapshot).not.toHaveBeenCalled()
+
+    await user.click(jiangsu)
+    await waitFor(() =>
+      expect(getServers.mock.calls.at(-1)?.[1]).toMatchObject({ province: '32' }),
+    )
+    const nav = screen.getByRole('navigation', { name: 'Catalog pagination' })
+    await waitFor(() => expect(within(nav).getByText('1–2 of 2')).toBeInTheDocument())
+    expect(screen.getByText('南京 #1')).toBeInTheDocument()
+    expect(screen.queryByText('杭州 #1')).not.toBeInTheDocument()
+    // The geo summary stays scoped to the search, so the map keeps its counts.
+    expect(screen.getByRole('button', { name: 'Jiangsu, 2 servers' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(getSnapshot).not.toHaveBeenCalled()
   })
 
   it('honours prefers-reduced-motion', async () => {

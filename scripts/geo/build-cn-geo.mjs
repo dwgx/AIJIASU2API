@@ -79,6 +79,60 @@ const ALIASES = {
   延吉: '222400',
 }
 
+/**
+ * Ethnic descriptors that separate a prefecture's conventional short name
+ * from its DataV full name: 湘西土家族苗族自治州 -> 湘西. The list covers the
+ * names DataV publishes; a bare 蒙古/柯尔克孜/哈萨克 is stripped separately
+ * (博尔塔拉蒙古自治州, 克孜勒苏柯尔克孜自治州, 伊犁哈萨克自治州).
+ */
+const ETHNIC_GROUPS =
+  '(?:蒙古族|回族|藏族|维吾尔族|苗族|彝族|壮族|布依族|朝鲜族|满族|侗族|瑶族|白族|土家族|哈尼族|哈萨克族|傣族|黎族|傈僳族|佤族|畲族|高山族|拉祜族|水族|东乡族|纳西族|景颇族|柯尔克孜族|土族|达斡尔族|仫佬族|羌族|布朗族|撒拉族|毛南族|仡佬族|锡伯族|阿昌族|普米族|塔吉克族|怒族|乌孜别克族|俄罗斯族|鄂温克族|德昂族|保安族|裕固族|京族|塔塔尔族|独龙族|鄂伦春族|赫哲族|门巴族|珞巴族|基诺族)'
+
+/**
+ * The vendor labels are conventional short names (`镇江`, `延边`, `湘西`);
+ * DataV publishes administrative names (`镇江市`, `延边朝鲜族自治州`). Derive
+ * the short form so resolution stays exact instead of prefix-matching.
+ */
+function shortCityName(name) {
+  const suffix = ['自治州', '自治县', '地区', '林区', '盟', '市', '县'].find((value) =>
+    name.endsWith(value),
+  )
+  if (!suffix) return ''
+  let base = name.slice(0, -suffix.length)
+  if (suffix === '自治州' || suffix === '自治县') {
+    base = base.replace(new RegExp(`(?:${ETHNIC_GROUPS})+$`), '')
+    base = base.replace(/(?:蒙古|柯尔克孜|哈萨克)$/, '')
+  }
+  return base.trim()
+}
+
+/**
+ * Adds one exact-match alias per city short name. An alias is only safe when
+ * it identifies a single city; a short form that names a different province
+ * (`海南` for 海南藏族自治州) is dropped so the row lands in `unknown` rather
+ * than misfiling into 青海.
+ */
+function addDerivedAliases(cities) {
+  const candidates = new Map()
+  for (const city of cities) {
+    const short = shortCityName(city.name)
+    if (!short || short === city.name) continue
+    const list = candidates.get(short) ?? []
+    list.push(city)
+    candidates.set(short, list)
+  }
+  const provinceByShortName = new Map(
+    PROVINCES.map(([code, name]) => [shortProvinceName(name), code]),
+  )
+  for (const [alias, list] of candidates) {
+    if (list.length !== 1) continue
+    const city = list[0]
+    const province = provinceByShortName.get(alias)
+    if (province && province !== city.provinceCode) continue
+    city.aliases = [...(city.aliases ?? []), alias]
+  }
+}
+
 function parseArgs(argv) {
   const args = { check: false, raw: '' }
   for (let index = 0; index < argv.length; index += 1) {
@@ -303,6 +357,7 @@ async function build(rawDir) {
       cities.push({ code: `${code}0000`, name: nameOf(code), provinceCode: code, x: round(x), y: round(y) })
     }
   }
+  addDerivedAliases(cities)
   for (const city of cities) {
     for (const [alias, target] of Object.entries(ALIASES)) {
       if (city.code === target) city.aliases = [...(city.aliases ?? []), alias]

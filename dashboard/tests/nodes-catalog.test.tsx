@@ -81,6 +81,16 @@ beforeEach(async () => {
   await api.resetMock()
 })
 
+/** The table row whose title cell matches; the strip may repeat the name. */
+function rowFor(title: string): HTMLTableRowElement {
+  const row = screen
+    .getAllByText(title)
+    .map((element) => element.closest('tr'))
+    .find((element): element is HTMLTableRowElement => element !== null)
+  if (!row) throw new Error(`catalog row for ${title} not found`)
+  return row
+}
+
 describe('nodes catalog', () => {
   it('loads the selected account catalog, groups by region and marks the live gate', async () => {
     render(<App />)
@@ -270,7 +280,7 @@ describe('nodes catalog', () => {
                 nodeId: 'node-01',
                 nodeState: 'LIVE',
                 selected: true,
-                skippedByLimit: false,
+                skippedByLimit: true,
                 memberOnly: true,
                 fullLoad: true,
                 blockingMarks: ['region-locked'],
@@ -290,7 +300,9 @@ describe('nodes catalog', () => {
     expect(screen.getByText('region-locked')).toBeInTheDocument()
     expect(screen.getByText('member only')).toBeInTheDocument()
     expect(screen.getByText('full load')).toBeInTheDocument()
-    expect(screen.getByText('ping secret')).toBeInTheDocument()
+    // Density contract (§4.5): ping-secret and skipped are not row badges.
+    expect(screen.queryByText('ping secret')).not.toBeInTheDocument()
+    expect(screen.queryByText('skipped by limit')).not.toBeInTheDocument()
     expect(screen.getByText('Current')).toBeInTheDocument()
     expect(
       within(screen.getByRole('navigation', { name: 'Catalog pagination' })).getByText('1–1 of 1'),
@@ -355,6 +367,51 @@ describe('nodes catalog', () => {
 
     await user.click(screen.getByRole('button', { name: 'Clear selection' }))
     await waitFor(() => expect(screen.queryByText('1 selected')).not.toBeInTheDocument())
+  })
+
+  it('marks the persisted target separately from the current node', async () => {
+    const user = userEvent.setup()
+    const view = render(<App />)
+
+    await screen.findByRole('heading', { name: 'Nodes', level: 1 })
+    expect(await screen.findByText('No target set')).toBeInTheDocument()
+
+    const current = rowFor('China · Zhejiang #1')
+    expect(within(current).getByText('Current')).toBeInTheDocument()
+    expect(within(current).queryByText('Target')).not.toBeInTheDocument()
+
+    const target = rowFor('Hong Kong #3')
+    expect(within(target).queryByText('Current')).not.toBeInTheDocument()
+    await user.click(within(target).getByRole('button', { name: 'Set target' }))
+
+    await waitFor(() => expect(within(rowFor('Hong Kong #3')).getByText('Target')).toBeInTheDocument())
+    expect(within(rowFor('Hong Kong #3')).queryByText('Current')).not.toBeInTheDocument()
+    expect(within(rowFor('China · Zhejiang #1')).queryByText('Target')).not.toBeInTheDocument()
+    expect(await screen.findByText('Target set to Hong Kong #3. No session was started.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Audit trail' })).toHaveAttribute('href', '/logs')
+
+    // A target is not a session: the two existing LIVE nodes are untouched.
+    expect(await api.getSelection('acc-01')).toMatchObject({ serverId: 'hk-01' })
+    const live = (await api.listNodes())
+      .filter((node) => node.accountId === 'acc-01' && node.state === 'LIVE')
+      .map((node) => node.label)
+    expect(live).toEqual(['cn-zj-01', 'cn-sh-01'])
+
+    // The target survives a reload; the catalog reads it from the daemon.
+    view.unmount()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Nodes', level: 1 })
+    await waitFor(() => expect(within(rowFor('Hong Kong #3')).getByText('Target')).toBeInTheDocument())
+
+    const reloadedStrip = screen.getByRole('group', {
+      name: 'Catalog actions for Northwind Ops',
+    })
+    await user.click(within(reloadedStrip).getByRole('button', { name: 'Clear target' }))
+    expect(
+      await screen.findByText('Target cleared. The current session is unchanged.'),
+    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('No target set')).toBeInTheDocument())
+    expect(await api.getSelection('acc-01')).toBeNull()
   })
 
   it('shows an honest empty state when the daemon retains no catalog', async () => {

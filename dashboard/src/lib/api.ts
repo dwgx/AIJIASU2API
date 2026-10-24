@@ -1,5 +1,6 @@
 import {
   DEFAULT_SETTINGS,
+  MOCK_IO_CAPABILITIES,
   buildAccountServers,
   buildLabDevice,
   buildLabDiagnostics,
@@ -13,23 +14,36 @@ import {
   buildLabProfiles,
   buildLabSessions,
   buildMetrics,
+  buildMockExport,
   getDb,
+  mockBulkDelete,
+  mockImportAccounts,
   resetMockDb,
   syncAccountCounts,
 } from './mock'
 import { ApiError, UnauthorizedError } from './errors'
 import type {
   Account,
+  AccountExportDownload,
+  AccountExportRequest,
+  AccountIOCapabilities,
+  AccountImportRequest,
+  AccountImportResult,
   AccountServers,
   AccountState,
   ApiKey,
   AuditEvent,
+  BulkDeleteRequest,
+  BulkDeleteResult,
+  CatalogSelection,
   CatalogSnapshot,
+  ConnectResult,
   CreateAccountInput,
   CreateKeyInput,
   CreateKeyResult,
   DeviceView,
   DiagnosticsView,
+  DisconnectResult,
   EgressCheckResult,
   EgressView,
   FlowsView,
@@ -50,6 +64,7 @@ import type {
   ProxyNode,
   RequestLog,
   ServerCatalogQuery,
+  ServerView,
   SessionView,
   UpdateInfo,
 } from './types'
@@ -115,15 +130,77 @@ async function wait(): Promise<void> {
   await promise
 }
 
-async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * A catalog write rejected by the daemon. P1 routes answer 409/429/502 with a
+ * machine `reason` (and sometimes `details`); the dashboard maps that reason to
+ * localized copy instead of showing the raw server message. `Retry-After` is
+ * parsed for 429 so the row actions can stay disabled for the countdown.
+ */
+export class CatalogActionError extends ApiError {
+  readonly reason: string | null
+  readonly details: Record<string, unknown> | null
+  readonly retryAfterSec: number | null
+
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    reason: string | null = null,
+    details: Record<string, unknown> | null = null,
+    retryAfterSec: number | null = null,
+  ) {
+    super(status, message, code)
+    this.name = 'CatalogActionError'
+    this.reason = reason
+    this.details = details
+    this.retryAfterSec = retryAfterSec
+  }
+}
+
+interface HttpErrorContext {
+  status: number
+  statusText: string
+  code: string | null
+  detail: string
+  reason: string | null
+  details: Record<string, unknown> | null
+  retryAfterSec: number | null
+}
+
+function defaultHttpError(context: HttpErrorContext): ApiError {
+  const suffix = context.detail ? ` — ${context.detail.slice(0, 200)}` : ''
+  return new ApiError(
+    context.status,
+    `${context.status} ${context.statusText}${suffix}`,
+    context.code,
+  )
+}
+
+function catalogActionError(context: HttpErrorContext): ApiError {
+  const suffix = context.detail ? ` — ${context.detail.slice(0, 200)}` : ''
+  return new CatalogActionError(
+    context.status,
+    `${context.status} ${context.statusText}${suffix}`,
+    context.code,
+    context.reason,
+    context.details,
+    context.retryAfterSec,
+  )
+}
+
+async function request(
+  path: string,
+  init: RequestInit = {},
+  errorFactory: (context: HttpErrorContext) => ApiError = defaultHttpError,
+): Promise<Response> {
   const headers = new Headers(init.headers)
-  headers.set('Accept', 'application/json')
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json')
   if (init.body) headers.set('Content-Type', 'application/json')
   if (panelToken) headers.set('Authorization', `Bearer ${panelToken}`)
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!response.ok) {
     const raw = await response.text().catch(() => '')
-    const { code, detail } = parseErrorBody(raw)
+    const { code, detail, reason, details } = parseErrorBody(raw)
     const suffix = detail ? ` — ${detail.slice(0, 200)}` : ''
     if (response.status === 401) {
       // A vendor credential rejection on the account login action is also a
@@ -133,23 +210,94 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
       }
       throw new UnauthorizedError(`401 Unauthorized${suffix}`)
     }
-    throw new ApiError(response.status, `${response.status} ${response.statusText}${suffix}`, code)
+    throw errorFactory({
+      status: response.status,
+      statusText: response.statusText,
+      code,
+      detail,
+      reason,
+      details,
+      retryAfterSec: parseRetryAfter(response.headers.get('Retry-After')),
+    })
   }
+  return response
+}
+
+async function http<T>(
+  path: string,
+  init: RequestInit = {},
+  errorFactory: (context: HttpErrorContext) => ApiError = defaultHttpError,
+): Promise<T> {
+  const response = await request(path, init, errorFactory)
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
-/** Reads `{error:{code,message}}`; a non-JSON body stays the detail text. */
-function parseErrorBody(raw: string): { code: string | null; detail: string } {
-  if (!raw) return { code: null, detail: '' }
+/** UTC `ajs-accounts-YYYYMMDD-HHMMSS` — the daemon's export filename shape. */
+function exportTimestamp(now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return (
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`
+  )
+}
+
+function exportFilename(header: string | null, extension: string): string {
+  if (header) {
+    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(header)
+    if (match?.[1]) {
+      try {
+        return decodeURIComponent(match[1])
+      } catch {
+        return match[1]
+      }
+    }
+  }
+  return `ajs-accounts-${exportTimestamp()}.${extension}`
+}
+
+function exportCount(header: string | null): number {
+  const value = Number(header)
+  return Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/** `Retry-After` is either delta-seconds or an HTTP date; both become seconds. */
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null
+  const seconds = Number(header)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds)
+  const at = Date.parse(header)
+  if (!Number.isNaN(at)) return Math.max(0, Math.ceil((at - Date.now()) / 1000))
+  return null
+}
+
+/**
+ * Reads `{error:{code,message,reason,details}}`; a non-JSON body stays the
+ * detail text. `reason`/`details` are additive P1 fields, absent on P0 routes.
+ */
+function parseErrorBody(raw: string): {
+  code: string | null
+  detail: string
+  reason: string | null
+  details: Record<string, unknown> | null
+} {
+  if (!raw) return { code: null, detail: '', reason: null, details: null }
   try {
-    const parsed = JSON.parse(raw) as { error?: { code?: unknown; message?: unknown } }
+    const parsed = JSON.parse(raw) as {
+      error?: { code?: unknown; message?: unknown; reason?: unknown; details?: unknown }
+    }
+    const rawDetails = parsed.error?.details
     return {
       code: typeof parsed.error?.code === 'string' ? parsed.error.code : null,
       detail: typeof parsed.error?.message === 'string' ? parsed.error.message : raw,
+      reason: typeof parsed.error?.reason === 'string' ? parsed.error.reason : null,
+      details:
+        typeof rawDetails === 'object' && rawDetails !== null
+          ? (rawDetails as Record<string, unknown>)
+          : null,
     }
   } catch {
-    return { code: null, detail: raw }
+    return { code: null, detail: raw, reason: null, details: null }
   }
 }
 
@@ -182,6 +330,303 @@ const snapshotInFlight = new Map<string, Promise<CatalogSnapshot>>()
 /** Bumped whenever a cached/in-flight snapshot is invalidated. */
 let snapshotEpoch = 0
 
+/* --------------------------------------------------------------------------
+ * P1 catalog actions — mock state
+ *
+ * The daemon keeps one persisted target and one FV session per account. The
+ * browser mock mirrors that contract on the fixture nodes so the catalog can
+ * be reviewed offline: a switch leaves exactly one LIVE node, a disconnect
+ * leaves the row in place without a gate, and the target survives both.
+ * ------------------------------------------------------------------------ */
+
+const mockSelections = new Map<string, CatalogSelection>()
+let mockCatalogSeq = 0
+
+function invalidateSnapshotCache(id: string): void {
+  snapshotEpoch += 1
+  snapshotCache.delete(id)
+  snapshotInFlight.delete(id)
+}
+
+interface MockRowEligibility {
+  eligible: boolean
+  ineligibleReason?: string
+}
+
+/** Mirrors DESIGN-CATALOG §2.1 eligibility priority, minus a live vendor call. */
+function mockEligibility(
+  server: ServerView,
+  enabled: boolean,
+  stale: boolean,
+  accountState: AccountState | undefined,
+): MockRowEligibility {
+  if (!enabled) return { eligible: false, ineligibleReason: 'login_disabled' }
+  if (accountState !== undefined && accountState !== 'active') {
+    return { eligible: false, ineligibleReason: 'account_state' }
+  }
+  if (stale) return { eligible: false, ineligibleReason: 'stale' }
+  if (server.status !== 'ok') return { eligible: false, ineligibleReason: 'vendor_status' }
+  if (server.fullLoad === true) return { eligible: false, ineligibleReason: 'full_load' }
+  if (server.blockingMarks.length > 0) return { eligible: false, ineligibleReason: 'blocked' }
+  if (server.memberOnly === true) return { eligible: false, ineligibleReason: 'member_only' }
+  return { eligible: true }
+}
+
+/** Adds the P1 runtime/selection overlay the daemon will send on each row. */
+function mockCatalogOverlay(
+  servers: ServerView[],
+  accountId: string,
+  enabled: boolean,
+  stale: boolean,
+): ServerView[] {
+  const account = getDb().accounts.find((item) => item.id === accountId)
+  const selection = mockSelections.get(accountId)
+  return servers.map((server) => ({
+    ...server,
+    desired: selection?.serverId === server.id,
+    connected: server.nodeState === 'LIVE' || server.nodeState === 'DRAINING',
+    serving: server.nodeState === 'LIVE',
+    autoStarted: server.nodeState === 'LIVE' || server.nodeState === 'DRAINING',
+    ...mockEligibility(server, enabled, stale, account?.state),
+  }))
+}
+
+function mockCatalogError(
+  status: number,
+  reason: string | null,
+  message: string,
+  details: Record<string, unknown> | null = null,
+  retryAfterSec: number | null = null,
+): CatalogActionError {
+  const code =
+    status === 404
+      ? 'NOT_FOUND'
+      : status === 409
+        ? 'CONFLICT'
+        : status === 429
+          ? 'RATE_LIMITED'
+          : status >= 500
+            ? 'INTERNAL'
+            : 'INVALID_ARGUMENT'
+  return new CatalogActionError(status, `${status} ${message}`, code, reason, details, retryAfterSec)
+}
+
+function mockCatalogAudit(
+  action: string,
+  target: string,
+  detail: string,
+  now: number,
+): string {
+  mockCatalogSeq += 1
+  const id = `audit-cat-${mockCatalogSeq}`
+  getDb().audit.unshift({
+    id,
+    ts: new Date(now).toISOString(),
+    severity: 'info',
+    actor: 'operator',
+    action,
+    target,
+    detail,
+  })
+  return id
+}
+
+/** Validates the same preconditions the P1 daemon enforces before a write. */
+function mockCatalogTarget(
+  accountId: string,
+  serverId: string,
+  now: number,
+): { account: Account; server: ServerView } {
+  const db = getDb()
+  const account = db.accounts.find((item) => item.id === accountId)
+  if (!account) throw mockCatalogError(404, null, `account ${accountId} not found`)
+  const page = buildAccountServers(db, accountId, now, { offset: 0, limit: 500 })
+  if (page.enabled === false) {
+    throw mockCatalogError(409, 'login_disabled', 'account login is disabled')
+  }
+  if (account.state !== 'active') {
+    throw mockCatalogError(409, 'account_state', `account ${accountId} is ${account.state}`)
+  }
+  if (page.stale) {
+    throw mockCatalogError(409, 'login_required', 'account has no retained login')
+  }
+  const server = page.servers.find((row) => row.id === serverId)
+  if (!server) {
+    throw mockCatalogError(404, 'unknown_server', `server ${serverId} is not in the retained catalog`)
+  }
+  const eligibility = mockEligibility(server, true, page.stale, account.state)
+  if (!eligibility.eligible) {
+    throw mockCatalogError(
+      409,
+      'server_ineligible',
+      `server ${server.title} is not eligible`,
+      eligibility.ineligibleReason ? { ineligibleReason: eligibility.ineligibleReason } : null,
+    )
+  }
+  return { account, server }
+}
+
+function mockSelection(accountId: string, server: ServerView, now: number): CatalogSelection {
+  return {
+    accountId,
+    serverId: server.id,
+    title: server.title,
+    updatedAt: new Date(now).toISOString(),
+    updatedBy: 'operator',
+  }
+}
+
+function mockConnect(
+  accountId: string,
+  serverId: string,
+  now: number,
+  trigger: 'connect' | 'reconnect',
+): ConnectResult {
+  const { account, server } = mockCatalogTarget(accountId, serverId, now)
+  const db = getDb()
+  const running = db.nodes.filter(
+    (node) =>
+      node.accountId === accountId && (node.state === 'LIVE' || node.state === 'DRAINING'),
+  )
+  const target = db.nodes.find((node) => node.accountId === accountId && node.label === serverId)
+  if (!target) {
+    throw mockCatalogError(404, 'unknown_server', `server ${serverId} has no runtime node`)
+  }
+  if (running.length === 1 && running[0]?.id === target.id) {
+    return {
+      accountId,
+      serverId,
+      nodeId: target.id,
+      nodeState: target.state,
+      gatePort: target.gatePort,
+      egressIp: target.egressIp,
+      durationMs: 0,
+      warnings: [],
+      alreadyConnected: true,
+    }
+  }
+
+  // Commit like the daemon: one node survives, every other gate closes. The
+  // fixture seeds demo accounts with more than one LIVE node; a real daemon
+  // answers 409 multiple_sessions there. The mock commits instead so the P1
+  // flow stays reviewable offline; tests inject that 409 through the API spy.
+  const previous = running.find((node) => node.id !== target.id)
+  for (const node of running) {
+    if (node.id === target.id) continue
+    node.state = 'READY'
+    node.lastProbeAt = new Date(now).toISOString()
+    db.leases = db.leases.filter((lease) => lease.nodeId !== node.id)
+  }
+  target.state = 'LIVE'
+  target.lastProbeAt = new Date(now).toISOString()
+  syncAccountCounts()
+
+  // A manual connect persists the operator's target; reconnect keeps it.
+  const selection = mockSelection(accountId, server, now)
+  mockSelections.set(accountId, selection)
+
+  const durationMs = trigger === 'reconnect' ? 900 : 1200
+  const auditId = mockCatalogAudit(
+    trigger === 'reconnect' ? 'catalog.reconnect' : previous ? 'catalog.switch' : 'catalog.connect',
+    `${account.label} · ${server.title}`,
+    `manual · from ${previous?.label ?? 'none'} · ${durationMs}ms`,
+    now,
+  )
+  invalidateSnapshotCache(accountId)
+  return {
+    accountId,
+    serverId,
+    nodeId: target.id,
+    nodeState: 'LIVE',
+    gatePort: target.gatePort,
+    egressIp: target.egressIp,
+    switchedFrom: previous?.label,
+    durationMs,
+    warnings: [],
+    auditId,
+    alreadyConnected: false,
+  }
+}
+
+function mockDisconnect(accountId: string, now: number): DisconnectResult {
+  const db = getDb()
+  const account = db.accounts.find((item) => item.id === accountId)
+  if (!account) throw mockCatalogError(404, null, `account ${accountId} not found`)
+  const running = db.nodes.filter(
+    (node) =>
+      node.accountId === accountId && (node.state === 'LIVE' || node.state === 'DRAINING'),
+  )
+  if (running.length === 0) {
+    return { accountId, disconnected: false, alreadyDisconnected: true }
+  }
+  for (const node of running) {
+    node.state = 'READY'
+    node.lastProbeAt = new Date(now).toISOString()
+    db.leases = db.leases.filter((lease) => lease.nodeId !== node.id)
+  }
+  syncAccountCounts()
+  const auditId = mockCatalogAudit(
+    'catalog.disconnect',
+    `${account.label} · ${running.map((node) => node.label).join(', ')}`,
+    `manual · closed ${running.length} · target kept`,
+    now,
+  )
+  invalidateSnapshotCache(accountId)
+  return { accountId, disconnected: true, alreadyDisconnected: false, warnings: [], auditId }
+}
+
+function mockReconnect(accountId: string, now: number): ConnectResult {
+  const db = getDb()
+  const account = db.accounts.find((item) => item.id === accountId)
+  if (!account) throw mockCatalogError(404, null, `account ${accountId} not found`)
+  if (account.state !== 'active') {
+    throw mockCatalogError(409, 'account_state', `account ${accountId} is ${account.state}`)
+  }
+  const running = db.nodes.filter(
+    (node) =>
+      node.accountId === accountId && (node.state === 'LIVE' || node.state === 'DRAINING'),
+  )
+  if (running.length > 1) {
+    throw mockCatalogError(
+      409,
+      'multiple_sessions',
+      `account ${accountId} has ${running.length} running sessions`,
+    )
+  }
+  if (running.length === 1) {
+    const node = running[0]!
+    // Same preconditions as a connect to the same server (design §3.5).
+    mockCatalogTarget(accountId, node.label, now)
+    node.state = 'LIVE'
+    node.lastProbeAt = new Date(now).toISOString()
+    syncAccountCounts()
+    const auditId = mockCatalogAudit(
+      'catalog.reconnect',
+      `${account.label} · ${node.label}`,
+      'manual · reopen · 900ms',
+      now,
+    )
+    invalidateSnapshotCache(accountId)
+    return {
+      accountId,
+      serverId: node.label,
+      nodeId: node.id,
+      nodeState: 'LIVE',
+      gatePort: node.gatePort,
+      egressIp: node.egressIp,
+      durationMs: 900,
+      warnings: [],
+      auditId,
+      alreadyConnected: false,
+    }
+  }
+  const selection = mockSelections.get(accountId)
+  if (!selection) {
+    throw mockCatalogError(409, 'no_target', `account ${accountId} has no current server or target`)
+  }
+  return mockConnect(accountId, selection.serverId, now, 'reconnect')
+}
+
 async function requestAccountServers(
   id: string,
   query: ServerCatalogQuery = {},
@@ -191,12 +636,19 @@ async function requestAccountServers(
   if (query.region) params.set('region', query.region)
   if (query.status) params.set('status', query.status)
   if (query.selected !== undefined) params.set('selected', String(query.selected))
+  if (query.province) params.set('province', query.province)
+  if (query.city) params.set('city', query.city)
   params.set('offset', String(Math.max(0, Math.trunc(query.offset ?? 0))))
   params.set('limit', String(Math.min(500, Math.max(1, Math.trunc(query.limit ?? 50)))))
   if (query.sort) params.set('sort', query.sort)
   if (!USE_MOCK) return http<AccountServers>(`/v1/accounts/${id}/servers?${params.toString()}`)
   await wait()
-  return clone(buildAccountServers(getDb(), id, Date.now(), query))
+  const db = getDb()
+  const page = buildAccountServers(db, id, Date.now(), query)
+  return clone({
+    ...page,
+    servers: mockCatalogOverlay(page.servers, id, page.enabled !== false, page.stale),
+  })
 }
 
 /**
@@ -270,6 +722,7 @@ async function requestCatalogSnapshot(
       enabled: first.enabled !== false,
       reason: first.reason,
       accountId: id,
+      snapshotId: first.snapshotId,
       fetchedAt: first.fetchedAt,
       stale: first.stale,
       total: first.total,
@@ -331,6 +784,7 @@ export const api = {
     if (!account) throw new Error('Account not found')
     account.lastLoginAt = new Date().toISOString()
     if (account.state === 'auth_failed') account.state = 'active'
+    invalidateSnapshotCache(id)
     return clone(account)
   },
 
@@ -349,6 +803,8 @@ export const api = {
       if (node.accountId === id && node.state !== 'DOWN') node.state = 'READY'
     }
     db.leases = db.leases.filter((lease) => lease.accountId !== id)
+    mockSelections.delete(id)
+    invalidateSnapshotCache(id)
     syncAccountCounts()
     return clone(account)
   },
@@ -361,20 +817,87 @@ export const api = {
     const account = getDb().accounts.find((item) => item.id === id)
     if (!account) throw new Error('Account not found')
     account.state = state
+    invalidateSnapshotCache(id)
     return clone(account)
   },
 
-  async deleteAccounts(ids: string[]): Promise<void> {
+  /** GET /v1/accounts/io/capabilities — limits and plaintext/encrypted gates. */
+  async accountIOCapabilities(): Promise<AccountIOCapabilities> {
+    if (!USE_MOCK) return http<AccountIOCapabilities>('/v1/accounts/io/capabilities')
+    await wait()
+    return clone(MOCK_IO_CAPABILITIES)
+  },
+
+  /**
+   * POST /v1/accounts/export — returns the file as a Blob plus the
+   * server-supplied filename and counts. The caller downloads it; nothing is
+   * written to storage and the token never appears in a URL.
+   */
+  async exportAccounts(input: AccountExportRequest): Promise<AccountExportDownload> {
     if (!USE_MOCK) {
-      await Promise.all(ids.map((id) => http<void>(`/v1/accounts/${id}`, { method: 'DELETE' })))
-      return
+      const response = await request('/v1/accounts/export', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+      const blob = await response.blob()
+      return {
+        blob,
+        filename: exportFilename(
+          response.headers.get('Content-Disposition'),
+          input.format === 'encrypted' ? 'ajsx' : input.format,
+        ),
+        counts: {
+          accounts: exportCount(response.headers.get('X-AJS-Export-Count')),
+          missingSecrets: exportCount(response.headers.get('X-AJS-Export-Missing-Secrets')),
+          devices: exportCount(response.headers.get('X-AJS-Export-Devices')),
+        },
+      }
     }
     await wait()
+    if (input.format === 'encrypted') {
+      throw new ApiError(409, 'Encrypted export requires the live daemon', 'CONFLICT')
+    }
     const db = getDb()
-    db.accounts = db.accounts.filter((account) => !ids.includes(account.id))
-    db.nodes = db.nodes.filter((node) => !ids.includes(node.accountId))
-    db.leases = db.leases.filter((lease) => !ids.includes(lease.accountId))
-    syncAccountCounts()
+    const ids = input.ids?.length ? input.ids : db.accounts.map((account) => account.id)
+    if (ids.length > MOCK_IO_CAPABILITIES.maxExportAccounts) {
+      throw new ApiError(400, 'too many accounts to export', 'INVALID_ARGUMENT')
+    }
+    const file = buildMockExport(ids, input.format)
+    return {
+      blob: new Blob([file.content], { type: file.mime }),
+      filename: `ajs-accounts-${exportTimestamp()}.${file.extension}`,
+      counts: { ...file.counts, missingSecrets: file.counts.accounts },
+    }
+  },
+
+  /** POST /v1/accounts/import — dry-run preview or apply. */
+  async importAccounts(input: AccountImportRequest): Promise<AccountImportResult> {
+    if (!USE_MOCK) {
+      return http<AccountImportResult>('/v1/accounts/import', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+    }
+    await wait()
+    return mockImportAccounts(input)
+  },
+
+  /** POST /v1/accounts/bulk-delete — one result per id, sequentially applied. */
+  async bulkDeleteAccounts(input: BulkDeleteRequest): Promise<BulkDeleteResult> {
+    if (!USE_MOCK) {
+      return http<BulkDeleteResult>('/v1/accounts/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+    }
+    await wait()
+    const result = mockBulkDelete(input.ids, input.mode, input.dryRun)
+    for (const item of result.results) {
+      if (item.status !== 'deleted') continue
+      mockSelections.delete(item.id)
+      invalidateSnapshotCache(item.id)
+    }
+    return result
   },
 
   async listNodes(): Promise<ProxyNode[]> {
@@ -691,15 +1214,142 @@ export const api = {
 
   /** Drops the cached full catalog so the next read fetches every page again. */
   invalidateCatalogSnapshot(id: string): void {
-    snapshotEpoch += 1
-    snapshotCache.delete(id)
-    snapshotInFlight.delete(id)
+    invalidateSnapshotCache(id)
+  },
+
+  /**
+   * GET /v1/accounts/{id}/selection. A P0 daemon has no route yet, so a 404
+   * reads as "no target" instead of blocking the catalog.
+   */
+  async getSelection(id: string): Promise<CatalogSelection | null> {
+    if (!USE_MOCK) {
+      try {
+        const selection = await http<CatalogSelection | null>(
+          `/v1/accounts/${encodeURIComponent(id)}/selection`,
+        )
+        return selection ?? null
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null
+        throw error
+      }
+    }
+    await wait()
+    const selection = mockSelections.get(id)
+    return selection ? clone(selection) : null
+  },
+
+  /** PUT /v1/accounts/{id}/selection — pins the next login's desired server. */
+  async setSelection(
+    id: string,
+    serverId: string,
+    snapshotId?: string,
+  ): Promise<CatalogSelection> {
+    if (!USE_MOCK) {
+      return http<CatalogSelection>(
+        `/v1/accounts/${encodeURIComponent(id)}/selection`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ serverId, ...(snapshotId ? { snapshotId } : {}) }),
+        },
+        catalogActionError,
+      )
+    }
+    await wait()
+    const now = Date.now()
+    const { account, server } = mockCatalogTarget(id, serverId, now)
+    const previous = mockSelections.get(id)
+    const selection = mockSelection(id, server, now)
+    mockSelections.set(id, selection)
+    mockCatalogAudit(
+      'catalog.select',
+      `${account.label} · ${server.title}`,
+      `manual · from ${previous?.serverId ?? 'none'}`,
+      now,
+    )
+    invalidateSnapshotCache(id)
+    return clone(selection)
+  },
+
+  /** DELETE /v1/accounts/{id}/selection — idempotent; keeps the session. */
+  async clearSelection(id: string): Promise<void> {
+    if (!USE_MOCK) {
+      await http<void>(
+        `/v1/accounts/${encodeURIComponent(id)}/selection`,
+        { method: 'DELETE' },
+        catalogActionError,
+      )
+      return
+    }
+    await wait()
+    const previous = mockSelections.get(id)
+    if (!previous) return
+    mockSelections.delete(id)
+    const account = getDb().accounts.find((item) => item.id === id)
+    mockCatalogAudit(
+      'catalog.unselect',
+      `${account?.label ?? id} · ${previous.title}`,
+      `manual · from ${previous.serverId}`,
+      Date.now(),
+    )
+    invalidateSnapshotCache(id)
+  },
+
+  /** POST /v1/accounts/{id}/actions/connect — guarded single-session switch. */
+  async connectAccountServer(
+    id: string,
+    serverId: string,
+    snapshotId?: string,
+  ): Promise<ConnectResult> {
+    if (!USE_MOCK) {
+      return http<ConnectResult>(
+        `/v1/accounts/${encodeURIComponent(id)}/actions/connect`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            serverId,
+            ...(snapshotId ? { snapshotId } : {}),
+            confirm: true,
+          }),
+        },
+        catalogActionError,
+      )
+    }
+    await wait()
+    return clone(mockConnect(id, serverId, Date.now(), 'connect'))
+  },
+
+  /** POST /v1/accounts/{id}/actions/disconnect — closes the account's session. */
+  async disconnectAccount(id: string): Promise<DisconnectResult> {
+    if (!USE_MOCK) {
+      return http<DisconnectResult>(
+        `/v1/accounts/${encodeURIComponent(id)}/actions/disconnect`,
+        { method: 'POST', body: JSON.stringify({ confirm: true }) },
+        catalogActionError,
+      )
+    }
+    await wait()
+    return clone(mockDisconnect(id, Date.now()))
+  },
+
+  /** POST /v1/accounts/{id}/actions/reconnect — reopens current or target. */
+  async reconnectAccount(id: string): Promise<ConnectResult> {
+    if (!USE_MOCK) {
+      return http<ConnectResult>(
+        `/v1/accounts/${encodeURIComponent(id)}/actions/reconnect`,
+        { method: 'POST', body: JSON.stringify({ confirm: true }) },
+        catalogActionError,
+      )
+    }
+    await wait()
+    return clone(mockReconnect(id, Date.now()))
   },
 
   async resetMock(): Promise<void> {
     if (!USE_MOCK) return
     await wait()
     resetMockDb()
+    mockSelections.clear()
+    mockCatalogSeq = 0
     snapshotEpoch += 1
     snapshotCache.clear()
     snapshotInFlight.clear()
