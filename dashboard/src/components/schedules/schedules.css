@@ -1,0 +1,371 @@
+/* Schedules page — list, dialog preview, run history and the read-only
+   renewal sweep. All colour comes from the shared tokens so both themes and
+   the contrast suite keep working. */
+
+.schedule-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.schedule-banner--info {
+  border-color: color-mix(in srgb, var(--info) 30%, var(--border));
+  background: color-mix(in srgb, var(--info) 8%, transparent);
+}
+
+.schedule-banner p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.schedule-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--border-faint);
+}
+
+.schedule-summary__item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.schedule-summary__item strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.schedule-name {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.schedule-name strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.schedule-name__meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.schedule-trigger {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.schedule-trigger__window {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.schedule-when,
+.schedule-last {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.schedule-when__relative {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.schedule-last__error {
+  max-width: 190px;
+  overflow: hidden;
+  color: var(--danger);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-preview__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.schedule-preview__hint,
+.schedule-preview__server-time {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 17px;
+}
+
+.schedule-preview__server-time {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.schedule-preview__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--border-faint);
+  list-style: none;
+}
+
+.schedule-preview__row {
+  display: grid;
+  grid-template-columns: 28px minmax(110px, 1fr) minmax(170px, 1.2fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--surface);
+  font-size: 11.5px;
+}
+
+.schedule-preview__index {
+  color: var(--mint);
+  font-size: 10px;
+}
+
+.schedule-preview__time {
+  color: var(--text-2);
+}
+
+.schedule-preview__utc {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-preview__warnings {
+  margin: 8px 0 0;
+  padding: 8px 10px 8px 26px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-radius: var(--radius-control);
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.schedule-form {
+  gap: 16px;
+}
+
+.schedule-form__section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.schedule-form__heading {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.schedule-form__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.schedule-form__days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.schedule-form__arm {
+  border-color: color-mix(in srgb, var(--warning) 36%, var(--border));
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  color: var(--warning);
+}
+
+.schedule-history__when {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11.5px;
+}
+
+.schedule-history__trigger {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.schedule-history__failure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.schedule-history__reason {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.schedule-history__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 260px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.schedule-history__actor {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.schedule-history__empty {
+  margin: 0;
+  padding: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.schedule-renewal__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.schedule-renewal__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.schedule-renewal__facts {
+  margin: 0;
+}
+
+.schedule-renewal__marks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.schedule-renewal__marks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.schedule-renewal__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--border-faint);
+  list-style: none;
+}
+
+.schedule-renewal__row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--surface);
+  font-size: 11.5px;
+}
+
+.schedule-renewal__account {
+  overflow: hidden;
+  color: var(--text-2);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-renewal__expiry {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.schedule-renewal__empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.schedule-renewal__note {
+  margin: 12px 0 0;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+@media (max-width: 900px) {
+  .schedule-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedule-renewal__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .schedule-preview__row {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+  }
+
+  .schedule-preview__utc {
+    display: none;
+  }
+
+  .schedule-renewal__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .schedule-renewal__expiry {
+    display: none;
+  }
+}
