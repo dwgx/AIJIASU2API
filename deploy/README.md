@@ -225,6 +225,38 @@ cannot be opened. The snapshot is not SQLite and has no migration path yet; see
   key: anyone with the volume and the key can read the sealed values.
 - Docker daemon access is root-equivalent; this stack does not change that boundary.
 
+## Firewall block (`nftables/ajs-panel.nft`)
+
+The AJS panel's LAN ingress block is owned by this tree as `nftables/ajs-panel.nft`. It opens
+`2261` (accountd admin API, bearer auth) and `18082` (dashboard preview) to `192.168.11.0/24`
+only. Gate ports stay loopback-only: acc-07's gate `:13012` is not exposed by this block.
+
+Ownership: change this file, not the host. The live `/etc/nftables.conf` is still merged by hand,
+so the two can temporarily differ; `check-nftables-drift.sh` is how you find out. This file is a
+fragment, not a complete nftables config: apply it by inserting the block into the `input` chain
+of `table inet egress` and reloading.
+
+**Never overwrite the live config with the ops repo copy before the block is merged.** The live
+`/etc/nftables.conf` is the whole host firewall (egress sets, `wg-hmc`, docker rules, other
+services); copying this fragment over it would drop all of that and lock the host down. The
+rollback and hot-withdraw commands are in the file header: delete the four block lines and reload
+with `nft -f /etc/nftables.conf`, or remove the live rule by handle with
+`nft delete rule inet egress input handle <h>`.
+
+Run the read-only drift check (default host `hmc`; pass another SSH host as `$1`):
+
+```bash
+sh deploy/check-nftables-drift.sh
+# host:  hmc
+# asset: .../deploy/nftables/ajs-panel.nft
+# state: OK - live block matches (1 rule, comments ignored)
+```
+
+Exit codes: `0` match, `1` drift (`MISSING`: the repo rule is absent live; `EXTRA`: live has an
+AJS line the repo block does not own, including duplicates or a changed rule), `2` error (ssh,
+unreadable or malformed asset). The check reads `/etc/nftables.conf`; it does not inspect the
+running ruleset and never reloads nftables.
+
 ## Limitations
 
 - **Live, one account, one session.** With `AJS_ACCOUNT_LOGIN=1` the daemon logs in through the

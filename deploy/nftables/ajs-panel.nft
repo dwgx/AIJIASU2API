@@ -1,0 +1,15 @@
+# AJS panel LAN ingress block — owned by this repository, not by a hand-edited host.
+# Owner: AJS control-plane ops (see deploy/README.md). Source of truth: this file.
+# Scope: 2261 (ajs-accountd admin API, bearer auth) and 18082 (dashboard preview) from
+# 192.168.11.0/24 only. Gate ports stay loopback-only: acc-07's gate :13012 is NOT opened here.
+# Rollback: delete the block below, then run `nft -f /etc/nftables.conf` on the host.
+# Hot withdrawal (热撤, no file edit): nft delete rule inet egress input handle <h>
+#   find <h>: nft -a list chain inet egress input | grep '2261'
+#
+# check-nftables-drift.sh compares only the rule line; comments are ignored.
+#
+# --- begin block: identical to the live /etc/nftables.conf ---
+        # AJS 面板（2026-10-24，AJS-120）：内网直连 2261（ajs-accountd admin API，Bearer 鉴权）
+        # 与 18082（dashboard vite preview）。只开 192.168.11.0/24；acc-07 的 gate 13012 仍只听 loopback。
+        # 回滚：删本行后 nft -f /etc/nftables.conf 重载；热撤（不改文件）：nft delete rule inet egress input handle <h>
+        ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept
