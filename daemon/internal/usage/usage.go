@@ -168,6 +168,11 @@ type Summary struct {
 	// aggregator clock. Zero means the store holds no request rows. It is a
 	// property of the store, so the query window and filters do not narrow it.
 	RetentionDays int `json:"retentionDays"`
+	// QuotaEnforced reports whether the gate enforces UserUsage.QuotaBytesMonth.
+	// The gate has no quota logic today, so this is always false and the quota
+	// column stays advisory. The field is part of the wire contract so the
+	// panel can switch to enforced without a schema change.
+	QuotaEnforced bool `json:"quotaEnforced"`
 }
 
 // totals is the mutable accumulator shared by the summary and one group.

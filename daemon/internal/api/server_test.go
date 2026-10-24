@@ -1462,6 +1462,34 @@ func TestCORSPreflight(t *testing.T) {
 	}
 }
 
+func TestCORSExposesSharedResponseHeaders(t *testing.T) {
+	ts, _ := newTestServer(t)
+	req := newRequest(t, http.MethodGet, ts.URL+"/v1/accounts", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:18081")
+	resp, _ := doRequest(t, ts, req)
+	requireStatus(t, resp, http.StatusUnauthorized)
+	exposed := resp.Header.Get("Access-Control-Expose-Headers")
+	for _, header := range []string{
+		"X-Request-Id",
+		"Retry-After",
+		"X-RateLimit-Limit",
+		"X-RateLimit-Remaining",
+		"X-RateLimit-Reset",
+		"Content-Disposition",
+		"X-AJS-Export-Count",
+		"X-AJS-Export-Missing-Secrets",
+		"X-AJS-Export-Devices",
+		"X-AJS-Backup-Blobs",
+		"X-Truncated",
+		"ETag",
+		"X-APC-Server-Time",
+	} {
+		if !strings.Contains(exposed, header) {
+			t.Fatalf("expose headers = %q, missing %s", exposed, header)
+		}
+	}
+}
+
 func TestRoutingErrors(t *testing.T) {
 	ts, _ := newTestServer(t)
 

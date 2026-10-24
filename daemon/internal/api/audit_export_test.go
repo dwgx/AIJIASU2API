@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/csv"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -295,5 +298,59 @@ func TestEncodeAuditMetaStableOrder(t *testing.T) {
 	meta := map[string]string{"z": "last", "a": "first", "m": "middle"}
 	if got, want := encodeAuditMeta(meta), `{"a":"first","m":"middle","z":"last"}`; got != want {
 		t.Fatalf("meta = %q, want %q", got, want)
+	}
+}
+
+func TestNeutralizeAuditCSVFieldMatrix(t *testing.T) {
+	cases := map[string]string{
+		"":            "",
+		"plain":       "plain",
+		"=1+1":        "'=1+1",
+		"+SUM(A1)":    "'+SUM(A1)",
+		"-2+3":        "'-2+3",
+		"@cmd":        "'@cmd",
+		"\t=1+1":      "'\t=1+1",
+		"\r=1+1":      "'\r=1+1",
+		"a=b":         "a=b",
+		" mid=value ": " mid=value ",
+		"1+1":         "1+1",
+	}
+	for input, want := range cases {
+		if got := neutralizeAuditCSVField(input); got != want {
+			t.Fatalf("neutralizeAuditCSVField(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestAuditExportCSVNeutralizesFormulaCells(t *testing.T) {
+	st := store.NewEmpty()
+	server := New(Config{AdminToken: testToken}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	st.RecordAudit(model.SeverityInfo, "=actor", "+action", "-target", "@detail")
+	st.RecordAudit(model.SeverityInfo, "\tactor", "\raction", "target\t", "=1+1")
+	st.RecordAudit(model.SeverityInfo, "operator", "note", "host", "he said \"hi\", ok\nsecond line")
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/audit/export.csv", nil)
+	requireStatus(t, resp, http.StatusOK)
+	rows := readAuditCSV(t, body)
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want a header plus three events: %v", len(rows), rows)
+	}
+
+	want := [][]string{
+		{"'=actor", "'+action", "'-target", "'@detail", "{}"},
+		{"'\tactor", "'\raction", "target\t", "'=1+1", "{}"},
+		{"operator", "note", "host", "he said \"hi\", ok\nsecond line", "{}"},
+	}
+	for i, expected := range want {
+		row := rows[i+1]
+		if len(row) != len(auditExportColumns) {
+			t.Fatalf("row %d has %d columns: %v", i+1, len(row), row)
+		}
+		if got := row[2:]; strings.Join(got, "\x00") != strings.Join(expected, "\x00") {
+			t.Fatalf("row %d = %q, want %q", i+1, got, expected)
+		}
 	}
 }

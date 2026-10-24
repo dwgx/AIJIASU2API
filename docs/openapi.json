@@ -9440,6 +9440,10 @@
             "type": "integer",
             "minimum": 0,
             "description": "UTC calendar days covered by the retained rows, counted inclusively from the oldest row through now. Zero when the store holds no request rows."
+          },
+          "quotaEnforced": {
+            "type": "boolean",
+            "description": "Whether the gate enforces quotaBytesMonth. Always false today: the gate has no quota logic, so quotas are advisory. The field is part of the contract so the panel can switch to enforced without a schema change."
           }
         },
         "required": [
@@ -9454,7 +9458,8 @@
           "topTargets",
           "truncated",
           "rowsRetained",
-          "retentionDays"
+          "retentionDays",
+          "quotaEnforced"
         ]
       },
       "HealthSample": {

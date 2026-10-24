@@ -713,3 +713,23 @@ func TestRetentionFields(t *testing.T) {
 			empty.RowsRetained, empty.RetentionDays, DefaultRetentionRows)
 	}
 }
+
+func TestAggregateReportsQuotaEnforcedContract(t *testing.T) {
+	agg := New(Config{Now: func() time.Time { return testNow }})
+	summary, err := agg.Aggregate(nil, Query{})
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	// The gate has no quota logic yet, so the wire field must be present and
+	// false rather than omitted; the panel keys its advisory label off it.
+	if summary.QuotaEnforced {
+		t.Fatal("QuotaEnforced = true, but the gate does not enforce quotas")
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"quotaEnforced":false`) {
+		t.Fatalf("summary JSON omits quotaEnforced:false: %s", encoded)
+	}
+}

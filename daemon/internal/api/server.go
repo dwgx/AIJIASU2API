@@ -460,7 +460,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
 				w.Header().Set("Access-Control-Expose-Headers",
-					"X-Request-Id, Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, X-Truncated, ETag, X-APC-Server-Time")
+					"X-Request-Id, Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, X-AJS-Backup-Blobs, X-Truncated, ETag, X-APC-Server-Time")
 			}
 		}
 		if r.Method == http.MethodOptions {

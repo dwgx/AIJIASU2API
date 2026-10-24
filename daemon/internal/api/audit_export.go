@@ -43,6 +43,26 @@ var auditExportSecretAssignment = regexp.MustCompile(`(?i)\b(token|password|pass
 // value, which the generic assignment pattern only covers partially.
 var auditExportAuthorization = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+`)
 
+// auditExportFormulaPrefix lists the leading bytes a spreadsheet treats as the
+// start of a formula. A cell that starts with one is prefixed with an
+// apostrophe so Excel and LibreOffice render the text instead of evaluating
+// it. encoding/csv already quotes commas, quotes and line breaks (RFC 4180);
+// this is the spreadsheet-injection defense layered on top.
+const auditExportFormulaPrefix = "=+-@\t\r"
+
+// neutralizeAuditCSVField makes one CSV cell inert for a spreadsheet. It is
+// applied after sanitizeAuditDetail, so a redacted credential can never be
+// re-exposed by the prefix.
+func neutralizeAuditCSVField(field string) string {
+	if field == "" {
+		return field
+	}
+	if strings.IndexByte(auditExportFormulaPrefix, field[0]) >= 0 {
+		return "'" + field
+	}
+	return field
+}
+
 // handleAuditExportCSV serves GET /v1/audit/export.csv. It filters the
 // retained audit history by an inclusive RFC 3339 window and an optional
 // severity, then streams the matching rows oldest-first.
@@ -77,7 +97,7 @@ func (s *Server) handleAuditExportCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, event := range rows {
-		if err := cw.Write([]string{
+		record := []string{
 			event.TS,
 			string(event.Severity),
 			event.Actor,
@@ -85,7 +105,11 @@ func (s *Server) handleAuditExportCSV(w http.ResponseWriter, r *http.Request) {
 			event.Target,
 			sanitizeAuditDetail(event.Detail),
 			encodeAuditMeta(event.Meta),
-		}); err != nil {
+		}
+		for i := range record {
+			record[i] = neutralizeAuditCSVField(record[i])
+		}
+		if err := cw.Write(record); err != nil {
 			s.logger.Warn("audit_export_failed", "reason", "row", "error", err)
 			return
 		}

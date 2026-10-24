@@ -115,6 +115,16 @@ func TestUsageSummaryAndValidation(t *testing.T) {
 	if summary.RetentionDays <= 0 {
 		t.Fatalf("retentionDays = %d, want a positive retained span", summary.RetentionDays)
 	}
+	if summary.QuotaEnforced {
+		t.Fatal("quotaEnforced = true, but the gate has no quota logic")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode raw usage body %q: %v", body, err)
+	}
+	if value, ok := raw["quotaEnforced"]; !ok || string(value) != "false" {
+		t.Fatalf("quotaEnforced wire value = %s (present %v), want false", value, ok)
+	}
 
 	// The account filter accepts the label or the account id.
 	resp, body = apiCall(t, ts, http.MethodGet,
@@ -193,6 +203,7 @@ type usageSummary struct {
 	Bytes         int64 `json:"bytes"`
 	RowsRetained  int   `json:"rowsRetained"`
 	RetentionDays int   `json:"retentionDays"`
+	QuotaEnforced bool  `json:"quotaEnforced"`
 	Days          []struct {
 		Day string `json:"day"`
 	} `json:"days"`
