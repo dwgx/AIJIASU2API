@@ -13,7 +13,7 @@ import (
 func TestStartSchedulerDisabledByDefault(t *testing.T) {
 	t.Setenv("AJS_SCHEDULES", "")
 	service, stop, err := startScheduler(context.Background(), store.NewEmpty(),
-		slog.New(slog.NewTextHandler(io.Discard, nil)), filepath.Join(t.TempDir(), "state.json"), nil, 1)
+		slog.New(slog.NewTextHandler(io.Discard, nil)), filepath.Join(t.TempDir(), "state.json"), nil, 1, nil)
 	if err != nil {
 		t.Fatalf("startScheduler: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestStartSchedulerEnabledStartsAndStops(t *testing.T) {
 	t.Setenv("AJS_SCHEDULER_TICK", "1s")
 	dir := t.TempDir()
 	service, stop, err := startScheduler(context.Background(), store.NewEmpty(),
-		slog.New(slog.NewTextHandler(io.Discard, nil)), filepath.Join(dir, "state.json"), nil, 1)
+		slog.New(slog.NewTextHandler(io.Discard, nil)), filepath.Join(dir, "state.json"), nil, 1, nil)
 	if err != nil {
 		t.Fatalf("startScheduler: %v", err)
 	}

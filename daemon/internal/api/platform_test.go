@@ -1,0 +1,470 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"ajsaccountd/internal/health"
+	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/renewal"
+	"ajsaccountd/internal/runtime"
+	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/usage"
+	"ajsaccountd/internal/webhook"
+)
+
+func newPlatformServer(t *testing.T, cfg Config) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st := store.New()
+	cfg.AdminToken = testToken
+	server := New(cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+	return ts, st
+}
+
+func TestRenewalPlansStaticFallback(t *testing.T) {
+	// The fetcher points at a closed loopback port, so the live refresh fails
+	// and the service must serve its built-in table with source=static.
+	service := renewal.New(renewal.Config{BaseURL: "http://127.0.0.1:1", TTL: time.Hour})
+	ts, _ := newPlatformServer(t, Config{Renewal: service})
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/renewal/plans", nil)
+	requireStatus(t, resp, http.StatusOK)
+	snapshot := decodeBody[renewal.PlansSnapshot](t, body)
+	if snapshot.Source != renewal.SourceStatic {
+		t.Fatalf("source = %q, want %q (body %s)", snapshot.Source, renewal.SourceStatic, body)
+	}
+	if !snapshot.Stale {
+		t.Fatalf("static fallback must report stale")
+	}
+	if len(snapshot.Plans) == 0 {
+		t.Fatalf("static snapshot has no plans")
+	}
+}
+
+func TestRenewalAccountStates(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{Renewal: renewal.New(renewal.Config{BaseURL: "http://127.0.0.1:1"})})
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/renewal/accounts/acc-01", nil)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[renewal.AccountRenewal](t, body)
+	if active.AccountID != "acc-01" {
+		t.Fatalf("accountId = %q, want acc-01", active.AccountID)
+	}
+	if active.RenewalURL != renewal.OfficialPurchaseURL {
+		t.Fatalf("renewalUrl = %q, want %q", active.RenewalURL, renewal.OfficialPurchaseURL)
+	}
+	if active.DaysLeft <= 0 || active.Urgency != renewal.UrgencyNone {
+		t.Fatalf("active account daysLeft=%d urgency=%q, want a positive none-urgency window", active.DaysLeft, active.Urgency)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/renewal/accounts/acc-06", nil)
+	requireStatus(t, resp, http.StatusOK)
+	expired := decodeBody[renewal.AccountRenewal](t, body)
+	if expired.Urgency != renewal.UrgencyOverdue || expired.DaysLeft >= 0 {
+		t.Fatalf("expired account daysLeft=%d urgency=%q, want overdue", expired.DaysLeft, expired.Urgency)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/renewal/accounts/acc-unknown", nil)
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, body, CodeNotFound)
+}
+
+func TestRenewalDisabled(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{})
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/renewal/plans", nil)
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/renewal/accounts/acc-01", nil)
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+}
+
+func TestUsageSummaryAndValidation(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
+	now := time.Now().UTC()
+	from := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	to := now.Add(time.Hour).Format(time.RFC3339)
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/usage?from="+from+"&to="+to, nil)
+	requireStatus(t, resp, http.StatusOK)
+	summary := decodeBody[usageSummary](t, body)
+	if summary.Requests == 0 {
+		t.Fatalf("usage summary counted no seeded requests (body %s)", body)
+	}
+	if len(summary.Days) != 3 {
+		t.Fatalf("days = %d, want 3 for a 48h window", len(summary.Days))
+	}
+	if len(summary.Accounts) == 0 {
+		t.Fatalf("usage summary has no account roll-up")
+	}
+
+	// The account filter accepts the label or the account id.
+	resp, body = apiCall(t, ts, http.MethodGet,
+		"/v1/usage?from="+from+"&to="+to+"&account=Northwind+Ops", nil)
+	requireStatus(t, resp, http.StatusOK)
+	filtered := decodeBody[usageSummary](t, body)
+	if len(filtered.Accounts) != 1 || filtered.Accounts[0].Account != "Northwind Ops" {
+		t.Fatalf("account filter returned %+v", filtered.Accounts)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet,
+		"/v1/usage?from="+from+"&to="+to+"&account=acc-01", nil)
+	requireStatus(t, resp, http.StatusOK)
+	byID := decodeBody[usageSummary](t, body)
+	if len(byID.Accounts) != 1 || byID.Accounts[0].Account != "Northwind Ops" {
+		t.Fatalf("account id filter returned %+v", byID.Accounts)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/usage?from=not-a-date", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+
+	// A reversed window and a window beyond usage.MaxWindowDays are both 400.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/usage?from=2026-10-25&to=2026-10-24", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/usage?from=2000-01-01&to=2026-10-24", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+}
+
+// usageSummary mirrors the fields this test asserts; the wire type itself is
+// usage.Summary.
+type usageSummary struct {
+	Requests int `json:"requests"`
+	Days     []struct {
+		Day string `json:"day"`
+	} `json:"days"`
+	Accounts []struct {
+		Account string `json:"account"`
+	} `json:"accounts"`
+}
+
+func usageAggregator() *usage.Aggregator {
+	return usage.New(usage.Config{})
+}
+
+func TestHealthNodesDisabled(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{})
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/health/nodes", nil)
+	requireStatus(t, resp, http.StatusOK)
+	var payload struct {
+		Enabled bool              `json:"enabled"`
+		Reason  string            `json:"reason"`
+		Nodes   []json.RawMessage `json:"nodes"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode health body %q: %v", body, err)
+	}
+	if payload.Enabled {
+		t.Fatal("health reported enabled without a sampler")
+	}
+	if payload.Reason == "" {
+		t.Fatal("disabled health must carry a reason")
+	}
+	if payload.Nodes == nil {
+		t.Fatalf("disabled health nodes must be an empty array, got %s", body)
+	}
+}
+
+func TestHealthNodesReportsWatchedNode(t *testing.T) {
+	sampler := health.New(health.Config{
+		Interval: time.Hour,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			client, server := net.Pipe()
+			_ = server.Close()
+			return client, nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sampler.Start(ctx)
+	t.Cleanup(sampler.Stop)
+
+	ts, st := newPlatformServer(t, Config{Health: sampler})
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-1", AccountID: "acc-01", Label: "test-node-one", Region: "test-region",
+		State: model.NodeLive, GatePort: 20001, Capacity: 10, Protocol: model.ProtocolSOCKS5,
+	}); err != nil {
+		t.Fatalf("put node: %v", err)
+	}
+	if err := sampler.Watch("node-1", 20001); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	waitForSample(t, sampler, "node-1")
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/health/nodes", nil)
+	requireStatus(t, resp, http.StatusOK)
+	var payload struct {
+		Enabled bool             `json:"enabled"`
+		Nodes   []healthNodeView `json:"nodes"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode health body %q: %v", body, err)
+	}
+	if !payload.Enabled || len(payload.Nodes) != 1 {
+		t.Fatalf("health payload = %+v, want one watched node", payload)
+	}
+	node := payload.Nodes[0]
+	if node.NodeID != "node-1" || node.State != health.StateOK || node.Count == 0 || node.OK == 0 {
+		t.Fatalf("health node = %+v, want an ok sample", node)
+	}
+	if node.Last == nil || !node.Last.OK {
+		t.Fatalf("health node has no successful last sample: %+v", node)
+	}
+}
+
+func waitForSample(t *testing.T, sampler *health.Sampler, key string) health.Stats {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if stats, ok := sampler.Stats(key); ok && stats.Count > 0 {
+			return stats
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("sampler recorded no sample for %q", key)
+	return health.Stats{}
+}
+
+func TestWebhookCRUDAndDeliveryRing(t *testing.T) {
+	dispatcher := webhook.New(webhook.Config{Workers: 1, Backoff: []time.Duration{0}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	ts, _ := newPlatformServer(t, Config{Webhooks: dispatcher})
+
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/webhooks", map[string]any{
+		"url":         "http://127.0.0.1:9/hook",
+		"events":      []string{"account.login", "node.connected"},
+		"description": "test receiver",
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	created := decodeBody[webhookCreated](t, body)
+	if created.ID == "" || created.Secret == "" {
+		t.Fatalf("create returned id=%q secret-empty=%t", created.ID, created.Secret == "")
+	}
+	if !created.SecretAvailable || !created.Enabled {
+		t.Fatalf("created endpoint = %+v, want an enabled endpoint with a secret", created)
+	}
+	secret := created.Secret
+
+	// The list must never expose the secret.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks", nil)
+	requireStatus(t, resp, http.StatusOK)
+	list := decodeBody[[]webhookEndpointView](t, body)
+	if len(list) != 1 || list[0].ID != created.ID || !list[0].SecretAvailable {
+		t.Fatalf("list = %+v, want the created endpoint", list)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("list response leaked the signing secret: %s", body)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+created.ID+"/deliveries", nil)
+	requireStatus(t, resp, http.StatusOK)
+	deliveries := decodeBody[[]webhook.Delivery](t, body)
+	if len(deliveries) != 0 {
+		t.Fatalf("deliveries = %+v, want empty", deliveries)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodPatch, "/v1/webhooks/"+created.ID, map[string]any{"enabled": false})
+	requireStatus(t, resp, http.StatusOK)
+	patched := decodeBody[webhookEndpointView](t, body)
+	if patched.Enabled {
+		t.Fatalf("patch did not disable the endpoint: %+v", patched)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodDelete, "/v1/webhooks/"+created.ID, nil)
+	requireStatus(t, resp, http.StatusNoContent)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if list := decodeBody[[]webhookEndpointView](t, body); len(list) != 0 {
+		t.Fatalf("list after delete = %+v, want empty", list)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+created.ID+"/deliveries", nil)
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, body, CodeNotFound)
+}
+
+func TestWebhookCreateRollsBackInvalidReceiver(t *testing.T) {
+	dispatcher := webhook.New(webhook.Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	ts, _ := newPlatformServer(t, Config{Webhooks: dispatcher})
+
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/webhooks", map[string]any{
+		"url": "ftp://example.com/hook",
+	})
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if list := decodeBody[[]webhookEndpointView](t, body); len(list) != 0 {
+		t.Fatalf("invalid receiver was not rolled back: %+v", list)
+	}
+}
+
+func TestWebhookDisabled(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{})
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/webhooks", map[string]any{"url": "https://example.com/hook"})
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if list := decodeBody[[]webhookEndpointView](t, body); len(list) != 0 {
+		t.Fatalf("disabled webhook list = %+v, want empty", list)
+	}
+}
+
+type recordedEvent struct {
+	event webhook.EventType
+	data  map[string]any
+}
+
+type recordingSink struct {
+	mu     sync.Mutex
+	events []recordedEvent
+}
+
+func (s *recordingSink) Emit(event webhook.EventType, data map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, recordedEvent{event: event, data: data})
+}
+
+func (s *recordingSink) types() []webhook.EventType {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]webhook.EventType, 0, len(s.events))
+	for _, event := range s.events {
+		out = append(out, event.event)
+	}
+	return out
+}
+
+func (s *recordingSink) count(event webhook.EventType) int {
+	count := 0
+	for _, got := range s.types() {
+		if got == event {
+			count++
+		}
+	}
+	return count
+}
+
+type recordingHealth struct {
+	mu        sync.Mutex
+	watched   map[string]int
+	unwatched []string
+}
+
+func (h *recordingHealth) Watch(key string, port int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.watched == nil {
+		h.watched = make(map[string]int)
+	}
+	h.watched[key] = port
+	return nil
+}
+
+func (h *recordingHealth) Unwatch(key string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.watched, key)
+	h.unwatched = append(h.unwatched, key)
+}
+
+func (h *recordingHealth) Stats(string) (health.Stats, bool) { return health.Stats{}, false }
+
+func (h *recordingHealth) watchPort(key string) (int, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	port, ok := h.watched[key]
+	return port, ok
+}
+
+func TestEventEmissionAndHealthLifecycle(t *testing.T) {
+	catalog := &fakeCatalog{}
+	sink := &recordingSink{}
+	probes := &recordingHealth{}
+	ts, _ := newPlatformServer(t, Config{
+		Catalog: catalog,
+		Events:  sink,
+		Health:  probes,
+	})
+
+	resp, _ := apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/login", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if sink.count(webhook.EventAccountLogin) != 1 {
+		t.Fatalf("login emitted %v, want account.login", sink.types())
+	}
+
+	catalog.connect = runtime.SwitchResult{
+		AccountID: "acc-01", NodeID: "acc-01:srv-1", ServerID: "srv-1",
+		NodeState: model.NodeLive, GatePort: 20001,
+	}
+	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/connect", map[string]any{
+		"confirm": true, "serverId": "srv-1",
+	})
+	requireStatus(t, resp, http.StatusOK)
+	if sink.count(webhook.EventNodeConnected) != 1 {
+		t.Fatalf("connect emitted %v, want node.connected", sink.types())
+	}
+	if port, ok := probes.watchPort("acc-01:srv-1"); !ok || port != 20001 {
+		t.Fatalf("health did not watch the connected gate: port=%d ok=%t", port, ok)
+	}
+
+	// A switch emits node.switched and drops the old gate from the sampler.
+	catalog.connect = runtime.SwitchResult{
+		AccountID: "acc-01", NodeID: "acc-01:srv-2", ServerID: "srv-2", SwitchedFrom: "srv-1",
+		NodeState: model.NodeLive, GatePort: 20002,
+	}
+	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/connect", map[string]any{
+		"confirm": true, "serverId": "srv-2",
+	})
+	requireStatus(t, resp, http.StatusOK)
+	if sink.count(webhook.EventNodeSwitched) != 1 {
+		t.Fatalf("switch emitted %v, want node.switched", sink.types())
+	}
+	if _, ok := probes.watchPort("acc-01:srv-1"); ok {
+		t.Fatal("switch kept sampling the old gate")
+	}
+	if port, ok := probes.watchPort("acc-01:srv-2"); !ok || port != 20002 {
+		t.Fatalf("health did not watch the switched gate: port=%d ok=%t", port, ok)
+	}
+
+	catalog.disconnect = runtime.DisconnectResult{
+		AccountID: "acc-01", NodeID: "acc-01:srv-2", ServerID: "srv-2", ActiveFlows: 1,
+	}
+	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/disconnect", map[string]any{
+		"confirm": true,
+	})
+	requireStatus(t, resp, http.StatusOK)
+	if sink.count(webhook.EventNodeDisconnected) != 1 {
+		t.Fatalf("disconnect emitted %v, want node.disconnected", sink.types())
+	}
+	if _, ok := probes.watchPort("acc-01:srv-2"); ok {
+		t.Fatal("disconnect kept sampling the closed gate")
+	}
+
+	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/logout", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if sink.count(webhook.EventAccountLogout) != 1 {
+		t.Fatalf("logout emitted %v, want account.logout", sink.types())
+	}
+}

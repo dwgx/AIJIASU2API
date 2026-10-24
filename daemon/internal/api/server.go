@@ -22,6 +22,8 @@ import (
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/usage"
+	"ajsaccountd/internal/webhook"
 )
 
 // Error codes. The first five are the contract codes from docs/PANEL.md §3;
@@ -34,6 +36,7 @@ const (
 	CodeQuotaExceeded       = "QUOTA_EXCEEDED"
 	CodeRateLimited         = "RATE_LIMITED"
 	CodeUnauthorized        = "UNAUTHORIZED"
+	CodeForbidden           = "FORBIDDEN"
 	CodeMethodNotAllowed    = "METHOD_NOT_ALLOWED"
 	CodeInternal            = "INTERNAL"
 )
@@ -139,6 +142,24 @@ type Config struct {
 	// Schedules is the scheduler engine. Nil means AJS_SCHEDULES=0: the read
 	// routes and the pure preview still work, every mutation answers 503.
 	Schedules ScheduleService
+	// Renewal is the cached public plan catalogue and per-account expiry
+	// derivation. Nil answers 503 on both renewal routes.
+	Renewal RenewalService
+	// Usage aggregates the request log. Nil answers 503 on GET /v1/usage.
+	Usage *usage.Aggregator
+	// Health is the loopback gate sampler. Nil means AJS_HEALTH_PROBE=0 and
+	// GET /v1/health/nodes reports enabled:false with a reason.
+	Health HealthMonitor
+	// Webhooks is the delivery dispatcher. Nil disables the webhook feature:
+	// GET /v1/webhooks still lists persisted rows, every mutation answers 503.
+	Webhooks *webhook.Dispatcher
+	// WebhookSecrets seals endpoint signing secrets at rest. Nil keeps them in
+	// process memory only, so they do not survive a restart; the daemon logs
+	// and documents that caveat.
+	WebhookSecrets WebhookSecretStore
+	// Events receives customer-visible events (login/logout, node and schedule
+	// transitions). Nil drops them.
+	Events EventSink
 }
 
 // Server wires the store to an http.Handler.
@@ -154,6 +175,11 @@ type Server struct {
 	// concurrent bulk operation into 409 instead of queueing memory- and
 	// CPU-heavy work behind it.
 	accountIOMu sync.Mutex
+
+	// webhookMu guards webhookSecrets, the in-memory fallback used when no
+	// secret.Store is configured. With a sealer the map stays empty.
+	webhookMu      sync.Mutex
+	webhookSecrets map[string]string
 }
 
 // New builds a server. Nil store and logger fall back to a seeded store and
@@ -182,6 +208,9 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 		}
 	}
 	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, started: time.Now()}
+	if cfg.WebhookSecrets == nil {
+		s.webhookSecrets = make(map[string]string)
+	}
 	s.handler = s.buildHandler()
 	return s
 }
@@ -222,6 +251,19 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/logout", s.handleLogoutAccount)
 	rt.handle(http.MethodGet, "/v1/accounts/{id}/servers", s.handleAccountServers)
 	rt.handle(http.MethodGet, "/v1/accounts/{id}/device", s.handleAccountDevice)
+
+	rt.handle(http.MethodGet, "/v1/device-pool", s.handleListDevicePool)
+	rt.handle(http.MethodPost, "/v1/device-pool/generate", s.handleGenerateDevices)
+	rt.handle(http.MethodPost, "/v1/device-pool/export", s.handleExportDevicePool)
+	rt.handle(http.MethodPost, "/v1/device-pool/import", s.handleImportDevicePool)
+	rt.handle(http.MethodGet, "/v1/device-pool/{id}", s.handleGetDevicePoolRecord)
+	rt.handle(http.MethodPatch, "/v1/device-pool/{id}", s.handlePatchDevicePoolRecord)
+	rt.handle(http.MethodPost, "/v1/device-pool/{id}/assign", s.handleAssignDevicePoolRecord)
+	rt.handle(http.MethodPost, "/v1/device-pool/{id}/release", s.handleReleaseDevicePoolRecord)
+	rt.handle(http.MethodPost, "/v1/device-pool/{id}/retire", s.handleRetireDevicePoolRecord)
+	rt.handle(http.MethodPost, "/v1/device-pool/{id}/quarantine", s.handleQuarantineDevicePoolRecord)
+	rt.handle(http.MethodPost, "/v1/device-pool/{id}/purge", s.handlePurgeDevicePoolRecord)
+
 	rt.handle(http.MethodGet, "/v1/accounts/{id}/selection", s.handleGetSelection)
 	rt.handle(http.MethodPut, "/v1/accounts/{id}/selection", s.handlePutSelection)
 	rt.handle(http.MethodDelete, "/v1/accounts/{id}/selection", s.handleDeleteSelection)
@@ -273,15 +315,35 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/apikeys", s.handleCreateKey)
 	rt.handle(http.MethodDelete, "/v1/apikeys/{id}", s.handleDeleteKey)
 
+	rt.handle(http.MethodGet, "/v1/scoped-keys", s.handleListScopedKeys)
+	rt.handle(http.MethodPost, "/v1/scoped-keys", s.handleCreateScopedKey)
+	rt.handle(http.MethodGet, "/v1/scoped-keys/{id}", s.handleGetScopedKey)
+	rt.handle(http.MethodDelete, "/v1/scoped-keys/{id}", s.handleDeleteScopedKey)
+
 	rt.handle(http.MethodGet, "/v1/requests", s.handleListRequests)
 	rt.handle(http.MethodPost, "/v1/requests/mutations", s.handleCreateMutation)
 	rt.handle(http.MethodGet, "/v1/audit", s.handleAudit)
+	rt.handle(http.MethodGet, "/v1/audit/export.csv", s.handleAuditExportCSV)
 
 	rt.handle(http.MethodGet, "/v1/settings", s.handleGetSettings)
 	rt.handle(http.MethodPatch, "/v1/settings", s.handlePatchSettings)
 	rt.handle(http.MethodGet, "/v1/topology", s.handleTopologyView)
 	rt.handle(http.MethodGet, "/v1/system/update", s.handleSystemUpdate)
+	rt.handle(http.MethodGet, "/v1/openapi.json", s.handleOpenAPISpec)
 	rt.handle(http.MethodPost, "/v1/reconcile", s.handleReconcile)
+
+	// Platform routes (AJS-205). The renewal and usage routes are read-only
+	// views; health reports the loopback sampler; webhooks manage the persisted
+	// receivers and their delivery ring.
+	rt.handle(http.MethodGet, "/v1/renewal/plans", s.handleRenewalPlans)
+	rt.handle(http.MethodGet, "/v1/renewal/accounts/{id}", s.handleRenewalAccount)
+	rt.handle(http.MethodGet, "/v1/usage", s.handleUsage)
+	rt.handle(http.MethodGet, "/v1/health/nodes", s.handleHealthNodes)
+	rt.handle(http.MethodGet, "/v1/webhooks", s.handleListWebhooks)
+	rt.handle(http.MethodPost, "/v1/webhooks", s.handleCreateWebhook)
+	rt.handle(http.MethodPatch, "/v1/webhooks/{id}", s.handlePatchWebhook)
+	rt.handle(http.MethodDelete, "/v1/webhooks/{id}", s.handleDeleteWebhook)
+	rt.handle(http.MethodGet, "/v1/webhooks/{id}/deliveries", s.handleWebhookDeliveries)
 }
 
 // handleTopologyView serves the Resin panel view when configured and the
@@ -353,7 +415,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
 				w.Header().Set("Access-Control-Expose-Headers",
-					"X-Request-Id, Retry-After, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, ETag, X-APC-Server-Time")
+					"X-Request-Id, Retry-After, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, X-Truncated, ETag, X-APC-Server-Time")
 			}
 		}
 		if r.Method == http.MethodOptions {
@@ -374,9 +436,12 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 		if r.Body != nil {
 			limit := s.cfg.MaxBodyBytes
 			// Base64 and JSON overhead can inflate a 1 MiB decoded document,
-			// so the import route gets a 4 MiB cap.
-			if r.URL.Path == "/v1/accounts/import" {
+			// so the import routes get their own cap.
+			switch r.URL.Path {
+			case "/v1/accounts/import":
 				limit = store.MaxImportBodyBytes
+			case "/v1/device-pool/import":
+				limit = store.DeviceImportMaxBytes
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
@@ -384,8 +449,11 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 	})
 }
 
-// auth protects the dashboard API and the Prometheus /metrics endpoint with
-// the same bearer token (or AllowInsecure); /healthz stays open.
+// auth protects the dashboard API and the Prometheus /metrics endpoint. The
+// admin bearer token is tried first in constant time; failing that, an
+// ajs_sk_ scoped key is resolved by its SHA-256. Scoped keys then pass the
+// account restriction check and the router enforces the per-route scope.
+// /healthz stays open, and AllowInsecure disables the check entirely.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1/") && r.URL.Path != "/metrics" {
@@ -398,13 +466,28 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		const prefix = "Bearer "
 		header := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(header, prefix)
-		if s.cfg.AdminToken == "" || !strings.HasPrefix(header, prefix) ||
-			subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) != 1 {
+		if !strings.HasPrefix(header, prefix) {
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
 			return
 		}
-		next.ServeHTTP(w, r)
+		token := strings.TrimPrefix(header, prefix)
+		if s.cfg.AdminToken != "" &&
+			subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) == 1 {
+			next.ServeHTTP(w, withAuthIdentity(r, authIdentity{admin: true}))
+			return
+		}
+		key, ok := s.store.AuthenticateScopedKey(token)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		if s.scopedKeyDeniesRequest(key, r) {
+			writeError(w, http.StatusForbidden, CodeForbidden,
+				"scoped key is not allowed to read this account")
+			return
+		}
+		s.store.MarkScopedKeyUsed(key.ID)
+		next.ServeHTTP(w, withAuthIdentity(r, authIdentity{key: key}))
 	})
 }
 
@@ -466,6 +549,11 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		allowed = append(allowed, candidate.method)
 		if candidate.method != r.Method {
 			continue
+		}
+		if identity, ok := authIdentityFrom(r); ok && !identity.allowsRoute(candidate.method, candidate.pattern) {
+			writeError(w, http.StatusForbidden, CodeForbidden,
+				"scoped key lacks the scope required by this route")
+			return
 		}
 		ctx := context.WithValue(r.Context(), paramsKey{}, params)
 		candidate.handler(w, r.WithContext(ctx))

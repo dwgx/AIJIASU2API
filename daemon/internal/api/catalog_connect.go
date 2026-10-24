@@ -171,6 +171,7 @@ func (s *Server) handleConnectAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeCatalogError(w, err)
 		return
 	}
+	s.observeConnect(result)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -200,6 +201,7 @@ func (s *Server) handleDisconnectAccount(w http.ResponseWriter, r *http.Request)
 		s.writeCatalogError(w, err)
 		return
 	}
+	s.observeDisconnect(result)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -229,6 +231,7 @@ func (s *Server) handleReconnectAccount(w http.ResponseWriter, r *http.Request) 
 		s.writeCatalogError(w, err)
 		return
 	}
+	s.observeConnect(result)
 	writeJSON(w, http.StatusOK, result)
 }
 

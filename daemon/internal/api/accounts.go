@@ -9,11 +9,12 @@ import (
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
-	accounts := s.store.Accounts()
+	accounts := s.filterAccountsForRequest(r, s.store.Accounts())
 	filtered := make([]model.Account, 0, len(accounts))
 	for _, account := range accounts {
 		if state != "" && string(account.State) != state {
@@ -69,6 +70,9 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("account %q not found", id))
 		return
 	}
+	// The store cascade removes the node rows, so the sampler keys must be
+	// captured before the mutation.
+	nodeIDs := s.accountNodeIDs(id)
 	if err := s.runAccountDeleteHook(r.Context(), id); err != nil {
 		// A hook failure is a runtime failure, not a store contract error, so
 		// it answers 500 instead of the mapped store status. The detail stays
@@ -83,6 +87,9 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cfg.LoginService != nil {
 		s.cfg.LoginService.Forget(id)
+	}
+	for _, nodeID := range nodeIDs {
+		s.unwatchHealth(nodeID)
 	}
 	// The hook only stopped gates; the nodes were still LIVE when it ran, so
 	// the reconcile that drops the account's tags must happen after the store
@@ -110,6 +117,11 @@ func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreError(w, err)
 			return
 		}
+		s.emit(webhook.EventAccountLogin, map[string]any{
+			"accountId": updated.ID,
+			"label":     updated.Label,
+			"state":     string(updated.State),
+		})
 		writeJSON(w, http.StatusOK, updated)
 		return
 	}
@@ -119,6 +131,14 @@ func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.runLoginHook(r.Context(), id)
+	// The login hook opens one gate per usable server, outside the connect
+	// handler; register those gates with the sampler now.
+	s.watchAccountHealth(id)
+	s.emit(webhook.EventAccountLogin, map[string]any{
+		"accountId": updated.ID,
+		"label":     updated.Label,
+		"state":     string(updated.State),
+	})
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -181,6 +201,13 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 	// store.LogoutAccount paused the account and drained its nodes; publish
 	// that state now, because the pre-mutation hook did not reconcile.
 	s.reconcileAccountMutation(r.Context(), id, "logout")
+	// The drained nodes no longer serve traffic; stop probing them.
+	s.unwatchAccountHealth(id)
+	s.emit(webhook.EventAccountLogout, map[string]any{
+		"accountId": account.ID,
+		"label":     account.Label,
+		"state":     string(account.State),
+	})
 	writeJSON(w, http.StatusOK, account)
 }
 

@@ -20,19 +20,26 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	_ "time/tzdata"
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
+	"ajsaccountd/internal/health"
 	"ajsaccountd/internal/lablog"
+	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/publisher"
+	"ajsaccountd/internal/renewal"
 	"ajsaccountd/internal/resin"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/schedule"
 	"ajsaccountd/internal/secret"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/usage"
+	"ajsaccountd/internal/webhook"
 	"ajsproxy/fvfacade"
 )
 
@@ -169,6 +176,42 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Platform services (AJS-205). The renewal catalogue is anonymous and
+	// read-only; usage is a pure aggregator over the request log; the health
+	// sampler probes only loopback gate ports; the webhook dispatcher fans
+	// customer events out to the persisted receivers.
+	renewalService := renewal.New(renewal.Config{})
+	usageAggregator := usage.New(usage.Config{})
+
+	var healthSampler *health.Sampler
+	var healthView api.HealthMonitor
+	var healthWatches *healthTracker
+	if os.Getenv("AJS_HEALTH_PROBE") == "0" {
+		logger.Info("health_probe_disabled", "reason", "AJS_HEALTH_PROBE=0")
+	} else {
+		healthSampler = health.New(health.Config{MaxNodes: healthMaxNodes})
+		healthSampler.Start(ctx)
+		// Registered before the controller's stop defer, so probes stop after
+		// the gates they sample are closed.
+		defer healthSampler.Stop()
+		healthWatches = newHealthTracker(healthSampler)
+		healthView = healthWatches
+		logger.Info("health_probe_enabled",
+			"interval", health.DefaultInterval.String(),
+			"timeout", health.DefaultTimeout.String(),
+			"max_nodes", healthMaxNodes)
+	}
+
+	var webhookSecrets api.WebhookSecretStore
+	if secrets != nil {
+		webhookSecrets = sealedWebhookSecrets{store: secrets}
+	} else {
+		logger.Warn("webhook_secrets_memory_only",
+			"reason", "AJS_MASTER_KEY is not set; endpoint secrets do not survive a restart")
+	}
+	webhookDispatcher, events := startWebhooks(st, logger, webhookSecrets)
+	defer func() { _ = webhookDispatcher.Close() }()
+
 	panel, err := startResinPanel(ctx, st, logger, resinOptions{
 		url:              *resinURL,
 		token:            *resinToken,
@@ -228,9 +271,12 @@ func run() error {
 			}
 			return controller.UndrainNode(ctx, nodeID)
 		}
+		if healthWatches != nil {
+			go runHealthReconciler(ctx, controller, healthWatches)
+		}
 	}
 
-	scheduleService, stopScheduler, err := startScheduler(ctx, st, logger, statePath, controller, nodeLimitValue)
+	scheduleService, stopScheduler, err := startScheduler(ctx, st, logger, statePath, controller, nodeLimitValue, events)
 	if err != nil {
 		return err
 	}
@@ -294,6 +340,12 @@ func run() error {
 		Lab:                  labView,
 		Catalog:              catalogConnector,
 		Schedules:            scheduleService,
+		Renewal:              renewalService,
+		Usage:                usageAggregator,
+		Health:               healthView,
+		Webhooks:             webhookDispatcher,
+		WebhookSecrets:       webhookSecrets,
+		Events:               events,
 		AllowPlaintextExport: os.Getenv("AJS_ALLOW_PLAINTEXT_EXPORT") == "1",
 		Persist: func() {
 			saveState(st, statePath, logger, "account-io")
@@ -341,7 +393,7 @@ func run() error {
 // AJS_SCHEDULES=1. The default is off, matching DESIGN-SCHEDULE §10.2: the
 // read routes and the pure preview still work, but no goroutine runs and no
 // mutation is accepted. A nil service means disabled.
-func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, statePath string, controller *runtime.NodeController, nodeLimit int) (api.ScheduleService, func(), error) {
+func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, statePath string, controller *runtime.NodeController, nodeLimit int, events api.EventSink) (api.ScheduleService, func(), error) {
 	if os.Getenv("AJS_SCHEDULES") != "1" {
 		logger.Info("scheduler_disabled", "reason", "AJS_SCHEDULES is not 1")
 		return nil, nil, nil
@@ -417,6 +469,20 @@ func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, s
 		RenewalLeadDays:   leadDays,
 		RenewalHour:       renewalHour,
 		RenewalTimezone:   timezone,
+		OnRun: func(schedule model.Schedule, run model.ScheduleRun) {
+			if events == nil {
+				return
+			}
+			switch run.Result {
+			case "ok":
+				events.Emit(webhook.EventScheduleFired, scheduleEventData(schedule, run))
+			case "error":
+				events.Emit(webhook.EventScheduleFailed, scheduleEventData(schedule, run))
+			}
+		},
+		OnReminder: func(reminder schedule.ReminderEvent) {
+			emitRenewalEvent(events, reminder)
+		},
 	})
 	if err != nil {
 		_ = fireLog.Close()
@@ -439,6 +505,277 @@ func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, s
 		_ = fireLog.Close()
 	}
 	return engine, stop, nil
+}
+
+// healthMaxNodes bounds the sampler's node rings. Eight watched gates is the
+// console contract for AJS-205; the sampler evicts the least recently used
+// ring beyond it.
+const healthMaxNodes = 8
+
+// healthReconcileInterval is how often the sampler is re-aligned with the
+// controller's running gates. The API updates it immediately on
+// connect/disconnect/login/logout; the sweep covers gates opened by the
+// scheduler, which never passes through an API handler.
+const healthReconcileInterval = 15 * time.Second
+
+// healthTracker adapts *health.Sampler to api.HealthMonitor and remembers the
+// watched keys, so the reconciler can unwatch gates the controller no longer
+// runs. It serializes Watch/Unwatch because a port change needs the sampler's
+// retained ring re-armed, and Unwatch waits for the probe goroutine.
+type healthTracker struct {
+	sampler *health.Sampler
+
+	mu      sync.Mutex
+	watched map[string]int
+}
+
+func newHealthTracker(sampler *health.Sampler) *healthTracker {
+	return &healthTracker{sampler: sampler, watched: make(map[string]int)}
+}
+
+func (t *healthTracker) Watch(key string, port int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if current, ok := t.watched[key]; ok && current != port {
+		t.sampler.Unwatch(key)
+		delete(t.watched, key)
+	}
+	if err := t.sampler.Watch(key, port); err != nil {
+		return err
+	}
+	t.watched[key] = port
+	return nil
+}
+
+func (t *healthTracker) Unwatch(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sampler.Unwatch(key)
+	delete(t.watched, key)
+}
+
+func (t *healthTracker) Stats(key string) (health.Stats, bool) {
+	return t.sampler.Stats(key)
+}
+
+// snapshot returns a copy of the watched key→port map.
+func (t *healthTracker) snapshot() map[string]int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]int, len(t.watched))
+	for key, port := range t.watched {
+		out[key] = port
+	}
+	return out
+}
+
+// runHealthReconciler keeps the sampler aligned with the controller's live
+// gates until ctx is cancelled.
+func runHealthReconciler(ctx context.Context, controller *runtime.NodeController, tracker *healthTracker) {
+	ticker := time.NewTicker(healthReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcileHealthWatches(controller, tracker)
+		}
+	}
+}
+
+// reconcileHealthWatches watches every running gate and unwatches keys the
+// controller no longer runs. controller.Snapshot is the authoritative running
+// set; store nodes may outlive their gate after a restart.
+func reconcileHealthWatches(controller *runtime.NodeController, tracker *healthTracker) {
+	live := make(map[string]int)
+	for _, node := range controller.Snapshot() {
+		if node.Port <= 0 {
+			continue
+		}
+		live[node.NodeID] = node.Port
+	}
+	current := tracker.snapshot()
+	for key, port := range live {
+		if got, ok := current[key]; ok && got == port {
+			continue
+		}
+		_ = tracker.Watch(key, port)
+	}
+	for key := range tracker.snapshot() {
+		if _, ok := live[key]; !ok {
+			tracker.Unwatch(key)
+		}
+	}
+}
+
+// sealedWebhookSecrets stores webhook signing secrets through secret.Store.
+// The AAD label is namespaced so a webhook id can never collide with an
+// account id, and pruneSecrets keeps these entries.
+type sealedWebhookSecrets struct{ store *secret.Store }
+
+func webhookSecretID(id string) string { return "webhook/" + id }
+
+func (s sealedWebhookSecrets) Seal(id string, secret []byte) error {
+	_, err := s.store.Seal(webhookSecretID(id), secret)
+	return err
+}
+
+func (s sealedWebhookSecrets) Open(id string) (string, bool) {
+	plaintext, err := s.store.OpenID(webhookSecretID(id))
+	if err != nil {
+		return "", false
+	}
+	return string(plaintext), true
+}
+
+func (s sealedWebhookSecrets) Delete(id string) error {
+	return s.store.Delete(webhookSecretID(id))
+}
+
+// startWebhooks builds the dispatcher and registers every persisted receiver
+// whose signing secret can be opened. A missing secret (no master key, or an
+// entry removed by hand) is logged and skipped: the row stays visible as
+// unavailable instead of delivering with an empty key.
+func startWebhooks(st *store.Store, logger *slog.Logger, secrets api.WebhookSecretStore) (*webhook.Dispatcher, api.EventSink) {
+	dispatcher := webhook.New(webhook.Config{Logger: logger})
+	registered, unavailable := 0, 0
+	for _, endpoint := range st.WebhookEndpoints() {
+		secret, ok := openWebhookSecret(secrets, endpoint.ID)
+		if !ok {
+			unavailable++
+			logger.Warn("webhook_secret_missing", "endpoint", endpoint.ID)
+			continue
+		}
+		receiver := webhook.Endpoint{
+			ID:          endpoint.ID,
+			URL:         endpoint.URL,
+			Secret:      secret,
+			Events:      webhookEventTypes(endpoint.Events),
+			Enabled:     endpoint.Enabled,
+			Description: endpoint.Description,
+		}
+		if parsed, err := time.Parse(time.RFC3339, endpoint.CreatedAt); err == nil {
+			receiver.CreatedAt = parsed
+		}
+		if err := dispatcher.AddEndpoint(receiver); err != nil {
+			unavailable++
+			logger.Warn("webhook_endpoint_invalid", "endpoint", endpoint.ID, "error", err)
+			continue
+		}
+		if !endpoint.Enabled {
+			_ = dispatcher.SetEndpointEnabled(endpoint.ID, false)
+		}
+		registered++
+	}
+	logger.Info("webhooks_loaded",
+		"registered", registered,
+		"unavailable", unavailable,
+		"configured", len(st.WebhookEndpoints()),
+		"sealed", secrets != nil)
+	return dispatcher, &webhookSink{dispatcher: dispatcher, logger: logger}
+}
+
+func openWebhookSecret(secrets api.WebhookSecretStore, id string) (string, bool) {
+	if secrets == nil {
+		return "", false
+	}
+	return secrets.Open(id)
+}
+
+// webhookEventTypes converts persisted event names to the dispatcher type.
+func webhookEventTypes(events []string) []webhook.EventType {
+	out := make([]webhook.EventType, 0, len(events))
+	for _, event := range events {
+		out = append(out, webhook.EventType(event))
+	}
+	return out
+}
+
+// webhookSink fans one customer event out to every enabled endpoint.
+// Dispatcher.Dispatch only enqueues, so an event never blocks the request that
+// produced it. Each endpoint gets its own event id because the dispatcher's
+// dedupe window is keyed by that id.
+type webhookSink struct {
+	dispatcher *webhook.Dispatcher
+	logger     *slog.Logger
+	seq        atomic.Uint64
+}
+
+func (s *webhookSink) Emit(event webhook.EventType, data map[string]any) {
+	for _, endpoint := range s.dispatcher.Endpoints() {
+		if !endpoint.Enabled {
+			continue
+		}
+		id := fmt.Sprintf("%s-%d-%d", event, time.Now().UnixNano(), s.seq.Add(1))
+		err := s.dispatcher.Dispatch(webhook.Event{
+			ID:         id,
+			EndpointID: endpoint.ID,
+			Type:       event,
+			Data:       data,
+		})
+		if err == nil ||
+			errors.Is(err, webhook.ErrNotSubscribed) ||
+			errors.Is(err, webhook.ErrEndpointDisabled) {
+			continue
+		}
+		s.logger.Warn("webhook_dispatch_failed", "event", event, "endpoint", endpoint.ID, "error", err)
+	}
+}
+
+// scheduleEventData is the payload shared by schedule.fired and
+// schedule.failed. It carries ids and outcomes only, never a credential.
+func scheduleEventData(schedule model.Schedule, run model.ScheduleRun) map[string]any {
+	data := map[string]any{
+		"scheduleId":   run.ScheduleID,
+		"runId":        run.ID,
+		"trigger":      run.Trigger,
+		"scheduledFor": run.ScheduledFor,
+		"startedAt":    run.StartedAt,
+		"finishedAt":   run.FinishedAt,
+		"result":       run.Result,
+	}
+	if schedule.Target.Kind == "account" {
+		data["accountId"] = schedule.Target.ID
+	}
+	if run.Reason != "" {
+		data["reason"] = run.Reason
+	}
+	if run.ErrorClass != "" {
+		data["errorClass"] = run.ErrorClass
+	}
+	if run.Detail != "" {
+		data["detail"] = run.Detail
+	}
+	return data
+}
+
+// emitRenewalEvent maps one renewal reminder onto the customer webhook
+// vocabulary: a due threshold becomes account.renewal_due and an overdue
+// membership becomes account.expired. Unknown kinds are dropped instead of
+// inventing an event type. A nil sink is a daemon without webhooks.
+func emitRenewalEvent(events api.EventSink, reminder schedule.ReminderEvent) {
+	if events == nil {
+		return
+	}
+	switch reminder.Kind {
+	case schedule.ReminderKindRenewalDue:
+		events.Emit(webhook.EventAccountRenewalDue, renewalEventData(reminder))
+	case schedule.ReminderKindRenewalOverdue:
+		events.Emit(webhook.EventAccountExpired, renewalEventData(reminder))
+	}
+}
+
+// renewalEventData is the payload shared by account.renewal_due and
+// account.expired. It carries the account id and the expiry only, never a
+// credential.
+func renewalEventData(reminder schedule.ReminderEvent) map[string]any {
+	return map[string]any{
+		"accountId": reminder.AccountID,
+		"expiresAt": reminder.ExpiresAt,
+		"daysLeft":  reminder.DaysLeft,
+		"threshold": reminder.Threshold,
+	}
 }
 
 func envOr(key, fallback string) string {
@@ -587,9 +924,14 @@ func pruneSecrets(secrets *secret.Store, st *store.Store, logger *slog.Logger) {
 	if secrets == nil {
 		return
 	}
-	known := make(map[string]struct{}, len(st.Accounts()))
+	known := make(map[string]struct{}, len(st.Accounts())+len(st.WebhookEndpoints()))
 	for _, account := range st.Accounts() {
 		known[account.ID] = struct{}{}
+	}
+	// Webhook signing secrets share the file under the "webhook/" namespace;
+	// an entry is an orphan only when its endpoint row is gone.
+	for _, endpoint := range st.WebhookEndpoints() {
+		known[webhookSecretID(endpoint.ID)] = struct{}{}
 	}
 	orphans := make([]string, 0)
 	for _, id := range secrets.IDs() {
