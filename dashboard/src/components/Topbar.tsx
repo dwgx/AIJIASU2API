@@ -5,12 +5,12 @@ import { useI18n } from '../lib/i18n'
 import { useRefreshActivity } from '../lib/useAsync'
 import {
   ApcMenuIcon,
-  ApcPanelCollapseIcon,
-  ApcPanelExpandIcon,
   ApcPlusIcon,
   ApcRefreshIcon,
   ApcSearchIcon,
 } from './icons/ApcIcons'
+import { MorphIcon } from './icons/MorphIcon'
+import { PANEL_COLLAPSE_GLYPH, PANEL_EXPAND_GLYPH } from './icons/morphGlyphs'
 import { Button, IconButton } from './primitives'
 import { useToast } from './Toast'
 
@@ -49,7 +49,13 @@ export function Topbar({
         />
         <IconButton
           label={t(collapsed ? 'shell.expandSidebar' : 'shell.collapseSidebar')}
-          icon={collapsed ? <ApcPanelExpandIcon size={17} /> : <ApcPanelCollapseIcon size={17} />}
+          icon={
+            <MorphIcon
+              icon={collapsed ? PANEL_EXPAND_GLYPH : PANEL_COLLAPSE_GLYPH}
+              size={17}
+              strokeWidth={1.6}
+            />
+          }
           onClick={onToggleSidebar}
           className="topbar__collapse"
           aria-expanded={!collapsed}

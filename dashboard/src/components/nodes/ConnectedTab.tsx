@@ -1,4 +1,4 @@
-import { Globe, Power, Search, Server, ShieldCheck } from 'lucide-react'
+import { Globe, Search, Server, ShieldCheck } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { api } from '../../lib/api'
 import { formatDateTime, formatNumber, formatRelative, percent } from '../../lib/format'
@@ -13,6 +13,8 @@ import type { Column } from '../DataTable'
 import { Drawer } from '../Overlay'
 import { useToast } from '../Toast'
 import { CopyButton } from '../CopyButton'
+import { MorphIcon } from '../icons/MorphIcon'
+import { NODE_DRAINED_GLYPH, NODE_LIVE_GLYPH } from '../icons/morphGlyphs'
 import {
   Badge,
   Button,
@@ -301,7 +303,13 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
           <Button
             size="sm"
             variant={node.state === 'LIVE' ? 'ghost' : 'secondary'}
-            icon={<Power size={13} />}
+            icon={
+              <MorphIcon
+                icon={node.state === 'DRAINING' ? NODE_DRAINED_GLYPH : NODE_LIVE_GLYPH}
+                size={13}
+                strokeWidth={1.8}
+              />
+            }
             disabled={node.state === 'DOWN' || node.state === 'STARTING'}
             onClick={() => void toggleNode(node)}
           >
@@ -518,7 +526,13 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
             <div className="drawer-actions">
               <Button
                 variant="secondary"
-                icon={<Power size={14} />}
+                icon={
+                  <MorphIcon
+                    icon={selected.state === 'DRAINING' ? NODE_DRAINED_GLYPH : NODE_LIVE_GLYPH}
+                    size={14}
+                    strokeWidth={1.8}
+                  />
+                }
                 disabled={selected.state === 'DOWN'}
                 onClick={() => void toggleNode(selected)}
               >

@@ -80,13 +80,15 @@
   --shadow-pop: 0 24px 64px rgba(0, 0, 0, 0.55);
   --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.18);
 
-  /* Map choropleth ramp — fixed bins, so filtered counts stay comparable. */
+  /* Map choropleth ramp — fixed bins, so filtered counts stay comparable.
+     Bin 1 clears 3:1 against --surface in both themes; the ramp darkens as
+     counts rise in the light theme and lightens in the dark theme. */
   --map-fill-0: #101413;
-  --map-fill-1: #123b36;
-  --map-fill-2: #155e54;
-  --map-fill-3: #1d8a7c;
-  --map-fill-4: #2bbfae;
-  --map-fill-5: #5eead4;
+  --map-fill-1: #2c7065;
+  --map-fill-2: #33857a;
+  --map-fill-3: #3f9e91;
+  --map-fill-4: #52c4b2;
+  --map-fill-5: #7ff0de;
 
   --z-topbar: 15;
   --z-sidebar: 20;
@@ -130,11 +132,11 @@
   --on-mint: #ffffff;
 
   --map-fill-0: #f3f6f4;
-  --map-fill-1: #ccfbf1;
-  --map-fill-2: #99f6e4;
-  --map-fill-3: #5eead4;
-  --map-fill-4: #2dd4bf;
-  --map-fill-5: #0f766e;
+  --map-fill-1: #0d9488;
+  --map-fill-2: #0f766e;
+  --map-fill-3: #115e59;
+  --map-fill-4: #134e4a;
+  --map-fill-5: #083d38;
 
   --scrim: rgba(16, 32, 26, 0.38);
   --scrim-nav: rgba(16, 32, 26, 0.32);
@@ -3984,6 +3986,148 @@ svg {
   align-items: center;
   gap: 2px;
   margin-left: auto;
+}
+
+/* Renewal: countdown chips in rows/cards plus the drawer card. Read-only —
+   the only action is an outbound link to the vendor's purchase page. */
+.renewal-status--warning {
+  color: var(--warning);
+}
+
+.renewal-status--overdue {
+  color: var(--danger);
+}
+
+.renewal-status__link:hover {
+  text-decoration: underline;
+}
+
+.account-card__renew {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  color: var(--mint);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.account-card__renew:hover {
+  text-decoration: underline;
+}
+
+.renewal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.renewal-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.renewal-card__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.renewal-card__warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.renewal-card__warning.is-overdue {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+}
+
+.renewal-card__plans {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.renewal-card__plans-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.renewal-card__source {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.renewal-plans {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.renewal-plans__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 12px;
+}
+
+.renewal-plans__row:last-child {
+  border-bottom: 0;
+}
+
+.renewal-plans__period {
+  min-width: 0;
+  flex: 1;
+}
+
+.renewal-plans__save {
+  color: var(--mint);
+  font-size: 10px;
+}
+
+.renewal-plans__price {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.renewal-card__auto,
+.renewal-card__source-note,
+.renewal-card__note {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.renewal-card__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 /* ==========================================================================

@@ -1,9 +1,10 @@
 import clsx from 'clsx'
+import { useEffect, useId, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { useI18n } from '../lib/i18n'
 import { useFocusTrap } from '../lib/useFocusTrap'
 import { ApcCloseIcon } from './icons/ApcIcons'
-import { Button, IconButton } from './primitives'
+import { Button, Field, IconButton, Input } from './primitives'
 
 interface DrawerProps {
   open: boolean
@@ -102,6 +103,9 @@ interface ConfirmDialogProps {
   confirmLabel: string
   tone?: 'danger' | 'primary'
   busy?: boolean
+  /** When set, the destructive action stays disabled until this exact text is typed. */
+  requireText?: string
+  requireTextLabel?: string
   onConfirm: () => void
   onCancel: () => void
 }
@@ -113,10 +117,18 @@ export function ConfirmDialog({
   confirmLabel,
   tone = 'danger',
   busy = false,
+  requireText,
+  requireTextLabel,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useI18n()
+  const [typed, setTyped] = useState('')
+  const inputId = useId()
+  useEffect(() => {
+    if (!open) setTyped('')
+  }, [open])
+  const blocked = requireText !== undefined && typed !== requireText
   return (
     <Modal
       open={open}
@@ -128,11 +140,34 @@ export function ConfirmDialog({
           <Button variant="ghost" onClick={onCancel} disabled={busy}>
             {t('common.cancel')}
           </Button>
-          <Button variant={tone} onClick={onConfirm} loading={busy}>
+          <Button
+            variant={tone}
+            onClick={onConfirm}
+            loading={busy}
+            disabled={blocked}
+          >
             {confirmLabel}
           </Button>
         </>
       }
-    />
+    >
+      {requireText !== undefined ? (
+        <div className="form">
+          <Field
+            label={requireTextLabel ?? requireText}
+            htmlFor={inputId}
+            hint={t('common.typeToConfirm', { text: requireText })}
+          >
+            <Input
+              id={inputId}
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+        </div>
+      ) : null}
+    </Modal>
   )
 }

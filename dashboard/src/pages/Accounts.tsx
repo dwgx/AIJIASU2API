@@ -1,18 +1,46 @@
 import clsx from 'clsx'
-import { LayoutGrid, LogOut, Pause, Play, Rows3, Search, Trash2 } from 'lucide-react'
+import {
+  CalendarClock,
+  Download,
+  ExternalLink,
+  LayoutGrid,
+  LogOut,
+  Pause,
+  Play,
+  Rows3,
+  Search,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, isMockMode } from '../lib/api'
-import { formatBytes, formatDate, formatRelative } from '../lib/format'
+import { formatBytes, formatDate } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import { ACCOUNT_STATE } from '../lib/labels'
-import type { Account, AccountState, CreateAccountInput, Platform } from '../lib/types'
+import type {
+  Account,
+  AccountState,
+  BulkDeleteItem,
+  BulkDeleteResult,
+  CreateAccountInput,
+  Platform,
+} from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
-import { ConfirmDialog, Modal } from '../components/Overlay'
+import { ConfirmDialog, Drawer, Modal } from '../components/Overlay'
 import { useToast } from '../components/Toast'
+import { AccountExportDialog } from '../components/accounts/AccountExportDialog'
+import { AccountImportDialog } from '../components/accounts/AccountImportDialog'
+import {
+  OFFICIAL_PURCHASE_URL,
+  RenewalCard,
+  renewalCountdown,
+  renewalStatusText,
+} from '../components/accounts/RenewalCard'
+import '../components/accounts/accounts-io.css'
 import {
   Button,
   Card,
@@ -47,6 +75,15 @@ function useParamQuery(paramValue: string | null): [string, (value: string) => v
 }
 
 const PLATFORMS: Platform[] = ['android', 'ios', 'windows', 'linux']
+/** Mirrors GET /v1/accounts/io/capabilities maxDeleteIDs. */
+const MAX_BULK_DELETE = 100
+const BULK_DELETE_STATUS_KEYS: Record<BulkDeleteItem['status'], string> = {
+  deleted: 'accounts.bulkDeleteStatusDeleted',
+  would_delete: 'accounts.bulkDeleteStatusWouldDelete',
+  not_found: 'accounts.bulkDeleteStatusNotFound',
+  failed: 'accounts.bulkDeleteStatusFailed',
+  skipped: 'accounts.bulkDeleteStatusSkipped',
+}
 const EMPTY_FORM = {
   label: '',
   username: '',
@@ -115,13 +152,24 @@ interface AccountCardProps {
   onTogglePause: (account: Account) => void
   onLogout: (account: Account) => void
   onDelete: (id: string) => void
+  onRenewal: (account: Account) => void
 }
 
-function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePause, onLogout, onDelete }: AccountCardProps) {
-  const { lang, t } = useI18n()
+function AccountCard({
+  account,
+  selected,
+  onToggleSelected,
+  onTest,
+  onTogglePause,
+  onLogout,
+  onDelete,
+  onRenewal,
+}: AccountCardProps) {
+  const { t } = useI18n()
   const state = ACCOUNT_STATE[account.state]
   const capacity = account.nodeCount > 0 ? Math.min(1, Math.max(0, account.liveNodeCount / account.nodeCount)) : 0
   const capacityPct = Math.round(capacity * 100)
+  const countdown = renewalCountdown(account.expiresAt)
 
   return (
     <article role="listitem" className={clsx('account-card', selected && 'is-selected')}>
@@ -186,9 +234,27 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
         <span className="account-card__expiry">
           <span className="account-card__expiry-label">{t('accounts.expires')}</span>
           <span className="account-card__expiry-date">{formatDate(account.expiresAt)}</span>
-          <span className="account-card__expiry-rel">
-            {formatRelative(account.expiresAt, Date.now(), lang)}
+          <span
+            className={clsx(
+              'account-card__expiry-rel',
+              countdown.warning && 'renewal-status--warning',
+              countdown.overdue && 'renewal-status--overdue',
+            )}
+          >
+            {renewalStatusText(t, countdown)}
           </span>
+          {countdown.warning ? (
+            <a
+              className="account-card__renew"
+              href={OFFICIAL_PURCHASE_URL}
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label={t('accounts.renewal.openOfficialFor', { name: account.label })}
+            >
+              {t('accounts.renewal.renew')}
+              <ExternalLink size={11} aria-hidden="true" />
+            </a>
+          ) : null}
         </span>
         <span className="account-card__actions">
           <IconButton
@@ -202,6 +268,11 @@ function AccountCard({ account, selected, onToggleSelected, onTest, onTogglePaus
             })}
             icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => onTogglePause(account)}
+          />
+          <IconButton
+            label={t('accounts.renewal.open', { name: account.label })}
+            icon={<CalendarClock size={14} />}
+            onClick={() => onRenewal(account)}
           />
           <IconButton
             label={t('accounts.logoutAccount', { name: account.label })}
@@ -229,6 +300,7 @@ function AccountCards({
   onTogglePause,
   onLogout,
   onDelete,
+  onRenewal,
 }: {
   accounts: Account[]
   selected: string[]
@@ -238,6 +310,7 @@ function AccountCards({
   onTogglePause: (account: Account) => void
   onLogout: (account: Account) => void
   onDelete: (id: string) => void
+  onRenewal: (account: Account) => void
 }) {
   const { t } = useI18n()
   if (accounts.length === 0) {
@@ -256,6 +329,7 @@ function AccountCards({
           onTogglePause={onTogglePause}
           onLogout={onLogout}
           onDelete={onDelete}
+          onRenewal={onRenewal}
         />
       ))}
     </div>
@@ -285,7 +359,7 @@ export default function Accounts() {
   const accounts = useAsync(() => api.listAccounts(), [], { intervalMs: 15_000 })
   const [params, setParams] = useSearchParams()
   const { push } = useToast()
-  const { lang, t } = useI18n()
+  const { t } = useI18n()
   const [query, setQuery] = useParamQuery(params.get('q'))
   const [stateFilter, setStateFilter] = useState<'all' | AccountState>('all')
   const [platformFilter, setPlatformFilter] = useState<'all' | Platform>('all')
@@ -293,8 +367,12 @@ export default function Accounts() {
   const [selected, setSelected] = useState<string[]>([])
   const [deleteIds, setDeleteIds] = useState<string[]>([])
   const [deleting, setDeleting] = useState(false)
+  const [deleteResult, setDeleteResult] = useState<BulkDeleteResult | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [logoutId, setLogoutId] = useState<string | null>(null)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [renewalId, setRenewalId] = useState<string | null>(null)
   const [form, setForm] = useState(EMPTY_FORM)
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState('')
@@ -319,6 +397,7 @@ export default function Accounts() {
 
   const allVisibleSelected = filtered.length > 0 && filtered.every((account) => selected.includes(account.id))
   const someVisibleSelected = filtered.some((account) => selected.includes(account.id))
+  const renewalAccount = accounts.data?.find((account) => account.id === renewalId) ?? null
 
   const closeCreate = () => {
     setParams({}, { replace: true })
@@ -379,12 +458,21 @@ export default function Accounts() {
 
   const confirmDelete = async () => {
     setDeleting(true)
+    setDeleteResult(null)
     try {
-      await api.deleteAccounts(deleteIds)
-      accounts.reload()
-      setSelected((current) => current.filter((id) => !deleteIds.includes(id)))
-      push(t('accounts.toastDeleted', { count: deleteIds.length }), 'success')
+      const result = await api.bulkDeleteAccounts({ ids: deleteIds })
+      const removed = result.results
+        .filter((item) => item.status === 'deleted')
+        .map((item) => item.id)
+      setSelected((current) => current.filter((id) => !removed.includes(id)))
+      setDeleteResult(result)
       setDeleteIds([])
+      accounts.reload()
+      if (result.counts.failed + result.counts.notFound + result.counts.skipped > 0) {
+        push(t('accounts.bulkDeletePartial'), 'danger')
+      } else {
+        push(t('accounts.toastDeleted', { count: result.counts.deleted }), 'success')
+      }
     } catch (cause) {
       push(cause instanceof Error ? cause.message : t('accounts.errorDelete'), 'danger')
     } finally {
@@ -519,18 +607,38 @@ export default function Accounts() {
     {
       key: 'expiry',
       label: t('accounts.columnExpires'),
-      render: (account) => (
-        <span className="cell-stack">
-          <span>{formatDate(account.expiresAt)}</span>
-          <span className="cell-sub">{formatRelative(account.expiresAt, Date.now(), lang)}</span>
-        </span>
-      ),
+      render: (account) => {
+        const countdown = renewalCountdown(account.expiresAt)
+        const status = renewalStatusText(t, countdown)
+        return (
+          <span className="cell-stack">
+            <span>{formatDate(account.expiresAt)}</span>
+            {countdown.warning ? (
+              <a
+                className={clsx(
+                  'cell-sub',
+                  'renewal-status__link',
+                  countdown.overdue ? 'renewal-status--overdue' : 'renewal-status--warning',
+                )}
+                href={OFFICIAL_PURCHASE_URL}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                <span>{status}</span>
+                <span className="sr-only"> — {t('accounts.renewal.openOfficial')}</span>
+              </a>
+            ) : (
+              <span className="cell-sub">{status}</span>
+            )}
+          </span>
+        )
+      },
     },
     {
       key: 'actions',
       label: '',
       align: 'right',
-      width: '164px',
+      width: '196px',
       render: (account) => (
         <span className="row-actions">
           <IconButton
@@ -544,6 +652,11 @@ export default function Accounts() {
             })}
             icon={account.state === 'paused' ? <Play size={14} /> : <Pause size={14} />}
             onClick={() => void togglePause(account)}
+          />
+          <IconButton
+            label={t('accounts.renewal.open', { name: account.label })}
+            icon={<CalendarClock size={14} />}
+            onClick={() => setRenewalId(account.id)}
           />
           <IconButton
             label={t('accounts.logoutAccount', { name: account.label })}
@@ -587,6 +700,39 @@ export default function Accounts() {
         subtitle={t('accounts.subtitle')}
         refresh={summarizeRefresh([accounts])}
       />
+
+      {deleteResult &&
+      deleteResult.counts.failed + deleteResult.counts.notFound + deleteResult.counts.skipped >
+        0 ? (
+        <div className="callout callout--warning" role="status">
+          <div>
+            <p className="callout__title">{t('accounts.bulkDeleteResult')}</p>
+            <p className="callout__text">
+              {t('accounts.bulkDeleteCounts', {
+                deleted: deleteResult.counts.deleted,
+                notFound: deleteResult.counts.notFound,
+                failed: deleteResult.counts.failed,
+                skipped: deleteResult.counts.skipped,
+              })}
+            </p>
+            <ul className="account-io-result-list">
+              {deleteResult.results
+                .filter((item) => item.status !== 'deleted')
+                .map((item) => (
+                  <li key={item.id}>
+                    <span className="mono">{item.id}</span>
+                    {item.label ? ` ${item.label}` : ''} —{' '}
+                    {t(BULK_DELETE_STATUS_KEYS[item.status])}
+                    {item.message ? `: ${item.message}` : ''}
+                  </li>
+                ))}
+            </ul>
+            <Button size="sm" variant="ghost" onClick={() => setDeleteResult(null)}>
+              {t('accounts.bulkDeleteDismiss')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="callout callout--warning" role="note">
         <span className="callout__icon">
@@ -636,19 +782,51 @@ export default function Accounts() {
           <span className="toolbar__count">
             {t('common.of', { shown: filtered.length, total: accounts.data?.length ?? 0 })}
           </span>
+          <div className="account-io-toolbar">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Upload size={13} />}
+              onClick={() => setImportOpen(true)}
+            >
+              {t('accounts.import')}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Download size={13} />}
+              onClick={() => setExportOpen(true)}
+            >
+              {t('accounts.export')}
+            </Button>
+          </div>
         </div>
 
         {selected.length > 0 ? (
           <div className="bulkbar">
             <span className="bulkbar__count">{t('accounts.selected', { count: selected.length })}</span>
+            {selected.length > MAX_BULK_DELETE ? (
+              <span className="bulkbar__hint">
+                {t('accounts.bulkDeleteTooMany', { max: MAX_BULK_DELETE })}
+              </span>
+            ) : null}
             <div className="bulkbar__actions">
               <Button size="sm" variant="secondary" icon={<Pause size={13} />} onClick={() => void bulkPause()}>
                 {t('accounts.pause')}
               </Button>
               <Button
                 size="sm"
+                variant="secondary"
+                icon={<Download size={13} />}
+                onClick={() => setExportOpen(true)}
+              >
+                {t('accounts.exportSelected')}
+              </Button>
+              <Button
+                size="sm"
                 variant="danger"
                 icon={<Trash2 size={13} />}
+                disabled={selected.length > MAX_BULK_DELETE}
                 onClick={() => setDeleteIds(selected)}
               >
                 {t('accounts.delete')}
@@ -678,6 +856,7 @@ export default function Accounts() {
             onTogglePause={(account) => void togglePause(account)}
             onLogout={(account) => setLogoutId(account.id)}
             onDelete={(id) => setDeleteIds([id])}
+            onRenewal={(account) => setRenewalId(account.id)}
           />
         ) : (
           <DataTable
@@ -788,9 +967,40 @@ export default function Accounts() {
             : t('accounts.deleteConfirmOne')
         }
         busy={deleting}
+        requireText={deleteIds.length > 10 ? 'DELETE' : undefined}
+        requireTextLabel={t('accounts.bulkDeleteConfirmLabel')}
         onConfirm={() => void confirmDelete()}
         onCancel={() => setDeleteIds([])}
       />
+
+      <AccountExportDialog
+        open={exportOpen}
+        accounts={accounts.data ?? []}
+        filtered={filtered}
+        selected={selected}
+        onClose={() => setExportOpen(false)}
+      />
+
+      <AccountImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => accounts.reload()}
+      />
+
+      <Drawer
+        open={renewalAccount !== null}
+        title={
+          renewalAccount
+            ? t('accounts.renewal.drawerTitle', { name: renewalAccount.label })
+            : t('accounts.renewal.title')
+        }
+        subtitle={t('accounts.renewal.drawerSubtitle')}
+        onClose={() => setRenewalId(null)}
+      >
+        {renewalAccount ? (
+          <RenewalCard accountLabel={renewalAccount.label} expiresAt={renewalAccount.expiresAt} />
+        ) : null}
+      </Drawer>
 
       <ConfirmDialog
         open={logoutId !== null}

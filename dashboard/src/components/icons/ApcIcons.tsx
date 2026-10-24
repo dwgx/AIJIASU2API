@@ -1,5 +1,7 @@
 import type { ComponentType, ReactNode } from 'react'
 import type { Status } from '../../lib/types'
+import { MorphIcon } from './MorphIcon'
+import { STATUS_GLYPHS } from './morphGlyphs'
 
 /**
  * APC glyphs — drawn inline on a 24px grid with `currentColor` so a single
@@ -205,42 +207,11 @@ export const ApcSpinnerIcon = createIcon('ApcSpinnerIcon', <path d="M12 3.5a8.5 
 
 /* Status ----------------------------------------------------------------- */
 
-const STATUS_PATHS: Record<Status, ReactNode> = {
-  ok: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M8 12.2l2.6 2.6L16 9.4" />
-    </>
-  ),
-  info: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M12 11v5" />
-      <path d="M12 8h.01" strokeWidth="2" />
-    </>
-  ),
-  warn: (
-    <>
-      <path d="M12 4.2 21 19.5H3z" />
-      <path d="M12 10v4" />
-      <path d="M12 17h.01" strokeWidth="2" />
-    </>
-  ),
-  error: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6" />
-    </>
-  ),
-  unavailable: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M6.5 6.5l11 11" />
-    </>
-  ),
-}
-
-/** Glyph paired with a status pill; colour follows the pill's status hue. */
+/**
+ * Glyph paired with a status pill; colour follows the pill's status hue.
+ * The glyph morphs in place when a mounted pill changes status (ok ↔ warn ↔
+ * error ↔ unavailable), so a live update reads as a transition, not a swap.
+ */
 export function ApcStatusGlyph({
   status,
   size = 12,
@@ -251,20 +222,11 @@ export function ApcStatusGlyph({
   className?: string
 }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+    <MorphIcon
+      icon={STATUS_GLYPHS[status]}
+      size={size}
+      strokeWidth={1.8}
       className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
-      {STATUS_PATHS[status]}
-    </svg>
+    />
   )
 }

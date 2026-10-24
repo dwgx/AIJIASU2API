@@ -3,7 +3,9 @@ import { NavLink } from 'react-router-dom'
 import { useI18n } from '../lib/i18n'
 import { NAV_SECTIONS } from '../lib/nav'
 import { useTheme } from '../lib/theme'
-import { ApcBrandMark, ApcMoonIcon, ApcSunIcon } from './icons/ApcIcons'
+import { ApcBrandMark } from './icons/ApcIcons'
+import { MorphIcon } from './icons/MorphIcon'
+import { HAN_GLYPH, LATIN_GLYPH, MOON_GLYPH, SUN_GLYPH } from './icons/morphGlyphs'
 import { IconButton } from './primitives'
 
 export function Sidebar({
@@ -63,26 +65,28 @@ export function Sidebar({
           <div className="lang-switch" role="group" aria-label={t('shell.language')}>
             <button
               type="button"
-              className={clsx('lang-switch__item', lang === 'zh' && 'is-active')}
-              aria-pressed={lang === 'zh'}
-              title={t('shell.languageZh')}
-              onClick={() => setLang('zh')}
+              className="lang-switch__item"
+              aria-label={lang === 'zh' ? 'EN' : '中'}
+              title={lang === 'zh' ? t('shell.languageEn') : t('shell.languageZh')}
+              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+              style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
             >
-              中
-            </button>
-            <button
-              type="button"
-              className={clsx('lang-switch__item', lang === 'en' && 'is-active')}
-              aria-pressed={lang === 'en'}
-              title={t('shell.languageEn')}
-              onClick={() => setLang('en')}
-            >
-              EN
+              <MorphIcon
+                icon={lang === 'zh' ? LATIN_GLYPH : HAN_GLYPH}
+                size={14}
+                strokeWidth={1.8}
+              />
             </button>
           </div>
           <IconButton
             label={theme === 'dark' ? t('shell.toLightTheme') : t('shell.toDarkTheme')}
-            icon={theme === 'dark' ? <ApcSunIcon size={15} /> : <ApcMoonIcon size={15} />}
+            icon={
+              <MorphIcon
+                icon={theme === 'dark' ? SUN_GLYPH : MOON_GLYPH}
+                size={15}
+                strokeWidth={1.6}
+              />
+            }
             onClick={toggle}
             size="sm"
           />
