@@ -377,7 +377,12 @@ export function BackupPanel() {
                 <strong>{t('backup.restore.warning')}:</strong> {restoreResult.warning}
               </p>
             ) : null}
-            <div className="table-wrap">
+            <div
+              className="table-wrap"
+              role="region"
+              aria-label={t('backup.restore.diffCaption')}
+              tabIndex={0}
+            >
               <table className="data-table backup-diff">
                 <caption>{t('backup.restore.diffCaption')}</caption>
                 <thead>
@@ -441,7 +446,12 @@ export function BackupPanel() {
 function ManifestTable({ entries }: { entries: BackupManifestEntry[] }) {
   const { t } = useI18n()
   return (
-    <div className="table-wrap">
+    <div
+      className="table-wrap"
+      role="region"
+      aria-label={t('backup.inspect.manifest')}
+      tabIndex={0}
+    >
       <table className="data-table backup-table">
         <caption className="sr-only">{t('backup.inspect.manifest')}</caption>
         <thead>

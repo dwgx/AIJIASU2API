@@ -105,7 +105,7 @@ export function DataTable<T>({
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" role="region" aria-label={caption} tabIndex={0}>
       <table className={clsx('data-table', density === 'comfy' && 'data-table--comfy')}>
         <caption className="sr-only">{caption}</caption>
         <thead>

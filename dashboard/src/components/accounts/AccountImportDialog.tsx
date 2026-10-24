@@ -307,7 +307,12 @@ export function AccountImportDialog({ open, onClose, onImported }: AccountImport
   }
 
   const resultTable = (data: AccountImportResult, caption: string) => (
-    <div className="account-io-table-wrap">
+    <div
+      className="account-io-table-wrap"
+      role="region"
+      aria-label={caption}
+      tabIndex={0}
+    >
       <table className="account-io-table" aria-label={caption}>
         <caption className="account-io-sr-only">{caption}</caption>
         <thead>

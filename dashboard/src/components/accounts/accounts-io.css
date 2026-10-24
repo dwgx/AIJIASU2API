@@ -139,6 +139,12 @@
   max-width: 100%;
 }
 
+/* The lane is a keyboard stop and clips its children; keep the ring inside. */
+.account-io-table-wrap:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: -2px;
+}
+
 .account-io-table {
   width: 100%;
   border-collapse: collapse;

@@ -170,7 +170,7 @@ function HealthTable({
 }) {
   const { t } = useI18n()
   return (
-    <div className="health-table-wrap">
+    <div className="health-table-wrap" role="region" aria-label={t('health.tableCaption')} tabIndex={0}>
       <table className="health-table">
         <caption className="sr-only">{t('health.tableCaption')}</caption>
         <thead>

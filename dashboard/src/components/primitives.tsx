@@ -3,6 +3,7 @@ import { useEffect, useId, useRef } from 'react'
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
+  KeyboardEvent,
   ReactNode,
   TextareaHTMLAttributes,
 } from 'react'
@@ -511,16 +512,49 @@ export function Tabs<T extends string>({
   onChange: (value: T) => void
   label: string
 }) {
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
+
+  /** Arrow keys, Home and End move focus and selection together (one tab stop). */
+  const move = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const last = options.length - 1
+    if (last < 0) return
+    let next: number
+    switch (event.key) {
+      case 'ArrowRight':
+        next = index === last ? 0 : index + 1
+        break
+      case 'ArrowLeft':
+        next = index === 0 ? last : index - 1
+        break
+      case 'Home':
+        next = 0
+        break
+      case 'End':
+        next = last
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    onChange(options[next].value)
+    tabRefs.current[next]?.focus()
+  }
+
   return (
     <div className="tabs" role="tablist" aria-label={label}>
-      {options.map((option) => (
+      {options.map((option, index) => (
         <button
           key={option.value}
+          ref={(node) => {
+            tabRefs.current[index] = node
+          }}
           type="button"
           role="tab"
           aria-selected={option.value === value}
+          tabIndex={option.value === value ? 0 : -1}
           className={clsx('tabs__item', option.value === value && 'is-active')}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => move(event, index)}
         >
           {option.icon}
           {option.label}
