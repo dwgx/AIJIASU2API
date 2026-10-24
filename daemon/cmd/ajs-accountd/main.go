@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -20,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
@@ -27,6 +30,7 @@ import (
 	"ajsaccountd/internal/publisher"
 	"ajsaccountd/internal/resin"
 	"ajsaccountd/internal/runtime"
+	"ajsaccountd/internal/schedule"
 	"ajsaccountd/internal/secret"
 	"ajsaccountd/internal/store"
 	"ajsproxy/fvfacade"
@@ -75,12 +79,15 @@ func run() error {
 	logRing := lablog.NewRing(lablog.DefaultCapacity)
 	logger := slog.New(logRing.Handler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(logger)
-	st, secrets, err := openStore(logger)
+	st, secrets, deviceSecrets, err := openStore(logger)
 	if err != nil {
 		return err
 	}
 	if secrets != nil {
 		defer func() { _ = secrets.Close() }()
+	}
+	if deviceSecrets != nil {
+		defer func() { _ = deviceSecrets.Close() }()
 	}
 
 	// The snapshot is the authoritative full state. It is loaded before the
@@ -102,6 +109,14 @@ func run() error {
 			"leases", len(st.Leases()))
 	}
 
+	// DESIGN-DEVICE-POOL §5.3: a snapshot that still carries the plaintext
+	// device map is converted to sealed pool records once, before any request
+	// can observe it. Restore already migrates when the sealer is wired, so
+	// this is idempotent; a failure is logged and the panel still starts,
+	// because the affected accounts fail closed at login rather than
+	// regenerating an identity.
+	migrateDevicesAtStartup(st, logger)
+
 	// AJS_DROP_DEMO is the one-shot migration off the dashboard mock: remove
 	// exactly the seed rows from the loaded snapshot, log counts only, and
 	// persist the result through the normal atomic snapshot path. It runs
@@ -122,6 +137,7 @@ func run() error {
 			"audit", purged.Audit)
 		saveState(st, statePath, logger, "demo-purge")
 	}
+	pruneSecrets(secrets, st, logger)
 
 	snapshotEvery, err := snapshotInterval()
 	if err != nil {
@@ -172,6 +188,7 @@ func run() error {
 	var accountDeleteHook func(context.Context, string) error
 	var accountLogoutHook func(context.Context, string) error
 	var nodeDrainHook func(context.Context, string, bool) error
+	var catalogConnector api.CatalogConnector
 	var controller *runtime.NodeController
 	var profile account.VersionProfile
 	nodeLimitValue := 1
@@ -192,6 +209,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		catalogConnector = controller
 		// Registered after the snapshot defer, so gates close and the final
 		// node state is written before the last state file is saved.
 		defer func() {
@@ -210,6 +228,14 @@ func run() error {
 			}
 			return controller.UndrainNode(ctx, nodeID)
 		}
+	}
+
+	scheduleService, stopScheduler, err := startScheduler(ctx, st, logger, statePath, controller, nodeLimitValue)
+	if err != nil {
+		return err
+	}
+	if stopScheduler != nil {
+		defer stopScheduler()
 	}
 
 	profileFlag := envOr("AJS_ACCOUNT_PROFILE", "linux-4.2.3.0")
@@ -253,19 +279,25 @@ func run() error {
 	})
 
 	server := api.New(api.Config{
-		AdminToken:        *token,
-		AllowInsecure:     *insecure,
-		CORSOrigins:       splitList(*corsOrigins),
-		Version:           api.DefaultVersion,
-		Panel:             panel,
-		LoginService:      loginService,
-		LoginHook:         loginHook,
-		AccountDeleteHook: accountDeleteHook,
-		AccountLogoutHook: accountLogoutHook,
-		NodeDrainHook:     nodeDrainHook,
-		UpdateRepo:        *updateRepo,
-		UpdateAPIBase:     *updateAPIBase,
-		Lab:               labView,
+		AdminToken:           *token,
+		AllowInsecure:        *insecure,
+		CORSOrigins:          splitList(*corsOrigins),
+		Version:              api.DefaultVersion,
+		Panel:                panel,
+		LoginService:         loginService,
+		LoginHook:            loginHook,
+		AccountDeleteHook:    accountDeleteHook,
+		AccountLogoutHook:    accountLogoutHook,
+		NodeDrainHook:        nodeDrainHook,
+		UpdateRepo:           *updateRepo,
+		UpdateAPIBase:        *updateAPIBase,
+		Lab:                  labView,
+		Catalog:              catalogConnector,
+		Schedules:            scheduleService,
+		AllowPlaintextExport: os.Getenv("AJS_ALLOW_PLAINTEXT_EXPORT") == "1",
+		Persist: func() {
+			saveState(st, statePath, logger, "account-io")
+		},
 	}, st, logger)
 
 	httpServer := &http.Server{
@@ -303,6 +335,110 @@ func run() error {
 		}
 		return err
 	}
+}
+
+// startScheduler constructs and starts the schedule engine when
+// AJS_SCHEDULES=1. The default is off, matching DESIGN-SCHEDULE §10.2: the
+// read routes and the pure preview still work, but no goroutine runs and no
+// mutation is accepted. A nil service means disabled.
+func startScheduler(ctx context.Context, st *store.Store, logger *slog.Logger, statePath string, controller *runtime.NodeController, nodeLimit int) (api.ScheduleService, func(), error) {
+	if os.Getenv("AJS_SCHEDULES") != "1" {
+		logger.Info("scheduler_disabled", "reason", "AJS_SCHEDULES is not 1")
+		return nil, nil, nil
+	}
+	tick := time.Second
+	if raw := strings.TrimSpace(os.Getenv("AJS_SCHEDULER_TICK")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			if seconds, intErr := strconv.Atoi(raw); intErr == nil {
+				parsed, err = time.Duration(seconds)*time.Second, nil
+			}
+		}
+		if err != nil || parsed < time.Second || parsed > 60*time.Second {
+			return nil, nil, fmt.Errorf("AJS_SCHEDULER_TICK %q must be 1s..60s", raw)
+		}
+		tick = parsed
+	}
+	workers := 4
+	if raw := strings.TrimSpace(os.Getenv("AJS_SCHEDULES_MAX_CONCURRENT")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 16 {
+			return nil, nil, fmt.Errorf("AJS_SCHEDULES_MAX_CONCURRENT %q must be 1..16", raw)
+		}
+		workers = parsed
+	}
+	renewalEnabled := os.Getenv("AJS_RENEWAL_REMINDERS") != "0"
+	renewalHour := 9
+	if raw := strings.TrimSpace(os.Getenv("AJS_RENEWAL_HOUR")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 23 {
+			return nil, nil, fmt.Errorf("AJS_RENEWAL_HOUR %q must be 0..23", raw)
+		}
+		renewalHour = parsed
+	}
+	leadDays := []int{30, 14, 7, 3, 1}
+	if raw := strings.TrimSpace(os.Getenv("AJS_RENEWAL_LEAD_DAYS")); raw != "" {
+		leadDays = nil
+		for _, part := range strings.Split(raw, ",") {
+			parsed, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil || parsed < 1 || parsed > 365 {
+				return nil, nil, fmt.Errorf("AJS_RENEWAL_LEAD_DAYS %q must be comma-separated days 1..365", raw)
+			}
+			leadDays = append(leadDays, parsed)
+		}
+		if len(leadDays) > 6 {
+			return nil, nil, errors.New("AJS_RENEWAL_LEAD_DAYS accepts at most 6 values")
+		}
+	}
+	timezone := envOr("AJS_TIMEZONE", "UTC")
+	if _, err := schedule.LoadTimezone(timezone); err != nil {
+		return nil, nil, fmt.Errorf("AJS_TIMEZONE %q is not a valid IANA name", timezone)
+	}
+	fireLog, err := schedule.OpenFireLog(filepath.Join(filepath.Dir(statePath), "schedule-fire.log"), time.Now)
+	if err != nil {
+		return nil, nil, err
+	}
+	var catalog schedule.Catalog
+	if controller != nil {
+		catalog = controller
+	}
+	engine, err := schedule.NewEngine(schedule.Config{
+		Store:             st,
+		Catalog:           catalog,
+		Logger:            logger,
+		FireLog:           fireLog,
+		Tick:              tick,
+		MaxConcurrent:     workers,
+		QueueSize:         100,
+		StartDeadline:     60 * time.Second,
+		AllowMultiSession: os.Getenv("AJS_VENDOR_ONE_SESSION") == "0",
+		NodeLimit:         nodeLimit,
+		RenewalEnabled:    renewalEnabled,
+		RenewalLeadDays:   leadDays,
+		RenewalHour:       renewalHour,
+		RenewalTimezone:   timezone,
+	})
+	if err != nil {
+		_ = fireLog.Close()
+		return nil, nil, err
+	}
+	if err := engine.Start(ctx); err != nil {
+		_ = engine.Stop(context.Background())
+		_ = fireLog.Close()
+		return nil, nil, err
+	}
+	logger.Info("scheduler_started", "tick", tick.String(), "workers", workers,
+		"renewal_reminders", renewalEnabled)
+	stop := func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := engine.Stop(stopCtx); err != nil {
+			logger.Warn("scheduler_stop_failed", "error", err)
+		}
+		_ = engine.Checkpoint()
+		_ = fireLog.Close()
+	}
+	return engine, stop, nil
 }
 
 func envOr(key, fallback string) string {
@@ -443,6 +579,34 @@ func snapshotInterval() (time.Duration, error) {
 	return interval, nil
 }
 
+// pruneSecrets removes sealed entries that have no account, which is how an
+// older build's delete or a crash between SealMany and apply leaves the file.
+// It logs a count only: the entries are sealed, but their ids are still not
+// needed in a log line.
+func pruneSecrets(secrets *secret.Store, st *store.Store, logger *slog.Logger) {
+	if secrets == nil {
+		return
+	}
+	known := make(map[string]struct{}, len(st.Accounts()))
+	for _, account := range st.Accounts() {
+		known[account.ID] = struct{}{}
+	}
+	orphans := make([]string, 0)
+	for _, id := range secrets.IDs() {
+		if _, ok := known[id]; !ok {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	if err := secrets.RemoveMany(orphans); err != nil {
+		logger.Warn("secret_prune_failed", "count", len(orphans), "error", err)
+		return
+	}
+	logger.Info("secret_pruned", "count", len(orphans))
+}
+
 // saveState writes the full snapshot and logs the outcome. Neither the log
 // line nor the error carries a credential: the document only holds sealed
 // envelopes and key hashes.
@@ -457,28 +621,110 @@ func saveState(st *store.Store, path string, logger *slog.Logger, reason string)
 // openStore builds the panel store. The daemon starts from an empty store:
 // the dashboard mock seed is a test/mock fixture, never live data. AJS_MASTER_KEY
 // enables at-rest sealing of account passwords; without it the daemon keeps the
-// skeleton behaviour and discards them. The key itself is never logged.
-func openStore(logger *slog.Logger) (*store.Store, *secret.Store, error) {
+// skeleton behaviour and discards them. With the key set the device pool is on
+// by default (DESIGN-DEVICE-POOL §7.6) and seals device material through a
+// second secret.Store whose key is derived from the master key; the password
+// file and the device file stay distinct (§5.1), so a password rotation cannot
+// re-encrypt identities and pruneSecrets never mistakes a dev_ entry for an
+// orphan. AJS_DEVICE_POOL=0 is the test-only kill switch. The key itself is
+// never logged.
+func openStore(logger *slog.Logger) (*store.Store, *secret.Store, *secret.Store, error) {
 	raw := strings.TrimSpace(os.Getenv("AJS_MASTER_KEY"))
+	poolOn, err := devicePoolEnabled(raw != "")
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	if raw == "" {
 		logger.Info("secrets_disabled", "reason", "AJS_MASTER_KEY is not set")
-		return store.NewEmpty(), nil, nil
+		return store.NewEmpty(), nil, nil, nil
 	}
 	key, err := parseMasterKey(raw)
 	if err != nil {
-		return nil, nil, fmt.Errorf("AJS_MASTER_KEY: %w", err)
+		return nil, nil, nil, fmt.Errorf("AJS_MASTER_KEY: %w", err)
 	}
 	stateDir := envOr("AJS_STATE_DIR", "./data")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("AJS_STATE_DIR %s: %w", stateDir, err)
+		return nil, nil, nil, fmt.Errorf("AJS_STATE_DIR %s: %w", stateDir, err)
 	}
 	path := filepath.Join(stateDir, "secrets.json")
 	secrets, err := secret.New(key, path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("secret store: %w", err)
+		return nil, nil, nil, fmt.Errorf("secret store: %w", err)
 	}
 	logger.Info("secrets_enabled", "path", path)
-	return store.NewEmptyWithSealer(secrets), secrets, nil
+	if !poolOn {
+		logger.Info("device_pool_disabled", "reason", "AJS_DEVICE_POOL=0")
+		return store.NewEmptyWithSealer(secrets), secrets, nil, nil
+	}
+	deviceKey, err := deviceSealerKey(key)
+	if err != nil {
+		_ = secrets.Close()
+		return nil, nil, nil, err
+	}
+	devicePath := filepath.Join(stateDir, "device-secrets.json")
+	deviceSecrets, err := secret.New(deviceKey, devicePath)
+	if err != nil {
+		_ = secrets.Close()
+		return nil, nil, nil, fmt.Errorf("device secret store: %w", err)
+	}
+	logger.Info("device_pool_enabled", "path", devicePath)
+	return store.NewEmptyWithSealers(secrets, deviceSecrets), secrets, deviceSecrets, nil
+}
+
+// devicePoolEnabled resolves AJS_DEVICE_POOL. DESIGN-DEVICE-POOL §7.6 makes the
+// pool on by default whenever AJS_MASTER_KEY is set, because the sealer needs
+// that key; AJS_DEVICE_POOL=0 is the test-only kill switch. An explicit 1
+// without a master key is a configuration error, and any other value is
+// refused instead of being read as "on".
+func devicePoolEnabled(masterKeyPresent bool) (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("AJS_DEVICE_POOL")); raw {
+	case "":
+		return masterKeyPresent, nil
+	case "1":
+		if !masterKeyPresent {
+			return false, errors.New("AJS_DEVICE_POOL=1 requires AJS_MASTER_KEY: the pool has no sealer without it")
+		}
+		return true, nil
+	case "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("AJS_DEVICE_POOL %q: use 1 (on) or 0 (off)", raw)
+	}
+}
+
+// deviceSealerKey derives the device-material key. The device file is separate
+// from the password file (DESIGN-DEVICE-POOL §5.1): the derived key keeps the
+// two namespaces independent, and the sealed entries are keyed by device id.
+func deviceSealerKey(masterKey []byte) ([]byte, error) {
+	key, err := hkdf.Key(sha256.New, masterKey, nil, "ajs/device-pool/v1", secret.KeySize)
+	if err != nil {
+		return nil, fmt.Errorf("device sealer key: %w", err)
+	}
+	return key, nil
+}
+
+// migrateDevicesAtStartup converts a legacy plaintext device map to sealed pool
+// records. Restore already performs the same conversion when the device sealer
+// is wired, so the call is idempotent; it keeps the documented startup sequence
+// (DESIGN-DEVICE-POOL §5.3) in one place and covers a store that was populated
+// before the sealer was attached. A failure is logged and startup continues:
+// the panel still serves, and a login for an affected account fails closed
+// instead of regenerating an identity.
+func migrateDevicesAtStartup(st *store.Store, logger *slog.Logger) {
+	if st == nil || !st.DevicePoolEnabled() {
+		return
+	}
+	before := len(st.DevicePoolRecords())
+	if err := st.MigrateDevices(); err != nil {
+		logger.Warn("device_migration_failed", "error", err)
+		return
+	}
+	if after := len(st.DevicePoolRecords()); after != before {
+		logger.Info("device_pool_migrated", "records", after)
+	}
+	if warnings := st.DevicePoolWarnings(); len(warnings) > 0 {
+		logger.Warn("device_pool_warnings", "count", len(warnings))
+	}
 }
 
 // parseMasterKey accepts a 32-byte key as 64 hex characters or base64, padded

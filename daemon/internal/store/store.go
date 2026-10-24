@@ -91,8 +91,36 @@ type Store struct {
 	secrets map[string][]byte
 
 	// devices holds the stable, non-secret device identity of each account.
-	// It is persisted in the state snapshot and never regenerated.
+	// It is persisted in the state snapshot and never regenerated. With the
+	// device pool enabled it is a mirror of the bound records' material; the
+	// pool and the sealed material file are the source of truth.
 	devices map[string]DeviceIdentity
+
+	// deviceSealer seals raw device material; nil disables the pool. deviceMu
+	// serialises material I/O so a seal never blocks API reads, and pool
+	// mutations so two first logins cannot bind two records.
+	deviceSealer   DeviceSealer
+	deviceMu       sync.Mutex
+	deviceCfg      DevicePoolConfig
+	devicePool     map[string]*DeviceRecord
+	deviceBindings map[string]string
+	deviceMaterial map[string]DeviceMaterial
+	deviceWarnings []string
+
+	// selections is the persisted operator target per account (DESIGN-CATALOG
+	// §3.4). It is not a session: setting one starts no gate. serverStats is
+	// keyed by account id + ":" + server id and counts switch attempts.
+	selections  map[string]model.Selection
+	serverStats map[string]model.ServerStat
+
+	// schedules and their bounded histories are the scheduler state
+	// (DESIGN-SCHEDULE §3, §6). Runs are newest first; fires are keyed by
+	// scheduleId@scheduledUnix. reminderMarks records one emitted renewal
+	// notice per account/threshold/expiresAt.
+	schedules     []model.Schedule
+	scheduleRuns  []model.ScheduleRun
+	scheduleFires []model.ScheduleFire
+	reminderMarks map[string]model.ReminderMark
 
 	// pendingLabels holds the lowercased labels of account creates that are
 	// sealing their password outside the write lock. A label is reserved
@@ -104,6 +132,8 @@ type Store struct {
 	keySeq      int
 	mutationSeq int
 	auditSeq    int
+	scheduleSeq int
+	runSeq      int
 }
 
 // New returns a store seeded with the dashboard mock dataset. It exists for
@@ -134,22 +164,48 @@ func NewEmptyWithSealer(sealer Sealer) *Store {
 	return newEmptyWithClock(time.Now, sealer)
 }
 
+// NewEmptyWithSealers returns an empty store with both a password sealer and
+// a device-material sealer. The device pool is enabled only when device is
+// non-nil; the two files must be distinct (DESIGN-DEVICE-POOL §5.1).
+func NewEmptyWithSealers(password Sealer, device DeviceSealer) *Store {
+	st := newEmptyWithClock(time.Now, password)
+	st.deviceSealer = device
+	return st
+}
+
+// NewWithSealers is the seeded-store counterpart of NewEmptyWithSealers.
+func NewWithSealers(password Sealer, device DeviceSealer) *Store {
+	st := newWithClock(time.Now, password)
+	st.deviceSealer = device
+	return st
+}
+
 func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 	return &Store{
-		now:           now,
-		accounts:      []model.Account{},
-		nodes:         []model.ProxyNode{},
-		leases:        []model.Lease{},
-		users:         []model.PanelUser{},
-		keys:          []model.APIKey{},
-		requests:      []model.RequestLog{},
-		audit:         []model.AuditEvent{},
-		settings:      defaultSettings(),
-		keyHashes:     make(map[string]string),
-		sealer:        sealer,
-		secrets:       make(map[string][]byte),
-		devices:       make(map[string]DeviceIdentity),
-		pendingLabels: make(map[string]struct{}),
+		now:            now,
+		accounts:       []model.Account{},
+		nodes:          []model.ProxyNode{},
+		leases:         []model.Lease{},
+		users:          []model.PanelUser{},
+		keys:           []model.APIKey{},
+		requests:       []model.RequestLog{},
+		audit:          []model.AuditEvent{},
+		settings:       defaultSettings(),
+		keyHashes:      make(map[string]string),
+		sealer:         sealer,
+		secrets:        make(map[string][]byte),
+		devices:        make(map[string]DeviceIdentity),
+		deviceCfg:      defaultDevicePoolConfig(),
+		devicePool:     make(map[string]*DeviceRecord),
+		deviceBindings: make(map[string]string),
+		deviceMaterial: make(map[string]DeviceMaterial),
+		pendingLabels:  make(map[string]struct{}),
+		selections:     make(map[string]model.Selection),
+		serverStats:    make(map[string]model.ServerStat),
+		schedules:      []model.Schedule{},
+		scheduleRuns:   []model.ScheduleRun{},
+		scheduleFires:  []model.ScheduleFire{},
+		reminderMarks:  make(map[string]model.ReminderMark),
 	}
 }
 
@@ -581,6 +637,10 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 // first would drop it while leaking the sealed blob on disk. The in-memory
 // cascade then runs under one write lock.
 func (s *Store) DeleteAccount(id string) error {
+	// Serialise with the pool binders: retiring a bound record and sealing a
+	// new one must not interleave.
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	s.mu.RLock()
 	sealer := s.sealer
 	exists := s.accountIndexLocked(id) >= 0
@@ -627,7 +687,48 @@ func (s *Store) DeleteAccount(id string) error {
 	s.leases = keptLeases
 	s.accounts = append(s.accounts[:idx], s.accounts[idx+1:]...)
 	delete(s.secrets, id)
+	// A bound identity is retired, not erased: re-adding the same
+	// (family, username) inside the retention window restores it. The sealed
+	// material and the account-key aliases stay.
+	if recID, ok := s.deviceBindings[id]; ok {
+		if rec := s.deviceRecordLocked(recID); rec != nil {
+			now := iso(s.now())
+			rec.State = DeviceRetired
+			rec.AssignedAccountID = ""
+			rec.AssignedAt = nil
+			rec.RetiredAt = &now
+			rec.RetiredReason = "account_deleted"
+			s.deviceAppendEventLocked(rec, "retired", "operator", "account delete")
+			s.addAuditLocked(model.SeverityInfo, "operator", "device.retire", rec.ID,
+				"reason=account_deleted account="+label)
+		}
+		delete(s.deviceBindings, id)
+	}
 	delete(s.devices, id)
+	// The selection and attempt counters describe a target that no longer
+	// exists; catalog events/audit history stay for the retention window.
+	delete(s.selections, id)
+	for key := range s.serverStats {
+		if strings.HasPrefix(key, id+":") {
+			delete(s.serverStats, key)
+		}
+	}
+	// A schedule without its account cannot resolve a target, so it is
+	// removed with the account (DESIGN-SCHEDULE §6.4). Runs and fire records
+	// stay until retention evicts them.
+	keptSchedules := s.schedules[:0]
+	for _, schedule := range s.schedules {
+		if schedule.Target.Kind == "account" && schedule.Target.ID == id {
+			continue
+		}
+		keptSchedules = append(keptSchedules, schedule)
+	}
+	s.schedules = keptSchedules
+	for key, mark := range s.reminderMarks {
+		if mark.AccountID == id {
+			delete(s.reminderMarks, key)
+		}
+	}
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.delete", label,
 		fmt.Sprintf("%d nodes and %d leases removed", nodesRemoved, leasesRemoved))
@@ -680,6 +781,9 @@ func (s *Store) MarkLogin(id, userName, membership string, expired bool) (model.
 	} else {
 		account.State = model.AccountActive
 	}
+	// A successful login is the only event that sets firstSeenAt and advances
+	// the counters; identity stability never depends on them.
+	s.markDeviceSeenLocked(id, account.Username)
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.login", account.Label, detail)
 	return cloneAccount(*account), nil
 }
@@ -798,7 +902,7 @@ func (s *Store) syncAccountCountsLocked() {
 	}
 }
 
-func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, detail string) {
+func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, detail string, meta ...map[string]string) string {
 	s.auditSeq++
 	event := model.AuditEvent{
 		ID:       fmt.Sprintf("audit-%03d", s.auditSeq),
@@ -809,7 +913,14 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 		Target:   target,
 		Detail:   detail,
 	}
+	if len(meta) > 0 && len(meta[0]) > 0 {
+		event.Meta = make(map[string]string, len(meta[0]))
+		for key, value := range meta[0] {
+			event.Meta[key] = value
+		}
+	}
 	s.audit = prependCapped(s.audit, event, AuditRetention)
+	return event.ID
 }
 
 // prependCapped inserts item at the front of items (newest first) and drops the

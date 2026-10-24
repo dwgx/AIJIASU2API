@@ -232,11 +232,21 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	return updated, nil
 }
 
-// deviceFor returns the account's stored device identity, generating and
-// persisting one on the first login. A retry or a concurrent login never
-// regenerates it: EnsureAccountDevice keeps the first stored record, so every
-// request presents the same _uid, _os_did, cuid and cseid.
+// deviceFor returns the account's device identity for the login. With the
+// device pool enabled it binds the account to a sealed pool record through
+// BindForLogin: a retry or a concurrent login gets the same material because
+// the binding is first-writer-wins, and a missing or corrupt entry fails closed
+// instead of regenerating an identity. Without the pool (tests and mock mode)
+// it keeps the legacy in-memory path: EnsureAccountDevice stores the generated
+// identity once per process. Neither path logs an identity field.
 func (s *LoginService) deviceFor(accountID string) (store.DeviceIdentity, error) {
+	if s.store.DevicePoolEnabled() {
+		material, err := s.store.BindForLogin(accountID, s.profile.Name)
+		if err != nil {
+			return store.DeviceIdentity{}, fmt.Errorf("account: bind device for %q: %w", accountID, err)
+		}
+		return material.Identity, nil
+	}
 	if identity, ok := s.store.AccountDevice(accountID); ok {
 		return identity, nil
 	}
@@ -262,6 +272,21 @@ func (s *LoginService) Result(accountID string) (LoginResult, bool) {
 		return LoginResult{}, false
 	}
 	return cloneLoginResult(result), true
+}
+
+// Forget drops the retained login result and closes its control for accountID.
+// Logout and delete call it so the catalog cannot keep serving a snapshot for
+// an account with no session (DESIGN-CATALOG §3.12). It performs no vendor call
+// and is idempotent.
+func (s *LoginService) Forget(accountID string) {
+	s.mu.Lock()
+	control := s.controls[accountID]
+	delete(s.controls, accountID)
+	delete(s.results, accountID)
+	s.mu.Unlock()
+	if control != nil {
+		control.Close()
+	}
 }
 
 // Close releases every idle HTTP connection and drops the retained login

@@ -273,25 +273,33 @@ func TestOpenStoreStartsEmpty(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Setenv("AJS_MASTER_KEY", "")
-	st, secrets, err := openStore(logger)
+	t.Setenv("AJS_DEVICE_POOL", "")
+	st, secrets, deviceSecrets, err := openStore(logger)
 	if err != nil {
 		t.Fatalf("openStore without a key: %v", err)
 	}
 	if secrets != nil {
 		t.Fatal("openStore without a key returned a secret store")
 	}
+	if deviceSecrets != nil {
+		t.Fatal("openStore without a key returned a device secret store")
+	}
 	assertEmptyStore(t, st)
 
 	t.Setenv("AJS_MASTER_KEY", strings.Repeat("ab", 32))
 	t.Setenv("AJS_STATE_DIR", t.TempDir())
-	st, secrets, err = openStore(logger)
+	st, secrets, deviceSecrets, err = openStore(logger)
 	if err != nil {
 		t.Fatalf("openStore with a key: %v", err)
 	}
 	if secrets == nil {
 		t.Fatal("openStore with a key returned no secret store")
 	}
+	if deviceSecrets == nil {
+		t.Fatal("openStore with a key returned no device secret store")
+	}
 	defer func() { _ = secrets.Close() }()
+	defer func() { _ = deviceSecrets.Close() }()
 	assertEmptyStore(t, st)
 }
 

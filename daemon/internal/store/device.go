@@ -1,18 +1,28 @@
 package store
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+
+	"ajsaccountd/internal/model"
+)
 
 // DeviceIdentity is the stable, non-secret device identity of one account.
 //
-// It is generated once per account, persisted in the state snapshot and reused
-// by every login and FV session, so a retry never presents a new device to the
-// vendor. It carries no credential.
+// It is generated once per account and reused by every login and FV session,
+// so a retry never presents a new device to the vendor. It carries no
+// credential. The pool persists it only inside sealed DeviceMaterial; the
+// snapshot keeps hashes and public claims.
 //
 // The field names mirror the vendor claims: UID is _uid, OSDID is _os_did,
 // CUID/CSEID are the FV cuid/cseid, and OSP/OSD/OSV/DIM are the FV osp/osd/osv/
 // dim values (also _m/_os_dev/_os_ver/_os_dim on the control channel). The
 // remaining fields complete the control descriptor so a restored identity
 // rebuilds the exact request.
+//
+// With the device pool enabled the identity lives only in the sealed
+// DeviceMaterial file; this type is the decoded value returned by
+// AccountDeviceMaterial and the account mirror, never the persisted record.
 type DeviceIdentity struct {
 	// UID is _uid: 22 characters for the OpenAJS/Android profile, 20 hex for
 	// Linux 4.2.3.0 (research/60-dynamic/captures/control.jsonl line 2).
@@ -57,7 +67,12 @@ func (dev DeviceIdentity) valid() bool {
 		strings.TrimSpace(dev.CSEID) != ""
 }
 
-// AccountDevice returns the stored device identity of an account.
+// AccountDevice returns the stored device identity of a bound account.
+//
+// With the pool enabled this is the account mirror rebuilt from sealed
+// material; a false result means "no usable bound identity", which is also
+// what a missing material entry reports. Callers that must distinguish the two
+// use AccountDeviceMaterial and check ErrDeviceMaterialMissing.
 func (s *Store) AccountDevice(id string) (DeviceIdentity, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -70,19 +85,85 @@ func (s *Store) AccountDevice(id string) (DeviceIdentity, bool) {
 // retry or a concurrent first login keeps the value the vendor saw first; that
 // is the stability rule behind the per-account record.
 //
+// With the device pool enabled it creates a pool record with algorithm
+// "legacy/v1" and marks it presented, because the identity was supplied by a
+// caller that already had it. Production first logins use BindForLogin; this
+// wrapper exists for account import and tests.
+//
 // dev must carry UID, OSDID, CUID and CSEID; the account must exist.
 func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdentity, error) {
 	if !dev.valid() {
 		return DeviceIdentity{}, invalidf("device identity for %q is missing uid/osdid/cuid/cseid", id)
 	}
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.accountIndexLocked(id) < 0 {
+	idx := s.accountIndexLocked(id)
+	if idx < 0 {
 		return DeviceIdentity{}, notFoundf("account %q not found", id)
 	}
 	if existing, ok := s.devices[id]; ok {
 		return existing, nil
 	}
+	if recID, ok := s.deviceBindings[id]; ok {
+		if rec := s.deviceRecordLocked(recID); rec != nil {
+			material, err := s.deviceMaterialLocked(rec)
+			if err != nil {
+				return DeviceIdentity{}, err
+			}
+			s.devices[id] = material.Identity
+			return material.Identity, nil
+		}
+	}
+	if s.deviceSealer == nil {
+		// Pool disabled: keep the pre-pool in-memory behaviour. Snapshot
+		// persists this map only in that mode.
+		s.devices[id] = dev
+		return dev, nil
+	}
+
+	account := s.accounts[idx]
+	family, err := familyOf(dev, account.Platform)
+	if err != nil {
+		return DeviceIdentity{}, err
+	}
+	machineCode, err := randomHex(32)
+	if err != nil {
+		return DeviceIdentity{}, err
+	}
+	deviceID := s.newDeviceIDLocked()
+	if deviceID == "" {
+		return DeviceIdentity{}, fmt.Errorf("store: device id generation failed")
+	}
+	profile := profileForVersion(dev.Version)
+	now := iso(s.now())
+	accountKey := deviceAccountKey(family, account.Username)
+	rec := &DeviceRecord{
+		ID: deviceID, State: DeviceAssigned, Platform: family, Profile: profile,
+		Algorithm: DeviceAlgorithmLegacy, Fingerprint: deviceFingerprint(machineCode, dev),
+		Hashes: deviceHashes(dev, machineCode), Claims: deviceClaims(dev),
+		AccountKey:        accountKey,
+		AccountKeyAliases: appendDeviceAlias(nil, deviceAccountKey(family, strings.ToLower(account.Username))),
+		AssignedAccountID: id, AssignedAt: &now, PresentedAt: &now,
+		CreatedAt: now, CreatedBy: "system",
+	}
+	material := DeviceMaterial{
+		DeviceID: deviceID, MachineCode: machineCode, Identity: dev,
+		Platform: family, Profile: profile, Algorithm: DeviceAlgorithmLegacy,
+		Fingerprint: rec.Fingerprint, CreatedAt: now, PresentedAt: &now,
+		AccountKey: accountKey, AccountKeyAliases: rec.AccountKeyAliases,
+	}
+	if err := s.sealDeviceMaterial(material); err != nil {
+		return DeviceIdentity{}, err
+	}
+	s.devicePool[rec.ID] = rec
+	s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
+	s.deviceBindings[id] = rec.ID
 	s.devices[id] = dev
+	s.deviceAppendEventLocked(rec, "created", "system", "from EnsureAccountDevice")
+	s.deviceAppendEventLocked(rec, "assigned", "system", "source=legacy")
+	s.addAuditLocked(model.SeverityInfo, "system", "device.create", rec.ID,
+		"profile="+profile+" algorithm="+DeviceAlgorithmLegacy)
 	return dev, nil
 }

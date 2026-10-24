@@ -261,7 +261,7 @@ func TestRestoreRejectsWrongVersion(t *testing.T) {
 	st := store.New()
 	before := st.Accounts()
 	for _, data := range [][]byte{
-		[]byte(`{"version": 2, "accounts": []}`),
+		[]byte(`{"version": 3, "accounts": []}`),
 		[]byte(`{"version": 0, "accounts": []}`),
 		[]byte(`{"accounts": []}`),
 	} {
