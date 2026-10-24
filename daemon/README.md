@@ -1157,12 +1157,19 @@ the lab/test opt-out for the address classes; the metadata names stay blocked.
 per-endpoint FIFO order, times each attempt out after 10 s and retries up to
 five attempts with backoff 1 s, 5 s, 30 s, 2 min and 10 min. A delivery that
 exhausts its attempts is recorded as `dead_letter` and is not retried again; an
-identical event id inside the 60 s dedupe window is dropped. The last 200
-attempts per endpoint (and globally) are kept in memory for
-`GET /v1/webhooks/{id}/deliveries`, oldest first; the ring does not survive a
-restart. Receivers must be `https` unless they are loopback or
-`AJS_WEBHOOK_ALLOW_HTTP=1`, must not resolve to a private address unless
-`AJS_WEBHOOK_ALLOW_PRIVATE=1`, and the registry is capped at 32 endpoints.
+identical event id inside the 60 s dedupe window is dropped. Every attempt is
+also appended to the persisted delivery history — 50 rows per endpoint, 500 in
+total, oldest dropped first — from one background goroutine fed by a bounded
+queue, so a slow sink costs dropped history (counted) and never delays a
+delivery. The append itself is memory-only: the periodic state snapshot carries
+it to disk, so a delivery never waits on a write or an fsync.
+`GET /v1/webhooks/{id}/deliveries` merges those persisted rows (authoritative;
+they survive a restart) with the live in-memory ring (the last 200 attempts per
+endpoint), dedupes by delivery id and answers newest first; `?limit` pages it
+(default 200, max 500; a non-positive value is 400). Receivers must be `https`
+unless they are loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`, must not resolve to a
+private address unless `AJS_WEBHOOK_ALLOW_PRIVATE=1`, and the registry is
+capped at 32 endpoints.
 `PATCH /v1/webhooks/{id}` changes only `enabled`: enabling a receiver whose
 signing secret is gone is a 409 because every delivery must be signed, and the
 URL/events/description are fixed at create time (recreate the endpoint to
@@ -1821,7 +1828,7 @@ objects.
 | POST | `/v1/webhooks` | `{url,events?,description?,enabled?}` → 201 with the signing secret exactly once; `https` unless loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`; non-private destination unless `AJS_WEBHOOK_ALLOW_PRIVATE=1`; max 32 endpoints |
 | PATCH | `/v1/webhooks/{id}` | `{enabled}` only; enabling a receiver whose secret is gone → 409 |
 | DELETE | `/v1/webhooks/{id}` | remove the row and its sealed secret → 204 |
-| GET | `/v1/webhooks/{id}/deliveries` | the last 200 delivery attempts for that endpoint, oldest first, from memory |
+| GET | `/v1/webhooks/{id}/deliveries` | delivery attempts for that endpoint, newest first: persisted rows (50 per endpoint, 500 total, survive a restart) merged with the live 200-attempt ring, deduped by delivery id; `?limit` defaults to 200 and is clamped to 500, a non-positive value → 400 |
 | GET | `/v1/events?since=&limit=&wait=` | retained customer events after `since`, oldest first: `{events,nextCursor,oldestCursor,dropped}`. `limit` defaults to 100 and is clamped to 500; `wait` (a Go duration, capped at 25 s) turns a current cursor into a long poll that answers as soon as the next event arrives. A malformed cursor → 400 `INVALID_ARGUMENT`; an evicted one → 410 `CURSOR_EXPIRED` with `details.oldestCursor`. Scope `events:read`; a key restricted by `accountIds`/`regions` → 403 |
 | GET | `/v1/events/stream` | `text/event-stream` replay plus live events: one `id:`/`event:`/`data:` frame each (data is the `Event` JSON object), resume from `Last-Event-ID` or `since`, a 15 s `: keepalive` comment, `X-Accel-Buffering: no`; closes when the client disconnects or the daemon stops. Scope `events:read` |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
@@ -2018,7 +2025,11 @@ the 403 for a missing scope, account/region read restrictions and the one-time s
 lifecycle (list/generate/assign/release/retire/quarantine/purge, confirm tokens, export/import,
 409 conflicts) and the startup gate. `internal/api/platform_test.go` covers renewal plans/status,
 usage windows and filters, the health view and the webhook registry (one-time secret, PATCH
-`enabled`, deliveries, 409 when the secret is gone); `internal/webhook/dispatcher_test.go` and
+`enabled`, the persisted+ring delivery merge with `?limit`, persisted deliveries after a reload,
+409 when the secret is gone); `internal/webhook/hook_test.go` pins the async bounded `OnDelivery`
+sink (a blocked sink never stalls dispatch, drops are counted, one call per attempt);
+`internal/store/webhook_deliveries_test.go` pins the 50/500 caps, newest-first snapshot reload,
+drop-oldest, snapshot validation and the delete cascade; `internal/webhook/dispatcher_test.go` and
 `webhook_test.go`/`ssrf_test.go` pin signing, retry/backoff, dead-letter, dedupe, the 200-attempt
 ring, payload scrubbing (including embedded `password=…` values) and the private/metadata-host
 probe table plus dial-guard recheck; `internal/store/audit_hook_test.go` pins critical-audit
@@ -3355,10 +3366,11 @@ header or credential). No live vendor call was made.
   label how much history actually exists. `/v1/health/nodes` probes loopback gate ports only: it
   is a diagnostic for a running gate, not a vendor reachability check, and it keeps one hour of
   samples in memory for at most `AJS_HEALTH_MAX_NODES` nodes (default 16). Webhook
-  deliveries are in-memory (a restart drops the ring and any queued retry), and the signing secret
-  survives a restart only with `AJS_MASTER_KEY`. Panel backup/restore is offline-tested against a
-  temporary state directory: a backup carries sealed credentials and an apply replaces the panel
-  files, so the daemon must be restarted afterwards.
+  delivery history persists through the state snapshot (50 rows per endpoint, 500 total, newest
+  first), while the live 200-attempt ring and any queued retry stay in memory, and the signing
+  secret survives a restart only with `AJS_MASTER_KEY`. Panel backup/restore is offline-tested
+  against a temporary state directory: a backup carries sealed credentials and an apply replaces
+  the panel files, so the daemon must be restarted afterwards.
 - Scoped keys are a least-privilege credential, not an operator model: every key belongs to a
   stored user, its `rateLimitPerMin` budget is a per-key token bucket rather than a quota, and the
   `admin` scope is equivalent to the admin bearer token.

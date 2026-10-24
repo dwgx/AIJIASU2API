@@ -4207,11 +4207,11 @@
         "tags": [
           "Webhooks"
         ],
-        "summary": "Read the bounded delivery-attempt ring for one receiver, oldest first.",
+        "summary": "Read the bounded delivery-attempt history for one receiver, newest first.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
-            "description": "Delivery attempts, oldest first; empty when none were recorded.",
+            "description": "Delivery attempts, newest first; empty when none were recorded. Persisted rows and the live ring are merged and deduped by delivery id before paging.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4222,6 +4222,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4239,6 +4242,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/DeliveryLimit"
           }
         ]
       }
@@ -4703,6 +4709,18 @@
           "default": "0s"
         },
         "description": "Long-poll budget as a Go duration (for example 25s), capped at 25s. Applied only when since is current; the request answers as soon as an event arrives."
+      },
+      "DeliveryLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 200
+        },
+        "description": "Page size over the newest-first merged history; a larger value is clamped to 500."
       },
       "EventLastEventID": {
         "name": "Last-Event-ID",

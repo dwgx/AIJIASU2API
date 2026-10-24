@@ -143,6 +143,11 @@ type Store struct {
 	// snapshot never carries a credential.
 	webhookEndpoints []model.WebhookEndpoint
 
+	// webhookDeliveries is the persisted delivery history, newest first and
+	// capped by WebhookDeliveryRetention. Appends are memory-only; the
+	// periodic snapshot writes them, so dispatch never waits on the disk.
+	webhookDeliveries []model.WebhookDelivery
+
 	// pendingLabels holds the lowercased labels of account creates that are
 	// sealing their password outside the write lock. A label is reserved
 	// before the slow call so a concurrent create or rename cannot take it.
@@ -205,34 +210,35 @@ func NewWithSealers(password Sealer, device DeviceSealer) *Store {
 
 func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 	return &Store{
-		now:              now,
-		accounts:         []model.Account{},
-		nodes:            []model.ProxyNode{},
-		leases:           []model.Lease{},
-		users:            []model.PanelUser{},
-		keys:             []model.APIKey{},
-		scopedKeys:       []model.ScopedKey{},
-		requests:         []model.RequestLog{},
-		audit:            []model.AuditEvent{},
-		settings:         defaultSettings(),
-		keyHashes:        make(map[string]string),
-		scopedKeyHashes:  make(map[string]string),
-		scopedKeyUse:     make(map[string]int64),
-		sealer:           sealer,
-		secrets:          make(map[string][]byte),
-		devices:          make(map[string]DeviceIdentity),
-		deviceCfg:        defaultDevicePoolConfig(),
-		devicePool:       make(map[string]*DeviceRecord),
-		deviceBindings:   make(map[string]string),
-		deviceMaterial:   make(map[string]DeviceMaterial),
-		pendingLabels:    make(map[string]struct{}),
-		selections:       make(map[string]model.Selection),
-		serverStats:      make(map[string]model.ServerStat),
-		schedules:        []model.Schedule{},
-		scheduleRuns:     []model.ScheduleRun{},
-		scheduleFires:    []model.ScheduleFire{},
-		reminderMarks:    make(map[string]model.ReminderMark),
-		webhookEndpoints: []model.WebhookEndpoint{},
+		now:               now,
+		accounts:          []model.Account{},
+		nodes:             []model.ProxyNode{},
+		leases:            []model.Lease{},
+		users:             []model.PanelUser{},
+		keys:              []model.APIKey{},
+		scopedKeys:        []model.ScopedKey{},
+		requests:          []model.RequestLog{},
+		audit:             []model.AuditEvent{},
+		settings:          defaultSettings(),
+		keyHashes:         make(map[string]string),
+		scopedKeyHashes:   make(map[string]string),
+		scopedKeyUse:      make(map[string]int64),
+		sealer:            sealer,
+		secrets:           make(map[string][]byte),
+		devices:           make(map[string]DeviceIdentity),
+		deviceCfg:         defaultDevicePoolConfig(),
+		devicePool:        make(map[string]*DeviceRecord),
+		deviceBindings:    make(map[string]string),
+		deviceMaterial:    make(map[string]DeviceMaterial),
+		pendingLabels:     make(map[string]struct{}),
+		selections:        make(map[string]model.Selection),
+		serverStats:       make(map[string]model.ServerStat),
+		schedules:         []model.Schedule{},
+		scheduleRuns:      []model.ScheduleRun{},
+		scheduleFires:     []model.ScheduleFire{},
+		reminderMarks:     make(map[string]model.ReminderMark),
+		webhookEndpoints:  []model.WebhookEndpoint{},
+		webhookDeliveries: []model.WebhookDelivery{},
 	}
 }
 

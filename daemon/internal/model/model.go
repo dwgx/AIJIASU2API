@@ -279,6 +279,23 @@ type WebhookEndpointInput struct {
 	Enabled     *bool    `json:"enabled,omitempty"`
 }
 
+// WebhookDelivery is one delivery attempt persisted in the state snapshot. It
+// is the restart-safe counterpart of webhook.Delivery: the dispatcher's ring
+// stays in memory, this row is what survives a snapshot/reload cycle. Error
+// carries only a status line or transport message — never a payload, signing
+// secret or header value.
+type WebhookDelivery struct {
+	ID         string `json:"id"`
+	EndpointID string `json:"endpointId"`
+	Event      string `json:"event"`
+	Attempt    int    `json:"attempt"`
+	Status     string `json:"status"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+	Error      string `json:"error,omitempty"`
+	At         string `json:"at"`
+	DurationMs int64  `json:"durationMs"`
+}
+
 // RequestLog mirrors the dashboard RequestLog interface.
 type RequestLog struct {
 	ID           string        `json:"id"`

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -95,6 +96,9 @@ func (s *Store) SetWebhookEndpointEnabled(id string, enabled bool) (model.Webhoo
 
 // DeleteWebhookEndpoint removes one receiver. Deleting an unknown id reports
 // not-found so DELETE can answer 404 instead of pretending the row existed.
+// The receiver's retained deliveries go with it: the deliveries route 404s
+// once the row is gone, and an attempt still queued in the dispatcher re-adds
+// itself under the normal caps.
 func (s *Store) DeleteWebhookEndpoint(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -103,6 +107,9 @@ func (s *Store) DeleteWebhookEndpoint(id string) error {
 		return notFoundf("webhook %q not found", id)
 	}
 	s.webhookEndpoints = append(s.webhookEndpoints[:idx], s.webhookEndpoints[idx+1:]...)
+	s.webhookDeliveries = slices.DeleteFunc(s.webhookDeliveries, func(delivery model.WebhookDelivery) bool {
+		return delivery.EndpointID == id
+	})
 	return nil
 }
 

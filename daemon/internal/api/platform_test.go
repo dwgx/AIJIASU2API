@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -530,5 +531,153 @@ func TestEventEmissionAndHealthLifecycle(t *testing.T) {
 	requireStatus(t, resp, http.StatusOK)
 	if sink.count(webhook.EventAccountLogout) != 1 {
 		t.Fatalf("logout emitted %v, want account.logout", sink.types())
+	}
+}
+
+func TestWebhookDeliveriesMergePersistedAndRing(t *testing.T) {
+	dispatcher := webhook.New(webhook.Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	ts, st := newPlatformServer(t, Config{Webhooks: dispatcher})
+
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/webhooks", map[string]any{
+		"url": "https://example.com/hook",
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	created := decodeBody[webhookCreated](t, body)
+
+	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for _, row := range []model.WebhookDelivery{
+		{
+			ID: "evt-a:1", EndpointID: created.ID, Event: "account.login", Attempt: 1,
+			Status: "success", HTTPStatus: 200, At: base.Format(time.RFC3339Nano), DurationMs: 4,
+		},
+		{
+			ID: "evt-b:1", EndpointID: created.ID, Event: "node.connected", Attempt: 1,
+			Status: "failed", HTTPStatus: 503, Error: "http status 503",
+			At: base.Add(time.Second).Format(time.RFC3339Nano), DurationMs: 9,
+		},
+	} {
+		if err := st.AppendWebhookDelivery(row); err != nil {
+			t.Fatalf("append %q: %v", row.ID, err)
+		}
+	}
+	// The ring repeats evt-b:1 (the store copy must win the dedupe) and adds a
+	// newer attempt the store has not seen.
+	dispatcher.Log().Append(webhook.Delivery{
+		ID: "evt-b:1", EndpointID: created.ID, Event: webhook.EventNodeConnected, Attempt: 1,
+		Status: webhook.StatusFailed, HTTPStatus: 503, At: base.Add(time.Second),
+	})
+	dispatcher.Log().Append(webhook.Delivery{
+		ID: "evt-c:1", EndpointID: created.ID, Event: webhook.EventNodeDisconnected, Attempt: 1,
+		Status: webhook.StatusSuccess, HTTPStatus: 204, At: base.Add(2 * time.Second),
+	})
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+created.ID+"/deliveries", nil)
+	requireStatus(t, resp, http.StatusOK)
+	deliveries := decodeBody[[]webhook.Delivery](t, body)
+	ids := make([]string, 0, len(deliveries))
+	for _, delivery := range deliveries {
+		ids = append(ids, delivery.ID)
+	}
+	want := []string{"evt-c:1", "evt-b:1", "evt-a:1"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("deliveries = %v, want %v (newest first, deduped)", ids, want)
+	}
+	if deliveries[1].Error != "http status 503" || deliveries[1].DurationMs != 9 {
+		t.Fatalf("dedupe kept the ring copy instead of the persisted row: %+v", deliveries[1])
+	}
+
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+created.ID+"/deliveries?limit=2", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if page := decodeBody[[]webhook.Delivery](t, body); len(page) != 2 || page[0].ID != "evt-c:1" || page[1].ID != "evt-b:1" {
+		t.Fatalf("limit=2 returned %+v, want the two newest", page)
+	}
+
+	for _, raw := range []string{"0", "-1", "many"} {
+		resp, body = apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+created.ID+"/deliveries?limit="+raw, nil)
+		requireStatus(t, resp, http.StatusBadRequest)
+		requireErrorCode(t, body, CodeInvalidArgument)
+	}
+}
+
+func TestWebhookDeliveriesSurviveRestart(t *testing.T) {
+	st := store.NewEmpty()
+	endpoint, err := st.CreateWebhookEndpoint(model.WebhookEndpointInput{URL: "https://example.com/hook"})
+	if err != nil {
+		t.Fatalf("create endpoint: %v", err)
+	}
+	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		row := model.WebhookDelivery{
+			ID:         "evt-1:" + strconv.Itoa(i),
+			EndpointID: endpoint.ID,
+			Event:      "account.login",
+			Attempt:    i,
+			Status:     "success",
+			HTTPStatus: 200,
+			At:         base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano),
+			DurationMs: int64(i),
+		}
+		if err := st.AppendWebhookDelivery(row); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	restored := store.NewEmpty()
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	// A fresh dispatcher has an empty ring: the response can only come from
+	// the reloaded snapshot.
+	dispatcher := webhook.New(webhook.Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = dispatcher.Close() })
+	server := New(Config{AdminToken: testToken, Webhooks: dispatcher}, restored, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(server)
+	t.Cleanup(ts.Close)
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+endpoint.ID+"/deliveries", nil)
+	requireStatus(t, resp, http.StatusOK)
+	deliveries := decodeBody[[]webhook.Delivery](t, body)
+	if len(deliveries) != 3 {
+		t.Fatalf("restored deliveries = %+v, want 3 rows", deliveries)
+	}
+	for i, delivery := range deliveries {
+		wantID := "evt-1:" + strconv.Itoa(3-i)
+		if delivery.ID != wantID {
+			t.Fatalf("delivery %d = %q, want %q (newest first)", i, delivery.ID, wantID)
+		}
+		if !delivery.At.Equal(base.Add(time.Duration(3-i) * time.Second)) {
+			t.Fatalf("delivery %d timestamp = %s", i, delivery.At)
+		}
+	}
+}
+
+func TestWebhookDeliveriesWithoutDispatcher(t *testing.T) {
+	ts, st := newPlatformServer(t, Config{})
+	endpoint, err := st.CreateWebhookEndpoint(model.WebhookEndpointInput{URL: "https://example.com/hook"})
+	if err != nil {
+		t.Fatalf("create endpoint: %v", err)
+	}
+	if err := st.AppendWebhookDelivery(model.WebhookDelivery{
+		ID: "evt-1:1", EndpointID: endpoint.ID, Event: "account.login", Attempt: 1,
+		Status: "success", HTTPStatus: 200,
+		At: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/webhooks/"+endpoint.ID+"/deliveries", nil)
+	requireStatus(t, resp, http.StatusOK)
+	deliveries := decodeBody[[]webhook.Delivery](t, body)
+	if len(deliveries) != 1 || deliveries[0].ID != "evt-1:1" {
+		t.Fatalf("deliveries without a dispatcher = %+v, want the persisted row", deliveries)
 	}
 }

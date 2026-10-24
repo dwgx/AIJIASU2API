@@ -81,6 +81,12 @@ type Snapshot struct {
 	WebhookEndpoints []model.WebhookEndpoint `json:"webhookEndpoints,omitempty"`
 	WebhookSeq       int                     `json:"webhookSeq,omitempty"`
 
+	// WebhookDeliveries is the persisted delivery history, newest first and
+	// bounded by WebhookDeliveryRetention/WebhookDeliveriesPerEndpoint. It is
+	// additive: an older build ignores it, and a document without it restores
+	// with an empty history.
+	WebhookDeliveries []model.WebhookDelivery `json:"webhookDeliveries,omitempty"`
+
 	AccountSeq   int `json:"accountSeq"`
 	UserSeq      int `json:"userSeq"`
 	KeySeq       int `json:"keySeq"`
@@ -166,6 +172,7 @@ func (s *Store) Snapshot() ([]byte, error) {
 		snap.WebhookEndpoints[i] = cloneWebhookEndpoint(endpoint)
 	}
 	snap.WebhookSeq = s.webhookSeq
+	snap.WebhookDeliveries = append([]model.WebhookDelivery(nil), s.webhookDeliveries...)
 	snap.AccountSeq = s.accountSeq
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
@@ -270,6 +277,10 @@ func (s *Store) Restore(data []byte) error {
 		s.webhookEndpoints = []model.WebhookEndpoint{}
 	}
 	s.webhookSeq = snap.WebhookSeq
+	s.webhookDeliveries = snap.WebhookDeliveries
+	if s.webhookDeliveries == nil {
+		s.webhookDeliveries = []model.WebhookDelivery{}
+	}
 	s.accountSeq = snap.AccountSeq
 	s.userSeq = snap.UserSeq
 	s.keySeq = snap.KeySeq
@@ -469,7 +480,10 @@ func (snap *Snapshot) validate() error {
 	if err := snap.validateSchedules(accounts); err != nil {
 		return err
 	}
-	return snap.validateWebhooks()
+	if err := snap.validateWebhooks(); err != nil {
+		return err
+	}
+	return snap.validateWebhookDeliveries()
 }
 
 // validateWebhooks rejects a document whose receiver rows cannot be loaded.
@@ -758,6 +772,7 @@ func (snap *Snapshot) normalize() {
 	if snap.WebhookEndpoints == nil {
 		snap.WebhookEndpoints = []model.WebhookEndpoint{}
 	}
+	snap.WebhookDeliveries = normalizeWebhookDeliveries(snap.WebhookDeliveries)
 	for _, endpoint := range snap.WebhookEndpoints {
 		snap.WebhookSeq = max(snap.WebhookSeq, sequenceOf(endpoint.ID, "wh-"))
 	}

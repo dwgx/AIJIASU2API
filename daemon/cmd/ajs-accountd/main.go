@@ -799,8 +799,20 @@ func (s sealedWebhookSecrets) Delete(id string) error {
 // whose signing secret can be opened. A missing secret (no master key, or an
 // entry removed by hand) is logged and skipped: the row stays visible as
 // unavailable instead of delivering with an empty key.
+//
+// Every recorded attempt is appended to the store through OnDelivery. The
+// append is memory-only — the periodic snapshot carries it to disk — and the
+// dispatcher feeds the hook from its own bounded goroutine, so neither a slow
+// disk nor a slow store can delay a delivery.
 func startWebhooks(st *store.Store, logger *slog.Logger, secrets api.WebhookSecretStore) (*webhook.Dispatcher, api.EventSink) {
-	dispatcher := webhook.New(webhook.Config{Logger: logger})
+	dispatcher := webhook.New(webhook.Config{
+		Logger: logger,
+		OnDelivery: func(delivery webhook.Delivery) {
+			if err := st.AppendWebhookDelivery(persistedDelivery(delivery)); err != nil {
+				logger.Warn("webhook_delivery_persist_failed", "delivery", delivery.ID, "error", err)
+			}
+		},
+	})
 	registered, unavailable := 0, 0
 	for _, endpoint := range st.WebhookEndpoints() {
 		secret, ok := openWebhookSecret(secrets, endpoint.ID)
@@ -843,6 +855,23 @@ func openWebhookSecret(secrets api.WebhookSecretStore, id string) (string, bool)
 		return "", false
 	}
 	return secrets.Open(id)
+}
+
+// persistedDelivery maps one dispatcher attempt onto its snapshot row. The
+// timestamp is RFC 3339 because that is the model's wire convention; the
+// nanosecond precision keeps retries of one event ordered.
+func persistedDelivery(delivery webhook.Delivery) model.WebhookDelivery {
+	return model.WebhookDelivery{
+		ID:         delivery.ID,
+		EndpointID: delivery.EndpointID,
+		Event:      string(delivery.Event),
+		Attempt:    delivery.Attempt,
+		Status:     string(delivery.Status),
+		HTTPStatus: delivery.HTTPStatus,
+		Error:      delivery.Error,
+		At:         delivery.At.UTC().Format(time.RFC3339Nano),
+		DurationMs: delivery.DurationMs,
+	}
 }
 
 // webhookEventTypes converts persisted event names to the dispatcher type.

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -543,24 +545,97 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleWebhookDeliveries serves GET /v1/webhooks/{id}/deliveries: the
-// dispatcher's bounded attempt ring for one endpoint, oldest first.
+// Delivery history page bounds. The store retains 50 rows per endpoint and
+// the dispatcher ring 200, so a default page of 200 shows the live window and
+// a larger limit is only useful after a restart.
+const (
+	defaultDeliveriesLimit = 200
+	maxDeliveriesLimit     = 500
+)
+
+// handleWebhookDeliveries serves GET /v1/webhooks/{id}/deliveries. Persisted
+// rows from state.json are authoritative; the dispatcher's in-memory ring adds
+// attempts the store has not seen yet (or already dropped at its retention
+// cap). Both are merged, deduped by delivery id and returned newest first, so a
+// restart never hides history and the live view never lags. The route answers
+// from the store even when the dispatcher is disabled.
 func (s *Server) handleWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
 	if _, ok := s.store.WebhookEndpoint(id); !ok {
 		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("webhook %q not found", id))
 		return
 	}
-	if s.cfg.Webhooks == nil {
-		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
-			"webhook dispatcher is not configured")
+	limit, ok := parseDeliveriesLimit(w, r.URL.Query().Get("limit"))
+	if !ok {
 		return
 	}
-	deliveries := s.cfg.Webhooks.Log().RecentFor(id)
-	if deliveries == nil {
-		deliveries = []webhook.Delivery{}
+	deliveries := s.webhookDeliveries(id)
+	if len(deliveries) > limit {
+		deliveries = deliveries[:limit]
 	}
 	writeJSON(w, http.StatusOK, deliveries)
+}
+
+// webhookDeliveries merges the persisted history with the live ring. Store rows
+// come first, so a duplicate id in the ring keeps the persisted copy; the ring
+// contributes only attempts missing from the store (younger than the last
+// snapshot, or evicted by the per-endpoint cap).
+func (s *Server) webhookDeliveries(endpointID string) []webhook.Delivery {
+	persisted := s.store.WebhookDeliveries(endpointID)
+	out := make([]webhook.Delivery, 0, len(persisted)+webhook.DefaultRingSize)
+	seen := make(map[string]struct{}, len(persisted))
+	for _, row := range persisted {
+		out = append(out, webhookDeliveryFromModel(row))
+		seen[row.ID] = struct{}{}
+	}
+	if s.cfg.Webhooks != nil {
+		ring := s.cfg.Webhooks.Log().RecentFor(endpointID) // oldest first
+		for i := len(ring) - 1; i >= 0; i-- {
+			if _, ok := seen[ring[i].ID]; ok {
+				continue
+			}
+			seen[ring[i].ID] = struct{}{}
+			out = append(out, ring[i])
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out
+}
+
+// webhookDeliveryFromModel converts a persisted row to the wire type. The
+// store validates At on write and on restore, so the parse cannot fail for a
+// row that reached this point; a zero time would only sort it last.
+func webhookDeliveryFromModel(row model.WebhookDelivery) webhook.Delivery {
+	at, _ := time.Parse(time.RFC3339, row.At)
+	return webhook.Delivery{
+		ID:         row.ID,
+		EndpointID: row.EndpointID,
+		Event:      webhook.EventType(row.Event),
+		Attempt:    row.Attempt,
+		Status:     webhook.DeliveryStatus(row.Status),
+		HTTPStatus: row.HTTPStatus,
+		Error:      row.Error,
+		At:         at,
+		DurationMs: row.DurationMs,
+	}
+}
+
+// parseDeliveriesLimit reads ?limit. Absent means the default page; a
+// non-positive or non-integer value is 400 and a larger one is clamped.
+func parseDeliveriesLimit(w http.ResponseWriter, raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultDeliveriesLimit, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 {
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "limit must be a positive integer")
+		return 0, false
+	}
+	if limit > maxDeliveriesLimit {
+		limit = maxDeliveriesLimit
+	}
+	return limit, true
 }
 
 // webhookEvents converts the persisted event strings to the dispatcher type.

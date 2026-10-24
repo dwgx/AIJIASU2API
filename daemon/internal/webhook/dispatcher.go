@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,11 @@ const (
 	DefaultMaxAttempts  = 5
 	DefaultTimeout      = 10 * time.Second
 	DefaultDedupeWindow = 60 * time.Second
+	// DefaultHookQueueSize bounds the queue between the delivery workers and
+	// the OnDelivery sink. Persisting an attempt is an in-memory append, so a
+	// small queue is enough; a slow sink degrades to dropped rows, never to a
+	// delayed delivery.
+	DefaultHookQueueSize = 256
 )
 
 // DefaultBackoff is the delay before attempt n+1. The last entry repeats when
@@ -60,6 +66,16 @@ type Config struct {
 	Sleep      func(ctx context.Context, d time.Duration) error
 	Logger     *slog.Logger
 	HTTPClient *http.Client
+
+	// OnDelivery receives every recorded attempt: success, retry, dead letter
+	// and abandoned-queue rows alike. It runs on one background goroutine fed
+	// by a bounded queue, never on a delivery worker, so a slow sink cannot
+	// delay or block a delivery. When the queue is full the attempt is dropped
+	// and counted by HookDropped. Nil disables the hook.
+	OnDelivery func(Delivery)
+	// HookQueueSize bounds the OnDelivery queue. A non-positive value selects
+	// DefaultHookQueueSize.
+	HookQueueSize int
 }
 
 // Dispatcher delivers events to registered endpoints. It is safe for
@@ -86,6 +102,13 @@ type Dispatcher struct {
 
 	log *DeliveryLog
 	wg  sync.WaitGroup
+
+	// hookCh feeds OnDelivery from a single background goroutine. It is nil
+	// when no hook is configured; a full queue increments hookDropped instead
+	// of blocking the delivery worker.
+	hookCh      chan Delivery
+	hookDropped atomic.Int64
+	hookWG      sync.WaitGroup
 }
 
 type endpointState struct {
@@ -145,7 +168,10 @@ func New(cfg Config) *Dispatcher {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Dispatcher{
+	if cfg.OnDelivery != nil && cfg.HookQueueSize <= 0 {
+		cfg.HookQueueSize = DefaultHookQueueSize
+	}
+	dispatcher := &Dispatcher{
 		cfg:          cfg,
 		logger:       cfg.Logger,
 		client:       client,
@@ -159,6 +185,12 @@ func New(cfg Config) *Dispatcher {
 		dedupe:       make(map[string]time.Time),
 		log:          NewDeliveryLog(cfg.RingSize),
 	}
+	if cfg.OnDelivery != nil {
+		dispatcher.hookCh = make(chan Delivery, cfg.HookQueueSize)
+		dispatcher.hookWG.Add(1)
+		go dispatcher.runDeliveryHook()
+	}
+	return dispatcher
 }
 
 // AddEndpoint registers a receiver. The URL must be HTTPS unless the receiver
@@ -338,6 +370,14 @@ func (d *Dispatcher) Close() error {
 			At:         d.cfg.Now(),
 		})
 	}
+	// Only Close sends the close, and only after every delivery worker has
+	// stopped and the leftover rows above are recorded, so no send can race
+	// the close. Draining the channel lets queued attempts reach the sink
+	// before Close returns.
+	if d.hookCh != nil {
+		close(d.hookCh)
+		d.hookWG.Wait()
+	}
 	return nil
 }
 
@@ -505,10 +545,11 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// record stores an attempt and logs it without any payload, secret or header
-// content.
+// record stores an attempt, hands it to the persistence hook and logs it
+// without any payload, secret or header content.
 func (d *Dispatcher) record(delivery Delivery) {
 	d.log.Append(delivery)
+	d.publishHook(delivery)
 	if delivery.Status == StatusDeadLetter {
 		d.logger.Warn("webhook delivery dead-lettered",
 			"endpoint", delivery.EndpointID,
@@ -530,3 +571,40 @@ func (d *Dispatcher) record(delivery Delivery) {
 		"error", delivery.Error,
 	)
 }
+
+// publishHook queues one attempt for OnDelivery without ever blocking the
+// caller. A full queue drops the attempt and counts it: a slow sink costs
+// history, never a delivery.
+func (d *Dispatcher) publishHook(delivery Delivery) {
+	if d.hookCh == nil {
+		return
+	}
+	select {
+	case d.hookCh <- delivery:
+	default:
+		d.hookDropped.Add(1)
+	}
+}
+
+// runDeliveryHook drains the OnDelivery queue on one goroutine. A panicking
+// sink is logged and the pump continues, so one bad row cannot silently stop
+// persistence for the process lifetime.
+func (d *Dispatcher) runDeliveryHook() {
+	defer d.hookWG.Done()
+	for delivery := range d.hookCh {
+		d.callDeliveryHook(delivery)
+	}
+}
+
+func (d *Dispatcher) callDeliveryHook(delivery Delivery) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			d.logger.Error("webhook_delivery_hook_panic", "panic", recovered)
+		}
+	}()
+	d.cfg.OnDelivery(delivery)
+}
+
+// HookDropped reports how many attempts were dropped because the OnDelivery
+// queue was full. It is a lifetime counter, not a gauge.
+func (d *Dispatcher) HookDropped() int64 { return d.hookDropped.Load() }
