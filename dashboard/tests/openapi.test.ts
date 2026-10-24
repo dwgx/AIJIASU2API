@@ -353,6 +353,9 @@ describe('docs/openapi.json', () => {
       )
       expect(responseSchema(usage, '200')).toEqual({ $ref: '#/components/schemas/UsageSummary' })
     }
+    const summary = schema('UsageSummary')
+    expect(summary.properties?.quotaEnforced).toMatchObject({ type: 'boolean' })
+    expect(summary.required).toContain('quotaEnforced')
 
     const health = doc.paths['/v1/health/nodes']?.get
     expect(health && responseSchema(health, '200')).toEqual({ $ref: '#/components/schemas/HealthView' })

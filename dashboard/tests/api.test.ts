@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../src/lib/api'
+import { getDb, mockAuditExportCsv } from '../src/lib/mock'
 
 beforeEach(async () => {
   localStorage.clear()
@@ -221,5 +222,38 @@ describe('lab fixtures', () => {
     expect(nodes.filter((node) => node.accountId === 'acc-01').every((node) => node.state === 'READY')).toBe(true)
     expect((await api.listLeases()).some((lease) => lease.accountId === 'acc-01')).toBe(false)
     expect((await api.listAccounts()).find((account) => account.id === 'acc-01')?.state).toBe('paused')
+  })
+})
+
+describe('audit export mock', () => {
+  it('neutralizes spreadsheet formulas and quotes RFC 4180 cells in the audit CSV', () => {
+    const db = getDb()
+    const ts = new Date().toISOString()
+    db.audit.unshift(
+      {
+        id: 'audit-formula',
+        ts,
+        severity: 'warn',
+        actor: '=actor',
+        action: '+action',
+        target: '-target',
+        detail: '@detail',
+      },
+      {
+        id: 'audit-quoted',
+        ts,
+        severity: 'warn',
+        actor: 'operator',
+        action: 'note',
+        target: 'host',
+        detail: 'say "hi", now\nnext line',
+      },
+    )
+
+    const file = mockAuditExportCsv({ severity: 'warn' })
+    // Every formula-leading cell carries the apostrophe guard.
+    expect(file.content).toContain(",warn,'=actor,'+action,'-target,'@detail,")
+    // Quotes and a line break stay inside one RFC 4180 quoted cell.
+    expect(file.content).toContain('"say ""hi"", now\nnext line"')
   })
 })

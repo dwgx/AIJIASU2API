@@ -4995,3 +4995,10 @@ svg {
 .audit-export-warning {
   margin: 12px 16px 0;
 }
+
+/* The CSV window label sits under the Logs toolbar and matches the toast. */
+.audit-export-window {
+  margin: 0 16px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}

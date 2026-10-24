@@ -20,6 +20,7 @@ import {
   mockBulkDelete,
   mockCreateBackup,
   mockCreateScopedKey,
+  mockEventsPage,
   mockImportAccounts,
   mockInspectBackup,
   mockRestoreBackup,
@@ -60,6 +61,8 @@ import type {
   DisconnectResult,
   EgressCheckResult,
   EgressView,
+  EventsPage,
+  EventsQuery,
   FlowsView,
   GateView,
   HealthView,
@@ -1721,6 +1724,7 @@ function mockUsageSummary(query: UsageQuery): UsageSummary {
     })),
     topTargets: [],
     truncated: false,
+    quotaEnforced: false,
   }
 
   for (const [label, account] of accounts) {
@@ -2348,6 +2352,30 @@ export const api = {
     if (!USE_MOCK) return http<AuditEvent[]>(`/v1/audit?limit=${limit}`)
     await wait()
     return clone(getDb().audit.slice(0, limit))
+  },
+
+  /**
+   * GET /v1/events — replay the retained ring and long-poll for the next
+   * event. `wait` holds the request server-side; pass the previous
+   * `nextCursor` as `since` so a reconnect never skips an event.
+   */
+  async listEvents(
+    query: EventsQuery = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EventsPage> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.since) params.set('since', query.since)
+      if (query.limit) params.set('limit', String(query.limit))
+      if (query.wait) params.set('wait', query.wait)
+      const search = params.toString()
+      return http<EventsPage>(`/v1/events${search ? `?${search}` : ''}`, {
+        signal: options.signal,
+      })
+    }
+    await wait()
+    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    return clone(mockEventsPage(query))
   },
 
   async getMetrics(range: MetricRange): Promise<Metrics> {

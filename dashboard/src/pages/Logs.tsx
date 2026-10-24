@@ -1,14 +1,16 @@
 import { Download, RefreshCw, ScrollText, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { api } from '../lib/api'
-import { formatDateTime, formatRelative } from '../lib/format'
+import { formatDate, formatDateTime, formatRelative } from '../lib/format'
 import { useI18n } from '../lib/i18n'
+import type { TranslationParams } from '../lib/i18n'
 import { SEVERITY } from '../lib/labels'
-import type { AuditEvent, Severity } from '../lib/types'
+import type { AuditEvent, AuditExportQuery, Severity } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { downloadBlob } from '../components/accounts/AccountExportDialog'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
+import { EventsFeed } from '../components/events/EventsFeed'
 import { Pagination, usePagination } from '../components/Pagination'
 import { useToast } from '../components/Toast'
 import {
@@ -22,6 +24,26 @@ import {
   StatusPill,
   TableSkeleton,
 } from '../components/primitives'
+
+/** The daemon's default CSV window when neither bound is sent. */
+const EXPORT_DEFAULT_DAYS = 7
+
+type Translate = (key: string, params?: TranslationParams) => string
+
+/** The window a download actually covers, in the user's language. */
+function exportWindowLabel(query: AuditExportQuery, t: Translate): string {
+  if (!query.from && !query.to) {
+    return t('audit.exportWindowLastDays', { days: EXPORT_DEFAULT_DAYS })
+  }
+  if (query.from && query.to) {
+    return t('audit.exportWindowRange', {
+      from: formatDate(query.from),
+      to: formatDate(query.to),
+    })
+  }
+  if (query.from) return t('audit.exportWindowSince', { from: formatDate(query.from) })
+  return t('audit.exportWindowUntil', { to: formatDate(query.to ?? '') })
+}
 
 export default function Logs() {
   const audit = useAsync(() => api.listAudit(20), [], { intervalMs: 15_000 })
@@ -54,17 +76,21 @@ export default function Logs() {
     resetKey: JSON.stringify([severity, actor, query]),
   })
 
+  const exportQuery: AuditExportQuery = severity === 'all' ? {} : { severity }
+  const exportWindow = exportWindowLabel(exportQuery, t)
+
   const exportLog = async () => {
     setExporting(true)
     setExportTruncated(false)
     try {
-      const download = await api.exportAuditCsv(
-        severity === 'all' ? {} : { severity },
-      )
+      const download = await api.exportAuditCsv(exportQuery)
       downloadBlob(download.blob, download.filename)
       setExportTruncated(download.truncated)
       push(
-        t(download.truncated ? 'audit.exportTruncated' : 'audit.exportDone'),
+        t(
+          download.truncated ? 'audit.exportTruncated' : 'audit.exportDoneWindow',
+          download.truncated ? undefined : { window: exportWindow },
+        ),
         download.truncated ? 'danger' : 'success',
       )
     } catch (cause) {
@@ -131,6 +157,7 @@ export default function Logs() {
               icon={<Download size={14} />}
               onClick={() => void exportLog()}
               loading={exporting}
+              title={t('audit.exportWindowHint', { window: exportWindow })}
             >
               {t('audit.export')}
             </Button>
@@ -140,6 +167,8 @@ export default function Logs() {
           </>
         }
       />
+
+      <EventsFeed />
 
       <Card bodyClassName="card__body--flush">
         <div className="toolbar">
@@ -175,6 +204,10 @@ export default function Logs() {
             ]}
           />
         </div>
+
+        <p className="audit-export-window">
+          {t('audit.exportWindowHint', { window: exportWindow })}
+        </p>
 
         {exportTruncated ? (
           <p className="callout callout--warning audit-export-warning" role="alert">

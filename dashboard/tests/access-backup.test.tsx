@@ -58,7 +58,7 @@ async function openLogs(): Promise<void> {
   window.history.pushState({}, '', '/logs')
   render(<App />)
   await screen.findByRole('heading', { name: 'Logs', level: 1 })
-  await screen.findByText('account.login')
+  await screen.findByRole('table', { name: 'Audit log' })
 }
 
 async function openBackup(): Promise<void> {
@@ -266,6 +266,8 @@ describe('audit CSV export', () => {
     const { createObjectURL, click } = stubDownload()
     await openLogs()
 
+    expect(screen.getByText('Export window: last 7 days')).toBeInTheDocument()
+
     await user.click(screen.getByRole('combobox', { name: 'Filter by severity' }))
     await user.click(await screen.findByRole('option', { name: 'Warn' }))
     await user.click(screen.getByRole('button', { name: 'Export CSV' }))
@@ -279,7 +281,9 @@ describe('audit CSV export', () => {
     for (const line of lines.slice(1)) expect(line.split(',')[1]).toBe('warn')
     expect(csv).toContain('node.drain')
     expect(csv).not.toContain('account.login')
-    expect(await screen.findByText('Audit CSV downloaded')).toBeInTheDocument()
+    expect(
+      await screen.findByText('Audit CSV downloaded · last 7 days'),
+    ).toBeInTheDocument()
     expect(screen.queryByText(/X-Truncated/)).toBeNull()
   })
 

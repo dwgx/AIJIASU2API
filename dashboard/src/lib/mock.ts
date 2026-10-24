@@ -23,6 +23,9 @@ import type {
   DiagnosticsView,
   EgressCheckResult,
   EgressView,
+  EventRecord,
+  EventsPage,
+  EventsQuery,
   FlagView,
   FlowsView,
   GateView,
@@ -48,8 +51,9 @@ import type {
   ServerView,
   SessionView,
   TrafficPoint,
+  WebhookEvent,
 } from './types'
-import { SCOPES } from './types'
+import { SCOPES, WEBHOOK_EVENTS } from './types'
 import { ApiError } from './errors'
 import { regionName } from './regions'
 
@@ -1851,8 +1855,14 @@ const AUDIT_EXPORT_DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const AUDIT_EXPORT_MAX_WINDOW_MS = 366 * 24 * 60 * 60 * 1000
 const AUDIT_EXPORT_ROW_CAP = 50_000
 
+// A spreadsheet treats these leading characters as the start of a formula;
+// prefixing an apostrophe forces the cell to render as text (the daemon does
+// the same in audit_export.go).
+const CSV_FORMULA_PREFIX = /^[=+\-@\t\r]/
+
 function csvField(value: string): string {
-  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+  const cell = CSV_FORMULA_PREFIX.test(value) ? `'${value}` : value
+  return /[",\n\r]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell
 }
 
 function exportStamp(ms: number): string {
@@ -1903,6 +1913,69 @@ export function mockAuditExportCsv(query: AuditExportQuery = {}, now = Date.now(
     content: `${lines.join('\r\n')}\r\n`,
     filename: `apc-audit-${exportStamp(from)}-${exportStamp(to)}.csv`,
     truncated,
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Event stream — mock of daemon/internal/events and GET /v1/events
+ *
+ * The stream is deterministic for a given mock database: the newest audit
+ * rows become oldest-first events with monotonic evt-NNNNNN ids, so a test
+ * can replay from nextCursor and see the same page twice.
+ * ------------------------------------------------------------------------ */
+
+const MOCK_EVENT_LIMIT = 12
+const MOCK_EVENT_PAGE_LIMIT = 100
+const MOCK_EVENT_MAX_LIMIT = 500
+
+/** Fallback types for audit actions that are not webhook events themselves. */
+const MOCK_EVENT_TYPES: WebhookEvent[] = [
+  'node.connected',
+  'schedule.fired',
+  'node.disconnected',
+  'device.retired',
+  'audit.critical',
+  'account.renewal_due',
+  'node.switched',
+  'schedule.failed',
+]
+
+function isWebhookEvent(value: string): value is WebhookEvent {
+  return (WEBHOOK_EVENTS as readonly string[]).includes(value)
+}
+
+export function mockEventsPage(query: EventsQuery = {}): EventsPage {
+  const rows = getDb().audit.slice(0, MOCK_EVENT_LIMIT).reverse()
+  const events: EventRecord[] = rows.map((row, index) => ({
+    id: `evt-${String(index + 1).padStart(6, '0')}`,
+    type: isWebhookEvent(row.action)
+      ? row.action
+      : MOCK_EVENT_TYPES[index % MOCK_EVENT_TYPES.length],
+    ts: row.ts,
+    data: { actor: row.actor, target: row.target, detail: row.detail },
+  }))
+  const ids = events.map((event) => event.id)
+  const since = query.since?.trim() ?? ''
+  let start = 0
+  if (since) {
+    const index = ids.indexOf(since)
+    if (index === -1) {
+      throw invalidArgument(
+        `invalid cursor ${JSON.stringify(since)}: expected a retained event id`,
+      )
+    }
+    start = index + 1
+  }
+  const limit =
+    query.limit && query.limit > 0
+      ? Math.min(query.limit, MOCK_EVENT_MAX_LIMIT)
+      : MOCK_EVENT_PAGE_LIMIT
+  const page = events.slice(start, start + limit)
+  return {
+    events: page,
+    nextCursor: page.length > 0 ? page[page.length - 1].id : since,
+    oldestCursor: ids[0] ?? '',
+    dropped: 0,
   }
 }
 

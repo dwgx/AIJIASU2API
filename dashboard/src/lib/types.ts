@@ -1167,7 +1167,7 @@ export interface UsageSummary {
   rowsRetained?: number
   /** Whole days the retained rows cover, derived from the oldest retained row. */
   retentionDays?: number
-  /** True once the gate enforces `quotaBytesMonth`; absent means advisory only. */
+  /** Always sent by the daemon; false while the gate treats quotas as advisory. */
   quotaEnforced?: boolean
 }
 
@@ -1254,6 +1254,40 @@ export const WEBHOOK_EVENTS = [
 ] as const
 
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number]
+
+/**
+ * One retained event from GET /v1/events. The daemon scrubs credential-shaped
+ * data before it enters the ring; `ts` is an RFC 3339 instant.
+ */
+export interface EventRecord {
+  /** Monotonic cursor such as evt-000123; pass it back as `since`. */
+  id: string
+  type: WebhookEvent
+  ts: string
+  data?: Record<string, unknown>
+}
+
+/** GET /v1/events — one replay/long-poll page of the retained ring. */
+export interface EventsPage {
+  /** Oldest-first; a client prepends the reversed page to a newest-first list. */
+  events: EventRecord[]
+  /** Cursor of the newest returned event, or the request cursor when empty. */
+  nextCursor: string
+  /** Oldest cursor the ring still retains; the restart point after CURSOR_EXPIRED. */
+  oldestCursor: string
+  /** Events this subscriber lost to a full buffer since it connected. */
+  dropped: number
+}
+
+/** Query for GET /v1/events; empty fields are omitted from the request. */
+export interface EventsQuery {
+  /** Retained event id to replay after; empty starts at the oldest retained event. */
+  since?: string
+  /** Page size; the daemon defaults to 100 and clamps at 500. */
+  limit?: number
+  /** Go duration such as `20s`; absent means no long poll. */
+  wait?: string
+}
 
 export type WebhookDeliveryStatus = 'success' | 'failed' | 'dead_letter'
 

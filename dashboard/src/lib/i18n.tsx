@@ -1367,10 +1367,15 @@ const EN = {
   'audit.title': 'Logs',
   'audit.subtitle': 'Control-plane audit trail. Secrets and request bodies are redacted by design.',
   'audit.export': 'Export CSV',
-  'audit.exportDone': 'Audit CSV downloaded',
+  'audit.exportDoneWindow': 'Audit CSV downloaded · {window}',
   'audit.exportFailed': 'Could not export the audit log',
   'audit.exportTruncated':
     'The export hit the row cap; older matching events were dropped (X-Truncated).',
+  'audit.exportWindowHint': 'Export window: {window}',
+  'audit.exportWindowLastDays': 'last {days} days',
+  'audit.exportWindowRange': '{from} – {to}',
+  'audit.exportWindowSince': 'since {from}',
+  'audit.exportWindowUntil': 'until {to}',
   'audit.searchAria': 'Search audit events',
   'audit.searchPlaceholder': 'Search action, target or detail',
   'audit.filterSeverity': 'Filter by severity',
@@ -1388,6 +1393,19 @@ const EN = {
   'audit.pagination': 'Logs pagination',
   'audit.note':
     'The CSV export covers the last seven days unless a range is supplied, filters by the selected severity, and streams up to 50,000 rows. Older events fall outside the retained ring.',
+  /* Live events ------------------------------------------------------------ */
+  'events.title': 'Live events',
+  'events.subtitle':
+    'Long-polled from /v1/events; newest first, capped at 100 rows. Hidden tabs pause and resume from the last cursor.',
+  'events.live': 'Live',
+  'events.paused': 'Paused',
+  'events.reconnecting': 'Reconnecting',
+  'events.count': '{count} / {max} shown',
+  'events.dropped': '{count} dropped',
+  'events.loading': 'Waiting for events…',
+  'events.empty': 'No events retained yet.',
+  'events.failed': 'Could not read the event stream',
+  'events.listLabel': 'Recent events',
   /* Schedules ------------------------------------------------------------- */
   'schedules.title': 'Schedules',
   'schedules.subtitle':
@@ -3336,9 +3354,14 @@ const ZH: Record<string, string> = {
   'audit.title': '日志',
   'audit.subtitle': '控制面审计轨迹。密钥与请求体按设计脱敏。',
   'audit.export': '导出 CSV',
-  'audit.exportDone': '审计 CSV 已下载',
+  'audit.exportDoneWindow': '审计 CSV 已下载 · {window}',
   'audit.exportFailed': '无法导出审计日志',
   'audit.exportTruncated': '导出达到行数上限，较早的匹配事件已被丢弃（X-Truncated）。',
+  'audit.exportWindowHint': '导出范围：{window}',
+  'audit.exportWindowLastDays': '最近 {days} 天',
+  'audit.exportWindowRange': '{from} – {to}',
+  'audit.exportWindowSince': '自 {from} 起',
+  'audit.exportWindowUntil': '截至 {to}',
   'audit.searchAria': '搜索审计事件',
   'audit.searchPlaceholder': '搜索操作、目标或详情',
   'audit.filterSeverity': '按级别筛选',
@@ -3356,6 +3379,19 @@ const ZH: Record<string, string> = {
   'audit.pagination': '日志分页',
   'audit.note':
     'CSV 导出默认覆盖最近七天（也可传入时间范围），按所选级别筛选，最多输出 50,000 行。更早的事件已不在保留环内。',
+  /* Live events ------------------------------------------------------------ */
+  'events.title': '实时事件',
+  'events.subtitle':
+    '通过 /v1/events 长轮询获取，最新在前，最多保留 100 条。标签页隐藏时暂停，恢复后从上次游标继续。',
+  'events.live': '实时',
+  'events.paused': '已暂停',
+  'events.reconnecting': '重连中',
+  'events.count': '显示 {count} / {max} 条',
+  'events.dropped': '丢弃 {count} 条',
+  'events.loading': '正在等待事件…',
+  'events.empty': '暂无保留事件。',
+  'events.failed': '无法读取事件流',
+  'events.listLabel': '最近事件',
   /* Schedules ------------------------------------------------------------- */
   'schedules.title': '计划任务',
   'schedules.subtitle':
