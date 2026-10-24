@@ -1,5 +1,6 @@
 import {
   ApcAccountsIcon,
+  ApcBackupIcon,
   ApcLabIcon,
   ApcLeasesIcon,
   ApcLogsIcon,
@@ -107,6 +108,13 @@ export const NAV_SECTIONS: NavSection[] = [
         labelKey: 'nav.settings',
         icon: ApcSettingsIcon,
         keywords: 'transport health lease subscription theme language reset 传输 健康 租约 订阅 主题 语言 重置 设置',
+      },
+      {
+        to: '/backup',
+        labelKey: 'nav.backup',
+        icon: ApcBackupIcon,
+        keywords:
+          'backup restore export envelope ajsb passphrase audit 备份 恢复 导出 信封 口令 审计',
       },
     ],
   },

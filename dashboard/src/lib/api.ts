@@ -16,8 +16,14 @@ import {
   buildMetrics,
   buildMockExport,
   getDb,
+  mockAuditExportCsv,
   mockBulkDelete,
+  mockCreateBackup,
+  mockCreateScopedKey,
   mockImportAccounts,
+  mockInspectBackup,
+  mockRestoreBackup,
+  mockRevokeScopedKey,
   resetMockDb,
   syncAccountCounts,
 } from './mock'
@@ -34,6 +40,12 @@ import type {
   AccountState,
   ApiKey,
   AuditEvent,
+  AuditExportDownload,
+  AuditExportQuery,
+  BackupDownload,
+  BackupInspectView,
+  BackupRestoreInput,
+  BackupRestoreView,
   BulkDeleteRequest,
   BulkDeleteResult,
   CatalogSelection,
@@ -80,6 +92,9 @@ import type {
   ScheduleRunInput,
   ScheduleTrigger,
   SchedulesPayload,
+  ScopedKey,
+  ScopedKeyCreateInput,
+  ScopedKeyCreated,
   ServerCatalogQuery,
   ServerView,
   SessionView,
@@ -313,7 +328,8 @@ function exportTimestamp(now = new Date()): string {
   )
 }
 
-function exportFilename(header: string | null, extension: string): string {
+/** Reads the server's Content-Disposition filename, or uses the fallback. */
+function attachmentFilename(header: string | null, fallback: string): string {
   if (header) {
     const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(header)
     if (match?.[1]) {
@@ -324,7 +340,7 @@ function exportFilename(header: string | null, extension: string): string {
       }
     }
   }
-  return `ajs-accounts-${exportTimestamp()}.${extension}`
+  return fallback
 }
 
 function exportCount(header: string | null): number {
@@ -374,6 +390,26 @@ function parseErrorBody(raw: string): {
 
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+/**
+ * A pasted envelope is JSON text; the daemon expects the document itself, not
+ * a quoted string. Parsing here keeps that mistake out of the request body.
+ */
+function parseEnvelopeDocument(
+  envelope: string | Record<string, unknown>,
+): Record<string, unknown> {
+  if (typeof envelope !== 'string') return envelope
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(envelope)
+  } catch {
+    throw new ApiError(400, 'envelope must be a JSON object', 'INVALID_ARGUMENT')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ApiError(400, 'envelope must be a JSON object', 'INVALID_ARGUMENT')
+  }
+  return parsed as Record<string, unknown>
 }
 
 function readSettings(): PanelSettings {
@@ -2077,9 +2113,9 @@ export const api = {
       const blob = await response.blob()
       return {
         blob,
-        filename: exportFilename(
+        filename: attachmentFilename(
           response.headers.get('Content-Disposition'),
-          input.format === 'encrypted' ? 'ajsx' : input.format,
+          `ajs-accounts-${exportTimestamp()}.${input.format === 'encrypted' ? 'ajsx' : input.format}`,
         ),
         counts: {
           accounts: exportCount(response.headers.get('X-AJS-Export-Count')),
@@ -2790,6 +2826,130 @@ export const api = {
     }
     await wait()
     return clone(mockWebhookDeliveries(id))
+  },
+
+  /** GET /v1/scoped-keys — least-privilege keys; the secret is never read back. */
+  async listScopedKeys(): Promise<ScopedKey[]> {
+    if (!USE_MOCK) return http<ScopedKey[]>('/v1/scoped-keys')
+    await wait()
+    return clone(getDb().scopedKeys)
+  },
+
+  /** POST /v1/scoped-keys — returns the plaintext secret exactly once. */
+  async createScopedKey(input: ScopedKeyCreateInput): Promise<ScopedKeyCreated> {
+    if (!USE_MOCK) {
+      return http<ScopedKeyCreated>('/v1/scoped-keys', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      })
+    }
+    await wait()
+    return clone(mockCreateScopedKey(input))
+  },
+
+  /** DELETE /v1/scoped-keys/{id} — revoking an already-revoked key is a no-op. */
+  async revokeScopedKey(id: string): Promise<void> {
+    if (!USE_MOCK) {
+      await http<void>(`/v1/scoped-keys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      return
+    }
+    await wait()
+    mockRevokeScopedKey(id)
+  },
+
+  /**
+   * GET /v1/audit/export.csv — returns the CSV as a Blob. The bearer header is
+   * added by `request`, so the token never appears in the URL.
+   */
+  async exportAuditCsv(query: AuditExportQuery = {}): Promise<AuditExportDownload> {
+    const params = new URLSearchParams()
+    if (query.from) params.set('from', query.from)
+    if (query.to) params.set('to', query.to)
+    if (query.severity) params.set('severity', query.severity)
+    if (!USE_MOCK) {
+      const search = params.toString()
+      const response = await request(
+        `/v1/audit/export.csv${search ? `?${search}` : ''}`,
+        { headers: { Accept: 'text/csv' } },
+      )
+      return {
+        blob: await response.blob(),
+        filename: attachmentFilename(
+          response.headers.get('Content-Disposition'),
+          `apc-audit-${exportTimestamp()}.csv`,
+        ),
+        truncated: response.headers.get('X-Truncated') === 'true',
+      }
+    }
+    await wait()
+    const file = mockAuditExportCsv(query)
+    return {
+      blob: new Blob([file.content], { type: 'text/csv;charset=utf-8' }),
+      filename: file.filename,
+      truncated: file.truncated,
+    }
+  },
+
+  /** POST /v1/backup — seals the panel files and serves the envelope. */
+  async createBackup(passphrase: string): Promise<BackupDownload> {
+    if (!USE_MOCK) {
+      const response = await request('/v1/backup', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase }),
+        headers: { Accept: 'application/octet-stream' },
+      })
+      return {
+        blob: await response.blob(),
+        filename: attachmentFilename(
+          response.headers.get('Content-Disposition'),
+          `ajs-backup-${exportTimestamp()}.ajsb`,
+        ),
+        blobs: exportCount(response.headers.get('X-AJS-Backup-Blobs')),
+      }
+    }
+    await wait()
+    const file = mockCreateBackup(passphrase)
+    return {
+      blob: new Blob([file.content], { type: 'application/octet-stream' }),
+      filename: file.filename,
+      blobs: file.blobs,
+    }
+  },
+
+  /**
+   * POST /v1/backup/inspect — header only without a passphrase, header plus
+   * manifest with one. Neither form touches the state directory.
+   */
+  async inspectBackup(
+    envelope: string | Record<string, unknown>,
+    passphrase = '',
+  ): Promise<BackupInspectView> {
+    const document = parseEnvelopeDocument(envelope)
+    if (!USE_MOCK) {
+      return http<BackupInspectView>('/v1/backup/inspect', {
+        method: 'POST',
+        body: JSON.stringify({ envelope: document, passphrase }),
+      })
+    }
+    await wait()
+    return clone(mockInspectBackup(document, passphrase))
+  },
+
+  /**
+   * POST /v1/backup/restore — a dry run unless `dryRun` is explicitly false.
+   * The console only ever asks for a dry run; an apply also needs the daemon's
+   * AJS_BACKUP_ALLOW_RESTORE and no LIVE node.
+   */
+  async restoreBackup(input: BackupRestoreInput): Promise<BackupRestoreView> {
+    const document = parseEnvelopeDocument(input.envelope)
+    if (!USE_MOCK) {
+      return http<BackupRestoreView>('/v1/backup/restore', {
+        method: 'POST',
+        body: JSON.stringify({ ...input, envelope: document }),
+      })
+    }
+    await wait()
+    return clone(mockRestoreBackup({ ...input, envelope: document }))
   },
 
   async resetMock(): Promise<void> {

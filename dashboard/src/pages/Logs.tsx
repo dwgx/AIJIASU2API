@@ -6,6 +6,7 @@ import { useI18n } from '../lib/i18n'
 import { SEVERITY } from '../lib/labels'
 import type { AuditEvent, Severity } from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
+import { downloadBlob } from '../components/accounts/AccountExportDialog'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { Pagination, usePagination } from '../components/Pagination'
@@ -29,6 +30,8 @@ export default function Logs() {
   const [severity, setSeverity] = useState<'all' | Severity>('all')
   const [actor, setActor] = useState('all')
   const [query, setQuery] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const [exportTruncated, setExportTruncated] = useState(false)
 
   const actors = useMemo(
     () => Array.from(new Set((audit.data ?? []).map((event) => event.actor))).sort(),
@@ -51,8 +54,27 @@ export default function Logs() {
     resetKey: JSON.stringify([severity, actor, query]),
   })
 
-  const exportLog = () => {
-    push(t('audit.exportPlaceholder'), 'default')
+  const exportLog = async () => {
+    setExporting(true)
+    setExportTruncated(false)
+    try {
+      const download = await api.exportAuditCsv(
+        severity === 'all' ? {} : { severity },
+      )
+      downloadBlob(download.blob, download.filename)
+      setExportTruncated(download.truncated)
+      push(
+        t(download.truncated ? 'audit.exportTruncated' : 'audit.exportDone'),
+        download.truncated ? 'danger' : 'success',
+      )
+    } catch (cause) {
+      push(
+        cause instanceof Error ? cause.message : t('audit.exportFailed'),
+        'danger',
+      )
+    } finally {
+      setExporting(false)
+    }
   }
 
   const columns: Array<Column<AuditEvent>> = [
@@ -104,7 +126,12 @@ export default function Logs() {
         refresh={summarizeRefresh([audit])}
         actions={
           <>
-            <Button variant="ghost" icon={<Download size={14} />} onClick={exportLog}>
+            <Button
+              variant="ghost"
+              icon={<Download size={14} />}
+              onClick={() => void exportLog()}
+              loading={exporting}
+            >
               {t('audit.export')}
             </Button>
             <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={audit.reload}>
@@ -148,6 +175,12 @@ export default function Logs() {
             ]}
           />
         </div>
+
+        {exportTruncated ? (
+          <p className="callout callout--warning audit-export-warning" role="alert">
+            {t('audit.exportTruncated')}
+          </p>
+        ) : null}
 
         {audit.status === 'error' ? (
           <ErrorState message={audit.error ?? t('common.unknownError')} onRetry={audit.reload} />

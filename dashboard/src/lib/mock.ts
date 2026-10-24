@@ -12,6 +12,11 @@ import type {
   AccountState,
   ApiKey,
   AuditEvent,
+  AuditExportQuery,
+  BackupDiff,
+  BackupInspectView,
+  BackupManifest,
+  BackupRestoreView,
   BulkDeleteItem,
   BulkDeleteResult,
   DeviceView,
@@ -35,11 +40,16 @@ import type {
   ProfileView,
   ProxyNode,
   RequestLog,
+  ScopedKey,
+  ScopedKeyCreateInput,
+  ScopedKeyCreated,
+  Scope,
   ServerCatalogQuery,
   ServerView,
   SessionView,
   TrafficPoint,
 } from './types'
+import { SCOPES } from './types'
 import { ApiError } from './errors'
 import { regionName } from './regions'
 
@@ -72,10 +82,12 @@ export interface MockDb {
   leases: Lease[]
   users: PanelUser[]
   keys: ApiKey[]
+  scopedKeys: ScopedKey[]
   requests: RequestLog[]
   audit: AuditEvent[]
   settings: PanelSettings
   keySeq: number
+  scopedKeySeq: number
   leaseSeq: number
   mutationSeq: number
   /** Epoch ms of the last guarded egress check per nodeId; reset with the dataset. */
@@ -243,6 +255,57 @@ function buildKeys(now: number): ApiKey[] {
   ]
 }
 
+/** Three seeded scoped keys: active, account-restricted, and revoked+unlimited. */
+function buildScopedKeys(now: number): ScopedKey[] {
+  return [
+    {
+      id: 'sk-01',
+      userId: 'u-01',
+      userName: 'ada.ops',
+      label: 'Grafana read-only',
+      prefix: 'ajs_sk_mock_01',
+      scopes: ['metrics:read', 'health:read'],
+      accountIds: [],
+      regions: [],
+      rateLimitPerMin: 60,
+      createdAt: iso(now - 12 * DAY),
+      expiresAt: iso(now + 30 * DAY),
+      lastUsedAt: iso(now - 2 * HOUR),
+      revokedAt: null,
+    },
+    {
+      id: 'sk-02',
+      userId: 'u-02',
+      userName: 'build-bot',
+      label: 'CI catalog sync',
+      prefix: 'ajs_sk_mock_02',
+      scopes: ['accounts:read', 'catalog:read'],
+      accountIds: ['acc-01', 'acc-02'],
+      regions: [],
+      rateLimitPerMin: 120,
+      createdAt: iso(now - 8 * DAY),
+      expiresAt: null,
+      lastUsedAt: null,
+      revokedAt: null,
+    },
+    {
+      id: 'sk-03',
+      userId: 'u-04',
+      userName: 'field.lab',
+      label: 'Legacy usage feed',
+      prefix: 'ajs_sk_mock_03',
+      scopes: ['usage:read'],
+      accountIds: [],
+      regions: [],
+      rateLimitPerMin: 0,
+      createdAt: iso(now - 40 * DAY),
+      expiresAt: iso(now - 2 * DAY),
+      lastUsedAt: iso(now - 10 * DAY),
+      revokedAt: iso(now - 5 * DAY),
+    },
+  ]
+}
+
 function buildRequests(now: number, users: PanelUser[], nodes: ProxyNode[]): RequestLog[] {
   const rand = mulberry32(20261023)
   const targets = [
@@ -354,10 +417,12 @@ export function createDb(now = Date.now()): MockDb {
     leases: buildLeases(now),
     users,
     keys: buildKeys(now),
+    scopedKeys: buildScopedKeys(now),
     requests: buildRequests(now, users, nodes),
     audit: buildAudit(now),
     settings: { ...DEFAULT_SETTINGS },
     keySeq: 6,
+    scopedKeySeq: 3,
     leaseSeq: 8,
     mutationSeq: 0,
     egressCheckedAt: {},
@@ -1669,5 +1734,436 @@ export function buildAccountServers(
     fetchedAt: account.state === 'auth_failed' ? null : account.lastLoginAt,
     stale: account.state === 'auth_failed' || account.state === 'paused',
     ...catalogPage(servers, query),
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Scoped keys — mock of daemon/internal/store/scoped_keys.go
+ * ------------------------------------------------------------------------ */
+
+function invalidArgument(message: string): ApiError {
+  return new ApiError(400, message, 'INVALID_ARGUMENT')
+}
+
+function notFound(message: string): ApiError {
+  return new ApiError(404, message, 'NOT_FOUND')
+}
+
+/** Mirrors the daemon's normalization: trim, reject blanks, dedupe. */
+function normalizeMockList(values: readonly string[], field: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of values) {
+    const value = raw.trim()
+    if (!value) throw invalidArgument(`${field} must not contain empty values`)
+    if (value.length > 128) throw invalidArgument(`${field} entry is too long`)
+    if (seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+export function mockCreateScopedKey(input: ScopedKeyCreateInput): ScopedKeyCreated {
+  const db = getDb()
+  const userId = input.userId.trim()
+  if (!userId) throw invalidArgument('userId is required')
+  const user = db.users.find((candidate) => candidate.id === userId)
+  if (!user) throw notFound(`user ${userId} not found`)
+  const label = input.label.trim()
+  if (!label) throw invalidArgument('label is required')
+  if (label.length > 80) throw invalidArgument('label must be at most 80 characters')
+
+  const scopes: Scope[] = []
+  const seenScopes = new Set<Scope>()
+  for (const raw of input.scopes) {
+    if (!SCOPES.includes(raw)) throw invalidArgument(`unknown scope ${raw}`)
+    if (seenScopes.has(raw)) continue
+    seenScopes.add(raw)
+    scopes.push(raw)
+  }
+  if (scopes.length === 0) throw invalidArgument('scopes must contain at least one scope')
+
+  const accountIds = normalizeMockList(input.accountIds ?? [], 'accountIds')
+  const regions = normalizeMockList(input.regions ?? [], 'regions')
+
+  let rateLimit = 60
+  if (input.rateLimitPerMin !== undefined) {
+    if (!Number.isInteger(input.rateLimitPerMin) || input.rateLimitPerMin < 0) {
+      throw invalidArgument('rateLimitPerMin must be zero (unlimited) or positive')
+    }
+    rateLimit = input.rateLimitPerMin
+  }
+
+  let expiresAt: string | null = null
+  if (input.expiresAt?.trim()) {
+    const parsed = new Date(input.expiresAt)
+    if (Number.isNaN(parsed.getTime())) throw invalidArgument('expiresAt must be an RFC 3339 timestamp')
+    if (parsed.getTime() <= Date.now()) throw invalidArgument('expiresAt must be in the future')
+    expiresAt = parsed.toISOString()
+  }
+
+  db.scopedKeySeq += 1
+  const suffix = db.scopedKeySeq.toString(16).padStart(24, '0')
+  const secret = `ajs_sk_mock_${suffix}`
+  const key: ScopedKey = {
+    id: `sk-${String(db.scopedKeySeq).padStart(2, '0')}`,
+    userId: user.id,
+    userName: user.name,
+    label,
+    prefix: secret.slice(0, 16),
+    scopes,
+    accountIds,
+    regions,
+    rateLimitPerMin: rateLimit,
+    createdAt: new Date().toISOString(),
+    expiresAt,
+    lastUsedAt: null,
+    revokedAt: null,
+  }
+  db.scopedKeys.unshift(key)
+  db.audit.unshift({
+    id: `audit-sk-${db.scopedKeySeq}`,
+    ts: new Date().toISOString(),
+    severity: 'info',
+    actor: 'operator',
+    action: 'key.create',
+    target: user.name,
+    detail: `Scoped key prefix ${key.prefix}`,
+  })
+  return { key: structuredClone(key), secret }
+}
+
+/** Revoking is idempotent, exactly like the daemon's store. */
+export function mockRevokeScopedKey(id: string): void {
+  const key = getDb().scopedKeys.find((candidate) => candidate.id === id)
+  if (!key) throw notFound(`scoped key ${id} not found`)
+  if (key.revokedAt) return
+  key.revokedAt = new Date().toISOString()
+}
+
+/* --------------------------------------------------------------------------
+ * Audit CSV — mock of daemon/internal/api/audit_export.go
+ * ------------------------------------------------------------------------ */
+
+const AUDIT_EXPORT_COLUMNS = ['ts', 'severity', 'actor', 'action', 'target', 'detail', 'meta']
+const AUDIT_EXPORT_DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const AUDIT_EXPORT_MAX_WINDOW_MS = 366 * 24 * 60 * 60 * 1000
+const AUDIT_EXPORT_ROW_CAP = 50_000
+
+function csvField(value: string): string {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+
+function exportStamp(ms: number): string {
+  return new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+}
+
+export interface MockAuditExport {
+  content: string
+  filename: string
+  truncated: boolean
+}
+
+export function mockAuditExportCsv(query: AuditExportQuery = {}, now = Date.now()): MockAuditExport {
+  const to = query.to ? Date.parse(query.to) : now
+  if (Number.isNaN(to)) throw invalidArgument('to must be an RFC 3339 timestamp')
+  const from = query.from ? Date.parse(query.from) : to - AUDIT_EXPORT_DEFAULT_WINDOW_MS
+  if (Number.isNaN(from)) throw invalidArgument('from must be an RFC 3339 timestamp')
+  if (from > to) throw invalidArgument('from must not be after to')
+  if (to - from > AUDIT_EXPORT_MAX_WINDOW_MS) throw invalidArgument('range must not exceed 366 days')
+
+  const rows = getDb()
+    .audit.filter((event) => {
+      const at = Date.parse(event.ts)
+      if (at < from || at > to) return false
+      return query.severity === undefined || event.severity === query.severity
+    })
+    .sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts))
+
+  const kept = rows.slice(-AUDIT_EXPORT_ROW_CAP)
+  const truncated = rows.length > kept.length
+  const lines = [AUDIT_EXPORT_COLUMNS.join(',')]
+  for (const event of kept) {
+    lines.push(
+      [
+        event.ts,
+        event.severity,
+        event.actor,
+        event.action,
+        event.target,
+        event.detail,
+        '',
+      ]
+        .map(csvField)
+        .join(','),
+    )
+  }
+  return {
+    content: `${lines.join('\r\n')}\r\n`,
+    filename: `apc-audit-${exportStamp(from)}-${exportStamp(to)}.csv`,
+    truncated,
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Backup — mock of daemon/internal/backup (deterministic, not encrypted)
+ * ------------------------------------------------------------------------ */
+
+const MOCK_BACKUP_MIN_PASSPHRASE = 12
+const MOCK_BACKUP_MAX_PASSPHRASE = 1024
+const MOCK_BACKUP_APP = 'apc'
+const MOCK_BACKUP_VERSION = 1
+
+/** FNV-1a over the UTF-8 code units; a stable stand-in for a real digest. */
+function mockDigest(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  const first = (hash >>> 0).toString(16).padStart(8, '0')
+  const second = mockDigestTail(value)
+  return `${first}${second}`
+}
+
+function mockDigestTail(value: string): string {
+  let hash = 0x9e3779b9
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x85ebca6b)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+function encodeBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function decodeBase64(value: string): string {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return new TextDecoder().decode(bytes)
+}
+
+function mockPanelBlobs(db: MockDb): Record<string, string> {
+  return {
+    'state.json': JSON.stringify({
+      version: 1,
+      accounts: db.accounts,
+      nodes: db.nodes,
+      leases: db.leases,
+      users: db.users,
+      settings: db.settings,
+    }),
+    'secrets.json': JSON.stringify({ sealed: true, accounts: db.accounts.length }),
+    'device-secrets.json': JSON.stringify({ sealed: true, devices: db.nodes.length }),
+  }
+}
+
+interface MockBackupPayload {
+  check: string
+  blobs: Record<string, string>
+}
+
+function validateMockPassphrase(passphrase: string): void {
+  if (
+    passphrase.length < MOCK_BACKUP_MIN_PASSPHRASE ||
+    passphrase.length > MOCK_BACKUP_MAX_PASSPHRASE
+  ) {
+    throw invalidArgument(
+      `passphrase must be between ${MOCK_BACKUP_MIN_PASSPHRASE} and ${MOCK_BACKUP_MAX_PASSPHRASE} characters`,
+    )
+  }
+}
+
+function mockManifest(blobs: Record<string, string>): BackupManifest {
+  return {
+    entries: Object.keys(blobs)
+      .sort()
+      .map((name) => ({
+        name,
+        size: new TextEncoder().encode(blobs[name]).length,
+        sha256: mockDigest(blobs[name]),
+        required: name === 'state.json',
+      })),
+  }
+}
+
+function parseMockEnvelope(envelope: unknown): {
+  header: Record<string, unknown>
+  payload: MockBackupPayload | null
+  bytes: number
+} {
+  if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    throw invalidArgument('backup: malformed envelope')
+  }
+  const header = envelope as Record<string, unknown>
+  const bytes = new TextEncoder().encode(JSON.stringify(header)).length
+  if (header.app !== MOCK_BACKUP_APP) {
+    throw invalidArgument('envelope is not an apc panel backup')
+  }
+  if (typeof header.payload !== 'string' || typeof header.version !== 'number') {
+    throw invalidArgument('backup: malformed envelope')
+  }
+  if (typeof header.createdAt !== 'string' || Number.isNaN(Date.parse(header.createdAt))) {
+    throw invalidArgument('backup: malformed envelope')
+  }
+  let payload: MockBackupPayload
+  try {
+    payload = JSON.parse(decodeBase64(header.payload)) as MockBackupPayload
+  } catch {
+    throw invalidArgument('backup: malformed envelope')
+  }
+  if (
+    payload === null ||
+    typeof payload !== 'object' ||
+    typeof payload.check !== 'string' ||
+    typeof payload.blobs !== 'object' ||
+    payload.blobs === null
+  ) {
+    throw invalidArgument('backup: malformed envelope')
+  }
+  return { header, payload, bytes }
+}
+
+function openMockEnvelope(envelope: unknown, passphrase: string): {
+  header: Record<string, unknown>
+  payload: MockBackupPayload
+  manifest: BackupManifest
+} {
+  const parsed = parseMockEnvelope(envelope)
+  if (parsed.header.version !== MOCK_BACKUP_VERSION) {
+    throw invalidArgument('backup: unsupported envelope version')
+  }
+  if (!passphrase) throw invalidArgument('backup: invalid passphrase')
+  validateMockPassphrase(passphrase)
+  if (parsed.payload === null || parsed.payload.check !== mockDigest(`backup:${passphrase}`)) {
+    throw invalidArgument('backup: wrong passphrase or corrupted envelope')
+  }
+  return {
+    header: parsed.header,
+    payload: parsed.payload,
+    manifest: mockManifest(parsed.payload.blobs),
+  }
+}
+
+export function mockCreateBackup(
+  passphrase: string,
+  now = Date.now(),
+): { content: string; filename: string; blobs: number } {
+  validateMockPassphrase(passphrase)
+  const blobs = mockPanelBlobs(getDb())
+  const payload: MockBackupPayload = {
+    check: mockDigest(`backup:${passphrase}`),
+    blobs,
+  }
+  const header: Record<string, unknown> = {
+    version: MOCK_BACKUP_VERSION,
+    createdAt: new Date(now).toISOString(),
+    app: MOCK_BACKUP_APP,
+    kdf: { algo: 'pbkdf2-sha256', iter: 600000, salt: '' },
+    cipher: 'aes-256-gcm',
+    nonce: '',
+    payload: encodeBase64(JSON.stringify(payload)),
+  }
+  return {
+    content: JSON.stringify(header),
+    filename: `ajs-backup-${new Date(now)
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d{3}Z$/, '')
+      .replace('T', '-')}.ajsb`,
+    blobs: Object.keys(blobs).length,
+  }
+}
+
+export function mockInspectBackup(
+  envelope: unknown,
+  passphrase = '',
+): BackupInspectView {
+  const parsed = parseMockEnvelope(envelope)
+  const view: BackupInspectView = {
+    version: parsed.header.version as number,
+    supported: parsed.header.version === MOCK_BACKUP_VERSION,
+    app: parsed.header.app as string,
+    createdAt: parsed.header.createdAt as string,
+    envelopeBytes: parsed.bytes,
+  }
+  if (passphrase) {
+    view.manifest = openMockEnvelope(envelope, passphrase).manifest
+  }
+  return view
+}
+
+export function mockRestoreBackup(input: {
+  envelope: unknown
+  passphrase: string
+  dryRun?: boolean
+  confirm?: string
+}): BackupRestoreView {
+  const opened = openMockEnvelope(input.envelope, input.passphrase)
+  const live = mockPanelBlobs(getDb())
+  const restored = opened.payload.blobs
+
+  const diff: BackupDiff = {
+    added: 0,
+    removed: 0,
+    changed: 0,
+    same: 0,
+    addedBytes: 0,
+    removedBytes: 0,
+    changedBytes: 0,
+    sameBytes: 0,
+    addedNames: [],
+    removedNames: [],
+    changedNames: [],
+    sameNames: [],
+  }
+  for (const name of Object.keys(restored).sort()) {
+    const restoredBytes = new TextEncoder().encode(restored[name]).length
+    if (!(name in live)) {
+      diff.added += 1
+      diff.addedBytes += restoredBytes
+      diff.addedNames.push(name)
+    } else if (mockDigest(live[name]) !== mockDigest(restored[name])) {
+      diff.changed += 1
+      diff.changedBytes += restoredBytes
+      diff.changedNames.push(name)
+    } else {
+      diff.same += 1
+      diff.sameBytes += new TextEncoder().encode(live[name]).length
+      diff.sameNames.push(name)
+    }
+  }
+  for (const name of Object.keys(live).sort()) {
+    if (name in restored) continue
+    diff.removed += 1
+    diff.removedBytes += new TextEncoder().encode(live[name]).length
+    diff.removedNames.push(name)
+  }
+
+  const dryRun = input.dryRun ?? true
+  if (!dryRun) {
+    if (input.confirm !== 'RESTORE') {
+      throw invalidArgument('confirm must be "RESTORE" when dryRun is false')
+    }
+    // The mock daemon always runs: without AJS_BACKUP_ALLOW_RESTORE an apply
+    // is refused, and the console never sends one anyway.
+    throw new ApiError(
+      409,
+      'restore must run while the daemon is stopped: set AJS_BACKUP_ALLOW_RESTORE=1 to write the files while it runs and restart afterwards',
+      'BACKUP_DAEMON_RUNNING',
+    )
+  }
+  return {
+    dryRun: true,
+    applied: false,
+    restartRequired: false,
+    manifest: opened.manifest,
+    diff,
   }
 }

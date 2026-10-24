@@ -1,0 +1,115 @@
+/* Backup console. Layout only: colours, radii and durations come from the app
+   tokens so both themes and all accents keep working. */
+
+.backup-form {
+  gap: 14px;
+}
+
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.backup-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-faint);
+}
+
+.backup-result__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.backup-result__meta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-subhead {
+  margin: 4px 0 0;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.backup-file-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* A file input cannot be a <Button>; this label borrows the button chrome. */
+.backup-file {
+  position: relative;
+  cursor: pointer;
+}
+
+.backup-file:focus-within {
+  outline: 2px solid var(--mint);
+  outline-offset: 2px;
+}
+
+.backup-file__name {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-table,
+.backup-diff {
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-control);
+}
+
+.backup-table td,
+.backup-diff td,
+.backup-diff th[scope='row'] {
+  height: auto;
+  padding: 8px 12px;
+}
+
+.backup-table__digest {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.backup-diff caption {
+  padding: 8px 12px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.backup-diff__names {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 640px) {
+  .backup-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

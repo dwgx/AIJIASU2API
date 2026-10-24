@@ -12,6 +12,7 @@ const SECTION_NAMES = [
   'Leases',
   'Updates',
   'Integrations',
+  'Access',
   'Audit',
 ]
 
@@ -38,7 +39,7 @@ beforeEach(async () => {
 })
 
 describe('settings sections', () => {
-  it('renders a left rail with the eight sections and their headers', async () => {
+  it('renders a left rail with the nine sections and their headers', async () => {
     const nav = await openSettings()
 
     const links = within(nav).getAllByRole('link')

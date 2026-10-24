@@ -29,6 +29,7 @@ import { SettingsNav } from '../components/settings/SettingsNav'
 import { SettingsSection } from '../components/settings/SettingsSection'
 import { SettingsSegmented } from '../components/settings/SettingsSegmented'
 import { WebhooksSection } from '../components/settings/WebhooksSection'
+import { AccessSection } from '../components/settings/AccessSection'
 import {
   SETTINGS_FIELD_KEYS,
   SETTINGS_SECTIONS,
@@ -729,6 +730,14 @@ export default function Settings() {
                 </p>
               </Card>
               <WebhooksSection />
+            </SettingsSection>
+
+            <SettingsSection
+              id="access"
+              title={t('settings.nav.access')}
+              description={t('settings.section.access.desc')}
+            >
+              <AccessSection />
             </SettingsSection>
 
             <SettingsSection

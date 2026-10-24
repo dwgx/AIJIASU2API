@@ -415,6 +415,78 @@ export interface CreateKeyResult {
   secret: string
 }
 
+/* --------------------------------------------------------------------------
+ * Scoped keys — daemon/internal/model/model.go
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The OpenAPI Scope enum. `accounts:write` is part of the daemon contract even
+ * though the first published enum only listed `accounts:read`; the platform
+ * reads are separate grants so a monitoring key never needs account access.
+ */
+export const SCOPES = [
+  'accounts:read',
+  'accounts:write',
+  'catalog:read',
+  'catalog:write',
+  'leases:read',
+  'leases:write',
+  'requests:read',
+  'audit:read',
+  'metrics:read',
+  'lab:read',
+  'settings:read',
+  'settings:write',
+  'usage:read',
+  'renewal:read',
+  'health:read',
+  'events:read',
+  'admin',
+] as const
+
+export type Scope = (typeof SCOPES)[number]
+
+/** One least-privilege key; the secret is never part of a read. */
+export interface ScopedKey {
+  id: string
+  userId: string
+  userName: string
+  label: string
+  prefix: string
+  scopes: Scope[]
+  /** Empty means every account. */
+  accountIds: string[]
+  /** Empty means every region. */
+  regions: string[]
+  /** 0 means unlimited. */
+  rateLimitPerMin: number
+  createdAt: string
+  expiresAt: string | null
+  lastUsedAt: string | null
+  revokedAt: string | null
+}
+
+/**
+ * POST /v1/scoped-keys body. An absent rate limit takes the daemon default
+ * (60/min); an explicit 0 selects unlimited. An empty expiresAt means the key
+ * does not expire.
+ */
+export interface ScopedKeyCreateInput {
+  userId: string
+  label: string
+  scopes: Scope[]
+  accountIds?: string[]
+  regions?: string[]
+  rateLimitPerMin?: number
+  expiresAt?: string
+}
+
+/** The one-time create response; `secret` is returned exactly once. */
+export interface ScopedKeyCreated {
+  key: ScopedKey
+  secret: string
+}
+
 export interface MutationLabInput {
   method: string
   target: string
@@ -1231,4 +1303,114 @@ export interface Delivery {
   /** RFC 3339 timestamp. */
   at: string
   durationMs: number
+}
+
+/* --------------------------------------------------------------------------
+ * Audit export — daemon/internal/api/audit_export.go
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Query for GET /v1/audit/export.csv. Both bounds are inclusive RFC 3339
+ * timestamps; the daemon defaults to the last seven days and refuses a window
+ * longer than 366 days.
+ */
+export interface AuditExportQuery {
+  from?: string
+  to?: string
+  severity?: Severity
+}
+
+/** One downloaded CSV. `truncated` mirrors the X-Truncated response header. */
+export interface AuditExportDownload {
+  blob: Blob
+  filename: string
+  truncated: boolean
+}
+
+/* --------------------------------------------------------------------------
+ * Backup — daemon/internal/backup/backup.go and daemon/internal/api/backup.go
+ * ------------------------------------------------------------------------ */
+
+export interface BackupKdfParams {
+  algo: string
+  iter: number
+  /** Base64 salt. */
+  salt: string
+}
+
+/** The unencrypted envelope header. `payload` is AES-256-GCM ciphertext. */
+export interface BackupEnvelope {
+  version: number
+  createdAt: string
+  app: string
+  kdf: BackupKdfParams
+  cipher: string
+  nonce: string
+  payload: string
+}
+
+export interface BackupManifestEntry {
+  name: string
+  size: number
+  sha256: string
+  /** A required blob must be present when the envelope is opened. */
+  required: boolean
+}
+
+export interface BackupManifest {
+  entries: BackupManifestEntry[]
+}
+
+/** POST /v1/backup/inspect — the manifest exists only with a passphrase. */
+export interface BackupInspectView {
+  version: number
+  supported: boolean
+  app: string
+  createdAt: string
+  envelopeBytes: number
+  manifest?: BackupManifest
+}
+
+/** POST /v1/backup — the file plus its server-supplied name and blob count. */
+export interface BackupDownload {
+  blob: Blob
+  filename: string
+  blobs: number
+}
+
+/** The dry-run comparison counts; names are sorted. */
+export interface BackupDiff {
+  added: number
+  removed: number
+  changed: number
+  same: number
+  addedBytes: number
+  removedBytes: number
+  changedBytes: number
+  sameBytes: number
+  addedNames: string[]
+  removedNames: string[]
+  changedNames: string[]
+  sameNames: string[]
+}
+
+/** POST /v1/backup/restore body. `dryRun` defaults to true on the daemon. */
+export interface BackupRestoreInput {
+  envelope: string | Record<string, unknown>
+  passphrase: string
+  dryRun?: boolean
+  /** Must be "RESTORE" for an apply. */
+  confirm?: string
+}
+
+export interface BackupRestoreView {
+  dryRun: boolean
+  applied: boolean
+  /** True after an apply: the running daemon must be restarted. */
+  restartRequired: boolean
+  manifest: BackupManifest
+  diff: BackupDiff
+  /** Blobs an apply wrote; empty for a dry run. */
+  files?: string[]
+  warning?: string
 }

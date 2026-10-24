@@ -2,7 +2,7 @@ import type { TranslationKey } from './i18n'
 import type { PanelSettings } from './types'
 
 /**
- * Settings is a map, not one long form: eight sections, each deep-linkable
+ * Settings is a map, not one long form: nine sections, each deep-linkable
  * with `#<id>`. This registry is the single source for the rail, the section
  * order, the per-section dirty dots and the reset scope.
  */
@@ -14,6 +14,7 @@ export type SettingsSectionId =
   | 'leases'
   | 'updates'
   | 'integrations'
+  | 'access'
   | 'audit'
 
 export type SettingsGroupId = 'basics' | 'runtime' | 'system'
@@ -97,6 +98,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDef[] = [
     group: 'system',
     labelKey: 'settings.nav.integrations',
     descriptionKey: 'settings.section.integrations.desc',
+    fields: [],
+  },
+  {
+    id: 'access',
+    group: 'system',
+    labelKey: 'settings.nav.access',
+    descriptionKey: 'settings.section.access.desc',
     fields: [],
   },
   {

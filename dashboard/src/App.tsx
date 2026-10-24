@@ -7,6 +7,7 @@ import { LanguageProvider, useI18n } from './lib/i18n'
 import { ThemeProvider } from './lib/theme'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
+const Backup = lazy(() => import('./pages/Backup'))
 const Lab = lazy(() => import('./pages/Lab'))
 const Leases = lazy(() => import('./pages/Leases'))
 const Logs = lazy(() => import('./pages/Logs'))
@@ -48,6 +49,7 @@ export default function App() {
                   <Route path="/schedules" element={<Schedules />} />
                   <Route path="/lab" element={<Lab />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/backup" element={<Backup />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Suspense>

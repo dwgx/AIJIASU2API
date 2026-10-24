@@ -147,6 +147,15 @@ export const ApcSchedulesIcon = createIcon(
   </>,
 )
 
+export const ApcBackupIcon = createIcon(
+  'ApcBackupIcon',
+  <>
+    <rect x="3.5" y="4.5" width="17" height="5" rx="1.5" />
+    <path d="M5 9.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9.5" />
+    <path d="M10 13h4" />
+  </>,
+)
+
 export const ApcLabIcon = createIcon(
   'ApcLabIcon',
   <>
