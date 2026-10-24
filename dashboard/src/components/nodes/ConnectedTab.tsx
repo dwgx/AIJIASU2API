@@ -364,6 +364,7 @@ export function ConnectedTab({ nodes, query, onQueryChange }: ConnectedTabProps)
               { value: 'LIVE', label: t('state.LIVE') },
               { value: 'READY', label: t('state.READY') },
               { value: 'DRAINING', label: t('state.DRAINING') },
+              { value: 'STALE', label: t('state.STALE') },
               { value: 'DOWN', label: t('state.DOWN') },
             ]}
           />
