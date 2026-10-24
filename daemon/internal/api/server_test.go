@@ -399,6 +399,7 @@ type stubLoginService struct {
 	account model.Account
 	err     error
 	lastID  string
+	forgot  string
 }
 
 func (s *stubLoginService) Login(_ context.Context, accountID string) (model.Account, error) {
@@ -412,6 +413,8 @@ func (s *stubLoginService) Login(_ context.Context, accountID string) (model.Acc
 	}
 	return out, nil
 }
+
+func (s *stubLoginService) Forget(accountID string) { s.forgot = accountID }
 
 func TestAccountLoginServiceStatusMapping(t *testing.T) {
 	cases := []struct {

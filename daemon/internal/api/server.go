@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ajsaccountd/internal/model"
@@ -31,6 +32,7 @@ const (
 	CodeConflict            = "CONFLICT"
 	CodeUpstreamUnavailable = "UPSTREAM_UNAVAILABLE"
 	CodeQuotaExceeded       = "QUOTA_EXCEEDED"
+	CodeRateLimited         = "RATE_LIMITED"
 	CodeUnauthorized        = "UNAUTHORIZED"
 	CodeMethodNotAllowed    = "METHOD_NOT_ALLOWED"
 	CodeInternal            = "INTERNAL"
@@ -60,6 +62,9 @@ type Panel = runtime.Panel
 // host unless AJS_ACCOUNT_LOGIN=1 wires an implementation.
 type LoginService interface {
 	Login(ctx context.Context, accountID string) (model.Account, error)
+	// Forget drops the retained login result after logout/delete, so the
+	// catalog cannot keep serving a snapshot for an account with no session.
+	Forget(accountID string)
 }
 
 // Config is the runtime configuration of the HTTP server.
@@ -119,6 +124,21 @@ type Config struct {
 	// route registered but answers enabled:false with a reason, so a test
 	// server and a partially wired daemon degrade honestly.
 	Lab LabReader
+	// Catalog is the guarded selection/connect path. It is set when
+	// AJS_ACCOUNT_LOGIN=1 wired the node controller; nil makes every
+	// selection write and connect action answer login_disabled instead of
+	// pretending to have a vendor catalog.
+	Catalog CatalogConnector
+	// AllowPlaintextExport gates JSON and CSV export. It is false unless
+	// AJS_ALLOW_PLAINTEXT_EXPORT=1; encrypted export is always available.
+	AllowPlaintextExport bool
+	// Persist writes an immediate state snapshot after a bulk account
+	// mutation. It is best-effort: a nil hook or a write failure never turns a
+	// successful import/delete into an error.
+	Persist func()
+	// Schedules is the scheduler engine. Nil means AJS_SCHEDULES=0: the read
+	// routes and the pure preview still work, every mutation answers 503.
+	Schedules ScheduleService
 }
 
 // Server wires the store to an http.Handler.
@@ -129,6 +149,11 @@ type Server struct {
 	origins map[string]struct{}
 	started time.Time // set in New; backs ajs_uptime_seconds
 	handler http.Handler
+
+	// accountIOMu serializes export, import and bulk delete. TryLock turns a
+	// concurrent bulk operation into 409 instead of queueing memory- and
+	// CPU-heavy work behind it.
+	accountIOMu sync.Mutex
 }
 
 // New builds a server. Nil store and logger fall back to a seeded store and
@@ -184,6 +209,12 @@ func (s *Server) routes(rt *router) {
 
 	rt.handle(http.MethodGet, "/v1/accounts", s.handleListAccounts)
 	rt.handle(http.MethodPost, "/v1/accounts", s.handleCreateAccount)
+	// Static account-IO routes must be registered before /v1/accounts/{id};
+	// the router is first-match, so a later registration would be shadowed.
+	rt.handle(http.MethodGet, "/v1/accounts/io/capabilities", s.handleAccountIOCapabilities)
+	rt.handle(http.MethodPost, "/v1/accounts/export", s.handleExportAccounts)
+	rt.handle(http.MethodPost, "/v1/accounts/import", s.handleImportAccounts)
+	rt.handle(http.MethodPost, "/v1/accounts/bulk-delete", s.handleBulkDeleteAccounts)
 	rt.handle(http.MethodGet, "/v1/accounts/{id}", s.handleGetAccount)
 	rt.handle(http.MethodPatch, "/v1/accounts/{id}", s.handlePatchAccount)
 	rt.handle(http.MethodDelete, "/v1/accounts/{id}", s.handleDeleteAccount)
@@ -191,6 +222,24 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/logout", s.handleLogoutAccount)
 	rt.handle(http.MethodGet, "/v1/accounts/{id}/servers", s.handleAccountServers)
 	rt.handle(http.MethodGet, "/v1/accounts/{id}/device", s.handleAccountDevice)
+	rt.handle(http.MethodGet, "/v1/accounts/{id}/selection", s.handleGetSelection)
+	rt.handle(http.MethodPut, "/v1/accounts/{id}/selection", s.handlePutSelection)
+	rt.handle(http.MethodDelete, "/v1/accounts/{id}/selection", s.handleDeleteSelection)
+	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/connect", s.handleConnectAccount)
+	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/disconnect", s.handleDisconnectAccount)
+	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/reconnect", s.handleReconnectAccount)
+
+	// Static /v1/schedules/preview must precede /v1/schedules/{id}: the
+	// router is first-match and both patterns have three segments.
+	rt.handle(http.MethodGet, "/v1/schedules", s.handleListSchedules)
+	rt.handle(http.MethodPost, "/v1/schedules", s.handleCreateSchedule)
+	rt.handle(http.MethodGet, "/v1/schedules/preview", s.handleSchedulePreview)
+	rt.handle(http.MethodPost, "/v1/schedules/preview", s.handleSchedulePreview)
+	rt.handle(http.MethodGet, "/v1/schedules/{id}", s.handleGetSchedule)
+	rt.handle(http.MethodPatch, "/v1/schedules/{id}", s.handlePatchSchedule)
+	rt.handle(http.MethodDelete, "/v1/schedules/{id}", s.handleDeleteSchedule)
+	rt.handle(http.MethodPost, "/v1/schedules/{id}/actions/run", s.handleRunSchedule)
+	rt.handle(http.MethodGet, "/v1/schedules/{id}/runs", s.handleScheduleRuns)
 
 	rt.handle(http.MethodGet, "/v1/lab/overview", s.handleLabOverview)
 	rt.handle(http.MethodGet, "/v1/lab/flags", s.handleLabFlags)
@@ -303,13 +352,14 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
-				w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id")
+				w.Header().Set("Access-Control-Expose-Headers",
+					"X-Request-Id, Retry-After, Content-Disposition, X-AJS-Export-Count, X-AJS-Export-Missing-Secrets, X-AJS-Export-Devices, ETag, X-APC-Server-Time")
 			}
 		}
 		if r.Method == http.MethodOptions {
 			if allowed {
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, If-Match, Idempotency-Key")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -322,7 +372,13 @@ func (s *Server) cors(next http.Handler) http.Handler {
 func (s *Server) bodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
+			limit := s.cfg.MaxBodyBytes
+			// Base64 and JSON overhead can inflate a 1 MiB decoded document,
+			// so the import route gets a 4 MiB cap.
+			if r.URL.Path == "/v1/accounts/import" {
+				limit = store.MaxImportBodyBytes
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -460,6 +516,12 @@ type errorResponse struct {
 type errorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Reason is the stable machine-readable reason of the catalog contract
+	// (DESIGN-CATALOG §3.10). Existing clients ignore it.
+	Reason string `json:"reason,omitempty"`
+	// Details carries small, non-secret context such as the current
+	// snapshotId or ineligibleReason.
+	Details map[string]string `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -520,7 +582,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if err := dec.Decode(dst); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, CodeInvalidArgument, "request body exceeds 1 MiB")
+			writeError(w, http.StatusRequestEntityTooLarge, CodeInvalidArgument, "request body exceeds the route limit")
 			return false
 		}
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "invalid JSON body: "+err.Error())

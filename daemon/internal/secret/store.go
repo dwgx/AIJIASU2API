@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 )
 
@@ -35,6 +36,9 @@ var (
 	ErrClosed   = errors.New("secret: store is closed")
 	ErrEnvelope = errors.New("secret: malformed or unauthenticated envelope")
 )
+
+// ErrNotFound reports a lookup for an entry that is not in the store.
+var ErrNotFound = errors.New("secret: entry not found")
 
 // fileEnvelope is the on-disk JSON document. Entries map an account id to the
 // base64 of its sealed envelope.
@@ -141,6 +145,141 @@ func (s *Store) Delete(accountID string) error {
 	return nil
 }
 
+// SealMany seals every entry under its account id with a fresh nonce and
+// rewrites the file once. Either every entry is durable when it returns or the
+// in-memory map is rolled back to its previous contents. Empty input is a
+// no-op. The returned map carries the envelopes; plaintext is not retained.
+func (s *Store) SealMany(entries map[string][]byte) (map[string][]byte, error) {
+	sealed := make(map[string][]byte, len(entries))
+	if len(entries) == 0 {
+		return sealed, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrClosed
+	}
+	previous := make(map[string][]byte, len(entries))
+	previousPresent := make(map[string]bool, len(entries))
+	for accountID := range entries {
+		if accountID == "" {
+			return nil, errors.New("secret: account id is required")
+		}
+	}
+	for accountID, plaintext := range entries {
+		envelope, err := sealWith(s.aead, accountID, plaintext)
+		if err != nil {
+			return nil, err
+		}
+		old, ok := s.entries[accountID]
+		previous[accountID] = old
+		previousPresent[accountID] = ok
+		sealed[accountID] = envelope
+	}
+	for accountID, envelope := range sealed {
+		s.entries[accountID] = envelope
+	}
+	if err := s.persistLocked(); err != nil {
+		for accountID, envelope := range previous {
+			if previousPresent[accountID] {
+				s.entries[accountID] = envelope
+			} else {
+				delete(s.entries, accountID)
+			}
+		}
+		return nil, err
+	}
+	return sealed, nil
+}
+
+// RestoreMany replaces entries with exact sealed blobs without re-encrypting
+// them and rewrites the file once. It exists for import rollback: the previous
+// envelopes must be restored byte for byte. The in-memory map is rolled back
+// when the write fails. Empty input is a no-op.
+func (s *Store) RestoreMany(entries map[string][]byte) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	previous := make(map[string][]byte, len(entries))
+	previousPresent := make(map[string]bool, len(entries))
+	for accountID := range entries {
+		if accountID == "" {
+			return errors.New("secret: account id is required")
+		}
+	}
+	for accountID, envelope := range entries {
+		old, ok := s.entries[accountID]
+		previous[accountID] = old
+		previousPresent[accountID] = ok
+		s.entries[accountID] = envelope
+	}
+	if err := s.persistLocked(); err != nil {
+		for accountID, envelope := range previous {
+			if previousPresent[accountID] {
+				s.entries[accountID] = envelope
+			} else {
+				delete(s.entries, accountID)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// RemoveMany deletes every named entry and rewrites the file once. Missing ids
+// are ignored, so a retried import rollback or account deletion converges. The
+// in-memory map is rolled back when the write fails.
+func (s *Store) RemoveMany(accountIDs []string) error {
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	removed := make(map[string][]byte)
+	for _, accountID := range accountIDs {
+		if accountID == "" {
+			return errors.New("secret: account id is required")
+		}
+	}
+	for _, accountID := range accountIDs {
+		if envelope, ok := s.entries[accountID]; ok {
+			removed[accountID] = envelope
+			delete(s.entries, accountID)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	if err := s.persistLocked(); err != nil {
+		for accountID, envelope := range removed {
+			s.entries[accountID] = envelope
+		}
+		return err
+	}
+	return nil
+}
+
+// IDs returns the account ids with a sealed entry, sorted for deterministic
+// startup pruning. The caller cannot mutate the store through the result.
+func (s *Store) IDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.entries))
+	for accountID := range s.entries {
+		ids = append(ids, accountID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // Open decrypts a sealed envelope for accountID. The account id must match the
 // one used by Seal; a mismatch fails authentication.
 func (s *Store) Open(accountID string, sealed []byte) ([]byte, error) {
@@ -148,6 +287,22 @@ func (s *Store) Open(accountID string, sealed []byte) ([]byte, error) {
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, ErrClosed
+	}
+	return s.openLocked(accountID, sealed)
+}
+
+// OpenID decrypts the entry stored under accountID. It is the lookup-by-key
+// counterpart of Open for callers that do not carry the envelope (device
+// material, whose envelope lives only in this file).
+func (s *Store) OpenID(accountID string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrClosed
+	}
+	sealed, ok := s.entries[accountID]
+	if !ok {
+		return nil, ErrNotFound
 	}
 	return s.openLocked(accountID, sealed)
 }
