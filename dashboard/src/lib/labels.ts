@@ -21,6 +21,9 @@ export const NODE_STATE: Record<NodeState, StateMeta> = {
   STARTING: { labelKey: 'state.STARTING', tone: 'warning', status: 'info' },
   DRAINING: { labelKey: 'state.DRAINING', tone: 'warning', status: 'warn' },
   DOWN: { labelKey: 'state.DOWN', tone: 'danger', status: 'unavailable' },
+  // A persisted row whose gate did not survive the last process: the daemon
+  // reports it as STALE instead of claiming LIVE until a login reopens it.
+  STALE: { labelKey: 'state.STALE', tone: 'warning', status: 'warn' },
 }
 
 export const SEVERITY: Record<Severity, StateMeta> = {

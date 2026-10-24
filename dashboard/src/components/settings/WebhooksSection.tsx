@@ -129,15 +129,21 @@ function deliveryErrorTone(delivery: Delivery): 'danger' | 'warning' | 'neutral'
   return 'neutral'
 }
 
+/** One page shared by the row header and the drawer; the daemon pages newest first. */
+const DELIVERY_PAGE_LIMIT = 50
+
 async function loadRows(): Promise<WebhookRow[]> {
   const endpoints = await api.listWebhooks()
   return Promise.all(
     endpoints.map(async (endpoint) => {
       try {
-        const deliveries = await api.listWebhookDeliveries(endpoint.id)
+        // The daemon answers newest first, so index 0 is the last attempt.
+        const deliveries = await api.listWebhookDeliveries(endpoint.id, {
+          limit: DELIVERY_PAGE_LIMIT,
+        })
         return {
           endpoint,
-          lastDelivery: deliveries.at(-1) ?? null,
+          lastDelivery: deliveries[0] ?? null,
           deliveriesKnown: true,
         }
       } catch {
@@ -660,7 +666,10 @@ function DeliveriesDrawer({
   onClose: () => void
 }) {
   const { t } = useI18n()
-  const deliveries = useAsync(() => api.listWebhookDeliveries(endpoint.id), [endpoint.id])
+  const deliveries = useAsync(
+    () => api.listWebhookDeliveries(endpoint.id, { limit: DELIVERY_PAGE_LIMIT }),
+    [endpoint.id],
+  )
   const rows = deliveries.data ?? []
   const name = endpointName(endpoint)
 

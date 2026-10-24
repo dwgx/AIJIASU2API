@@ -107,6 +107,7 @@ import type {
   UsageTarget,
   WebhookCreate,
   WebhookCreated,
+  WebhookDeliveriesQuery,
   WebhookEndpoint,
   WebhookEvent,
   WebhookPatch,
@@ -2007,12 +2008,16 @@ function mockDeleteWebhook(id: string): void {
   state.deliveries.delete(id)
 }
 
-function mockWebhookDeliveries(id: string): Delivery[] {
+function mockWebhookDeliveries(id: string, query: WebhookDeliveriesQuery): Delivery[] {
   const state = mockWebhookStateValue()
   if (!state.endpoints.some((candidate) => candidate.id === id)) {
     throw platformError(404, 'NOT_FOUND', `webhook "${id}" not found`)
   }
-  return clone(state.deliveries.get(id) ?? [])
+  // Mirror the daemon: newest first, then the page limit.
+  const rows = [...(state.deliveries.get(id) ?? [])].sort(
+    (left, right) => Date.parse(right.at) - Date.parse(left.at),
+  )
+  return clone(query.limit === undefined ? rows : rows.slice(0, query.limit))
 }
 
 export const api = {
@@ -2847,13 +2852,25 @@ export const api = {
     mockDeleteWebhook(id)
   },
 
-  /** GET /v1/webhooks/{id}/deliveries — bounded attempt ring, oldest first. */
-  async listWebhookDeliveries(id: string): Promise<Delivery[]> {
+  /**
+   * GET /v1/webhooks/{id}/deliveries — persisted delivery history merged with
+   * the live ring, newest first. `limit` pages the merged list; the daemon
+   * defaults to 200 and clamps a larger value to 500.
+   */
+  async listWebhookDeliveries(
+    id: string,
+    query: WebhookDeliveriesQuery = {},
+  ): Promise<Delivery[]> {
     if (!USE_MOCK) {
-      return http<Delivery[]>(`/v1/webhooks/${encodeURIComponent(id)}/deliveries`)
+      const params = new URLSearchParams()
+      if (query.limit !== undefined) params.set('limit', String(query.limit))
+      const search = params.toString()
+      return http<Delivery[]>(
+        `/v1/webhooks/${encodeURIComponent(id)}/deliveries${search ? `?${search}` : ''}`,
+      )
     }
     await wait()
-    return clone(mockWebhookDeliveries(id))
+    return clone(mockWebhookDeliveries(id, query))
   },
 
   /** GET /v1/scoped-keys — least-privilege keys; the secret is never read back. */

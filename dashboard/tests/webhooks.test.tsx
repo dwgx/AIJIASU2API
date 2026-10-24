@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { api } from '../src/lib/api'
 import { ApiError } from '../src/lib/errors'
-import type { WebhookCreated } from '../src/lib/types'
+import type { Delivery, WebhookCreated } from '../src/lib/types'
 
 beforeEach(async () => {
   localStorage.clear()
@@ -181,6 +181,38 @@ describe('webhook settings section', () => {
     expect(screen.getByText('No webhook receiver is configured.')).toBeInTheDocument()
   })
 
+  it('reads the last delivery from index 0 and pages the newest 50', async () => {
+    const now = Date.now()
+    const newest: Delivery = {
+      id: 'dlv-new',
+      endpointId: 'wh-001',
+      event: 'node.disconnected',
+      attempt: 3,
+      status: 'dead_letter',
+      httpStatus: 503,
+      error: 'HTTP 503',
+      at: new Date(now - 60_000).toISOString(),
+      durationMs: 41,
+    }
+    const oldest: Delivery = {
+      ...newest,
+      id: 'dlv-old',
+      attempt: 1,
+      status: 'success',
+      httpStatus: 200,
+      error: undefined,
+      at: new Date(now - 2 * 3_600_000).toISOString(),
+    }
+    const list = vi.spyOn(api, 'listWebhookDeliveries').mockResolvedValue([newest, oldest])
+    await openWebhooks()
+
+    // Newest first: index 0 is the dead letter, the tail is the older success.
+    const row = webhookRow('Ops relay')
+    expect(within(row).getByText('Dead letter')).toBeInTheDocument()
+    expect(within(row).queryByText('Delivered')).not.toBeInTheDocument()
+    expect(list).toHaveBeenCalledWith('wh-001', { limit: 50 })
+  })
+
   it('opens the delivery drawer with attempts, statuses, error classes and durations', async () => {
     const user = userEvent.setup()
     await openWebhooks()
@@ -201,6 +233,14 @@ describe('webhook settings section', () => {
     expect(within(drawer).getByText('96 ms')).toBeInTheDocument()
     expect(within(drawer).getAllByText('node.connected').length).toBeGreaterThan(0)
     expect(within(drawer).getAllByText('node.disconnected').length).toBeGreaterThan(0)
+
+    // Newest first: the first body row is the latest attempt, the last the oldest.
+    expect(within(drawer).getByText(/newest first/)).toBeInTheDocument()
+    const rows = within(drawer).getAllByRole('row')
+    expect(within(rows[1]).getByText('Attempt 2')).toBeInTheDocument()
+    expect(within(rows[1]).getByText('96 ms')).toBeInTheDocument()
+    expect(within(rows[rows.length - 1]).getByText('Attempt 1')).toBeInTheDocument()
+    expect(within(rows[rows.length - 1]).getByText('118 ms')).toBeInTheDocument()
   })
 
   it('shows an honest empty state when a receiver has no deliveries', async () => {

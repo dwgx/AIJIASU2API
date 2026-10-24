@@ -5,7 +5,7 @@ export type Status = 'ok' | 'info' | 'warn' | 'error' | 'unavailable'
 
 export type Platform = 'android' | 'ios' | 'windows' | 'linux'
 export type AccountState = 'active' | 'paused' | 'auth_failed' | 'expired'
-export type NodeState = 'LIVE' | 'READY' | 'STARTING' | 'DRAINING' | 'DOWN'
+export type NodeState = 'LIVE' | 'READY' | 'STARTING' | 'DRAINING' | 'DOWN' | 'STALE'
 export type ProxyProtocol = 'socks5' | 'http'
 export type Severity = 'info' | 'warn' | 'error'
 export type ThemeName = 'dark' | 'light'
@@ -1324,7 +1324,7 @@ export interface WebhookPatch {
   enabled: boolean
 }
 
-/** One delivery attempt from the dispatcher's bounded ring. */
+/** One delivery attempt from the persisted history merged with the live ring. */
 export interface Delivery {
   id: string
   endpointId: string
@@ -1337,6 +1337,12 @@ export interface Delivery {
   /** RFC 3339 timestamp. */
   at: string
   durationMs: number
+}
+
+/** Query for GET /v1/webhooks/{id}/deliveries; the daemon pages newest first. */
+export interface WebhookDeliveriesQuery {
+  /** Page size; the daemon defaults to 200 and clamps a larger value to 500. */
+  limit?: number
 }
 
 /* --------------------------------------------------------------------------

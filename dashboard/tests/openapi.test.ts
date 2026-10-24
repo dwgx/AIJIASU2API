@@ -148,7 +148,11 @@ function parameterNames(operation: Operation): string[] {
 }
 
 function findParameter(operation: Operation, name: string): Parameter | undefined {
-  return (operation.parameters ?? []).find((parameter) => parameter.name === name)
+  return (operation.parameters ?? [])
+    .map((parameter) =>
+      parameter.$ref ? (resolvePointer(doc, parameter.$ref) as Parameter) : parameter,
+    )
+    .find((parameter) => parameter.name === name)
 }
 
 function schema(name: string): JsonSchema {
@@ -305,6 +309,20 @@ describe('docs/openapi.json', () => {
     expect(schema('CreateAccountInput').properties?.password?.writeOnly).toBe(true)
   })
 
+  it('keeps the node state vocabulary in sync with the daemon', () => {
+    // Startup recovery demotes a persisted node whose gate did not survive
+    // the last process; the console needs STALE in the same enum the daemon
+    // writes, or a stale row renders without a badge.
+    expect(schema('NodeState').enum).toEqual([
+      'LIVE',
+      'READY',
+      'STARTING',
+      'DRAINING',
+      'DOWN',
+      'STALE',
+    ])
+  })
+
   it('documents catalog pagination query and response', () => {
     const operation = doc.paths['/v1/accounts/{id}/servers']?.get
     expect(operation).toBeDefined()
@@ -377,6 +395,29 @@ describe('docs/openapi.json', () => {
       'failed',
       'dead_letter',
     ])
+  })
+
+  it('documents newest-first delivery history with a bounded limit', () => {
+    const operation = doc.paths['/v1/webhooks/{id}/deliveries']?.get
+    expect(operation).toBeDefined()
+    if (!operation) return
+
+    expect(operation.summary).toMatch(/newest first/i)
+    expect(operation.responses['200']?.description).toMatch(/newest first/i)
+    expect(parameterNames(operation)).toEqual(
+      expect.arrayContaining(['path:id', 'query:limit']),
+    )
+    expect(findParameter(operation, 'limit')?.schema).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: 500,
+      default: 200,
+    })
+    expect(operation.responses['400']).toEqual({ $ref: '#/components/responses/BadRequest' })
+    expect(responseSchema(operation, '200')).toEqual({
+      type: 'array',
+      items: { $ref: '#/components/schemas/Delivery' },
+    })
   })
 
   it('shares the error envelope across failure responses', () => {
