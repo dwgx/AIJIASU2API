@@ -34,6 +34,7 @@ import (
 	"ajsaccountd/internal/health"
 	"ajsaccountd/internal/lablog"
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/payment"
 	"ajsaccountd/internal/publisher"
 	"ajsaccountd/internal/renewal"
 	"ajsaccountd/internal/resin"
@@ -69,6 +70,7 @@ func run() error {
 	tenantPortal := flag.Bool("tenant-portal", os.Getenv("AJS_TENANT_PORTAL") == "1", "enable the customer tenant portal (env AJS_TENANT_PORTAL=1)")
 	tenantOrigin := flag.String("tenant-origin", os.Getenv("AJS_TENANT_ORIGIN"), "exact browser origin allowed for portal writes (env AJS_TENANT_ORIGIN)")
 	trustedProxies := flag.String("trusted-proxies", os.Getenv("AJS_TRUSTED_PROXIES"), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (env AJS_TRUSTED_PROXIES)")
+	stripeWebhookSecret := flag.String("stripe-webhook-secret", os.Getenv("AJS_STRIPE_WEBHOOK_SECRET"), "Stripe-compatible webhook signing secret (env AJS_STRIPE_WEBHOOK_SECRET); empty disables online settlement")
 	flag.Parse()
 
 	// The HTTPS admin listener is opt-in (AJS-276): AJS_TLS_CERT and
@@ -502,6 +504,15 @@ func run() error {
 		logger.Warn("tenant_origin_ignored",
 			"reason", "AJS_TENANT_ORIGIN is set but AJS_TENANT_PORTAL is not 1")
 	}
+	// Manual settlement is always available to an authenticated admin. The
+	// Stripe-compatible webhook is a separate capability: without a secret it
+	// answers 503 and never falls back to manual settlement.
+	manualPayments := payment.NewManual(time.Now)
+	stripeWebhooks := payment.NewStripeCompatible(payment.StripeConfig{Secret: *stripeWebhookSecret})
+	if !stripeWebhooks.Enabled() {
+		logger.Info("stripe_webhook_disabled",
+			"reason", "AJS_STRIPE_WEBHOOK_SECRET is not set; POST /v1/payments/stripe answers 503")
+	}
 	server := api.New(api.Config{
 		AdminToken:           *token,
 		AllowInsecure:        *insecure,
@@ -514,6 +525,8 @@ func run() error {
 		TenantPortal:         *tenantPortal,
 		TenantOrigin:         tenantOriginValue,
 		TrustedProxies:       trustedProxyValues,
+		ManualPayments:       manualPayments,
+		StripeWebhooks:       stripeWebhooks,
 		Panel:                panel,
 		LoginService:         loginService,
 		LoginHook:            loginHook,

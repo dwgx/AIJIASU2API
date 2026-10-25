@@ -22,6 +22,7 @@ import (
 
 	"ajsaccountd/internal/events"
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/payment"
 	"ajsaccountd/internal/ratelimit"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
@@ -209,6 +210,14 @@ type Config struct {
 	// believed for portal rate limiting (AJS_TRUSTED_PROXIES, IPs or CIDRs).
 	// Empty trusts no forwarding header.
 	TrustedProxies []string
+	// ManualPayments is the offline settlement provider behind the admin
+	// attestation route. Nil answers 503 on POST /v1/admin/orders/{id}/settle;
+	// there is no implicit fallback.
+	ManualPayments payment.ManualSettlementProvider
+	// StripeWebhooks verifies POST /v1/payments/stripe. Nil, or a provider that
+	// reports itself disabled, answers 503; the webhook never falls back to
+	// manual settlement.
+	StripeWebhooks payment.WebhookProvider
 }
 
 // Server wires the store to an http.Handler.
@@ -446,6 +455,13 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/backup/inspect", s.handleBackupInspect)
 	rt.handle(http.MethodPost, "/v1/backup/restore", s.handleBackupRestore)
 
+	// Payment webhook (DESIGN-ORDERS §Provider boundary). It is registered even
+	// when the customer portal is off because it is a provider callback, not a
+	// customer route. It authenticates the provider signature over the raw
+	// body, never a bearer token; a disabled adapter answers 503 and never
+	// falls back to manual settlement.
+	rt.handle(http.MethodPost, "/v1/payments/stripe", s.handleStripeWebhook)
+
 	// Customer portal chains (DESIGN-TENANT). Both are opt-in: without
 	// AJS_TENANT_PORTAL=1 the routes are not registered and answer 404, and
 	// no identity is synthesized for them. The portal chain authenticates only
@@ -461,11 +477,27 @@ func (s *Server) routes(rt *router) {
 		rt.handle(http.MethodGet, "/v1/portal/keys", s.handlePortalListKeys)
 		rt.handle(http.MethodPost, "/v1/portal/keys", s.handlePortalCreateKey)
 		rt.handle(http.MethodDelete, "/v1/portal/keys/{id}", s.handlePortalRevokeKey)
+		rt.handle(http.MethodGet, "/v1/portal/plans", s.handlePortalPlans)
+		rt.handle(http.MethodGet, "/v1/portal/orders", s.handlePortalListOrders)
+		rt.handle(http.MethodPost, "/v1/portal/orders", s.handlePortalCreateOrder)
+		rt.handle(http.MethodGet, "/v1/portal/orders/{id}", s.handlePortalGetOrder)
+		rt.handle(http.MethodPost, "/v1/portal/orders/{id}/cancel", s.handlePortalCancelOrder)
 
 		rt.handle(http.MethodGet, "/v1/admin/tenants", s.handleListTenants)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/approve", s.handleApproveTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/suspend", s.handleSuspendTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/resume", s.handleResumeTenant)
+		rt.handle(http.MethodGet, "/v1/admin/plans", s.handleListPlans)
+		rt.handle(http.MethodPost, "/v1/admin/plans", s.handleCreatePlan)
+		rt.handle(http.MethodGet, "/v1/admin/plans/{id}", s.handleGetPlan)
+		rt.handle(http.MethodPatch, "/v1/admin/plans/{id}", s.handlePatchPlan)
+		rt.handle(http.MethodDelete, "/v1/admin/plans/{id}", s.handleDeletePlan)
+		rt.handle(http.MethodGet, "/v1/admin/orders", s.handleListOrders)
+		rt.handle(http.MethodGet, "/v1/admin/orders/{id}", s.handleGetOrder)
+		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/settle", s.handleSettleOrder)
+		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/refund", s.handleRefundOrder)
+		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/chargeback", s.handleChargebackOrder)
+		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/cancel", s.handleAdminCancelOrder)
 	}
 }
 
@@ -589,6 +621,14 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 // /healthz stays open, and AllowInsecure disables the check entirely.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The payment webhook is authenticated by its provider signature over
+		// the raw body, not by a bearer token: a payment provider cannot send
+		// one. The handler verifies the signature and answers 503 while the
+		// adapter is disabled.
+		if r.URL.Path == stripeWebhookPath {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// The portal chain is its own authentication world: a cookie session
 		// is the only identity, and neither the admin token nor a scoped key
 		// can stand in for one. When the feature is off the routes are absent,
@@ -618,7 +658,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		if !strings.HasPrefix(header, prefix) {
 			if adminTenant && portalCookiePresent(r) {
 				writeError(w, http.StatusForbidden, CodeForbidden,
-					"a portal session cannot administer tenants")
+					"a portal session cannot administer this route")
 				return
 			}
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
@@ -634,7 +674,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		if !ok {
 			if adminTenant && portalCookiePresent(r) {
 				writeError(w, http.StatusForbidden, CodeForbidden,
-					"a portal session cannot administer tenants")
+					"a portal session cannot administer this route")
 				return
 			}
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")

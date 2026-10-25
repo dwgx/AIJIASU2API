@@ -64,12 +64,22 @@ func isPortalPath(path string) bool {
 	return path == "/v1/portal" || strings.HasPrefix(path, "/v1/portal/")
 }
 
-// isAdminTenantPath reports whether the path belongs to tenant administration.
-// These routes require the admin token or a scoped key carrying the admin
-// scope even when AJS_ALLOW_INSECURE=1: insecure mode keeps its legacy effect
-// on the existing dashboard routes but never bypasses the tenant chains.
+// isAdminTenantPath reports whether the path belongs to tenant or order
+// administration. These routes require the admin token or a scoped key carrying
+// the admin scope even when AJS_ALLOW_INSECURE=1: insecure mode keeps its
+// legacy effect on the existing dashboard routes but never bypasses the
+// tenant or order chains.
 func isAdminTenantPath(path string) bool {
-	return path == "/v1/admin/tenants" || strings.HasPrefix(path, "/v1/admin/tenants/")
+	switch {
+	case path == "/v1/admin/tenants", strings.HasPrefix(path, "/v1/admin/tenants/"):
+		return true
+	case path == "/v1/admin/orders", strings.HasPrefix(path, "/v1/admin/orders/"):
+		return true
+	case path == "/v1/admin/plans", strings.HasPrefix(path, "/v1/admin/plans/"):
+		return true
+	default:
+		return false
+	}
 }
 
 // portalCookiePresent reports whether the request carries a portal session

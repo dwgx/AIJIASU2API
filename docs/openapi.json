@@ -3559,7 +3559,11 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["cron", "interval", "once"]
+              "enum": [
+                "cron",
+                "interval",
+                "once"
+              ]
             }
           },
           {
@@ -4557,11 +4561,11 @@
           "Backup"
         ],
         "summary": "Compare a backup with the live panel, then optionally replace the state files.",
-        "description": "Admin only. dryRun defaults to true and writes nothing, returning the diff only. dryRun:false additionally needs confirm:\"RESTORE\" and a correct passphrase. An apply is refused with 409 BACKUP_LIVE_NODE while any proxy node is LIVE, and with 409 BACKUP_DAEMON_RUNNING unless AJS_BACKUP_ALLOW_RESTORE=1, because the running daemon would write its stale in-memory panel over the restored state.json on its next snapshot. Files are replaced atomically (0600 temporary file plus rename) and a file the backup omits is never deleted. A successful apply answers restartRequired:true.",
+        "description": "Admin only. dryRun defaults to true and writes nothing, returning the diff only. dryRun:false additionally needs confirm:\"RESTORE\" and a correct passphrase. An apply is refused with 409 BACKUP_LIVE_NODE while any proxy node is LIVE, and with 409 BACKUP_DAEMON_RUNNING unless AJS_BACKUP_ALLOW_RESTORE=1, because the running daemon cannot serve the restored panel. Files are replaced atomically (0600 temporary file plus rename) and a file the backup omits is never deleted. A successful apply answers restartRequired:true and exitRecommended:true: the process marks itself restored, refuses every later state.json snapshot (the interval ticker, a bulk persist and the shutdown save; logged once as state_save_suppressed_after_restore) and should be stopped, so the restored file survives a graceful SIGTERM.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
-            "description": "Diff report; applied, files and restartRequired after an apply.",
+            "description": "Diff report; applied, files, restartRequired and exitRecommended after an apply.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5218,6 +5222,874 @@
           }
         ]
       }
+    },
+    "/v1/portal/plans": {
+      "get": {
+        "operationId": "portalListPlans",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "List active plans available to order.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List active plans available to order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Plan"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ]
+      }
+    },
+    "/v1/portal/orders": {
+      "get": {
+        "operationId": "portalListOrders",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "List only the signed-in user's orders, newest first.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List only the signed-in user's orders, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ]
+      },
+      "post": {
+        "operationId": "portalCreateOrder",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Create an awaiting_payment order from an active plan; never a payment success.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderIdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order created in awaiting_payment. No payment has been taken and no entitlement exists yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Idempotent replay: the same key and plan returned the original order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/orders/{id}": {
+      "get": {
+        "operationId": "portalGetOrder",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Read one own order; a foreign id answers 404.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order's truthful server state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/orders/{id}/cancel": {
+      "post": {
+        "operationId": "portalCancelOrder",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Cancel an awaiting_payment order; cancelled is terminal.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled order, or the unchanged row on an idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/admin/plans": {
+      "get": {
+        "operationId": "listPlans",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "List every plan, including inactive rows, newest first.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "List every plan, including inactive rows, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Plan"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createPlan",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Create one plan catalogue entry.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "201": {
+            "description": "Create one plan catalogue entry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/plans/{id}": {
+      "get": {
+        "operationId": "getPlan",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Read one plan catalogue entry.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Read one plan catalogue entry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "patchPlan",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Apply a partial plan update; existing order snapshots are immutable.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Apply a partial plan update; existing order snapshots are immutable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanPatch"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deletePlan",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Soft-deactivate a plan; the row is retained for order history.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Plan deactivated. New orders are refused; existing orders are unchanged."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "List orders, newest first, with optional tenant, user and state filters.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "List orders, newest first, with optional tenant, user and state filters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "name": "tenantId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact tenant filter."
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact user filter."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/OrderState"
+            },
+            "description": "Exact lifecycle filter; absent lists every state."
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ]
+      }
+    },
+    "/v1/admin/orders/{id}": {
+      "get": {
+        "operationId": "getOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Read one order and its entitlement.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Read one order and its entitlement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/admin/orders/{id}/settle": {
+      "post": {
+        "operationId": "settleOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Record an admin's offline settlement attestation; never claims an online payment.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderSettleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment recorded. The order is paid (activation blocked or retryable) or active with one grant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders/{id}/refund": {
+      "post": {
+        "operationId": "refundOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Record an already completed full offline refund; never transfers money.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRefundRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded reversal or review state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders/{id}/chargeback": {
+      "post": {
+        "operationId": "chargebackOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Record external chargeback evidence; revokes the grant and flags review.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderChargebackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded reversal or review state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders/{id}/cancel": {
+      "post": {
+        "operationId": "adminCancelOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Cancel an awaiting_payment order as admin; cancelled is terminal.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled order, or the unchanged row on an idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/payments/stripe": {
+      "post": {
+        "operationId": "stripeWebhook",
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Verify a Stripe-compatible webhook signature over the raw body and record the event.",
+        "x-implementation-phase": "P0",
+        "security": [],
+        "parameters": [
+          {
+            "name": "Stripe-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "t=<unix>,v1=<HMAC-SHA256 hex>. Verified over the exact raw body with a timestamp tolerance; a bearer token is never accepted here."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Raw provider payload. Only checkout completion, refund and dispute events are mapped; no raw payload, signature or card data is stored."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event authenticated and processed, or authenticated but ignored (unsupported type or unknown order).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "received": {
+                      "type": "boolean"
+                    },
+                    "ignored": {
+                      "type": "boolean",
+                      "description": "Present only when the authenticated event could not apply."
+                    }
+                  },
+                  "required": [
+                    "received"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5466,6 +6338,16 @@
           "maxLength": 64
         },
         "description": "Per-session CSRF token returned by login and GET /v1/portal/session. Required on every unsafe portal request, including logout and key revocation; compared by SHA-256 in constant time."
+      },
+      "OrderIdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "description": "Retry-safe order-create key. The same key and plan replays the original order (200); the same key with a different plan answers 409."
       }
     },
     "schemas": {
@@ -10618,6 +11500,12 @@
           "schedule.fired",
           "schedule.failed",
           "device.retired",
+          "order.created",
+          "order.cancelled",
+          "order.paid",
+          "order.activated",
+          "order.refunded",
+          "order.charged_back",
           "audit.critical"
         ]
       },
@@ -11081,6 +11969,10 @@
             "type": "boolean",
             "description": "True after an apply: the running daemon still holds the replaced panel and must be restarted."
           },
+          "exitRecommended": {
+            "type": "boolean",
+            "description": "True after an apply: the restored panel is on disk, this process has stopped writing state.json snapshots (the refusal is logged once as state_save_suppressed_after_restore) and it cannot serve the restored panel. Stop it now; a graceful SIGTERM leaves the restored state.json untouched."
+          },
           "manifest": {
             "$ref": "#/components/schemas/BackupManifest"
           },
@@ -11103,6 +11995,7 @@
           "dryRun",
           "applied",
           "restartRequired",
+          "exitRecommended",
           "manifest",
           "diff"
         ]
@@ -11290,6 +12183,419 @@
           }
         },
         "description": "Supply exactly one of userId or user. The bind, the optional user creation, activation and the audit row commit atomically."
+      },
+      "Plan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Inactive plans are refused for new orders; existing snapshots are unaffected."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "amountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Price in minor units (fen, cents)."
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "example": "CNY"
+          },
+          "leaseTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 604800
+          },
+          "quotaBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          }
+        },
+        "required": [
+          "id",
+          "active",
+          "name",
+          "amountMinor",
+          "currency",
+          "leaseTtlSeconds",
+          "quotaBytes",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "PlanSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "amountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "leaseTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 604800
+          },
+          "quotaBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "amountMinor",
+          "currency",
+          "leaseTtlSeconds",
+          "quotaBytes"
+        ]
+      },
+      "PlanInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "amountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "leaseTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 604800
+          },
+          "quotaBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Defaults to true when omitted."
+          }
+        },
+        "required": [
+          "name",
+          "amountMinor",
+          "currency",
+          "leaseTtlSeconds",
+          "quotaBytes"
+        ]
+      },
+      "PlanPatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "amountMinor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "leaseTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 604800
+          },
+          "quotaBytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "active": {
+            "type": "boolean",
+            "description": "false deactivates; true reactivates. Existing orders keep their snapshot."
+          }
+        }
+      },
+      "OrderState": {
+        "type": "string",
+        "enum": [
+          "awaiting_payment",
+          "paid",
+          "active",
+          "cancelled",
+          "refunded",
+          "charged_back"
+        ]
+      },
+      "EntitlementGrant": {
+        "type": "object",
+        "properties": {
+          "orderId": {
+            "type": "string"
+          },
+          "leaseId": {
+            "type": "string"
+          },
+          "quotaBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "previousQuotaBytes": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "format": "int64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Quota the grant replaced; restored on revocation."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "Lease expiry, paidAt + leaseTtlSeconds. Service ends here, not at a browser timer."
+          },
+          "revokedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null while the grant is live."
+          }
+        },
+        "required": [
+          "orderId",
+          "leaseId",
+          "quotaBytes",
+          "previousQuotaBytes",
+          "expiresAt",
+          "revokedAt"
+        ]
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "planId": {
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PlanSnapshot"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "stripe"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/OrderState"
+          },
+          "providerRef": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Offline receipt reference or provider payment reference; null before settlement."
+          },
+          "reviewRequired": {
+            "type": "boolean",
+            "description": "True when conflicting or late evidence needs offline reconciliation. No grant is created for such a row."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "paidAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null before settlement."
+          },
+          "activatedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null until activation succeeds."
+          },
+          "cancelledAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null unless cancelled."
+          },
+          "refundedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null unless refunded."
+          },
+          "grant": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntitlementGrant"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The order's one entitlement; null before activation or after quarantine."
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "userId",
+          "planId",
+          "plan",
+          "provider",
+          "state",
+          "providerRef",
+          "reviewRequired",
+          "createdAt",
+          "paidAt",
+          "activatedAt",
+          "cancelledAt",
+          "refundedAt",
+          "grant"
+        ]
+      },
+      "OrderCreateRequest": {
+        "type": "object",
+        "properties": {
+          "planId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "planId"
+        ]
+      },
+      "OrderSettleRequest": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Offline receipt/reference; never a card number."
+          },
+          "offlineFundsReceived": {
+            "type": "boolean",
+            "const": true,
+            "description": "Explicit attestation that offline funds were received."
+          }
+        },
+        "required": [
+          "reference",
+          "offlineFundsReceived"
+        ]
+      },
+      "OrderRefundRequest": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Evidence of the already completed offline refund."
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "reference"
+        ]
+      },
+      "OrderChargebackRequest": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "External dispute evidence."
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "reference"
+        ]
       }
     }
   }

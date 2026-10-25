@@ -46,6 +46,12 @@ const (
 	EventScheduleFired     EventType = "schedule.fired"
 	EventScheduleFailed    EventType = "schedule.failed"
 	EventDeviceRetired     EventType = "device.retired"
+	EventOrderCreated      EventType = "order.created"
+	EventOrderCancelled    EventType = "order.cancelled"
+	EventOrderPaid         EventType = "order.paid"
+	EventOrderActivated    EventType = "order.activated"
+	EventOrderRefunded     EventType = "order.refunded"
+	EventOrderChargedBack  EventType = "order.charged_back"
 	EventAuditCritical     EventType = "audit.critical"
 )
 
@@ -65,6 +71,12 @@ func (e EventType) Valid() bool {
 		EventScheduleFired,
 		EventScheduleFailed,
 		EventDeviceRetired,
+		EventOrderCreated,
+		EventOrderCancelled,
+		EventOrderPaid,
+		EventOrderActivated,
+		EventOrderRefunded,
+		EventOrderChargedBack,
 		EventAuditCritical:
 		return true
 	}

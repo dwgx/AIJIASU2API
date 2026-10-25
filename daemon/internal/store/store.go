@@ -201,11 +201,23 @@ type Store struct {
 	// before the slow call so a concurrent create or rename cannot take it.
 	pendingLabels map[string]struct{}
 
+	// plans, orders and paymentEvents are the order catalogue and its audit
+	// trail (DESIGN-ORDERS). Orders are newest first and carry a store-only
+	// idempotency hash; paymentEvents are newest first and unique on
+	// (provider, id), which is what makes a duplicate webhook a no-op. The
+	// refundPolicy is process-only configuration, not snapshot state.
+	plans         []model.Plan
+	orders        []orderRecord
+	paymentEvents []model.PaymentEvent
+	refundPolicy  RefundPolicy
+
 	accountSeq   int
 	userSeq      int
 	keySeq       int
 	scopedKeySeq int
 	tenantSeq    int
+	planSeq      int
+	orderSeq     int
 	mutationSeq  int
 	auditSeq     int
 	scheduleSeq  int
@@ -294,6 +306,9 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		tenants:           []tenantRecord{},
 		portalSessions:    []model.PortalSession{},
 		tenantHashSem:     make(chan struct{}, tenantHashConcurrency),
+		plans:             []model.Plan{},
+		orders:            []orderRecord{},
+		paymentEvents:     []model.PaymentEvent{},
 	}
 }
 

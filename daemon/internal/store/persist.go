@@ -113,6 +113,22 @@ type Snapshot struct {
 	PortalSessions []model.PortalSession `json:"portalSessions,omitempty"`
 	TenantSeq      int                   `json:"tenantSeq,omitempty"`
 
+	// Plans, Orders and PaymentEvents are the order state (DESIGN-ORDERS).
+	// Every field is additive and omitempty, so a pre-order snapshot restores
+	// with an empty catalogue and no orders. Order rows carry only the
+	// idempotency/request hashes, never the raw key; payment events carry no
+	// card data, signature or raw provider payload.
+	Plans         []model.Plan         `json:"plans,omitempty"`
+	Orders        []orderRecord        `json:"orders,omitempty"`
+	PaymentEvents []model.PaymentEvent `json:"paymentEvents,omitempty"`
+	PlanSeq       int                  `json:"planSeq,omitempty"`
+	OrderSeq      int                  `json:"orderSeq,omitempty"`
+
+	// quarantinedOrders is process-only: restore records why an order was
+	// failed closed so an operator can find the row, but the reason never
+	// enters the document.
+	quarantinedOrders []string
+
 	AccountSeq   int `json:"accountSeq"`
 	UserSeq      int `json:"userSeq"`
 	KeySeq       int `json:"keySeq"`
@@ -220,6 +236,19 @@ func (s *Store) Snapshot() ([]byte, error) {
 		snap.PortalSessions[i] = session
 	}
 	snap.TenantSeq = s.tenantSeq
+	snap.Plans = make([]model.Plan, len(s.plans))
+	for i, plan := range s.plans {
+		snap.Plans[i] = clonePlan(plan)
+	}
+	snap.Orders = make([]orderRecord, len(s.orders))
+	for i, record := range s.orders {
+		row := record
+		row.Order = cloneOrder(record.Order)
+		snap.Orders[i] = row
+	}
+	snap.PaymentEvents = append([]model.PaymentEvent(nil), s.paymentEvents...)
+	snap.PlanSeq = s.planSeq
+	snap.OrderSeq = s.orderSeq
 	snap.AccountSeq = s.accountSeq
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
@@ -349,6 +378,23 @@ func (s *Store) Restore(data []byte) error {
 		s.portalSessions = []model.PortalSession{}
 	}
 	s.tenantSeq = snap.TenantSeq
+	// Order state is installed after validation quarantined broken rows, so a
+	// malformed order cannot grant an entitlement. An older snapshot restores
+	// with an empty catalogue and no orders.
+	s.plans = snap.Plans
+	if s.plans == nil {
+		s.plans = []model.Plan{}
+	}
+	s.orders = snap.Orders
+	if s.orders == nil {
+		s.orders = []orderRecord{}
+	}
+	s.paymentEvents = snap.PaymentEvents
+	if s.paymentEvents == nil {
+		s.paymentEvents = []model.PaymentEvent{}
+	}
+	s.planSeq = snap.PlanSeq
+	s.orderSeq = snap.OrderSeq
 	// Both histories are newest first: a snapshot written by an older build
 	// (or edited by hand) is cut to the retention window, never the reverse.
 	if len(s.requests) > RequestRetention {
@@ -580,6 +626,12 @@ func (snap *Snapshot) validate() error {
 		return err
 	}
 	snap.validatePortalSessions()
+	if err := snap.validatePlans(); err != nil {
+		return err
+	}
+	if err := snap.validateOrders(); err != nil {
+		return err
+	}
 	if snap.UsageMonth != "" {
 		if _, err := time.Parse("2006-01", snap.UsageMonth); err != nil {
 			return fmt.Errorf("state snapshot has an invalid usage month %q", snap.UsageMonth)
@@ -893,10 +945,25 @@ func (snap *Snapshot) normalize() {
 	if snap.PortalSessions == nil {
 		snap.PortalSessions = []model.PortalSession{}
 	}
+	if snap.Plans == nil {
+		snap.Plans = []model.Plan{}
+	}
+	if snap.Orders == nil {
+		snap.Orders = []orderRecord{}
+	}
+	if snap.PaymentEvents == nil {
+		snap.PaymentEvents = []model.PaymentEvent{}
+	}
 	snap.WebhookDeliveries = normalizeWebhookDeliveries(snap.WebhookDeliveries)
 	snap.WebhookOutbox = normalizeWebhookOutbox(snap.WebhookOutbox)
 	for _, tenant := range snap.Tenants {
 		snap.TenantSeq = max(snap.TenantSeq, sequenceOf(tenant.ID, "t-"))
+	}
+	for _, plan := range snap.Plans {
+		snap.PlanSeq = max(snap.PlanSeq, sequenceOf(plan.ID, planIDPrefix))
+	}
+	for _, order := range snap.Orders {
+		snap.OrderSeq = max(snap.OrderSeq, sequenceOf(order.ID, orderIDPrefix))
 	}
 	for _, endpoint := range snap.WebhookEndpoints {
 		snap.WebhookSeq = max(snap.WebhookSeq, sequenceOf(endpoint.ID, "wh-"))
