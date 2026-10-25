@@ -289,6 +289,17 @@ func run() error {
 	if resinPanel, ok := panel.(*runtime.ResinPanel); ok {
 		defer func() { _ = resinPanel.Close() }()
 	}
+	// AJS_RESIN_RECONCILE=1 keeps the Resin view converged: the loop hashes
+	// the desired LIVE nodes, leases and accounts and publishes only when the
+	// hash changes. The stop func is registered after the panel's Close, so
+	// LIFO runs it first and no reconcile can race the publisher's shutdown.
+	stopReconcile, err := startResinReconciler(ctx, st, panel, logger)
+	if err != nil {
+		return err
+	}
+	if stopReconcile != nil {
+		defer stopReconcile()
+	}
 
 	var loginService api.LoginService
 	var loginResults runtime.LoginResults
@@ -1385,6 +1396,122 @@ func startResinPanel(ctx context.Context, st *store.Store, logger *slog.Logger, 
 		"subscription_id", panel.SubscriptionID(),
 		"platform_id", panel.PlatformID())
 	return panel, nil
+}
+
+// startResinReconciler starts the interval reconciler when
+// AJS_RESIN_RECONCILE=1 and a Resin panel is configured. The returned stop
+// function cancels the loop and waits for an in-flight reconcile; the caller
+// registers it after the panel's Close defer so it runs first. A nil stop
+// means the loop is disabled.
+func startResinReconciler(ctx context.Context, st *store.Store, panel api.Panel, logger *slog.Logger) (func(), error) {
+	enabled := strings.TrimSpace(os.Getenv("AJS_RESIN_RECONCILE")) == "1"
+	if panel == nil {
+		if enabled {
+			logger.Warn("resin_reconcile_disabled", "reason", "AJS_RESIN_ADMIN_TOKEN is not set")
+		}
+		return nil, nil
+	}
+	if !enabled {
+		logger.Info("resin_reconcile_disabled", "reason", "AJS_RESIN_RECONCILE is not 1")
+		return nil, nil
+	}
+	interval, err := resinReconcileInterval()
+	if err != nil {
+		return nil, err
+	}
+	reconciler, err := publisher.NewReconciler(publisher.ReconcileConfig{
+		Interval: interval,
+		Snapshot: func() publisher.DesiredState { return desiredResinState(st) },
+		Reconcile: func(ctx context.Context) error {
+			_, err := panel.Reconcile(ctx)
+			return err
+		},
+		Audit:  resinReconcileAudit(st),
+		Logger: logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resin reconciler: %w", err)
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reconciler.Run(loopCtx)
+	}()
+	logger.Info("resin_reconcile_enabled", "interval", interval.String())
+	return func() {
+		cancel()
+		<-done
+	}, nil
+}
+
+// resinReconcileAudit maps the reconciler's two transitions onto store audit
+// rows. A failed publish is a warning; a recovery is informational. The detail
+// is produced by the reconciler and never carries a credential.
+func resinReconcileAudit(st *store.Store) func(action, detail string) {
+	return func(action, detail string) {
+		severity := model.SeverityInfo
+		if action == publisher.AuditReconcileFailed {
+			severity = model.SeverityWarn
+		}
+		st.RecordAudit(severity, "system", action, "resin", detail)
+	}
+}
+
+// desiredResinState maps the store onto the reconciler's hash input. It uses
+// the same LIVE filter and tag as runtime.ResinPanel.render; volatile counters
+// (requests, bytes, latency) are deliberately absent so a busy gate does not
+// look like drift.
+func desiredResinState(st *store.Store) publisher.DesiredState {
+	nodes := st.Nodes()
+	state := publisher.DesiredState{Nodes: make([]publisher.Node, 0, len(nodes))}
+	for _, node := range nodes {
+		if node.State != model.NodeLive {
+			continue
+		}
+		state.Nodes = append(state.Nodes, publisher.Node{Tag: node.Label, GatePort: node.GatePort})
+	}
+
+	leases := st.Leases()
+	state.Leases = make([]publisher.LeaseID, 0, len(leases))
+	for _, lease := range leases {
+		state.Leases = append(state.Leases, publisher.LeaseID{
+			PlatformID: string(lease.Platform),
+			Account:    lease.AccountID,
+		})
+	}
+
+	accounts := st.Accounts()
+	state.Accounts = make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		state.Accounts = append(state.Accounts, account.ID)
+	}
+	return state
+}
+
+// resinReconcileInterval parses AJS_RESIN_RECONCILE_INTERVAL. Unset selects
+// publisher.DefaultReconcileInterval; a bare integer means seconds, any Go
+// duration keeps its meaning. Invalid or non-positive fails startup instead
+// of silently disabling the loop.
+func resinReconcileInterval() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("AJS_RESIN_RECONCILE_INTERVAL"))
+	if raw == "" {
+		return publisher.DefaultReconcileInterval, nil
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil {
+		// ParseDuration("3600s") also catches integer overflow for us.
+		if _, intErr := strconv.ParseInt(raw, 10, 64); intErr == nil {
+			interval, err = time.ParseDuration(raw + "s")
+		}
+		if err != nil {
+			return 0, fmt.Errorf("AJS_RESIN_RECONCILE_INTERVAL %q: %w (use a Go duration such as 5m, or a bare integer number of seconds)", raw, err)
+		}
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("AJS_RESIN_RECONCILE_INTERVAL %q must be positive", raw)
+	}
+	return interval, nil
 }
 
 // startAccountLogin builds the optional vendor login path. AJS_ACCOUNT_LOGIN=1
