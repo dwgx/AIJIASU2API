@@ -73,6 +73,12 @@ with a CSRF token, and admin approval binds exactly one user. The same wave emit
 `lease.created`/`lease.revoked`/`lease.expired` webhook events and keeps durable monthly usage
 counters, so a quota is never renewed by request-log eviction.
 
+The order wave (`AJS-298`) adds an admin plan catalogue, customer orders, offline settlement
+attestation and idempotent entitlement activation under the same portal flag. Payment confirmation
+and activation are separate audited commands: a created order is never a payment success, manual
+settlement records an admin-verified offline receipt, and the Stripe-compatible webhook stays
+disabled until `AJS_STRIPE_WEBHOOK_SECRET` is configured. See [Orders and activation](#orders-and-activation-ajs-298).
+
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
 - State: versioned JSON snapshot at `$AJS_STATE_FILE` (default
@@ -94,6 +100,7 @@ go.mod
 cmd/ajs-accountd/main.go     flags/env, listener, graceful shutdown
 internal/model/model.go      wire structs, inputs and patches
 internal/model/tenant.go     tenant, session and key wire structs; closed status vocabulary
+internal/model/orders.go     plan, order, grant and payment-event wire structs; closed state vocabulary
 internal/store/              mutex-protected state + test/mock seed
 internal/store/seed.go       mock-compatible seed data and health derivation
 internal/store/demo.go       seed-row purge behind AJS_DROP_DEMO
@@ -116,15 +123,20 @@ internal/api/device_pool.go  device-pool HTTP lifecycle handlers
 internal/api/platform.go     renewal, usage, health and webhook handlers
 internal/api/tenant_auth.go  portal middleware: cookie session, CSRF, origin, rate limits, trusted proxies
 internal/api/portal.go       customer portal handlers: signup/login/session/logout, own leases/usage/keys
+internal/api/portal_orders.go  portal plan list and own-order create/get/cancel handlers
+internal/api/admin_orders.go  admin plan CRUD, order settle/refund/chargeback/cancel, Stripe webhook
 internal/api/admin_tenants.go  tenant administration: list, approve, suspend, resume
 internal/api/events.go       event replay page and server-sent event stream handlers
 internal/api/backup.go       panel backup, inspect and restore handlers (admin-only)
 internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
 internal/store/tenants.go    tenant signup/auth, Argon2id hashes, cookie sessions, CSRF, tenant keys
+internal/store/plans.go      admin plan catalogue: validation, create/update, soft-deactivate, restore
+internal/store/orders.go     order state machine, single grant per order, settlement/reversal, restore quarantine
 internal/store/webhooks.go   persisted webhook receivers
 internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states, eviction healing
 internal/health/egress.go    through-gate egress sampler: SOCKS5 CONNECT + HTTP target, 60-sample rings
 internal/renewal/            cached public plan catalogue and per-account expiry
+internal/payment/            manual offline attestation + Stripe-compatible signature verifier (disabled without a secret)
 internal/usage/              request-log aggregation: windows, accounts, users, days, targets, retention
 internal/webhook/            dispatcher, HMAC signing, SSRF policy, retry/backoff, delivery ring, scrub
 internal/webhook/events_lease.go  shared lease.* payload (ids, platform, expiry; no credential)
@@ -1282,9 +1294,10 @@ test binary as the child.
 | `AJS_TLS_LISTEN` | — | `127.0.0.1:2262` | HTTPS admin address; only meaningful with the pair set. `AJS_TLS_LISTEN` alone, or one half of the pair, fails startup; the address must differ from `AJS_LISTEN`; `AJS_ALLOW_INSECURE=1` still refuses a non-loopback bind |
 | `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token unless `AJS_ALLOW_INSECURE=1`; at least 32 characters; the placeholders the repo ships or prints (`change-me`, `changeme`, `change_me`, `admin`, `test`, `password`, `secret`, `local-test-token`, `replace-me-with-openssl-rand-hex-32`) are refused at startup |
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth; refused unless `AJS_LISTEN` is loopback (`127.0.0.1`, `::1` or `localhost`) |
-| `AJS_TENANT_PORTAL` | `-tenant-portal` | `0` | `1` registers the customer portal chains `/v1/portal/*` and `/v1/admin/tenants*`; off leaves them unregistered, so they answer 404 and no identity is synthesized. Enabling it requires `AJS_TENANT_ORIGIN`. `AJS_ALLOW_INSECURE=1` never bypasses either chain |
+| `AJS_TENANT_PORTAL` | `-tenant-portal` | `0` | `1` registers the customer portal chains `/v1/portal/*`, the tenant-admin chain `/v1/admin/tenants*` and the order chains `/v1/admin/orders*` + `/v1/admin/plans*`; off leaves them unregistered, so they answer 404 and no identity is synthesized. Enabling it requires `AJS_TENANT_ORIGIN`. `AJS_ALLOW_INSECURE=1` never bypasses any of these chains |
 | `AJS_TENANT_ORIGIN` | `-tenant-origin` | — | exact browser origin allowed on signup, login and every unsafe portal request, for example `https://panel.example.com`. Required when `AJS_TENANT_PORTAL=1`; a path/query/userinfo fails startup. A non-`https` origin is accepted with a warning (the cookie is `Secure`, so browsers will not send it over plain HTTP) |
 | `AJS_TRUSTED_PROXIES` | `-trusted-proxies` | — | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed for portal rate limiting; empty trusts no forwarding header and uses the socket peer. A malformed entry fails startup |
+| `AJS_STRIPE_WEBHOOK_SECRET` | `-stripe-webhook-secret` | — | signing secret for the Stripe-compatible webhook (`POST /v1/payments/stripe`). Empty leaves the adapter disabled: the route answers 503 and never falls back to manual settlement. Set it only when a real provider is configured; the value is never logged |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
@@ -1323,7 +1336,7 @@ test binary as the child.
 | `AJS_EGRESS_TARGET` | — | `https://www.gstatic.com/generate_204` | absolute `http(s)` URL fetched through the gate; only a 2xx answer is a success (a redirect or error page records `http` with its status). A malformed URL fails startup, and a URL carrying userinfo is refused so a credential cannot reach the startup log |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
 | `AJS_WEBHOOK_ALLOW_PRIVATE` | — | `0` | lab/test opt-out: `1` lets a receiver point at loopback, RFC 1918, IPv6 unique-local and link-local addresses. Without it a resolved private address is rejected (an unresolvable name is allowed at registration and re-checked at dial time); cloud metadata names (`metadata`, `metadata.google.internal`) are rejected either way |
-| `AJS_BACKUP_ALLOW_RESTORE` | — | `0` | `1` lets `POST /v1/backup/restore` write the panel files while the daemon runs; the request still needs `dryRun:false` and `confirm:"RESTORE"`, and the response sets `restartRequired`. Off by default because the running process would overwrite the restored `state.json` with its stale in-memory panel on the next snapshot. Startup logs a warning when set |
+| `AJS_BACKUP_ALLOW_RESTORE` | — | `0` | `1` lets `POST /v1/backup/restore` write the panel files while the daemon runs; the request still needs `dryRun:false` and `confirm:"RESTORE"`, and the response sets `restartRequired` and `exitRecommended`. Off by default because the running process cannot serve the restored panel. After a successful apply the process stops writing `state.json` — the interval ticker, a bulk persist and the shutdown save are all refused and the first refusal is logged once as `state_save_suppressed_after_restore` — so a graceful `SIGTERM` leaves the restored file byte-identical; stop it and start it again. Startup logs a warning when set |
 | `AJS_STATE_DIR` | — | `./data` | state directory (created `0700`); holds `state.json`, `secrets.json`, `device-secrets.json` and `schedule-fire.log` |
 | `AJS_STATE_FILE` | — | `$AJS_STATE_DIR/state.json` | full-state JSON snapshot; loaded before serving and rewritten on every snapshot |
 | `AJS_SNAPSHOT_INTERVAL` | — | `30s` | Go duration between background snapshots; invalid or non-positive fails startup |
@@ -1381,7 +1394,7 @@ Four read views, the webhook registry and the panel backup routes are wired in `
 | `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `internal/webhook` dispatcher plus the persisted receiver rows in `state.json` |
 | `POST /v1/backup` | seals `state.json`, `secrets.json` and `device-secrets.json` into one passphrase-encrypted `.ajsb` envelope (AES-256-GCM over a deterministic tar, PBKDF2-SHA256 at 600 000 iterations, the whole header authenticated) and answers the file itself with `no-store` and `X-AJS-Backup-Blobs`. Admin-only |
 | `POST /v1/backup/inspect` | header-only inspect of a posted envelope; with `passphrase` it also returns the decrypted manifest (`name`, `size`, `sha256`, `required`). It never touches the state directory and returns no blob, so it works on a daemon with no state dir. Admin-only |
-| `POST /v1/backup/restore` | compares an envelope with the panel files and returns a per-blob diff (`added`/`removed`/`changed`/`same` with counts, names and byte totals). `dryRun` defaults to **true**; an apply needs `dryRun:false` and `confirm:"RESTORE"`, is refused while any node is `LIVE`, and writes only while the daemon is stopped unless `AJS_BACKUP_ALLOW_RESTORE=1`. Admin-only |
+| `POST /v1/backup/restore` | compares an envelope with the panel files and returns a per-blob diff (`added`/`removed`/`changed`/`same` with counts, names and byte totals). `dryRun` defaults to **true**; an apply needs `dryRun:false` and `confirm:"RESTORE"`, is refused while any node is `LIVE`, and writes only while the daemon is stopped unless `AJS_BACKUP_ALLOW_RESTORE=1`. A successful apply answers `restartRequired:true` and `exitRecommended:true` and stops every later `state.json` snapshot, so the restored file survives a graceful stop. Admin-only |
 
 Health sampling follows the live gate set: a successful connect/switch watches
 the committed gate, login watches every gate the sync opened, and
@@ -1473,6 +1486,28 @@ endpoint), dedupes by delivery id and answers newest first; `?limit` pages it
 unless they are loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`, must not resolve to a
 private address unless `AJS_WEBHOOK_ALLOW_PRIVATE=1`, and the registry is
 capped at 32 endpoints.
+
+**Durable outbox.** A pending delivery is not lost on a restart. Every accepted
+event is written to a bounded outbox (`webhookOutbox` in `state.json`, 1000
+entries) *before* its first attempt: the row carries the endpoint id, the event
+id, the exact scrubbed JSON body, its SHA-256 digest, the attempts already spent
+and the next due time. An entry leaves the outbox only after an attempt succeeds
+or the delivery dead-letters. A shutdown leaves the rest in place, so the next
+process re-queues them instead of dropping them: an event that was queued but
+never attempted is delivered exactly once after the restart, and an attempt cut
+off mid-flight is retried (at-least-once). Restore waits out the remaining
+backoff before the next attempt and seeds the event id into the 60 s dedupe
+window, so a producer that re-sends the event after the restart cannot fan out a
+duplicate. Entries whose receiver was deleted, whose body no longer matches its
+digest or whose retry budget is already spent are dropped on load rather than
+replayed (the spent one reports its dead letter). When the cap is reached the
+oldest entry is evicted, counted by the dispatcher's `OutboxDropped` counter and
+reported as one warning `webhook.outbox_dropped` audit row — actor `system`,
+target the endpoint id, detail `<event> dropped after <n> attempts` — so the URL,
+signing secret and payload never enter the audit trail. The body is scrubbed
+before the row exists, so no credential is persisted, and the store recomputes
+the digest on load instead of trusting the file.
+
 `PATCH /v1/webhooks/{id}` changes only `enabled`: enabling a receiver whose
 signing secret is gone is a 409 because every delivery must be signed, and the
 URL/events/description are fixed at create time (recreate the endpoint to
@@ -1531,6 +1566,25 @@ and it writes each file through a `0600` temp-file rename. Codes:
 | `CONFLICT` | 409 | `state.json` is missing, so there is nothing to seal |
 | `INVALID_ARGUMENT` | 400 | bad passphrase, malformed or oversized envelope, missing `confirm:"RESTORE"`, or a backup without `state.json` |
 | `INTERNAL` | 500 | a read or write failed; a failed apply reports the files already written in `details.written` |
+
+**Stopped-mode restore procedure.** The HTTP route needs a running process, so
+the apply is always served by a daemon that already loaded the old panel. Do
+not skip the restart between the apply and normal service:
+
+1. Stop the daemon that owns the state directory (`SIGTERM`); its shutdown save
+   is the last write before the files are quiescent.
+2. Start it again with `AJS_BACKUP_ALLOW_RESTORE=1`.
+3. `POST /v1/backup/restore` with `dryRun:false` and `confirm:"RESTORE"`, then
+   check `applied:true` and the `files` list. The answer carries
+   `restartRequired:true` and `exitRecommended:true`.
+4. Stop it again with `SIGTERM`. The apply marked the process restored, so the
+   interval ticker, a bulk account-io persist and the shutdown save all refuse
+   to write `state.json`; the first refusal is logged once as
+   `state_save_suppressed_after_restore`. The restored file therefore survives
+   the graceful stop byte for byte (RESTORE-DRILL.md hazard H1). A hard kill is
+   safe for the same reason, but the graceful stop is the supported path.
+5. Start the daemon normally, without the allow flag; it loads the restored
+   panel.
 
 ### Verifying webhook signatures
 
@@ -1699,6 +1753,63 @@ curl -X POST -H "Authorization: Bearer $AJS_ADMIN_TOKEN" -H 'Content-Type: appli
   "https://panel.example.com/v1/admin/tenants/t-01/approve"
 ```
 
+## Orders and activation (AJS-298)
+
+`internal/model/orders.go`, `internal/store/plans.go`, `internal/store/orders.go`,
+`internal/payment/*` and `internal/api/{portal_orders,admin_orders}.go` implement
+`DESIGN-ORDERS.md`. Payment confirmation and entitlement activation are separate, audited
+commands: neither an order-create response nor a checkout redirect is evidence of payment.
+
+- **State machine.** `awaiting_payment → paid → active`; `awaiting_payment → cancelled`;
+  `paid|active → refunded|charged_back`. Terminal states never resume. A late settlement, a
+  conflicting reference or refund evidence without a recorded settlement sets `reviewRequired`
+  and grants nothing; `paid` means payment recorded and activation pending, and stays retryable.
+- **Plans.** `Plan` is admin configuration (`amountMinor`, `currency`, `leaseTtlSeconds`,
+  `quotaBytes`, `active`). Every order copies those fields into an immutable snapshot, so a plan
+  edit or `DELETE` (soft-deactivate) affects only new orders. Non-positive prices, quotas or a TTL
+  outside 60 s–7 d are refused at write time.
+- **Order creation.** `POST /v1/portal/orders` requires an active tenant, the linked user and an
+  active plan, and accepts an optional `Idempotency-Key`. Orders are unique on
+  `(tenantId, keyHash)`: a replay with the same plan returns the original (200), a different plan
+  answers 409. One awaiting/paid/unexpired-active order per user is allowed; expiry permits a
+  renewal. A foreign order id answers 404 exactly like an unknown one.
+- **Manual settlement.** `POST /v1/admin/orders/{id}/settle` requires a nonempty receipt
+  `reference` and `offlineFundsReceived:true`. The provider never sees the order: the store stamps
+  the snapshot amount, records one `PaymentEvent`, audits `payment.settled`, then activates.
+  Replaying the same reference replays the recorded event; a different reference on a settled order
+  answers 409. There is no online payment claim and no card data anywhere.
+- **Activation.** One locked transaction keyed by the unique grant `orderId` creates the lease
+  (`expiresAt = paidAt + leaseTtlSeconds`), sets the user's `quotaBytesMonth` and stores the
+  previous quota in the grant. Concurrent or restarted attempts reuse the grant: no second lease,
+  no TTL extension. Activation needs an active tenant and an enabled linked user; while blocked the
+  order stays `paid`, `payment.activation_retry` is audited, and the same settlement retry grants
+  once after resume.
+- **Refunds and chargebacks.** `POST …/refund` records an already completed full offline refund and
+  never transfers money; `POST …/chargeback` records external evidence and always flags review.
+  Both revoke the grant's lease and restore its previous quota without re-enabling a suspended user
+  or un-revoking a key. The default `RefundPolicy` allows only full refunds of paid/active orders
+  with a reference; a partial refund stays unchanged, audits `refund.review` and never becomes a
+  new payment. Reversal history is retained.
+- **Webhook.** `POST /v1/payments/stripe` is the one unauthenticated `/v1` route: it verifies
+  `Stripe-Signature` over the exact raw body with HMAC-SHA256 and a five-minute tolerance before
+  parsing. Only checkout completion, refund and dispute events are mapped; metadata must name the
+  order and amount/currency must match the snapshot. Duplicate event ids are no-ops. Without
+  `AJS_STRIPE_WEBHOOK_SECRET` the adapter is disabled and the route answers 503; it never falls
+  back to manual settlement.
+- **Persistence and audit.** `Snapshot` gains additive `plans`, `orders` and `paymentEvents` rows
+  plus their sequence counters. An order row stores only SHA-256 idempotency/request hashes, never
+  the raw key. A malformed restored row is failed closed into `cancelled` + `reviewRequired` with
+  no grant. Audited actions: `order.created`, `order.cancelled`, `payment.settled`,
+  `payment.activation_retry`, `entitlement.granted`, `refund.completed`, `refund.review`,
+  `chargeback.recorded`, `entitlement.revoked`, `webhook.rejected`, `plan.created`,
+  `plan.updated`, `plan.deactivated`; details carry a reference fingerprint, never the reference,
+  payload or signature. Customer events: `order.created|cancelled|paid|activated|refunded|charged_back`.
+
+Operations: creating an order is not a payment. Reconcile offline receipts before attesting;
+`refund` records money already returned; a webhook secret is optional and rotating it simply
+disables the endpoint until the new value is configured. Back up `state.json` before enabling the
+portal; orders and payment events are part of that snapshot.
+
 ## Secret storage
 
 `internal/secret` is a stdlib-only file-backed store for account passwords.
@@ -1802,8 +1913,11 @@ $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
   schedules        []Schedule       scheduleRuns []ScheduleRun
   scheduleFires    []ScheduleFire   reminderMarks {key: ReminderMark}
   webhookEndpoints []WebhookEndpoint  webhookDeliveries []WebhookDelivery
+  webhookOutbox    []WebhookOutboxEntry  (pending deliveries, oldest first, max 1000)
   tenants          []tenantRecord   portalSessions []PortalSession
-  scheduleSeq runSeq webhookSeq tenantSeq
+  plans            []Plan           orders []orderRecord (newest first; idempotency hashes store-only)
+  paymentEvents    []PaymentEvent   (newest first, unique on provider+id, max 20000)
+  scheduleSeq runSeq webhookSeq tenantSeq planSeq orderSeq
   accountSeq userSeq keySeq scopedKeySeq mutationSeq auditSeq
 ```
 
@@ -2251,9 +2365,26 @@ objects.
 | POST | `/v1/admin/tenants/{id}/approve` | `{userId}` XOR `{user:{…CreateUserInput}}`; binds exactly one user and activates atomically. Duplicate link → 409; the tenant stays pending on any failure |
 | POST | `/v1/admin/tenants/{id}/suspend` | disables the linked user and revokes the tenant's sessions plus every API/scoped key it owns in one commit; idempotent |
 | POST | `/v1/admin/tenants/{id}/resume` | re-enables the user; keys revoked by the suspension stay revoked |
+| GET | `/v1/portal/plans` | active plans only, newest first; inactive plans are never offered to a customer |
+| GET | `/v1/portal/orders` | only `Order.TenantID == tenant.id` and `userId == tenant.userId`, filtered before pagination; newest first |
+| POST | `/v1/portal/orders` | `{planId}` + optional `Idempotency-Key` → 201 `Order` in `awaiting_payment`; the same key and plan replays 200, a different plan 409, an inactive plan 409, a second open order 409. Never a payment success |
+| GET | `/v1/portal/orders/{id}` | one own order; a foreign or unknown id → 404 |
+| POST | `/v1/portal/orders/{id}/cancel` | requires `X-CSRF-Token`; only `awaiting_payment` → `cancelled` (terminal); a repeat cancel is 200 unchanged, any other state 409 |
+| GET | `/v1/admin/plans?limit=&offset=` | the full catalogue, including inactive rows (admin token or scoped `admin` only) |
+| POST | `/v1/admin/plans` | `{name,amountMinor,currency,leaseTtlSeconds,quotaBytes,active?}` → 201 `Plan`; invalid price/currency/TTL/quota → 400 |
+| GET | `/v1/admin/plans/{id}` | one plan |
+| PATCH | `/v1/admin/plans/{id}` | partial update; `active:false` deactivates, `active:true` reactivates. Existing orders keep their snapshot |
+| DELETE | `/v1/admin/plans/{id}` | soft-deactivate → 204; the row is retained for order history |
+| GET | `/v1/admin/orders?tenantId=&userId=&state=&limit=&offset=` | every order, newest first, with exact filters |
+| GET | `/v1/admin/orders/{id}` | one order and its entitlement |
+| POST | `/v1/admin/orders/{id}/settle` | `{reference, offlineFundsReceived:true}` → 200 `Order`. Records an offline receipt only; activation may remain pending. Missing reference/attestation → 400, a different reference on a settled order → 409, disabled provider → 503 |
+| POST | `/v1/admin/orders/{id}/refund` | `{reference,reason?}` → 200 `Order`; records an already completed full offline refund, revokes the grant once; a partial or unsupported case is flagged for review without mutation |
+| POST | `/v1/admin/orders/{id}/chargeback` | `{reference,reason?}` → 200 `Order`; records external dispute evidence, revokes the grant and flags review |
+| POST | `/v1/admin/orders/{id}/cancel` | cancels `awaiting_payment` → 200; a repeat is 200 unchanged, any other state 409 |
+| POST | `/v1/payments/stripe` | no bearer: verifies `Stripe-Signature` over the raw body (HMAC-SHA256, five-minute tolerance), maps checkout-completion/refund/dispute events and acknowledges duplicates. A bad signature/stale timestamp → 400, an unknown type → 200 `ignored`, no secret configured → 503 |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
 | POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
-| POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1` (admin-only) |
+| POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,exitRecommended,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1`; after an apply the process refuses further `state.json` saves and answers `exitRecommended:true` (admin-only) |
 
 The catalog selection/connect, schedule and Lab routes are listed in the
 [Lab telemetry](#lab-telemetry) table below rather than repeated here.
@@ -2297,12 +2428,12 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (91 paths, 111 operations,
-  163 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (104 paths, 128 operations,
+  174 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
-  undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
-  `internal/api/server.go` and the contract drift apart.
+  undeclared, the bearer requirement is missing outside `/healthz`, the portal cookie or webhook
+  signature chain, or the route table in `internal/api/server.go` and the contract drift apart.
 
 - Timestamps are RFC 3339 (nanosecond precision), byte counts are integers.
 - `quotaBytesMonth`, `lastUsedAt`, `revokedAt` are `null` when unset.
@@ -2393,7 +2524,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **881 `func Test` functions across 113 `_test.go` files** (recounted 2026-10-25);
+The tree holds **938 `func Test` functions across 121 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -2460,6 +2591,14 @@ probe table plus dial-guard recheck; `internal/webhook/deadletter_test.go` pins 
 ring and panic isolation, and `cmd/ajs-accountd/webhook_deadletter_test.go` pins the composition
 root: exactly one warning `webhook.dead_letter` audit row per exhausted delivery (no second row on
 close), the endpoint/event/attempt detail, and no URL or signing secret;
+`internal/webhook/outbox_test.go` pins the durable outbox (persist before the first attempt,
+restart mid-backoff and mid-flight, dedupe after restore, the cap with drop-oldest and its hook,
+dead-letter removal, unusable restored rows, restore idempotence and the scrubbed persisted body),
+`internal/store/webhook_outbox_test.go` pins the snapshot round-trip (byte-identical on the second
+save), replacement by endpoint/event key, the 1000-row cap, validation, digest mismatch and
+restore normalization, and `cmd/ajs-accountd/webhook_outbox_test.go` pins the composition root: a
+queued-but-unattempted event is delivered exactly once after a snapshot reload and an interrupted
+attempt is retried, plus the `webhook.outbox_dropped` audit row;
 `internal/store/audit_hook_test.go` pins critical-audit
 delivery; `internal/health/health_test.go` pins the 30 s/120-sample window, states, error
 classes, loopback-only dials, the configurable cap, unwatched-first eviction, the watched-LRU
@@ -2576,6 +2715,20 @@ samplers. `internal/webhook/events_lease_test.go` and
 credential-free payload and the sweep → sink path. `internal/store/usage_durability_test.go`
 pins the durable monthly counters across request-log eviction, a snapshot roundtrip, a month
 rollover and a legacy snapshot rebuilt from its current-month gate rows.
+
+The order wave (`AJS-298`) adds three files. `internal/api/orders_test.go` covers the portal
+plan/order routes (inactive and unknown plan refusal, idempotency and ownership, terminal cancel),
+manual settlement (reference and attestation required, one activation, suspension/resume retry),
+the Stripe webhook (disabled, bad signature, stale timestamp, unsupported event acknowledged,
+concurrent settlement records one event), refund/chargeback revocation and partial-refund review,
+and admin plan CRUD plus deactivation scope. `internal/store/orders_test.go` pins the plan
+lifecycle and validation, create idempotency/ownership/cancel, one grant across a restart and
+concurrent settles, the paid-while-suspended retry, partial-refund review and full-refund
+revocation, the refund-policy hook, chargeback review, late-settlement/mismatch quarantine, one
+open order under concurrency, renewal after expiry without clobbering a newer quota, and restore
+quarantine for a malformed row. `internal/payment/provider_test.go` pins the manual attestation and
+the Stripe signature/mapping table (disabled without a secret, allowlisted events, bad/stale/unknown
+rejection, one valid signature among several).
 
 `internal/runtime/panel_test.go` drives the real client and publisher against a
 fake Resin admin server (`httptest`) with a fake clock. It asserts the exact
