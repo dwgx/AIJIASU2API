@@ -148,15 +148,32 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A store row can say LIVE while the runtime lost the session (restart).
-	// Treat that as idle and reopen the same server through the guarded
-	// switch; trigger "reconnect" skips the already-connected shortcut.
+	// A same-server target that is not a healthy live session is a reopen, not
+	// a switch: a DRAINING row (a drain that still owns the gate), a STALE row
+	// (startup recovery demoted a persisted node), and a LIVE row whose runtime
+	// session died. ConnectServer takes the already-connected shortcut when the
+	// slot's gate still runs and leaves the node as it is; ReconnectSlot always
+	// reopens. The trigger alone also skips the shortcut, so the same-server
+	// case is a real reopen even when the reconnect executor is not chosen.
+	sameSlotTarget := false
+	if node, ok := s.slotNode(accountID); ok && node.ServerID == target.serverID {
+		sameSlotTarget = true
+	}
+	// ReconnectAccount derives its server from the runtime (gate, then
+	// selection), so use it only when every target it could pick is the
+	// requested server; otherwise ConnectServer names the target explicitly.
+	reconnect := false
+	if sameSlotTarget {
+		if served, ok := s.reconnectServerID(accountID); ok && served == target.serverID {
+			reconnect = true
+		}
+	}
 	operationType := model.OperationTypeConnect
 	trigger := "manual"
 	switch {
 	case hasCurrent && runtimeHealthy:
 		operationType = model.OperationTypeSwitch
-	case hasCurrent && current.ServerID == target.serverID:
+	case sameSlotTarget:
 		trigger = "reconnect"
 	}
 	operation, busy, err := s.store.BeginOperation(model.Operation{
@@ -182,7 +199,7 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timeout := time.Duration(body.TimeoutSeconds) * time.Second
-	go s.runSelectNode(operation, target.serverID, trigger, timeout)
+	go s.runSelectNode(operation, target.serverID, trigger, reconnect, timeout)
 	if body.Wait {
 		s.waitSelectNode(w, r, operation, timeout)
 		return
@@ -193,10 +210,12 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 }
 
 // runSelectNode is the async executor. It marks the durable record running
-// before touching the vendor, then calls the same CatalogConnector.ConnectServer
-// the synchronous connect route uses, so cooldown, the one-session break
-// before make, the slot lock and metadata-only containment all stay in force.
-func (s *Server) runSelectNode(operation model.Operation, serverID, trigger string, timeout time.Duration) {
+// before touching the vendor, then runs one guarded switch: ReconnectAccount
+// (runtime.ReconnectSlot) when the target is a same-server reopen, so the
+// already-connected shortcut is never taken, or ConnectServer when the target
+// is a different server. Both paths keep the cooldown, the one-session break
+// before make, the slot lock and metadata-only containment.
+func (s *Server) runSelectNode(operation model.Operation, serverID, trigger string, reconnect bool, timeout time.Duration) {
 	if !s.store.MarkOperationRunning(operation.ID) {
 		// Canceled before dispatch: never touch the vendor.
 		return
@@ -223,7 +242,15 @@ func (s *Server) runSelectNode(operation model.Operation, serverID, trigger stri
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	result, err := s.cfg.Catalog.ConnectServer(ctx, operation.AccountID, serverID, "", trigger)
+	var (
+		result runtime.SwitchResult
+		err    error
+	)
+	if reconnect {
+		result, err = s.cfg.Catalog.ReconnectAccount(ctx, operation.AccountID, "", trigger)
+	} else {
+		result, err = s.cfg.Catalog.ConnectServer(ctx, operation.AccountID, serverID, "", trigger)
+	}
 	switchMs := time.Since(start).Milliseconds()
 	steps := []model.OperationStep{
 		{Name: "validate", State: model.OperationStepOK, DurationMs: validateMs},
@@ -658,6 +685,63 @@ func (s *Server) currentSelectNode(accountID string) (model.ProxyNode, bool) {
 		}
 	}
 	return fallback, hasFallback
+}
+
+// slotNode returns the account's slot-1 node row in any state that can still
+// own an endpoint: LIVE, DRAINING (a drain that has not removed the gate yet)
+// or STALE (demoted by startup recovery). DOWN is excluded because a confirmed
+// disconnect has nothing to reopen; selecting that server is a fresh connect.
+// Legacy rows without a slot count as slot 1, matching currentSelectNode.
+func (s *Server) slotNode(accountID string) (model.ProxyNode, bool) {
+	var fallback model.ProxyNode
+	hasFallback := false
+	for _, node := range s.store.Nodes() {
+		if node.AccountID != accountID {
+			continue
+		}
+		switch node.State {
+		case model.NodeLive, model.NodeDraining, model.NodeStale:
+		default:
+			continue
+		}
+		if node.Slot == 1 {
+			return node, true
+		}
+		if node.Slot == 0 && !hasFallback {
+			fallback, hasFallback = node, true
+		}
+	}
+	return fallback, hasFallback
+}
+
+// reconnectServerID reports the server runtime.ReconnectSlot would reopen for
+// slot 1, but only when the answer cannot change underneath the call: the
+// persisted selection must exist and name that server, and any running slot-1
+// gate must serve the same one. ReconnectSlot reads the gate first and the
+// selection second, so a gate that closes between this read and the call would
+// otherwise redirect the reopen to a different selection. The slot row is
+// deliberately not consulted: ReconnectSlot only falls back to it for higher
+// slots. ok=false means the caller must use the explicit ConnectServer path.
+func (s *Server) reconnectServerID(accountID string) (string, bool) {
+	selection, ok := s.store.Selection(accountID)
+	if !ok {
+		return "", false
+	}
+	serverID := strings.TrimSpace(selection.ServerID)
+	if serverID == "" {
+		return "", false
+	}
+	if snapshotter, ok := s.cfg.Catalog.(NodeRuntimeSnapshotter); ok {
+		for _, running := range snapshotter.Snapshot() {
+			if running.AccountID != accountID || running.Slot != 1 || running.Port <= 0 {
+				continue
+			}
+			if strings.TrimSpace(running.ServerID) != serverID {
+				return "", false
+			}
+		}
+	}
+	return serverID, true
 }
 
 // nodeTargetServerID extracts the vendor server from a node id that must

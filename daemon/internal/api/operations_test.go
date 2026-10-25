@@ -140,14 +140,23 @@ func eligibleLookup() runtime.ServerLookup {
 
 func putLiveNode(t *testing.T, st *store.Store, accountID, serverID, label string) {
 	t.Helper()
+	putNodeState(t, st, accountID, serverID, label, model.NodeLive, 13002)
+}
+
+func putNodeState(t *testing.T, st *store.Store, accountID, serverID, label string, state model.NodeState, gatePort int) {
+	t.Helper()
+	egress := ""
+	if gatePort > 0 {
+		egress = "198.51.100.7"
+	}
 	_, err := st.PutNode(model.ProxyNode{
 		ID:        accountID + "#1:" + serverID,
 		AccountID: accountID,
 		Label:     label,
 		Region:    "cn",
-		State:     model.NodeLive,
-		GatePort:  13002,
-		EgressIP:  "198.51.100.7",
+		State:     state,
+		GatePort:  gatePort,
+		EgressIP:  egress,
 		ServerID:  serverID,
 		Slot:      1,
 	})
@@ -344,6 +353,144 @@ func TestSelectNodeReopensDeadSession(t *testing.T) {
 	}
 	if got := catalog.lastCall(); got != "connect|"+account.ID+"|srv-a||reconnect" {
 		t.Fatalf("guarded switch call = %q, want reconnect trigger", got)
+	}
+}
+
+// fakeReconnectCatalog models the runtime's same-server decision so a test can
+// prove select-node routes a DRAINING/STALE/dead-session target through the
+// reconnect path. ConnectServer mirrors ConnectSlot: a running gate for the
+// same server and a non-reconnect trigger answers alreadyConnected and leaves
+// the node state alone. ReconnectAccount mirrors ReconnectSlot: it always
+// reopens, keeps the gate port and commits LIVE.
+type fakeReconnectCatalog struct {
+	*fakeOperationCatalog
+	mu        sync.Mutex
+	accountID string
+	nodeID    string
+	serverID  string
+	state     model.NodeState
+	gatePort  int
+}
+
+func (f *fakeReconnectCatalog) Snapshot() []runtime.NodeRuntime {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gatePort <= 0 || (f.state != model.NodeLive && f.state != model.NodeDraining) {
+		return nil
+	}
+	return []runtime.NodeRuntime{{
+		NodeID: f.nodeID, AccountID: f.accountID, ServerID: f.serverID,
+		Port: f.gatePort, Draining: f.state == model.NodeDraining,
+		Slot: 1, SessionPresent: true, SessionHealthy: true,
+	}}
+}
+
+func (f *fakeReconnectCatalog) ConnectServer(ctx context.Context, accountID, serverID, snapshotID, trigger string) (runtime.SwitchResult, error) {
+	f.mu.Lock()
+	if f.gatePort > 0 && f.serverID == serverID && f.state != model.NodeDown && trigger != "reconnect" {
+		res := runtime.SwitchResult{
+			AccountID: accountID, ServerID: serverID, NodeID: f.nodeID,
+			NodeState: f.state, GatePort: f.gatePort, Slot: 1, AlreadyConnected: true,
+		}
+		f.mu.Unlock()
+		return res, nil
+	}
+	f.state = model.NodeLive
+	f.mu.Unlock()
+	return f.fakeOperationCatalog.ConnectServer(ctx, accountID, serverID, snapshotID, trigger)
+}
+
+func (f *fakeReconnectCatalog) ReconnectAccount(_ context.Context, accountID, snapshotID, trigger string) (runtime.SwitchResult, error) {
+	f.mu.Lock()
+	f.state = model.NodeLive
+	if f.gatePort <= 0 {
+		f.gatePort = 13007
+	}
+	res := runtime.SwitchResult{
+		AccountID: accountID, ServerID: f.serverID, NodeID: f.nodeID,
+		NodeState: model.NodeLive, GatePort: f.gatePort, DurationMs: 25, Slot: 1,
+	}
+	f.mu.Unlock()
+	f.fakeOperationCatalog.mu.Lock()
+	f.fakeOperationCatalog.calls = append(f.fakeOperationCatalog.calls, "reconnect|"+accountID+"|"+trigger)
+	f.fakeOperationCatalog.mu.Unlock()
+	return res, nil
+}
+
+func (f *fakeReconnectCatalog) nodeState() model.NodeState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
+
+func TestSelectNodeReopensDrainingNodeThroughReconnect(t *testing.T) {
+	catalog := &fakeReconnectCatalog{
+		fakeOperationCatalog: &fakeOperationCatalog{lookup: eligibleLookup()},
+		state:                model.NodeDraining,
+		serverID:             "srv-a",
+		gatePort:             13002,
+	}
+	ts, st, account, _ := newOperationTestServer(t, catalog)
+	catalog.accountID = account.ID
+	catalog.nodeID = account.ID + "#1:srv-a"
+	putNodeState(t, st, account.ID, "srv-a", "ops-node-a", model.NodeDraining, 13002)
+	if _, err := st.SetSelection(account.ID, "srv-a", "operator"); err != nil {
+		t.Fatalf("SetSelection: %v", err)
+	}
+
+	// A drain keeps the gate. ConnectServer would answer alreadyConnected and
+	// leave the row DRAINING; select-node must take the reconnect path.
+	resp, body := apiCall(t, ts, http.MethodPost,
+		"/v1/accounts/"+account.ID+"/actions/select-node",
+		map[string]any{"target": map[string]any{"serverId": "srv-a"}, "wait": true})
+	requireStatus(t, resp, http.StatusOK)
+	result := decodeBody[model.SelectNodeResult](t, body)
+	if !result.Changed {
+		t.Fatalf("DRAINING select-node = %+v, want changed:true", result)
+	}
+	if result.GatePort != 13002 || !result.SessionHealthy {
+		t.Fatalf("reopened endpoint = %+v, want the preserved gate port and a healthy session", result)
+	}
+	if got := catalog.lastCall(); got != "reconnect|"+account.ID+"|reconnect" {
+		t.Fatalf("guarded switch call = %q, want the reconnect path", got)
+	}
+	if catalog.callCount("connect|") != 0 {
+		t.Fatalf("DRAINING target took the connect shortcut: %v", catalog.calls)
+	}
+	if state := catalog.nodeState(); state != model.NodeLive {
+		t.Fatalf("node state = %q, want LIVE", state)
+	}
+}
+
+func TestSelectNodeReopensStaleNodeThroughReconnect(t *testing.T) {
+	catalog := &fakeReconnectCatalog{
+		fakeOperationCatalog: &fakeOperationCatalog{lookup: eligibleLookup()},
+		state:                model.NodeStale,
+		serverID:             "srv-a",
+	}
+	ts, st, account, _ := newOperationTestServer(t, catalog)
+	catalog.accountID = account.ID
+	catalog.nodeID = account.ID + "#1:srv-a"
+	putNodeState(t, st, account.ID, "srv-a", "ops-node-a", model.NodeStale, 0)
+	if _, err := st.SetSelection(account.ID, "srv-a", "operator"); err != nil {
+		t.Fatalf("SetSelection: %v", err)
+	}
+
+	// Startup recovery demoted the persisted row, so there is no gate to reuse:
+	// the selection is the runtime's reconnect target.
+	resp, body := apiCall(t, ts, http.MethodPost,
+		"/v1/accounts/"+account.ID+"/actions/select-node",
+		map[string]any{"target": map[string]any{"serverId": "srv-a"}, "wait": true})
+	requireStatus(t, resp, http.StatusOK)
+	result := decodeBody[model.SelectNodeResult](t, body)
+	if !result.Changed || !result.SessionHealthy || result.GatePort == 0 {
+		t.Fatalf("STALE select-node = %+v, want a real reopen", result)
+	}
+	if got := catalog.lastCall(); got != "reconnect|"+account.ID+"|reconnect" {
+		t.Fatalf("guarded switch call = %q, want the reconnect path", got)
+	}
+	if state := catalog.nodeState(); state != model.NodeLive {
+		t.Fatalf("node state = %q, want LIVE", state)
 	}
 }
 
