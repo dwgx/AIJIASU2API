@@ -105,6 +105,18 @@ type Store struct {
 	// exist only in the CreateKey return value.
 	keyHashes map[string]string
 
+	// userUsage holds each panel user's derived gate-metered byte total for
+	// usageMonth. PanelUser.UsedBytes is never stored state: Restore, PurgeDemo
+	// and a UTC month rollover rebuild this map from s.requests, and
+	// AppendRequest advances it in place, so a read costs one lookup instead of
+	// a scan over the retained request log.
+	//
+	// usageMu is a leaf lock: it is only ever taken while s.mu is held (a
+	// rebuild reads s.requests), never the other way round.
+	usageMu    sync.Mutex
+	usageMonth string
+	userUsage  map[string]int64
+
 	// sealer encrypts account passwords when configured; secrets holds the
 	// sealed blobs. Neither is part of model.Account or any JSON response.
 	sealer  Sealer
@@ -227,6 +239,7 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		keyHashes:         make(map[string]string),
 		scopedKeyHashes:   make(map[string]string),
 		scopedKeyUse:      make(map[string]int64),
+		userUsage:         make(map[string]int64),
 		sealer:            sealer,
 		secrets:           make(map[string][]byte),
 		devices:           make(map[string]DeviceIdentity),
@@ -365,18 +378,22 @@ func (s *Store) Lease(id string) (model.Lease, bool) {
 	return lease, true
 }
 
-// Users returns a snapshot in seed order.
+// Users returns a snapshot in seed order. UsedBytes is the derived
+// current-month gate total (see userUsageLocked), not the stored seed value.
 func (s *Store) Users() []model.PanelUser {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	usage := s.userUsageLocked()
 	out := make([]model.PanelUser, len(s.users))
 	for i, user := range s.users {
 		out[i] = cloneUser(user)
+		out[i].UsedBytes = usage[user.ID]
 	}
 	return out
 }
 
-// User returns one panel user by id.
+// User returns one panel user by id. UsedBytes is the derived current-month
+// gate total (see userUsageLocked), not the stored seed value.
 func (s *Store) User(id string) (model.PanelUser, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -384,7 +401,9 @@ func (s *Store) User(id string) (model.PanelUser, bool) {
 	if idx < 0 {
 		return model.PanelUser{}, false
 	}
-	return cloneUser(s.users[idx]), true
+	user := cloneUser(s.users[idx])
+	user.UsedBytes = s.userUsageLocked()[id]
+	return user, true
 }
 
 // Keys returns a snapshot in seed order.
@@ -437,8 +456,7 @@ func (s *Store) Requests() []model.RequestLog {
 // timestamp are skipped rather than ending the scan. An unknown account has no
 // usage.
 func (s *Store) MonthlyUsage(accountID string) int64 {
-	now := s.now().UTC()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	_, monthStart := currentUsageMonth(s.now())
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -463,6 +481,146 @@ func (s *Store) MonthlyUsage(accountID string) int64 {
 		total += row.Bytes
 	}
 	return total
+}
+
+// currentUsageMonth returns the UTC month key ("2006-01") and its first instant
+// for now. The derivation and the rollover check share it, so one month
+// boundary invalidates every derived total at once.
+func currentUsageMonth(now time.Time) (string, time.Time) {
+	utc := now.UTC()
+	return utc.Format("2006-01"), time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// userUsageLocked returns the derived current-month gate total per user,
+// rebuilding the map when the month rolled over or a caller invalidated it
+// after replacing the rows. PanelUser.UsedBytes is read from here, so the panel
+// never reports a stale or seeded counter.
+//
+// The caller holds s.mu for reading or writing. usageMu is taken inside and is
+// never held while s.mu is acquired. The returned map belongs to the store and
+// must not be modified by the caller.
+func (s *Store) userUsageLocked() map[string]int64 {
+	month, start := currentUsageMonth(s.now())
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.usageMonth != month {
+		s.userUsage = monthlyUserTotals(s.requests, start)
+		s.usageMonth = month
+	}
+	return s.userUsage
+}
+
+// withDerivedUsage returns user with UsedBytes stamped from the derived
+// current-month totals. The caller holds s.mu.
+func (s *Store) withDerivedUsage(user model.PanelUser) model.PanelUser {
+	user.UsedBytes = s.userUsageLocked()[user.ID]
+	return user
+}
+
+// advanceUserUsageLocked folds one gate row into the derived totals. It must
+// run before the row is prepended: a rebuild triggered by a month rollover or
+// an invalidation reads s.requests, which must not contain the row yet, or the
+// row would be counted twice. The caller holds s.mu for writing.
+func (s *Store) advanceUserUsageLocked(entry model.RequestLog) {
+	if entry.Source != model.SourceGate || entry.UserID == "" {
+		return
+	}
+	ts, err := time.Parse(time.RFC3339, entry.TS)
+	if err != nil {
+		return
+	}
+	month, start := currentUsageMonth(s.now())
+	if ts.UTC().Before(start) {
+		// A backdated row is not part of the current month.
+		return
+	}
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.usageMonth != month {
+		s.userUsage = monthlyUserTotals(s.requests, start)
+		s.usageMonth = month
+	}
+	if s.userIndexLocked(entry.UserID) < 0 {
+		return
+	}
+	s.userUsage[entry.UserID] += entry.Bytes
+}
+
+// forgetUserUsageLocked drops one deleted user's derived total. The caller
+// holds s.mu for writing.
+func (s *Store) forgetUserUsageLocked(userID string) {
+	s.usageMu.Lock()
+	delete(s.userUsage, userID)
+	s.usageMu.Unlock()
+}
+
+// discountUserUsageLocked removes one evicted row from the derived totals. A
+// full request log drops its oldest row on the next append, and the figure must
+// not keep bytes the retained log no longer holds. A stale map is left for the
+// next read to rebuild, and a map that cannot cover the row is invalidated
+// rather than driven negative. The caller holds s.mu for writing.
+func (s *Store) discountUserUsageLocked(row model.RequestLog) {
+	if row.Source != model.SourceGate || row.UserID == "" {
+		return
+	}
+	ts, err := time.Parse(time.RFC3339, row.TS)
+	if err != nil {
+		return
+	}
+	month, start := currentUsageMonth(s.now())
+	if ts.UTC().Before(start) {
+		// A row from an earlier month never entered this month's total.
+		return
+	}
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.usageMonth != month {
+		return
+	}
+	current, ok := s.userUsage[row.UserID]
+	if !ok {
+		// The user was deleted after the row was appended, so nothing is
+		// counted for it.
+		return
+	}
+	if current < row.Bytes {
+		// The map cannot cover the row: rebuild from the rows instead of
+		// going negative.
+		s.usageMonth = ""
+		return
+	}
+	s.userUsage[row.UserID] = current - row.Bytes
+}
+
+// invalidateUserUsageLocked drops the derived totals so the next read rebuilds
+// them from the row set a caller just installed (Restore, PurgeDemo). The
+// caller holds s.mu for writing.
+func (s *Store) invalidateUserUsageLocked() {
+	s.usageMu.Lock()
+	s.usageMonth = ""
+	s.usageMu.Unlock()
+}
+
+// monthlyUserTotals sums gate-metered rows per user for the month starting at
+// start. Rows are newest first, so the scan stops at the first row older than
+// the boundary; unparseable timestamps are skipped rather than ending it, and
+// loopback rows carry no user id and therefore belong to no one.
+func monthlyUserTotals(rows []model.RequestLog, start time.Time) map[string]int64 {
+	totals := make(map[string]int64)
+	for _, row := range rows {
+		ts, err := time.Parse(time.RFC3339, row.TS)
+		if err != nil {
+			continue
+		}
+		if ts.UTC().Before(start) {
+			break
+		}
+		if row.Source != model.SourceGate || row.UserID == "" {
+			continue
+		}
+		totals[row.UserID] += row.Bytes
+	}
+	return totals
 }
 
 // Audit returns up to limit events newest first.

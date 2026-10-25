@@ -74,8 +74,8 @@ func (s *Store) CreateUser(in model.CreateUserInput) (model.PanelUser, error) {
 	}
 	s.users = append([]model.PanelUser{user}, s.users...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.create", name,
-		fmt.Sprintf("platform %s Â· sticky ttl %s", platform, stickyTTL))
-	return cloneUser(user), nil
+		fmt.Sprintf("platform %s · sticky ttl %s", platform, stickyTTL))
+	return s.withDerivedUsage(cloneUser(user)), nil
 }
 
 // UpdateUser applies a partial identity update.
@@ -126,11 +126,11 @@ func (s *Store) UpdateUser(id string, patch model.UserPatch) (model.PanelUser, e
 		changed = append(changed, "allowlist")
 	}
 	if len(changed) == 0 {
-		return cloneUser(user), nil
+		return s.withDerivedUsage(cloneUser(user)), nil
 	}
 	s.users[idx] = user
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.update", user.Name, "fields: "+strings.Join(changed, ", "))
-	return cloneUser(user), nil
+	return s.withDerivedUsage(cloneUser(user)), nil
 }
 
 // DeleteUser releases the user's leases, revokes their keys and removes the
@@ -172,8 +172,9 @@ func (s *Store) DeleteUser(id string) error {
 		}
 	}
 	s.users = append(s.users[:idx], s.users[idx+1:]...)
+	s.forgetUserUsageLocked(id)
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.delete", name,
-		fmt.Sprintf("%d leases released Â· %d keys revoked", leasesRemoved, keysRevoked))
+		fmt.Sprintf("%d leases released · %d keys revoked", leasesRemoved, keysRevoked))
 	return nil
 }
 
@@ -191,9 +192,9 @@ func (s *Store) SetUserEnabled(id string, enabled bool) (model.PanelUser, error)
 	if enabled {
 		s.addAuditLocked(model.SeverityInfo, "operator", "user.resume", user.Name, "Kill switch released")
 	} else {
-		s.addAuditLocked(model.SeverityWarn, "operator", "user.suspend", user.Name, "Kill switch engaged Â· requests fail closed")
+		s.addAuditLocked(model.SeverityWarn, "operator", "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
 	}
-	return cloneUser(*user), nil
+	return s.withDerivedUsage(cloneUser(*user)), nil
 }
 
 // SetUserAllowlist replaces the user's destination allowlist.
@@ -213,7 +214,7 @@ func (s *Store) SetUserAllowlist(id string, allowlist []string) (model.PanelUser
 	user.Allowlist = normalized
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.allowlist", user.Name,
 		fmt.Sprintf("%d entries", len(normalized)))
-	return cloneUser(*user), nil
+	return s.withDerivedUsage(cloneUser(*user)), nil
 }
 
 // CreateKey issues a secret, stores only its hash and returns the secret once.
@@ -323,9 +324,9 @@ func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, err
 		LatencyMs:    latency,
 		Source:       model.SourceMutationLab,
 	}
-	s.requests = prependCapped(s.requests, entry, RequestRetention)
+	s.prependRequestLocked(entry)
 	s.addAuditLocked(model.SeverityInfo, "operator", "request.mutation", node.Label,
-		fmt.Sprintf("%s %s Â· %d bytes", method, target, entry.Bytes))
+		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
 	return entry, nil
 }
 
@@ -351,8 +352,22 @@ func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
 	if entry.TS == "" {
 		entry.TS = iso(s.now())
 	}
-	s.requests = prependCapped(s.requests, entry, RequestRetention)
+	// The derived per-user totals advance before the prepend: a rebuild that a
+	// month rollover triggers reads s.requests, which must not contain this row
+	// yet.
+	s.advanceUserUsageLocked(entry)
+	s.prependRequestLocked(entry)
 	return entry
+}
+
+// prependRequestLocked inserts one request row under the retention cap. A full
+// log evicts its oldest row, so that row's gate bytes leave the derived totals
+// in the same step. The caller holds s.mu for writing.
+func (s *Store) prependRequestLocked(entry model.RequestLog) {
+	if len(s.requests) == RequestRetention {
+		s.discountUserUsageLocked(s.requests[len(s.requests)-1])
+	}
+	s.requests = prependCapped(s.requests, entry, RequestRetention)
 }
 
 // UpdateSettings applies a validated partial settings update.

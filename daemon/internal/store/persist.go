@@ -112,6 +112,9 @@ func (s *Store) Snapshot() ([]byte, error) {
 	snap.Users = make([]model.PanelUser, len(s.users))
 	for i, user := range s.users {
 		snap.Users[i] = cloneUser(user)
+		// UsedBytes is derived from the gate rows on every read, never stored
+		// state: persisting it would freeze one month's total into the next.
+		snap.Users[i].UsedBytes = 0
 	}
 	snap.Keys = make([]model.APIKey, len(s.keys))
 	for i, key := range s.keys {
@@ -295,6 +298,8 @@ func (s *Store) Restore(data []byte) error {
 	if len(s.audit) > AuditRetention {
 		s.audit = s.audit[:AuditRetention]
 	}
+	// The installed rows are the new basis for the derived per-user totals.
+	s.invalidateUserUsageLocked()
 	s.syncAccountCountsLocked()
 	s.mu.Unlock()
 	// Material presence is checked after the index is installed: a corrupt

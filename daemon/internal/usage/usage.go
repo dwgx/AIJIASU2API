@@ -134,8 +134,11 @@ type AccountUsage struct {
 	RemainingBytes     *int64   `json:"remainingBytes"`
 }
 
-// UserUsage is the per-user roll-up. UsedBytes is the byte total inside the
-// queried window; QuotaBytesMonth is echoed from Query.Quotas.
+// UserUsage is the per-user roll-up. Bytes is the byte total inside the queried
+// window; UsedBytes is the monthly enforcement figure — the gate-metered total
+// for the current UTC month — which the API fills from the store exactly as it
+// fills AccountUsage. The aggregator itself leaves UsedBytes equal to Bytes, so
+// a caller that wants the window total reads Bytes.
 type UserUsage struct {
 	UserID          string `json:"userId"`
 	UserName        string `json:"userName"`

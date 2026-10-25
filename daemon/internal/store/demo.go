@@ -156,6 +156,8 @@ func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer) {
 		delete(s.secrets, id)
 		delete(s.devices, id)
 	}
+	// Purging removed rows, so the derived per-user totals must be rebuilt.
+	s.invalidateUserUsageLocked()
 	s.syncAccountCountsLocked()
 	return result, removedAccounts, s.sealer
 }

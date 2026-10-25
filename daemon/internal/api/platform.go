@@ -141,12 +141,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = filtered
 	}
+	users := s.usageUsers()
 	summary, err := s.cfg.Usage.Aggregate(rows, usage.Query{
 		From:    from,
 		To:      to,
 		Account: accountFilter,
 		UserID:  strings.TrimSpace(userID),
-		Quotas:  s.usageQuotas(),
+		Quotas:  usageQuotas(users),
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, err.Error())
@@ -155,6 +156,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	quotas, enforced := s.usageAccountQuotas(r)
 	summary.QuotaEnforced = enforced
 	applyAccountQuotas(&summary, quotas)
+	applyUserUsage(&summary, users)
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -183,17 +185,49 @@ func parseUsageTime(w http.ResponseWriter, raw, field string, endOfDay bool) (ti
 	return time.Time{}, false
 }
 
-// usageQuotas maps user id to monthly quota so the summary can echo it.
-func (s *Server) usageQuotas() map[string]*int64 {
+// usageUserView is one user's monthly enforcement figures: the configured quota
+// (nil = unlimited) and the store's derived current-month gate total. It is the
+// same total GET /v1/users reports, so a quota percentage means one thing
+// across the panel.
+type usageUserView struct {
+	quota *int64
+	used  int64
+}
+
+// usageUsers maps user id to its monthly quota and derived usage. One store
+// read serves both the aggregator's quota echo and the used-bytes override.
+func (s *Server) usageUsers() map[string]usageUserView {
 	users := s.store.Users()
-	quotas := make(map[string]*int64, len(users))
+	out := make(map[string]usageUserView, len(users))
 	for _, user := range users {
-		if user.QuotaBytesMonth != nil {
-			quota := *user.QuotaBytesMonth
-			quotas[user.ID] = &quota
+		out[user.ID] = usageUserView{quota: user.QuotaBytesMonth, used: user.UsedBytes}
+	}
+	return out
+}
+
+// usageQuotas projects the quota field the aggregator echoes per user row. A
+// nil quota stays absent, which the aggregator also reads as unlimited.
+func usageQuotas(users map[string]usageUserView) map[string]*int64 {
+	quotas := make(map[string]*int64, len(users))
+	for id, user := range users {
+		if user.quota != nil {
+			quotas[id] = user.quota
 		}
 	}
 	return quotas
+}
+
+// applyUserUsage replaces each user row's window byte total with the derived
+// current-month gate total, so usedBytes means the same thing as on the account
+// rows and the panel can render a quota percentage against it. Bytes keeps the
+// window total. A user row whose user no longer exists keeps the window total:
+// no live quota can be measured against it.
+func applyUserUsage(summary *usage.Summary, users map[string]usageUserView) {
+	for i := range summary.Users {
+		if user, ok := users[summary.Users[i].UserID]; ok {
+			summary.Users[i].UsedBytes = user.used
+		}
+	}
 }
 
 // accountQuotaView is one account's monthly enforcement figures. budget is nil

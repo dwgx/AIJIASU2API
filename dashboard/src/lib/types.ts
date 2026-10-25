@@ -181,6 +181,8 @@ export interface RequestLog {
   accountLabel: string
   nodeLabel: string
   region: string
+  /** Gate listener that relayed the request; absent when the daemon omits it. */
+  protocol?: ProxyProtocol
   method: string
   target: string
   status: number
@@ -616,6 +618,11 @@ export interface FlowView {
   bytesIn: number
   bytesOut: number
   errorClass?: string
+  /** Gate listener protocol; absent when the daemon does not report it. */
+  protocol?: ProxyProtocol
+  /** Operator whose lease the gate relayed; absent for unattributed flows. */
+  userId?: string
+  userName?: string
 }
 
 /** GET /v1/lab/flows — bounded per-gate rings joined to their nodes. */

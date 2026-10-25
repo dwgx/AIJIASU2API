@@ -377,6 +377,7 @@ function buildRequests(now: number, users: PanelUser[], nodes: ProxyNode[]): Req
       accountLabel: node.accountLabel,
       nodeLabel: node.label,
       region: node.region,
+      protocol: node.protocol,
       method: pick(rand, methods),
       target: pick(rand, targets),
       status,
@@ -1400,6 +1401,13 @@ export function buildLabGates(db: MockDb, now = Date.now()): GateView[] {
 
 export function buildLabFlows(db: MockDb, limit = 200, now = Date.now()): FlowsView {
   const gates = db.nodes.filter((node) => node.state === 'LIVE' || node.state === 'DRAINING')
+  // The gate relays whatever lease holds the node; nodes without one produce
+  // unattributed flows, exactly as a daemon that cannot name the operator.
+  const leaseByNode = new Map(
+    db.leases
+      .filter((lease) => lease.status === 'active')
+      .map((lease) => [lease.nodeId, lease] as const),
+  )
   const rand = mulberry32(20261024)
   const hosts = [
     'api.example.com',
@@ -1427,6 +1435,7 @@ export function buildLabFlows(db: MockDb, limit = 200, now = Date.now()): FlowsV
     const targetHost = handshakeWithoutTarget ? '' : pick(rand, hosts)
     const targetPort = targetHost ? pick(rand, ports) : 0
     const errorClass = rejected ? pick(rand, errorClasses) : ''
+    const lease = leaseByNode.get(node.id)
     flows.push({
       id: `${node.id}#${index + 1}`,
       nodeId: node.id,
@@ -1441,6 +1450,8 @@ export function buildLabFlows(db: MockDb, limit = 200, now = Date.now()): FlowsV
       bytesIn: rejected ? 0 : 400 + Math.round(rand() * 2_400_000),
       bytesOut: rejected ? 0 : 800 + Math.round(rand() * 8_000_000),
       ...(errorClass ? { errorClass } : {}),
+      protocol: node.protocol,
+      ...(lease ? { userId: lease.userId, userName: lease.userName } : {}),
     })
   }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -197,5 +198,194 @@ func TestUserAllowlistWritePathNormalizes(t *testing.T) {
 	}
 	if !slices.Equal(fresh.Allowlist, []string{"127.0.0.1/32"}) {
 		t.Fatalf("default allowlist = %v, want [127.0.0.1/32]", fresh.Allowlist)
+	}
+}
+
+// TestPanelUserUsedBytesDerivedFromGateRows pins the UsedBytes contract: the
+// figure is the current UTC month's gate-metered bytes for that user, derived
+// on read. Proxy-sourced rows, other users' rows, loopback rows without a user
+// id, rows before the month boundary and unparseable rows never count, an
+// append is visible to the next read, and a UTC month rollover resets the
+// figure before rebuilding it when the clock returns.
+func TestPanelUserUsedBytesDerivedFromGateRows(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	user := mustCreateUser(t, st, "usage-bot")
+	other := mustCreateUser(t, st, "other-bot")
+
+	// AppendRequest prepends, so appending oldest first keeps the log
+	// newest-first exactly as production does.
+	rows := []model.RequestLog{
+		{TS: "2026-09-30T23:59:59Z", UserID: user.ID, Source: model.SourceGate, Bytes: 500},
+		{TS: "2026-10-01T00:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 100},
+		{TS: "2026-10-02T08:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 200},
+		{TS: "2026-10-03T08:00:00Z", UserID: user.ID, Source: model.SourceProxy, Bytes: 900},
+		{TS: "2026-10-04T08:00:00Z", UserID: other.ID, Source: model.SourceGate, Bytes: 400},
+		{TS: "2026-10-05T08:00:00Z", Source: model.SourceGate, Bytes: 700},
+		{TS: "not-a-timestamp", UserID: user.ID, Source: model.SourceGate, Bytes: 7},
+	}
+	for _, row := range rows {
+		st.AppendRequest(row)
+	}
+
+	const want = 300 // 100 at the boundary + 200 on 2026-10-02
+	got, ok := st.User(user.ID)
+	if !ok || got.UsedBytes != want {
+		t.Fatalf("User(%s).UsedBytes = %d (ok=%v), want %d", user.ID, got.UsedBytes, ok, want)
+	}
+	for _, listed := range st.Users() {
+		if listed.ID != user.ID {
+			continue
+		}
+		if listed.UsedBytes != want {
+			t.Fatalf("Users() usedBytes = %d, want %d (list and single read must agree)", listed.UsedBytes, want)
+		}
+	}
+
+	// A later append is visible to the next read without a rescan.
+	st.AppendRequest(model.RequestLog{TS: "2026-10-16T09:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 50})
+	if got, _ := st.User(user.ID); got.UsedBytes != want+50 {
+		t.Fatalf("usedBytes after append = %d, want %d", got.UsedBytes, want+50)
+	}
+
+	// A UTC month rollover resets the figure even though the rows are retained.
+	now = time.Date(2026, 11, 1, 0, 0, 1, 0, time.UTC)
+	if got, _ := st.User(user.ID); got.UsedBytes != 0 {
+		t.Fatalf("usedBytes after rollover = %d, want 0", got.UsedBytes)
+	}
+	// Moving the clock back rebuilds the same month from the rows.
+	now = time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	if got, _ := st.User(user.ID); got.UsedBytes != want+50 {
+		t.Fatalf("usedBytes after returning to October = %d, want %d", got.UsedBytes, want+50)
+	}
+
+	// A deleted user's total is forgotten.
+	if err := st.DeleteUser(user.ID); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, ok := st.User(user.ID); ok {
+		t.Fatal("deleted user is still readable")
+	}
+}
+
+// TestAppendRequestAfterRolloverDoesNotDoubleCount is the ordering regression:
+// the derived totals are advanced before the row is prepended, so a rebuild
+// triggered by the rollover cannot already contain the row it then adds.
+func TestAppendRequestAfterRolloverDoesNotDoubleCount(t *testing.T) {
+	now := time.Date(2026, 10, 31, 23, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	user := mustCreateUser(t, st, "rollover-bot")
+
+	st.AppendRequest(model.RequestLog{TS: "2026-10-31T22:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 500})
+	if got, _ := st.User(user.ID); got.UsedBytes != 500 {
+		t.Fatalf("October usedBytes = %d, want 500", got.UsedBytes)
+	}
+
+	// The cached total still belongs to October when the first November row
+	// arrives.
+	now = time.Date(2026, 11, 1, 0, 0, 5, 0, time.UTC)
+	st.AppendRequest(model.RequestLog{TS: "2026-11-01T00:00:05Z", UserID: user.ID, Source: model.SourceGate, Bytes: 40})
+	if got, _ := st.User(user.ID); got.UsedBytes != 40 {
+		t.Fatalf("November usedBytes = %d, want 40 (the appended row was counted twice)", got.UsedBytes)
+	}
+}
+
+// TestUsedBytesSurvivesRestoreFromRows proves the derived figure is rebuilt
+// from the restored request rows rather than carried in the snapshot.
+func TestUsedBytesSurvivesRestoreFromRows(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	user := mustCreateUser(t, st, "restore-bot")
+	st.AppendRequest(model.RequestLog{TS: "2026-10-20T10:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 123})
+	if got, _ := st.User(user.ID); got.UsedBytes != 123 {
+		t.Fatalf("usedBytes = %d, want 123", got.UsedBytes)
+	}
+
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	for _, persisted := range snap.Users {
+		if persisted.UsedBytes != 0 {
+			t.Fatalf("snapshot persisted usedBytes = %d, want 0 (the figure is derived)", persisted.UsedBytes)
+		}
+	}
+
+	fresh := newEmptyWithClock(func() time.Time { return now }, nil)
+	if err := fresh.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	restored, ok := fresh.User(user.ID)
+	if !ok || restored.UsedBytes != 123 {
+		t.Fatalf("restored usedBytes = %d (ok=%v), want 123", restored.UsedBytes, ok)
+	}
+}
+
+// TestSeededPanelUserUsageIsNotTheDemoCounter proves the dashboard mock's
+// per-user counters are not reported as usage: the seed's request rows are
+// proxy-sourced, so a seeded user has no billable traffic.
+func TestSeededPanelUserUsageIsNotTheDemoCounter(t *testing.T) {
+	st := New()
+	user, ok := st.User("u-01")
+	if !ok {
+		t.Fatal("seeded user u-01 is missing")
+	}
+	if user.UsedBytes != 0 {
+		t.Fatalf("u-01 usedBytes = %d, want 0 (seeded rows are proxy-sourced, so the demo counter is not usage)", user.UsedBytes)
+	}
+}
+
+// TestRequestRetentionEvictionLeavesDerivedUsage pins the cap interaction: once
+// the request log is full, the next append drops its oldest row, and that row's
+// gate bytes must leave the derived total with it so the figure never exceeds
+// the retained log.
+func TestRequestRetentionEvictionLeavesDerivedUsage(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	user := mustCreateUser(t, st, "cap-bot")
+
+	// The oldest row is a billable gate row; the rest only fill the log.
+	st.AppendRequest(model.RequestLog{TS: "2026-10-01T00:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 900})
+	for range RequestRetention - 1 {
+		st.AppendRequest(model.RequestLog{TS: "2026-10-02T00:00:00Z", Source: model.SourceMutationLab})
+	}
+	if got := len(st.Requests()); got != RequestRetention {
+		t.Fatalf("request log = %d rows, want %d", got, RequestRetention)
+	}
+	if got, _ := st.User(user.ID); got.UsedBytes != 900 {
+		t.Fatalf("usedBytes before eviction = %d, want 900", got.UsedBytes)
+	}
+
+	// One more append evicts the oldest row, which was the gate row.
+	st.AppendRequest(model.RequestLog{TS: "2026-10-03T00:00:00Z", Source: model.SourceMutationLab})
+	if got, _ := st.User(user.ID); got.UsedBytes != 0 {
+		t.Fatalf("usedBytes after eviction = %d, want 0 (the evicted row's bytes must leave the total)", got.UsedBytes)
+	}
+}
+
+// TestLeaseQuotaGuardUsesDerivedUsage proves lease creation refuses a user who
+// exhausted the month's gate traffic, and that it reads the derived figure
+// rather than the (always zero) stored counter.
+func TestLeaseQuotaGuardUsesDerivedUsage(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	quota := int64(1_000)
+	user, err := st.CreateUser(model.CreateUserInput{Name: "quota-bot", QuotaBytesMonth: &quota})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	st.AppendRequest(model.RequestLog{TS: "2026-10-10T10:00:00Z", UserID: user.ID, Source: model.SourceGate, Bytes: 1_000})
+
+	if stored := st.users[0].UsedBytes; stored != 0 {
+		t.Fatalf("stored usedBytes = %d, want 0: the guard must not read the stored counter", stored)
+	}
+	_, _, err = st.CreateLease(model.CreateLeaseInput{UserID: user.ID, Platform: model.PlatformAndroid})
+	var leaseErr *LeaseError
+	if !errors.As(err, &leaseErr) || !errors.Is(err, ErrQuota) || leaseErr.Reason != "quota_exceeded" {
+		t.Fatalf("CreateLease = %v, want quota_exceeded", err)
 	}
 }

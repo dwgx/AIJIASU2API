@@ -2583,6 +2583,7 @@ export const api = {
       accountLabel: node.accountLabel,
       nodeLabel: node.label,
       region: node.region,
+      protocol: node.protocol,
       method: input.method,
       target: input.target,
       status: 200,

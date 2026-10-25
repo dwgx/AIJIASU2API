@@ -108,7 +108,10 @@ func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error
 		return model.Lease{}, false, leaseErrorf(ErrConflict, "user_disabled",
 			"user %q is suspended", user.Name)
 	}
-	if user.QuotaBytesMonth != nil && user.UsedBytes >= *user.QuotaBytesMonth {
+	// The quota guard reads the derived current-month gate total, not the
+	// stored field: PanelUser.UsedBytes is never persisted, so the stored copy
+	// is stale by definition (see userUsageLocked).
+	if user.QuotaBytesMonth != nil && s.userUsageLocked()[user.ID] >= *user.QuotaBytesMonth {
 		return model.Lease{}, false, leaseErrorf(ErrQuota, "quota_exceeded",
 			"user %q has exhausted its monthly quota", user.Name)
 	}

@@ -20,7 +20,14 @@ import {
   percent,
 } from '../lib/format'
 import { useI18n } from '../lib/i18n'
-import type { FlowView, MutationLabInput, ProxyNode, RequestLog, Status } from '../lib/types'
+import type {
+  FlowView,
+  MutationLabInput,
+  ProxyNode,
+  ProxyProtocol,
+  RequestLog,
+  Status,
+} from '../lib/types'
 import { summarizeRefresh, useAsync } from '../lib/useAsync'
 import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
@@ -47,6 +54,7 @@ import {
 } from '../components/primitives'
 
 const METHODS = ['CONNECT', 'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']
+const PROTOCOLS: ProxyProtocol[] = ['socks5', 'http']
 const UNKNOWN_METHOD = '__unknown__'
 const FLOW_LIMIT = 200
 const RANGE_MS: Record<Exclude<TimeRange, 'all'>, number> = {
@@ -70,6 +78,11 @@ interface AuditRow {
   method: string
   targetHost: string
   targetPort: number
+  /** Gate listener protocol; empty when the source does not report it. */
+  protocol: string
+  /** Operator the relayed lease belonged to; empty when unattributed. */
+  userId: string
+  userName: string
   /** Gate vocabulary ("ok" / "rejected") or the mutation HTTP status. */
   status: string
   /** Numeric status for mutation rows; null for gate flows. */
@@ -156,6 +169,12 @@ function formatTarget(row: Pick<AuditRow, 'targetHost' | 'targetPort'>): string 
   return `${host}:${row.targetPort}`
 }
 
+/** Same tone convention as the Leases table: socks5 is the info tone. */
+function ProtocolBadge({ protocol }: { protocol: string }) {
+  if (!protocol) return <span className="cell-sub">—</span>
+  return <Badge tone={protocol === 'socks5' ? 'info' : 'neutral'}>{protocol}</Badge>
+}
+
 /**
  * Splits a mutation-lab target into host and port without keeping the path,
  * query or credentials that the operator typed into the form.
@@ -192,6 +211,9 @@ function toGateRow(flow: FlowView, node: ProxyNode | undefined): AuditRow {
     method: flow.method,
     targetHost: flow.targetHost,
     targetPort: flow.targetPort,
+    protocol: flow.protocol ?? '',
+    userId: flow.userId ?? '',
+    userName: flow.userName ?? '',
     status: flow.status,
     statusCode: null,
     bytesIn: flow.bytesIn,
@@ -215,6 +237,9 @@ function toMutationRow(request: RequestLog): AuditRow {
     method: request.method,
     targetHost: host,
     targetPort: port,
+    protocol: request.protocol ?? '',
+    userId: request.userId ?? '',
+    userName: request.userName ?? '',
     status: String(request.status),
     statusCode: request.status,
     bytesIn: 0,
@@ -260,7 +285,9 @@ export default function Requests() {
   const [range, setRange] = useState<TimeRange>('1h')
   const [statusFilter, setStatusFilter] = useState<StatusClass>('all')
   const [methodFilter, setMethodFilter] = useState('all')
+  const [protocolFilter, setProtocolFilter] = useState<'all' | ProxyProtocol>('all')
   const [nodeFilter, setNodeFilter] = useState('all')
+  const [userFilter, setUserFilter] = useState('all')
   const [sourceFilter, setSourceFilter] = useState<'all' | FlowSource>('all')
   const [errorFilter, setErrorFilter] = useState('all')
   const [selected, setSelected] = useState<AuditRow | null>(null)
@@ -312,6 +339,19 @@ export default function Requests() {
     return [...values.entries()].sort((left, right) => left[1].localeCompare(right[1]))
   }, [allRows])
 
+  // Attribution is optional on the wire, so the filter only exists once at
+  // least one row names an operator. A row without a name still gets its id.
+  const userOptions = useMemo(() => {
+    const values = new Map<string, string>()
+    for (const row of allRows) {
+      const value = row.userId || row.userName
+      if (!value) continue
+      const label = row.userName || row.userId
+      if (!values.has(value) || label !== value) values.set(value, label)
+    }
+    return [...values.entries()].sort((left, right) => left[1].localeCompare(right[1]))
+  }, [allRows])
+
   const errorClassOptions = useMemo(() => {
     const values = new Set(allRows.map((row) => row.errorClass).filter(Boolean))
     return [...values].sort((left, right) => left.localeCompare(right))
@@ -326,7 +366,9 @@ export default function Requests() {
       if (new Date(row.startedAt).getTime() < cutoff) return false
       if (!matchesStatusClass(row, statusFilter)) return false
       if (methodFilter !== 'all' && (row.method || UNKNOWN_METHOD) !== methodFilter) return false
+      if (protocolFilter !== 'all' && row.protocol !== protocolFilter) return false
       if (nodeFilter !== 'all' && `${row.accountLabel}|${row.nodeLabel}` !== nodeFilter) return false
+      if (userFilter !== 'all' && (row.userId || row.userName) !== userFilter) return false
       if (sourceFilter !== 'all' && row.source !== sourceFilter) return false
       if (errorFilter !== 'all' && row.errorClass !== errorFilter) return false
       if (!needle) return true
@@ -337,6 +379,9 @@ export default function Requests() {
         row.nodeId,
         row.nodeLabel,
         row.method,
+        row.protocol,
+        row.userId,
+        row.userName,
         row.targetHost,
         String(row.targetPort),
         row.status,
@@ -347,7 +392,18 @@ export default function Requests() {
         .toLowerCase()
       return haystack.includes(needle)
     })
-  }, [allRows, errorFilter, methodFilter, nodeFilter, query, range, sourceFilter, statusFilter])
+  }, [
+    allRows,
+    errorFilter,
+    methodFilter,
+    nodeFilter,
+    protocolFilter,
+    query,
+    range,
+    sourceFilter,
+    statusFilter,
+    userFilter,
+  ])
 
   const summary = useMemo(() => {
     let accepted = 0
@@ -373,7 +429,9 @@ export default function Requests() {
       range,
       statusFilter,
       methodFilter,
+      protocolFilter,
       nodeFilter,
+      userFilter,
       sourceFilter,
       errorFilter,
     ]),
@@ -384,7 +442,9 @@ export default function Requests() {
     range !== '1h' ||
     statusFilter !== 'all' ||
     methodFilter !== 'all' ||
+    protocolFilter !== 'all' ||
     nodeFilter !== 'all' ||
+    userFilter !== 'all' ||
     sourceFilter !== 'all' ||
     errorFilter !== 'all'
 
@@ -393,7 +453,9 @@ export default function Requests() {
     setRange('1h')
     setStatusFilter('all')
     setMethodFilter('all')
+    setProtocolFilter('all')
     setNodeFilter('all')
+    setUserFilter('all')
     setSourceFilter('all')
     setErrorFilter('all')
   }
@@ -462,9 +524,28 @@ export default function Requests() {
       ),
     },
     {
+      key: 'user',
+      label: t('requests.columnUser'),
+      render: (row) => {
+        const label = row.userName || row.userId
+        return label ? (
+          <span className="cell-truncate" title={row.userId || undefined}>
+            {label}
+          </span>
+        ) : (
+          <span className="cell-sub">—</span>
+        )
+      },
+    },
+    {
       key: 'method',
       label: t('requests.columnMethod'),
       render: (row) => <span className="cell-mono">{row.method || '—'}</span>,
+    },
+    {
+      key: 'protocol',
+      label: t('requests.columnProtocol'),
+      render: (row) => <ProtocolBadge protocol={row.protocol} />,
     },
     {
       key: 'target',
@@ -691,6 +772,16 @@ export default function Requests() {
           />
           <Select
             variant="log"
+            aria-label={t('requests.filterProtocol')}
+            value={protocolFilter}
+            onChange={(value) => setProtocolFilter(value as 'all' | ProxyProtocol)}
+            options={[
+              { value: 'all', label: t('requests.allProtocols') },
+              ...PROTOCOLS.map((protocol) => ({ value: protocol, label: protocol })),
+            ]}
+          />
+          <Select
+            variant="log"
             aria-label={t('requests.filterNode')}
             value={nodeFilter}
             onChange={setNodeFilter}
@@ -699,6 +790,18 @@ export default function Requests() {
               ...nodeOptions.map(([value, label]) => ({ value, label })),
             ]}
           />
+          {userOptions.length > 0 ? (
+            <Select
+              variant="log"
+              aria-label={t('requests.filterUser')}
+              value={userFilter}
+              onChange={setUserFilter}
+              options={[
+                { value: 'all', label: t('requests.allUsers') },
+                ...userOptions.map(([value, label]) => ({ value, label })),
+              ]}
+            />
+          ) : null}
           <Select
             variant="filter"
             aria-label={t('requests.filterSource')}
@@ -728,7 +831,7 @@ export default function Requests() {
         {flows.status === 'error' && !flows.data ? (
           <ErrorState message={flows.error ?? t('common.unknownError')} onRetry={flows.reload} />
         ) : flows.status === 'loading' && !flows.data ? (
-          <TableSkeleton rows={9} columns={9} />
+          <TableSkeleton rows={9} columns={11} />
         ) : (
           <>
             {flowsDisabled ? (
@@ -819,8 +922,18 @@ export default function Requests() {
                 <dd>{selected.nodeLabel || selected.nodeId || '—'}</dd>
               </div>
               <div>
+                <dt>{t('requests.detailUser')}</dt>
+                <dd>{selected.userName || selected.userId || '—'}</dd>
+              </div>
+              <div>
                 <dt>{t('requests.detailMethod')}</dt>
                 <dd className="mono">{selected.method || '—'}</dd>
+              </div>
+              <div>
+                <dt>{t('requests.detailProtocol')}</dt>
+                <dd>
+                  <ProtocolBadge protocol={selected.protocol} />
+                </dd>
               </div>
               <div>
                 <dt>{t('requests.detailTarget')}</dt>
