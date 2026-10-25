@@ -343,6 +343,11 @@ type RequestLog struct {
 	Bytes        int64         `json:"bytes"`
 	LatencyMs    int           `json:"latencyMs"`
 	Source       RequestSource `json:"source"`
+	// MeteredLive marks a gate row whose bytes already advanced the durable
+	// monthly counters while the flow was relaying. AppendRequest still stores
+	// the row for the usage log but must not count it a second time. It is
+	// process-local metadata and never persisted or serialized.
+	MeteredLive bool `json:"-"`
 }
 
 // AuditEvent mirrors the dashboard AuditEvent interface.

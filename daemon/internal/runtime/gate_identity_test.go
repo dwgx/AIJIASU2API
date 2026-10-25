@@ -695,6 +695,10 @@ func TestGateIdentityConcurrentFlowsAndUpdates(t *testing.T) {
 		users = append(users, raceIdentity{user: user, key: key, secret: secret})
 	}
 
+	// The acceptance row opens 16 concurrent flows per user, so lift the
+	// default per-user cap for this gate.
+	t.Setenv("AJS_GATE_USER_FLOWS", "16")
+
 	meter := NewFlowMeter(st)
 	identity := meter.Identity()
 	session := &identityEchoSession{}

@@ -1027,6 +1027,13 @@ type GateIdentity struct {
 	cacheTTL        time.Duration
 	rebuildInterval time.Duration
 
+	// flowCap bounds concurrently admitted flows per user (AJS_GATE_USER_FLOWS,
+	// default 8). active counts the flows the gate has admitted but not yet
+	// finished. Both are guarded by mu and are process-wide, so the cap holds
+	// across every gate the controller starts.
+	flowCap int
+	active  map[string]int
+
 	mu       sync.Mutex
 	digest   map[[sha256.Size]byte]string
 	policies map[string]*gateUserPolicy
@@ -1049,17 +1056,64 @@ type gateUserUsage struct {
 }
 
 // NewGateIdentity builds the gate identity over st. A nil store fails every
-// authentication and every policy check closed.
+// authentication and every policy check closed. The per-user concurrent-flow
+// cap comes from AJS_GATE_USER_FLOWS (default 8).
 func NewGateIdentity(st *store.Store) *GateIdentity {
 	return &GateIdentity{
 		store:           st,
 		now:             time.Now,
 		cacheTTL:        defaultUserQuotaCacheTTL,
 		rebuildInterval: defaultDigestRebuildInterval,
+		flowCap:         userFlowCapFromEnv(),
+		active:          make(map[string]int),
 		digest:          make(map[[sha256.Size]byte]string),
 		policies:        make(map[string]*gateUserPolicy),
 		usage:           make(map[string]gateUserUsage),
 	}
+}
+
+// AcquireFlow reserves one concurrent flow slot for userID. It returns false
+// when the user already holds flowCap flows, which refuses the new flow with
+// user_flow_limit before a gate slot or vendor flow is taken. An empty user id
+// (loopback mode) is always admitted.
+func (g *GateIdentity) AcquireFlow(userID string) bool {
+	if g == nil || userID == "" {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.flowCap > 0 && g.active[userID] >= g.flowCap {
+		return false
+	}
+	g.active[userID]++
+	return true
+}
+
+// ReleaseFlow returns one concurrent flow slot reserved by AcquireFlow. It is
+// idempotent-safe for a missing slot: a double release cannot drive the count
+// negative.
+func (g *GateIdentity) ReleaseFlow(userID string) {
+	if g == nil || userID == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active[userID] <= 1 {
+		delete(g.active, userID)
+		return
+	}
+	g.active[userID]--
+}
+
+// ActiveFlows returns the number of admitted flows for userID. It exists for
+// diagnostics and tests.
+func (g *GateIdentity) ActiveFlows(userID string) int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.active[userID]
 }
 
 // Authenticate verifies one RFC 1929 credential pair. It returns ok only for an
@@ -1194,7 +1248,7 @@ func allowlistFingerprint(entries []string) uint64 {
 }
 
 // monthlyUsage returns the cached current-month total for one user, computing
-// it from the request log on a miss or after the month changed.
+// it from the store's durable counter on a miss or after the month changed.
 func (g *GateIdentity) monthlyUsage(userID string) int64 {
 	now := g.now()
 	month := now.UTC().Format("2006-01")
@@ -1206,7 +1260,7 @@ func (g *GateIdentity) monthlyUsage(userID string) int64 {
 	}
 	g.mu.Unlock()
 
-	used := g.storeUserUsage(userID, now)
+	used := g.store.UserMonthlyUsage(userID)
 
 	g.mu.Lock()
 	g.usage[userID] = gateUserUsage{month: month, bytes: used, expires: now.Add(g.cacheTTL)}
@@ -1215,8 +1269,10 @@ func (g *GateIdentity) monthlyUsage(userID string) int64 {
 }
 
 // AddUsage advances the cached monthly total for one authenticated user after
-// the meter appended an accepted flow. An absent entry stays absent: the next
-// admission recomputes from the request log, which already holds that row.
+// the relay reported a chunk. The store's durable counter is advanced by the
+// meter first; this only keeps a populated cache entry in step so the next
+// admission does not need a store read. An absent entry stays absent: the next
+// admission recomputes from the durable counter.
 func (g *GateIdentity) AddUsage(userID string, bytes int64) {
 	if g == nil || g.store == nil || userID == "" || bytes <= 0 {
 		return
@@ -1232,27 +1288,16 @@ func (g *GateIdentity) AddUsage(userID string, bytes int64) {
 	g.mu.Unlock()
 }
 
-// storeUserUsage sums one user's gate-metered bytes in the current UTC month.
-// The scan is bounded by the request-log cap and stops at the first row older
-// than the month start; rows with an unparseable timestamp are skipped rather
-// than ending the scan. It runs on a cache miss only.
-func (g *GateIdentity) storeUserUsage(userID string, now time.Time) int64 {
-	utc := now.UTC()
-	monthStart := time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
-
-	var total int64
-	for _, row := range g.store.Requests() {
-		if row.Source != model.SourceGate || row.UserID != userID {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339, row.TS)
-		if err != nil {
-			continue
-		}
-		if ts.UTC().Before(monthStart) {
-			break
-		}
-		total += row.Bytes
+// overQuota reports whether userID has reached the month's byte quota. It is
+// the live counterpart of Admit's quota stage: the relay calls it after every
+// 256 KiB so a flow is cut off before it can multiply the admission pre-check.
+func (g *GateIdentity) overQuota(userID string) bool {
+	if g == nil || g.store == nil || userID == "" {
+		return false
 	}
-	return total
+	user, ok := g.store.User(userID)
+	if !ok || user.QuotaBytesMonth == nil {
+		return false
+	}
+	return g.monthlyUsage(userID) >= *user.QuotaBytesMonth
 }

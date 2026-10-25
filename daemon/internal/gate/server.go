@@ -90,7 +90,20 @@ var (
 
 	errAdmissionTimeout = errors.New("gate: admission timeout")
 	errDraining         = errors.New("gate: node is draining")
+	errQuotaStopped     = errors.New("gate: flow quota exceeded")
 )
+
+// ProgressChunk is the in-flight accounting granularity. The relay reports
+// bytes to Config.MeterProgress once per chunk per direction, so a flow can
+// overshoot a monthly budget by less than one chunk before the meter refuses
+// it. Smaller chunks bound the overrun more tightly but cost one store update
+// per chunk.
+const ProgressChunk = 256 << 10
+
+// FlowErrorUserFlowLimit is the refusal class for the per-user concurrent-flow
+// cap. It is a transient capacity refusal, not a byte quota: the HTTP listener
+// answers 429 with a one-second retry hint rather than the monthly reset.
+const FlowErrorUserFlowLimit = "user_flow_limit"
 
 // Config is the per-node gate configuration. Zero values select the defaults.
 type Config struct {
@@ -132,6 +145,20 @@ type Config struct {
 	// never calls Session.OpenFlow; used and budget are diagnostics only.
 	// Nil disables quota admission.
 	QuotaCheck func(accountID string) (ok bool, used, budget int64)
+	// MeterProgress reports relayed bytes while an admitted flow is in flight.
+	// The relay calls it at most once per ProgressChunk bytes per direction
+	// (and once more for the trailing remainder). It advances the durable
+	// monthly counters and returns false when a budget is exhausted; the gate
+	// then closes both sides of the tunnel and records FlowErrorQuota. Nil
+	// disables in-flight accounting.
+	MeterProgress func(userID, accountID string, n int64) bool
+	// UserFlowCheck reserves one concurrent-flow slot for an authenticated
+	// user. It runs at the same post-CONNECT admission point as the quota
+	// checks; a false result refuses the flow with FlowErrorUserFlowLimit
+	// before a slot or vendor flow is taken. UserFlowRelease must return the
+	// slot after the flow finishes. Both nil disables the per-user cap.
+	UserFlowCheck   func(userID string) bool
+	UserFlowRelease func(userID string)
 	// AuthMode selects the SOCKS5 authentication method. An empty value keeps
 	// AuthLoopback. AuthUserPass requires Authenticator and UserPolicy; a nil
 	// one fails closed (01 01 / policy_unavailable) rather than falling back
@@ -625,7 +652,8 @@ func (s *Server) handle(client net.Conn) {
 	// account quota. Both precede the admission slot and every vendor call, so
 	// a refusal never consumes capacity or opens upstream traffic. 0x02 is
 	// SOCKS5's "connection not allowed by ruleset".
-	if verdict := s.admit(principal, target); !verdict.ok {
+	verdict := s.admit(principal, target)
+	if !verdict.ok {
 		s.rejected.Add(1)
 		s.recordReject(started, target, principal, verdict.errorClass)
 		_ = writeReply(client, repNotAllowed)
@@ -639,6 +667,9 @@ func (s *Server) handle(client net.Conn) {
 			"budget_bytes", verdict.budget,
 		)
 		return
+	}
+	if verdict.release != nil {
+		defer verdict.release()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -703,8 +734,8 @@ func (s *Server) handle(client net.Conn) {
 	}
 	s.accepted.Add(1)
 
-	in, out := relay(client, remote, &s.ingress, &s.egress)
-	s.recordFlow(FlowRecord{
+	in, out, quotaStopped := relay(client, remote, &s.ingress, &s.egress, s.meterProgress(principal.UserID))
+	record := FlowRecord{
 		StartedAt:  started,
 		UserID:     principal.UserID,
 		UserName:   principal.UserName,
@@ -715,7 +746,11 @@ func (s *Server) handle(client net.Conn) {
 		Status:     FlowStatusOK,
 		BytesIn:    in,
 		BytesOut:   out,
-	})
+	}
+	if quotaStopped {
+		record.ErrorClass = FlowErrorQuota
+	}
+	s.recordFlow(record)
 	s.logger.Info("gate flow closed",
 		"node_id", s.cfg.NodeID,
 		"protocol", FlowProtocolSOCKS5,
@@ -724,6 +759,7 @@ func (s *Server) handle(client net.Conn) {
 		"ingress_bytes", in,
 		"egress_bytes", out,
 		"duration", s.cfg.Now().Sub(started),
+		"error_class", record.ErrorClass,
 	)
 }
 
@@ -1109,19 +1145,22 @@ func (s *Server) admitUser(principal Principal, host string) (bool, string, int6
 
 // admission is the shared policy verdict for one parsed destination. A
 // refusal names the credential-free FlowRecord class; used and budget are
-// diagnostics for the rejection log only.
+// diagnostics for the rejection log only. release is non-nil when the verdict
+// reserved a per-user flow slot; the caller must defer it.
 type admission struct {
 	ok         bool
 	errorClass string
 	used       int64
 	budget     int64
+	release    func()
 }
 
-// admit evaluates the two policy stages both listeners share, in the order the
+// admit evaluates the policy stages both listeners share, in the order the
 // design fixes: the per-user policy (userpass mode only: enabled state,
-// allowlist, user quota) and then the account quota. It runs after the
-// destination parses and before an admission slot is taken or any vendor flow
-// opens, so a refusal never consumes capacity or opens upstream traffic.
+// allowlist, user quota), then the account quota, then the per-user active-flow
+// cap. It runs after the destination parses and before an admission slot is
+// taken or any vendor flow opens, so a refusal never consumes capacity or opens
+// upstream traffic.
 func (s *Server) admit(principal Principal, target target) admission {
 	if s.cfg.AuthMode == AuthUserPass {
 		ok, errorClass, used, budget := s.admitUser(principal, target.host)
@@ -1133,6 +1172,16 @@ func (s *Server) admit(principal Principal, target target) admission {
 		if ok, used, budget := s.cfg.QuotaCheck(s.cfg.AccountID); !ok {
 			return admission{errorClass: FlowErrorQuota, used: used, budget: budget}
 		}
+	}
+	// The cap needs both hooks: acquiring without a release would leak the
+	// slot, so an incomplete pair is treated as disabled.
+	if s.cfg.AuthMode == AuthUserPass && principal.UserID != "" &&
+		s.cfg.UserFlowCheck != nil && s.cfg.UserFlowRelease != nil {
+		if !s.cfg.UserFlowCheck(principal.UserID) {
+			return admission{errorClass: FlowErrorUserFlowLimit}
+		}
+		userID := principal.UserID
+		return admission{ok: true, release: func() { s.cfg.UserFlowRelease(userID) }}
 	}
 	return admission{ok: true}
 }
@@ -1190,30 +1239,56 @@ func writeReply(w io.Writer, rep byte) error {
 	return err
 }
 
+// meterProgress returns the per-flow progress callback for one principal. Nil
+// means the gate was built without in-flight accounting.
+func (s *Server) meterProgress(userID string) func(int64) bool {
+	if s.cfg.MeterProgress == nil {
+		return nil
+	}
+	accountID := s.cfg.AccountID
+	return func(n int64) bool { return s.cfg.MeterProgress(userID, accountID, n) }
+}
+
 // relay copies bytes in both directions until both copies end, then closes
 // both connections. ingress counts client -> target, egress target -> client.
-func relay(a, b net.Conn, ingress, egress *atomic.Uint64) (in, out int64) {
+// progress, when non-nil, is called with every ProgressChunk bytes written in
+// either direction plus the trailing remainder; a false result closes both
+// sides immediately and sets quotaStopped so the caller can record the class.
+func relay(a, b net.Conn, ingress, egress *atomic.Uint64, progress func(int64) bool) (in, out int64, quotaStopped bool) {
 	var wg sync.WaitGroup
+	var once sync.Once
+	var stopped atomic.Bool
+	stop := func() {
+		once.Do(func() {
+			stopped.Store(true)
+			_ = a.Close()
+			_ = b.Close()
+		})
+	}
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		in = copyFlow(b, a, ingress)
+		in = copyFlow(b, a, ingress, progress, stop)
 	}()
 	go func() {
 		defer wg.Done()
-		out = copyFlow(a, b, egress)
+		out = copyFlow(a, b, egress, progress, stop)
 	}()
 	wg.Wait()
 	_ = a.Close()
 	_ = b.Close()
-	return in, out
+	return in, out, stopped.Load()
 }
 
 // copyFlow copies one direction and half-closes the destination. A connection
 // without CloseWrite (net.Pipe, for example) is closed instead, matching the
 // emulator's relay behaviour.
-func copyFlow(dst, src net.Conn, counter *atomic.Uint64) int64 {
-	n, _ := io.Copy(countingWriter{w: dst, n: counter}, src)
+func copyFlow(dst, src net.Conn, counter *atomic.Uint64, progress func(int64) bool, stop func()) int64 {
+	writer := &meteredWriter{w: dst, n: counter, progress: progress}
+	n, _ := io.Copy(writer, src)
+	if writer.flush() {
+		stop()
+	}
 	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	} else {
@@ -1222,17 +1297,41 @@ func copyFlow(dst, src net.Conn, counter *atomic.Uint64) int64 {
 	return n
 }
 
-// countingWriter adds every successful write to counter. Counters are updated
-// live, so State is exact while a flow is still running.
-type countingWriter struct {
-	w io.Writer
-	n *atomic.Uint64
+// meteredWriter adds every successful write to counter and reports the bytes
+// to the progress callback in ProgressChunk batches. Counters are updated live,
+// so State is exact while a flow is still running.
+type meteredWriter struct {
+	w        io.Writer
+	n        *atomic.Uint64
+	progress func(int64) bool
+	pending  int64
+	refused  bool
 }
 
-func (c countingWriter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
+func (m *meteredWriter) Write(p []byte) (int, error) {
+	n, err := m.w.Write(p)
 	if n > 0 {
-		c.n.Add(uint64(n))
+		m.n.Add(uint64(n))
+		m.pending += int64(n)
+	}
+	if m.progress != nil && m.pending >= ProgressChunk {
+		if !m.progress(m.pending) {
+			m.refused = true
+			return n, errQuotaStopped
+		}
+		m.pending = 0
 	}
 	return n, err
+}
+
+// flush reports the trailing bytes below one chunk and returns true when the
+// meter refused the flow.
+func (m *meteredWriter) flush() bool {
+	if m.progress != nil && m.pending > 0 {
+		if !m.progress(m.pending) {
+			m.refused = true
+		}
+		m.pending = 0
+	}
+	return m.refused
 }

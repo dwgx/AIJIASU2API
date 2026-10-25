@@ -21,12 +21,13 @@ const (
 
 // Quota is the gate's per-account monthly traffic budget admission policy.
 // It reads the budget from the store on every check (so an operator patch is
-// effective immediately) and caches only the month's gate-metered total.
+// effective immediately) and caches only the month's durable gate-metered
+// total.
 //
-// The cache is invalidated by FlowMeter.observe after every metered row and
-// expires after CacheTTL. A cache entry also carries its UTC month key, so a
-// daemon that crosses midnight into a new month recomputes instead of
-// refusing flows with the previous month's total.
+// The meter advances a populated cache entry after every relayed chunk and
+// invalidates it after a completed row written by another path. A cache entry
+// also carries its UTC month key, so a daemon that crosses midnight into a new
+// month recomputes instead of refusing flows with the previous month's total.
 type Quota struct {
 	store         *store.Store
 	now           func() time.Time
@@ -103,6 +104,25 @@ func (q *Quota) Invalidate(accountID string) {
 	}
 	q.mu.Lock()
 	delete(q.usage, accountID)
+	q.mu.Unlock()
+}
+
+// advance moves a populated cache entry forward by one relayed chunk. The store
+// already advanced the durable counter; this only keeps the cached total in
+// step so the live budget check does not need a store read. An absent or
+// previous-month entry is left alone: Check recomputes it from the store.
+func (q *Quota) advance(accountID string, n int64) {
+	if q == nil || accountID == "" || n <= 0 {
+		return
+	}
+	now := q.now()
+	month := now.UTC().Format("2006-01")
+	q.mu.Lock()
+	if entry, ok := q.usage[accountID]; ok && entry.month == month {
+		entry.bytes += n
+		entry.expires = now.Add(q.cacheTTL)
+		q.usage[accountID] = entry
+	}
 	q.mu.Unlock()
 }
 

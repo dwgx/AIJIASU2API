@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"ajsaccountd/internal/model"
 )
@@ -41,6 +42,15 @@ type Snapshot struct {
 	Requests   []model.RequestLog  `json:"requests"`
 	Audit      []model.AuditEvent  `json:"audit"`
 	Settings   model.PanelSettings `json:"settings"`
+
+	// UsageMonth, MonthlyUsage and AccountUsage are the durable gate-metered
+	// monthly totals (user id and account id keyed). They are quota state, not
+	// display state: unlike the retained request rows they never shrink when a
+	// row is evicted, and an older snapshot without them is rebuilt from its
+	// current-month gate rows on restore.
+	UsageMonth   string           `json:"usageMonth,omitempty"`
+	MonthlyUsage map[string]int64 `json:"monthlyUsage,omitempty"`
+	AccountUsage map[string]int64 `json:"accountUsage,omitempty"`
 
 	KeyHashes map[string]string `json:"keyHashes"`
 	// ScopedKeyHashes is the scoped-key counterpart of KeyHashes. Both hold
@@ -125,6 +135,7 @@ func (s *Store) Snapshot() ([]byte, error) {
 		snap.ScopedKeys[i] = cloneScopedKey(key)
 	}
 	snap.Requests = append([]model.RequestLog(nil), s.requests...)
+	snap.UsageMonth, snap.MonthlyUsage, snap.AccountUsage = s.usageSnapshotLocked()
 	snap.Audit = append([]model.AuditEvent(nil), s.audit...)
 	snap.Settings = s.settings
 	snap.KeyHashes = make(map[string]string, len(s.keyHashes))
@@ -298,8 +309,31 @@ func (s *Store) Restore(data []byte) error {
 	if len(s.audit) > AuditRetention {
 		s.audit = s.audit[:AuditRetention]
 	}
-	// The installed rows are the new basis for the derived per-user totals.
-	s.invalidateUserUsageLocked()
+	// The durable monthly counters are installed with the rows. A snapshot
+	// written by this build carries them; an older snapshot (or one written in
+	// a previous month) is rebuilt from the restored current-month gate rows.
+	month, start := currentUsageMonth(s.now())
+	s.usageMu.Lock()
+	s.usageMonth = month
+	if snap.UsageMonth == month {
+		s.monthlyUsage = copyUsage(snap.MonthlyUsage)
+		s.accountUsage = copyUsage(snap.AccountUsage)
+		// A hand-edited snapshot can carry a counter for a deleted row; drop
+		// it instead of failing the whole restore.
+		for id := range s.monthlyUsage {
+			if s.userIndexLocked(id) < 0 {
+				delete(s.monthlyUsage, id)
+			}
+		}
+		for id := range s.accountUsage {
+			if s.accountIndexLocked(id) < 0 {
+				delete(s.accountUsage, id)
+			}
+		}
+	} else {
+		s.monthlyUsage, s.accountUsage = monthlyUsageTotals(s.requests, s.accounts, start)
+	}
+	s.usageMu.Unlock()
 	s.syncAccountCountsLocked()
 	s.mu.Unlock()
 	// Material presence is checked after the index is installed: a corrupt
@@ -490,6 +524,21 @@ func (snap *Snapshot) validate() error {
 	}
 	if err := snap.validateWebhooks(); err != nil {
 		return err
+	}
+	if snap.UsageMonth != "" {
+		if _, err := time.Parse("2006-01", snap.UsageMonth); err != nil {
+			return fmt.Errorf("state snapshot has an invalid usage month %q", snap.UsageMonth)
+		}
+	}
+	for id, bytes := range snap.MonthlyUsage {
+		if bytes < 0 {
+			return fmt.Errorf("state snapshot has a negative monthly usage for user %q", id)
+		}
+	}
+	for id, bytes := range snap.AccountUsage {
+		if bytes < 0 {
+			return fmt.Errorf("state snapshot has a negative monthly usage for account %q", id)
+		}
 	}
 	return snap.validateWebhookDeliveries()
 }

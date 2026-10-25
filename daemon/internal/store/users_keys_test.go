@@ -339,11 +339,11 @@ func TestSeededPanelUserUsageIsNotTheDemoCounter(t *testing.T) {
 	}
 }
 
-// TestRequestRetentionEvictionLeavesDerivedUsage pins the cap interaction: once
-// the request log is full, the next append drops its oldest row, and that row's
-// gate bytes must leave the derived total with it so the figure never exceeds
-// the retained log.
-func TestRequestRetentionEvictionLeavesDerivedUsage(t *testing.T) {
+// TestRequestRetentionEvictionKeepsDurableUsage pins the quota/retention
+// separation: once the request log is full, the next append drops its oldest
+// row for display, but that row's gate bytes stay in the durable monthly
+// counters. Log churn must never renew a budget.
+func TestRequestRetentionEvictionKeepsDurableUsage(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	st := newEmptyWithClock(func() time.Time { return now }, nil)
 	user := mustCreateUser(t, st, "cap-bot")
@@ -362,8 +362,20 @@ func TestRequestRetentionEvictionLeavesDerivedUsage(t *testing.T) {
 
 	// One more append evicts the oldest row, which was the gate row.
 	st.AppendRequest(model.RequestLog{TS: "2026-10-03T00:00:00Z", Source: model.SourceMutationLab})
-	if got, _ := st.User(user.ID); got.UsedBytes != 0 {
-		t.Fatalf("usedBytes after eviction = %d, want 0 (the evicted row's bytes must leave the total)", got.UsedBytes)
+	if got, _ := st.User(user.ID); got.UsedBytes != 900 {
+		t.Fatalf("usedBytes after eviction = %d, want 900 (eviction must not renew a quota)", got.UsedBytes)
+	}
+	// The counter survives a snapshot/reload even though the row is gone.
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	fresh := newEmptyWithClock(func() time.Time { return now }, nil)
+	if err := fresh.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got, _ := fresh.User(user.ID); got.UsedBytes != 900 {
+		t.Fatalf("restored usedBytes = %d, want 900", got.UsedBytes)
 	}
 }
 

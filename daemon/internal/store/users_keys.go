@@ -340,6 +340,11 @@ var gateRequestSeq atomic.Uint64
 // RequestRetention cap as every other writer, so gate metering can never grow
 // the snapshot beyond the documented 10,000 rows. It returns the stored row.
 //
+// A gate row advances the durable monthly counters for its user and account
+// unless MeteredLive reports that the relay already did so. Eviction of an old
+// row never decrements those counters: retention is a display bound, not a
+// quota bound.
+//
 // The caller owns the row's content. The gate meter passes host:port targets
 // only (never a URL, header or credential) and sets SourceGate.
 func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
@@ -352,21 +357,18 @@ func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
 	if entry.TS == "" {
 		entry.TS = iso(s.now())
 	}
-	// The derived per-user totals advance before the prepend: a rebuild that a
-	// month rollover triggers reads s.requests, which must not contain this row
-	// yet.
-	s.advanceUserUsageLocked(entry)
+	// The durable totals advance before the prepend: a rebuild that a month
+	// rollover triggers reads s.requests, which must not contain this row yet.
+	s.advanceUsageLocked(entry)
 	s.prependRequestLocked(entry)
 	return entry
 }
 
 // prependRequestLocked inserts one request row under the retention cap. A full
-// log evicts its oldest row, so that row's gate bytes leave the derived totals
-// in the same step. The caller holds s.mu for writing.
+// log evicts its oldest row for display only: the durable monthly counters keep
+// the evicted row's bytes, so log churn can never renew a quota. The caller
+// holds s.mu for writing.
 func (s *Store) prependRequestLocked(entry model.RequestLog) {
-	if len(s.requests) == RequestRetention {
-		s.discountUserUsageLocked(s.requests[len(s.requests)-1])
-	}
 	s.requests = prependCapped(s.requests, entry, RequestRetention)
 }
 

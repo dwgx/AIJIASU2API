@@ -132,14 +132,19 @@ func (s *Server) handleHTTP(client net.Conn) {
 	// the account quota. A refusal never takes a slot or opens upstream
 	// traffic. 403 is the allowlist/identity refusal; an exhausted quota is
 	// 429 with a Retry-After pointing at the monthly reset.
-	if verdict := s.admit(principal, request.target); !verdict.ok {
+	verdict := s.admit(principal, request.target)
+	if !verdict.ok {
 		s.rejected.Add(1)
 		s.recordHTTPReject(started, request.method, request.target, principal, verdict.errorClass)
 		status := http.StatusForbidden
 		var headers []string
-		if verdict.errorClass == FlowErrorQuota || verdict.errorClass == FlowErrorUserQuota {
+		switch verdict.errorClass {
+		case FlowErrorQuota, FlowErrorUserQuota:
 			status = http.StatusTooManyRequests
 			headers = append(headers, "Retry-After: "+strconv.Itoa(s.retryAfterSeconds()))
+		case FlowErrorUserFlowLimit:
+			status = http.StatusTooManyRequests
+			headers = append(headers, "Retry-After: 1")
 		}
 		_ = writeHTTPStatus(client, status, headers...)
 		s.logger.Warn("gate flow rejected",
@@ -153,6 +158,9 @@ func (s *Server) handleHTTP(client net.Conn) {
 			"budget_bytes", verdict.budget,
 		)
 		return
+	}
+	if verdict.release != nil {
+		defer verdict.release()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,8 +231,8 @@ func (s *Server) handleHTTP(client net.Conn) {
 	// The relay reads through the same buffered reader: a client that
 	// pipelined its first tunnel bytes behind the head must not lose them.
 	tunnel := &bufferedClient{Conn: client, r: reader}
-	in, out := relay(tunnel, remote, &s.ingress, &s.egress)
-	s.recordFlow(FlowRecord{
+	in, out, quotaStopped := relay(tunnel, remote, &s.ingress, &s.egress, s.meterProgress(principal.UserID))
+	record := FlowRecord{
 		StartedAt:  started,
 		UserID:     principal.UserID,
 		UserName:   principal.UserName,
@@ -235,7 +243,11 @@ func (s *Server) handleHTTP(client net.Conn) {
 		Status:     FlowStatusOK,
 		BytesIn:    in,
 		BytesOut:   out,
-	})
+	}
+	if quotaStopped {
+		record.ErrorClass = FlowErrorQuota
+	}
+	s.recordFlow(record)
 	s.logger.Info("gate flow closed",
 		"node_id", s.cfg.NodeID,
 		"protocol", FlowProtocolHTTP,
@@ -244,6 +256,7 @@ func (s *Server) handleHTTP(client net.Conn) {
 		"ingress_bytes", in,
 		"egress_bytes", out,
 		"duration", s.cfg.Now().Sub(started),
+		"error_class", record.ErrorClass,
 	)
 }
 

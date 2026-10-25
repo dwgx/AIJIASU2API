@@ -2,9 +2,9 @@ package runtime
 
 import (
 	"net"
+	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/model"
@@ -15,6 +15,11 @@ import (
 // gate only emits a FlowStatusOK record after the SOCKS5 success reply, so an
 // accepted flow is a completed 200 for usage purposes.
 const acceptedStatus = 200
+
+// defaultUserFlowCap is the per-user concurrent-flow limit when
+// AJS_GATE_USER_FLOWS is unset or invalid. It keeps the admission pre-check
+// from being multiplied by many simultaneous long-lived flows.
+const defaultUserFlowCap = 8
 
 // FlowMeter turns finished gate flows into request-log rows for the usage
 // pipeline. Before this seam only seeded demo traffic and the mutation lab
@@ -46,6 +51,53 @@ func NewFlowMeter(st *store.Store) *FlowMeter {
 	return &FlowMeter{store: st, quota: NewQuota(st), identity: NewGateIdentity(st)}
 }
 
+// userFlowCapFromEnv reads AJS_GATE_USER_FLOWS. Unset, non-numeric and
+// non-positive values fall back to defaultUserFlowCap: a typo must not disable
+// the cap that bounds concurrent overrun.
+func userFlowCapFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("AJS_GATE_USER_FLOWS"))
+	if raw == "" {
+		return defaultUserFlowCap
+	}
+	cap, err := strconv.Atoi(raw)
+	if err != nil || cap < 1 {
+		return defaultUserFlowCap
+	}
+	return cap
+}
+
+// Progress advances the durable monthly counters for one relayed chunk and
+// re-checks both monthly budgets. The gate calls it every 256 KiB, so an
+// admitted flow cannot relay far past a budget that the pre-check saw as
+// available. It returns false when the flow must stop; the gate then closes the
+// tunnel and records quota_exceeded.
+//
+// The cache entries are advanced before either check so a refusal leaves every
+// cached total in step with the durable counter. The store is the source of
+// truth; this method only saves the reads a populated cache can answer.
+func (m *FlowMeter) Progress(userID, accountID string, n int64) bool {
+	if m == nil || m.store == nil || n <= 0 {
+		return true
+	}
+	m.store.AddUsage(userID, accountID, n)
+	if m.quota != nil && accountID != "" {
+		m.quota.advance(accountID, n)
+	}
+	if m.identity != nil && userID != "" {
+		m.identity.AddUsage(userID, n)
+	}
+	ok := true
+	if m.quota != nil && accountID != "" {
+		if allowed, _, _ := m.quota.Check(accountID); !allowed {
+			ok = false
+		}
+	}
+	if m.identity != nil && userID != "" && m.identity.overQuota(userID) {
+		ok = false
+	}
+	return ok
+}
+
 // Quota returns the admission policy the factory attaches to every gate.
 func (m *FlowMeter) Quota() *Quota {
 	return m.quota
@@ -74,6 +126,11 @@ func (m *FlowMeter) GateFactory() GateFactory {
 		}
 		if m.quota != nil {
 			cfg.QuotaCheck = m.quota.Check
+		}
+		cfg.MeterProgress = m.Progress
+		if m.identity != nil {
+			cfg.UserFlowCheck = m.identity.AcquireFlow
+			cfg.UserFlowRelease = m.identity.ReleaseFlow
 		}
 		if cfg.AuthMode == gate.AuthUserPass && m.identity != nil {
 			if cfg.Authenticator == nil {
@@ -106,7 +163,9 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		accountLabel = account.Label
 	}
 	m.store.AppendRequest(model.RequestLog{
-		TS:           record.StartedAt.UTC().Format(time.RFC3339Nano),
+		// TS stays empty: AppendRequest stamps the completion instant. Using
+		// StartedAt would prepend a long flow ahead of rows it started after
+		// and break every chronological consumer.
 		UserID:       record.UserID,
 		UserName:     record.UserName,
 		AccountLabel: accountLabel,
@@ -119,12 +178,10 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		Bytes:        record.BytesIn + record.BytesOut,
 		LatencyMs:    int(record.DurationMs),
 		Source:       model.SourceGate,
+		// The relay advanced the durable counters every 256 KiB, so this row is
+		// a log entry only and must not be counted again.
+		MeteredLive: true,
 	})
-	// The next admission must see this row, so the cached monthly totals are
-	// advanced (account: dropped and recomputed; user: incremented in place)
-	// before the flow goroutine ends.
-	m.quota.Invalidate(accountID)
-	m.identity.AddUsage(record.UserID, record.BytesIn+record.BytesOut)
 }
 
 // flowTarget renders a flow destination as host:port. The gate only ever
