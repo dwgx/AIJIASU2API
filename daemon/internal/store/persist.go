@@ -97,6 +97,13 @@ type Snapshot struct {
 	// with an empty history.
 	WebhookDeliveries []model.WebhookDelivery `json:"webhookDeliveries,omitempty"`
 
+	// WebhookOutbox is the pending-delivery set, oldest first and bounded by
+	// WebhookOutboxLimit. It is additive and omitempty: an older build ignores
+	// it, and a document without it restores with nothing pending. Each row
+	// carries the already-scrubbed body, so no signing secret or credential
+	// enters this document.
+	WebhookOutbox []WebhookOutboxEntry `json:"webhookOutbox,omitempty"`
+
 	// Tenants and PortalSessions are the customer portal state
 	// (DESIGN-TENANT §3). Both are additive and omitempty: a pre-portal
 	// snapshot loads with zero tenants and no identity backfill. Password and
@@ -196,6 +203,11 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	snap.WebhookSeq = s.webhookSeq
 	snap.WebhookDeliveries = append([]model.WebhookDelivery(nil), s.webhookDeliveries...)
+	snap.WebhookOutbox = make([]WebhookOutboxEntry, len(s.webhookOutbox))
+	for i, entry := range s.webhookOutbox {
+		snap.WebhookOutbox[i] = cloneWebhookOutboxEntry(entry)
+	}
+	sortWebhookOutbox(snap.WebhookOutbox)
 	snap.Tenants = make([]tenantRecord, len(s.tenants))
 	for i, rec := range s.tenants {
 		snap.Tenants[i] = rec
@@ -315,6 +327,10 @@ func (s *Store) Restore(data []byte) error {
 	s.webhookDeliveries = snap.WebhookDeliveries
 	if s.webhookDeliveries == nil {
 		s.webhookDeliveries = []model.WebhookDelivery{}
+	}
+	s.webhookOutbox = snap.WebhookOutbox
+	if s.webhookOutbox == nil {
+		s.webhookOutbox = []WebhookOutboxEntry{}
 	}
 	s.accountSeq = snap.AccountSeq
 	s.userSeq = snap.UserSeq
@@ -579,7 +595,10 @@ func (snap *Snapshot) validate() error {
 			return fmt.Errorf("state snapshot has a negative monthly usage for account %q", id)
 		}
 	}
-	return snap.validateWebhookDeliveries()
+	if err := snap.validateWebhookDeliveries(); err != nil {
+		return err
+	}
+	return snap.validateWebhookOutbox()
 }
 
 // validateWebhooks rejects a document whose receiver rows cannot be loaded.
@@ -875,6 +894,7 @@ func (snap *Snapshot) normalize() {
 		snap.PortalSessions = []model.PortalSession{}
 	}
 	snap.WebhookDeliveries = normalizeWebhookDeliveries(snap.WebhookDeliveries)
+	snap.WebhookOutbox = normalizeWebhookOutbox(snap.WebhookOutbox)
 	for _, tenant := range snap.Tenants {
 		snap.TenantSeq = max(snap.TenantSeq, sequenceOf(tenant.ID, "t-"))
 	}

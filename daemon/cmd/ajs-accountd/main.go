@@ -1060,6 +1060,17 @@ func startWebhooksWithConfig(st *store.Store, logger *slog.Logger, secrets api.W
 			logger.Warn("webhook_delivery_persist_failed", "delivery", delivery.ID, "error", err)
 		}
 	}
+	// The outbox keeps an accepted event durable until it is delivered, so a
+	// restart resumes the backlog instead of losing it. Writes are memory-only;
+	// the periodic snapshot carries them to disk.
+	cfg.Outbox = storeOutbox{store: st}
+	// An entry evicted by the cap is a delivery the panel can no longer honour.
+	// One warning row records the loss; the detail carries the event and the
+	// attempts already spent, never the URL, secret or payload.
+	cfg.OnOutboxDrop = func(entry webhook.OutboxEntry) {
+		st.RecordAudit(model.SeverityWarn, "system", "webhook.outbox_dropped", entry.EndpointID,
+			fmt.Sprintf("%s dropped after %d attempts", entry.Event, entry.Attempts))
+	}
 	// The dispatcher dedupes by delivery id, so one exhausted delivery writes
 	// exactly one row. The detail carries the event and the attempt count
 	// only; the URL, signing secret and payload never enter the audit trail.
@@ -1097,10 +1108,17 @@ func startWebhooksWithConfig(st *store.Store, logger *slog.Logger, secrets api.W
 		}
 		registered++
 	}
+	// Re-queue the deliveries the previous process had accepted but not
+	// finished. It runs after AddEndpoint because a restored entry can only be
+	// delivered through its registered receiver; entries whose endpoint is gone
+	// are dropped here and logged in the count below.
+	restored, skipped := dispatcher.RestoreOutbox()
 	logger.Info("webhooks_loaded",
 		"registered", registered,
 		"unavailable", unavailable,
 		"configured", len(st.WebhookEndpoints()),
+		"outboxRestored", restored,
+		"outboxSkipped", skipped,
 		"sealed", secrets != nil)
 	return dispatcher, &webhookSink{dispatcher: dispatcher, logger: logger}
 }
@@ -1110,6 +1128,66 @@ func openWebhookSecret(secrets api.WebhookSecretStore, id string) (string, bool)
 		return "", false
 	}
 	return secrets.Open(id)
+}
+
+// storeOutbox adapts the persisted outbox rows to the dispatcher's contract.
+// The store owns the snapshot shape (RFC 3339 strings, validated payload) and
+// the dispatcher owns scheduling (time values, retry state); both key an entry
+// by endpoint id plus event id.
+type storeOutbox struct{ store *store.Store }
+
+func (o storeOutbox) PutOutbox(entry webhook.OutboxEntry) error {
+	return o.store.PutWebhookOutbox(persistedOutboxEntry(entry))
+}
+
+func (o storeOutbox) RemoveOutbox(endpointID, id string) error {
+	return o.store.RemoveWebhookOutbox(endpointID, id)
+}
+
+func (o storeOutbox) Outbox() []webhook.OutboxEntry {
+	rows := o.store.WebhookOutbox()
+	out := make([]webhook.OutboxEntry, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, restoredOutboxEntry(row))
+	}
+	return out
+}
+
+// persistedOutboxEntry maps one pending delivery onto its snapshot row. The
+// payload is the exact scrubbed body the dispatcher already built, so a
+// restored delivery replays the same bytes.
+func persistedOutboxEntry(entry webhook.OutboxEntry) store.WebhookOutboxEntry {
+	return store.WebhookOutboxEntry{
+		ID:            entry.ID,
+		EndpointID:    entry.EndpointID,
+		Event:         string(entry.Event),
+		PayloadHash:   entry.PayloadHash,
+		Payload:       entry.Payload,
+		Attempts:      entry.Attempts,
+		NextAttemptAt: entry.NextAttemptAt.UTC().Format(time.RFC3339Nano),
+		CreatedAt:     entry.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// restoredOutboxEntry is the inverse of persistedOutboxEntry. A row that
+// reached the store has already passed validation, so an unparseable timestamp
+// cannot occur; the zero fallback only keeps a hand-built row from panicking.
+func restoredOutboxEntry(row store.WebhookOutboxEntry) webhook.OutboxEntry {
+	entry := webhook.OutboxEntry{
+		ID:          row.ID,
+		EndpointID:  row.EndpointID,
+		Event:       webhook.EventType(row.Event),
+		PayloadHash: row.PayloadHash,
+		Payload:     row.Payload,
+		Attempts:    row.Attempts,
+	}
+	if at, err := time.Parse(time.RFC3339, row.NextAttemptAt); err == nil {
+		entry.NextAttemptAt = at
+	}
+	if at, err := time.Parse(time.RFC3339, row.CreatedAt); err == nil {
+		entry.CreatedAt = at
+	}
+	return entry
 }
 
 // persistedDelivery maps one dispatcher attempt onto its snapshot row. The

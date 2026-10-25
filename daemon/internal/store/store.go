@@ -176,6 +176,13 @@ type Store struct {
 	// periodic snapshot writes them, so dispatch never waits on the disk.
 	webhookDeliveries []model.WebhookDelivery
 
+	// webhookOutbox is the pending-delivery set: every accepted event that has
+	// not yet succeeded, dead-lettered or been evicted. It is the durable
+	// counterpart of the dispatcher queue and is capped by
+	// WebhookOutboxLimit, so a restart resumes the backlog instead of losing
+	// it. Like the delivery history, writes are memory-only.
+	webhookOutbox []WebhookOutboxEntry
+
 	// tenants and portalSessions are the customer portal state (DESIGN-TENANT
 	// §3). A tenant is a login identity linked one-to-one to a user; sessions
 	// hold only SHA-256 digests of the cookie and CSRF values. Both collections
@@ -283,6 +290,7 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		reminderMarks:     make(map[string]model.ReminderMark),
 		webhookEndpoints:  []model.WebhookEndpoint{},
 		webhookDeliveries: []model.WebhookDelivery{},
+		webhookOutbox:     []WebhookOutboxEntry{},
 		tenants:           []tenantRecord{},
 		portalSessions:    []model.PortalSession{},
 		tenantHashSem:     make(chan struct{}, tenantHashConcurrency),

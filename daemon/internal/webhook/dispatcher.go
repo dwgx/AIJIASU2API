@@ -89,6 +89,22 @@ type Config struct {
 	// delivery; the operator audit write it usually drives is an in-memory
 	// append. Nil disables the hook.
 	OnDeadLetter func(Delivery)
+
+	// Outbox persists the pending-delivery set so a restart resumes it instead
+	// of losing every accepted event. Every entry is written before its first
+	// attempt and removed only after the delivery succeeds, dead-letters or is
+	// evicted by OutboxLimit. RestoreOutbox re-queues the surviving entries
+	// once the receivers are registered. Nil keeps the outbox in memory only.
+	Outbox OutboxStore
+	// OutboxLimit bounds the pending set. A non-positive value selects
+	// DefaultOutboxLimit. When the limit is reached the oldest entry is
+	// dropped, counted by OutboxDropped and reported to OnOutboxDrop.
+	OutboxLimit int
+	// OnOutboxDrop receives each entry evicted by OutboxLimit, synchronously on
+	// the dispatching goroutine. The operator audit write it usually drives is
+	// an in-memory append; a slow sink delays Dispatch, so it must not block.
+	// Nil disables the hook.
+	OnOutboxDrop func(OutboxEntry)
 }
 
 // Dispatcher delivers events to registered endpoints. It is safe for
@@ -112,6 +128,12 @@ type Dispatcher struct {
 	states    map[string]*endpointState
 	pending   int
 	dedupe    map[string]time.Time
+
+	// outbox is the authoritative pending set, keyed by OutboxEntry.Key. A
+	// record leaves it on success, dead letter, or eviction; cfg.Outbox mirrors
+	// every transition so a restart can resume the set.
+	outbox        map[string]*outboxRecord
+	outboxDropped atomic.Int64
 
 	log *DeliveryLog
 	wg  sync.WaitGroup
@@ -140,6 +162,10 @@ type endpointState struct {
 type job struct {
 	endpoint Endpoint
 	event    Event
+	// record is the outbox entry this job delivers. It carries the exact body
+	// and the attempts already spent, so a restored entry resumes where the
+	// previous process stopped.
+	record *outboxRecord
 }
 
 // New builds a dispatcher. Deliveries start as soon as Dispatch accepts one.
@@ -161,6 +187,9 @@ func New(cfg Config) *Dispatcher {
 	}
 	if cfg.Backoff == nil {
 		cfg.Backoff = append([]time.Duration(nil), DefaultBackoff[:]...)
+	}
+	if cfg.OutboxLimit <= 0 {
+		cfg.OutboxLimit = DefaultOutboxLimit
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -204,6 +233,7 @@ func New(cfg Config) *Dispatcher {
 		endpoints:      make(map[string]Endpoint),
 		states:         make(map[string]*endpointState),
 		dedupe:         make(map[string]time.Time),
+		outbox:         make(map[string]*outboxRecord),
 		log:            NewDeliveryLog(cfg.RingSize),
 		deadLetterSeen: make(map[string]struct{}, deadLetterDedupeSize),
 		deadLetterRing: make([]string, deadLetterDedupeSize),
@@ -290,6 +320,10 @@ func (d *Dispatcher) Endpoints() []Endpoint {
 // Dispatch accepts an event for delivery. It never blocks: a full queue,
 // duplicate event id, unknown or disabled endpoint and unsubscribed event are
 // reported immediately.
+//
+// The payload is built and scrubbed here, once, so the outbox can persist the
+// exact body before the first attempt; a body that cannot be encoded is
+// rejected as an invalid event instead of being accepted and lost.
 func (d *Dispatcher) Dispatch(event Event) error {
 	if event.ID == "" {
 		return fmt.Errorf("%w: id is required", ErrInvalidEvent)
@@ -300,32 +334,58 @@ func (d *Dispatcher) Dispatch(event Event) error {
 	if event.At.IsZero() {
 		event.At = d.cfg.Now()
 	}
+	body, err := json.Marshal(Payload{
+		ID:    event.ID,
+		Event: event.Type,
+		At:    event.At,
+		Data:  Scrub(event.Data),
+	})
+	if err != nil {
+		return fmt.Errorf("%w: encode payload: %v", ErrInvalidEvent, err)
+	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.closed {
+		d.mu.Unlock()
 		return ErrClosed
 	}
 	ep, ok := d.endpoints[event.EndpointID]
 	if !ok {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrUnknownEndpoint, event.EndpointID)
 	}
 	if !ep.Enabled {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrEndpointDisabled, event.EndpointID)
 	}
 	if !ep.subscribes(event.Type) {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotSubscribed, event.Type)
 	}
 
 	now := d.cfg.Now()
 	d.purgeDedupeLocked(now)
 	if _, duplicate := d.dedupe[event.ID]; duplicate {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrDuplicate, event.ID)
 	}
 	if d.pending >= d.cfg.QueueSize {
+		d.mu.Unlock()
 		return ErrQueueFull
 	}
 
+	record := &outboxRecord{entry: OutboxEntry{
+		ID:            event.ID,
+		EndpointID:    ep.ID,
+		Event:         event.Type,
+		PayloadHash:   PayloadDigest(body),
+		Payload:       body,
+		Attempts:      0,
+		NextAttemptAt: now,
+		CreatedAt:     now,
+	}}
+	entry := record.entry
+	d.outbox[record.entry.Key()] = record
 	d.dedupe[event.ID] = now
 	d.pending++
 	state := d.states[ep.ID]
@@ -333,10 +393,26 @@ func (d *Dispatcher) Dispatch(event Event) error {
 		state = &endpointState{}
 		d.states[ep.ID] = state
 	}
-	state.pending = append(state.pending, job{endpoint: ep, event: event})
-	if !state.running {
+	state.pending = append(state.pending, job{endpoint: ep, event: event, record: record})
+	start := !state.running
+	if start {
 		state.running = true
 		d.wg.Add(1)
+	}
+	evicted := d.evictOutboxLocked(record)
+	d.mu.Unlock()
+
+	// Persist and report outside the lock: the outbox store and the drop hook
+	// may reach back into the dispatcher (the audit hook dispatches events), so
+	// calling them while d.mu is held could deadlock.
+	//
+	// The new entry is written before the drops are reported, so a re-entrant
+	// Dispatch from the drop hook cannot observe a key that is in memory but
+	// still missing from the store.
+	d.persistLiveOutbox(record, entry)
+	d.reportOutboxDrops(evicted)
+	// The entry is durable before the first attempt starts.
+	if start {
 		go d.runEndpoint(state)
 	}
 	return nil
@@ -362,6 +438,8 @@ func (d *Dispatcher) Log() *DeliveryLog { return d.log }
 
 // Close stops the dispatcher. In-flight attempts are cancelled, queued
 // deliveries are recorded as failed and no further dispatches are accepted.
+// Pending outbox entries are left in place: a delivery that was queued or on the
+// wire is resumed by the next process instead of being lost.
 func (d *Dispatcher) Close() error {
 	d.mu.Lock()
 	if d.closed {
@@ -453,27 +531,31 @@ func (d *Dispatcher) finish() {
 }
 
 func (d *Dispatcher) deliver(queued job) {
-	body, err := json.Marshal(Payload{
-		ID:    queued.event.ID,
-		Event: queued.event.Type,
-		At:    queued.event.At,
-		Data:  Scrub(queued.event.Data),
-	})
-	if err != nil {
-		d.record(Delivery{
-			ID:         queued.event.ID + ":0",
-			EndpointID: queued.endpoint.ID,
-			Event:      queued.event.Type,
-			Status:     StatusFailed,
-			Error:      "encode payload: " + err.Error(),
-			At:         d.cfg.Now(),
-		})
-		return
+	record := queued.record
+	// A restored entry carries the backoff remainder from the previous
+	// process: wait it out instead of hammering the receiver right after a
+	// restart. A fresh entry is due immediately.
+	if delay := record.entry.NextAttemptAt.Sub(d.cfg.Now()); delay > 0 {
+		if err := d.cfg.Sleep(d.ctx, delay); err != nil {
+			// Shutdown during the wait: the entry stays in the outbox with its
+			// attempts and next-attempt time, so the next process resumes here.
+			return
+		}
 	}
 
-	for attempt := 1; attempt <= d.cfg.MaxAttempts; attempt++ {
+	for attempt := record.entry.Attempts + 1; attempt <= d.cfg.MaxAttempts; attempt++ {
+		if d.ctx.Err() != nil {
+			// Shutdown cancelled the attempt that was on the wire. Keep the
+			// entry for the next process instead of spending the rest of the
+			// retry budget on a dead context.
+			return
+		}
+		if !d.outboxLive(record) {
+			// Evicted by the cap while queued: the delivery was abandoned.
+			return
+		}
 		started := d.cfg.Now()
-		httpStatus, errText, retryable := d.send(queued.endpoint, queued.event, body, attempt)
+		httpStatus, errText, retryable := d.send(queued.endpoint, queued.event, record.entry.Payload, attempt)
 		delivery := Delivery{
 			ID:         fmt.Sprintf("%s:%d", queued.event.ID, attempt),
 			EndpointID: queued.endpoint.ID,
@@ -487,6 +569,7 @@ func (d *Dispatcher) deliver(queued job) {
 		}
 		if errText == "" {
 			delivery.Status = StatusSuccess
+			d.completeOutbox(record)
 			d.record(delivery)
 			return
 		}
@@ -494,14 +577,341 @@ func (d *Dispatcher) deliver(queued job) {
 			if retryable {
 				delivery.Status = StatusDeadLetter
 			}
+			d.completeOutbox(record)
 			d.record(delivery)
 			return
 		}
 		d.record(delivery)
-		if err := d.cfg.Sleep(d.ctx, backoffFor(d.cfg.Backoff, attempt)); err != nil {
+		// Persist the failure and the next due time before waiting, so a crash
+		// during the backoff resumes the schedule instead of restarting it.
+		backoff := backoffFor(d.cfg.Backoff, attempt)
+		d.advanceOutbox(record, attempt, d.cfg.Now().Add(backoff))
+		if err := d.cfg.Sleep(d.ctx, backoff); err != nil {
 			return
 		}
 	}
+	// Unreachable in practice: a restored entry whose retry budget is already
+	// spent is finalized by RestoreOutbox. Keep the guard so a shrunk attempt
+	// budget can never leave an entry pending forever.
+	if d.outboxLive(record) {
+		d.finalizeOutbox(record)
+	}
+}
+
+// RestoreOutbox re-queues the durable pending deliveries. It must run after
+// AddEndpoint, because a restored entry can only be delivered through its
+// receiver. Entries whose endpoint is gone, whose payload no longer matches its
+// digest, or whose retry budget is already spent are removed from the outbox
+// store and counted as skipped; a delivery is never queued twice because the
+// key is the endpoint id plus the event id.
+//
+// The restored event ids are seeded into the dedupe window, so a producer that
+// re-sends an event after the restart is rejected instead of fanning out a
+// duplicate.
+func (d *Dispatcher) RestoreOutbox() (restored, skipped int) {
+	if d.cfg.Outbox == nil {
+		return 0, 0
+	}
+	entries := d.cfg.Outbox.Outbox()
+	if len(entries) == 0 {
+		return 0, 0
+	}
+
+	// unusable rows are deleted from the store; exhausted ones are deleted and
+	// reported as the dead letter the previous process did not get to write.
+	var unusable, exhausted []OutboxEntry
+	var starts []*endpointState
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return 0, 0
+	}
+	now := d.cfg.Now()
+	d.purgeDedupeLocked(now)
+	for _, entry := range entries {
+		key := entry.Key()
+		if entry.ID == "" || entry.EndpointID == "" {
+			unusable = append(unusable, entry)
+			skipped++
+			continue
+		}
+		if entry.PayloadHash != "" && entry.PayloadHash != PayloadDigest(entry.Payload) {
+			unusable = append(unusable, entry)
+			skipped++
+			continue
+		}
+		if _, duplicate := d.outbox[key]; duplicate {
+			// Already queued: a second RestoreOutbox call must not disturb the
+			// live entry or its persisted row.
+			skipped++
+			continue
+		}
+		ep, ok := d.endpoints[entry.EndpointID]
+		if !ok {
+			unusable = append(unusable, entry)
+			skipped++
+			continue
+		}
+		if entry.Attempts >= d.cfg.MaxAttempts {
+			// The previous process died after the final attempt but before it
+			// removed the entry. Finalizing here reports the dead letter the
+			// crash interrupted and keeps a stale entry from blocking its
+			// endpoint's FIFO for one more backoff.
+			exhausted = append(exhausted, entry)
+			skipped++
+			continue
+		}
+		record := &outboxRecord{entry: entry}
+		d.outbox[key] = record
+		d.dedupe[entry.ID] = now
+		d.pending++
+		state := d.states[ep.ID]
+		if state == nil {
+			state = &endpointState{}
+			d.states[ep.ID] = state
+		}
+		state.pending = append(state.pending, job{endpoint: ep, event: d.eventFor(entry), record: record})
+		if !state.running {
+			state.running = true
+			d.wg.Add(1)
+			starts = append(starts, state)
+		}
+		restored++
+	}
+	// A snapshot written under a larger limit must not exceed this process's
+	// bound: the cap evicts the oldest restored entries, exactly as Dispatch
+	// does for a live overflow.
+	evicted := d.evictOutboxLocked(nil)
+	d.mu.Unlock()
+
+	for _, entry := range append(unusable, exhausted...) {
+		if err := d.cfg.Outbox.RemoveOutbox(entry.EndpointID, entry.ID); err != nil {
+			d.logger.Warn("webhook_outbox_remove_failed", "endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+		}
+	}
+	for _, entry := range exhausted {
+		d.record(Delivery{
+			ID:         fmt.Sprintf("%s:%d", entry.ID, entry.Attempts),
+			EndpointID: entry.EndpointID,
+			Event:      entry.Event,
+			Attempt:    entry.Attempts,
+			Status:     StatusDeadLetter,
+			Error:      "retry budget exhausted before restart",
+			At:         d.cfg.Now(),
+		})
+	}
+	d.reportOutboxDrops(evicted)
+	for _, state := range starts {
+		go d.runEndpoint(state)
+	}
+	return restored, skipped
+}
+
+// eventFor rebuilds the dispatcher event a restored entry was accepted with.
+// Only the fields a delivery reads are restored: the payload bytes are replayed
+// from the entry, not re-encoded from Data.
+func (d *Dispatcher) eventFor(entry OutboxEntry) Event {
+	return Event{ID: entry.ID, EndpointID: entry.EndpointID, Type: entry.Event}
+}
+
+// OutboxLen reports the pending deliveries the outbox currently holds.
+func (d *Dispatcher) OutboxLen() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.outbox)
+}
+
+// OutboxDropped reports how many entries the cap evicted. It is a lifetime
+// counter, not a gauge.
+func (d *Dispatcher) OutboxDropped() int64 { return d.outboxDropped.Load() }
+
+// evictOutboxLocked drops the oldest entries until the pending set fits
+// OutboxLimit. keep is the entry that was just accepted and is never the
+// victim. The caller reports the victims outside the lock.
+func (d *Dispatcher) evictOutboxLocked(keep *outboxRecord) []*outboxRecord {
+	var evicted []*outboxRecord
+	for len(d.outbox) > d.cfg.OutboxLimit {
+		victim := d.oldestOutboxLocked(keep)
+		if victim == nil {
+			break
+		}
+		delete(d.outbox, victim.entry.Key())
+		d.removeQueuedLocked(victim)
+		evicted = append(evicted, victim)
+	}
+	return evicted
+}
+
+// oldestOutboxLocked returns the entry with the earliest creation time, which
+// is the one the cap drops first. Ties break on the key so the choice is
+// deterministic.
+func (d *Dispatcher) oldestOutboxLocked(except *outboxRecord) *outboxRecord {
+	var oldest *outboxRecord
+	for _, candidate := range d.outbox {
+		if candidate == except {
+			continue
+		}
+		if oldest == nil ||
+			candidate.entry.CreatedAt.Before(oldest.entry.CreatedAt) ||
+			(candidate.entry.CreatedAt.Equal(oldest.entry.CreatedAt) && candidate.entry.Key() < oldest.entry.Key()) {
+			oldest = candidate
+		}
+	}
+	return oldest
+}
+
+// removeQueuedLocked removes a job that has not started yet. An in-flight job
+// is not in the queue: it notices the eviction before its next attempt.
+func (d *Dispatcher) removeQueuedLocked(record *outboxRecord) {
+	for _, state := range d.states {
+		for i := range state.pending {
+			if state.pending[i].record != record {
+				continue
+			}
+			state.pending = append(state.pending[:i], state.pending[i+1:]...)
+			d.pending--
+			return
+		}
+	}
+}
+
+// reportOutboxDrops removes the evicted entries from the outbox store, counts
+// them and hands each to OnOutboxDrop. It runs outside d.mu because the hook
+// usually writes an audit row.
+func (d *Dispatcher) reportOutboxDrops(evicted []*outboxRecord) {
+	for _, record := range evicted {
+		entry := record.entry
+		// A re-entrant Dispatch may have re-accepted the same key while this
+		// drop was being reported. That row is newer than the evicted one, so
+		// only a key that is still absent is deleted from the store.
+		if d.cfg.Outbox != nil && !d.outboxHoldsKey(entry.Key()) {
+			if err := d.cfg.Outbox.RemoveOutbox(entry.EndpointID, entry.ID); err != nil {
+				d.logger.Warn("webhook_outbox_remove_failed", "endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+			}
+		}
+		d.outboxDropped.Add(1)
+		d.logger.Warn("webhook_outbox_dropped",
+			"endpoint", entry.EndpointID,
+			"event", entry.Event,
+			"attempts", entry.Attempts,
+			"limit", d.cfg.OutboxLimit,
+		)
+		d.notifyOutboxDrop(entry)
+	}
+}
+
+// outboxHoldsKey reports whether any live record currently uses key.
+func (d *Dispatcher) outboxHoldsKey(key string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.outbox[key]
+	return ok
+}
+
+// notifyOutboxDrop isolates the sink: a panic is logged and the dispatching
+// goroutine continues, so one bad audit row cannot stop a producer.
+func (d *Dispatcher) notifyOutboxDrop(entry OutboxEntry) {
+	if d.cfg.OnOutboxDrop == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			d.logger.Error("webhook_outbox_drop_hook_panic", "panic", recovered)
+		}
+	}()
+	d.cfg.OnOutboxDrop(entry)
+}
+
+// persistOutbox mirrors one entry into the outbox store. A persistence fault
+// is logged and delivery continues: durability degrades, availability does not.
+func (d *Dispatcher) persistOutbox(entry OutboxEntry) {
+	if d.cfg.Outbox == nil {
+		return
+	}
+	if err := d.cfg.Outbox.PutOutbox(entry); err != nil {
+		d.logger.Warn("webhook_outbox_persist_failed",
+			"endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+	}
+}
+
+// persistLiveOutbox writes one record's current state only while the outbox
+// still holds that record. The store write happens outside d.mu, so a
+// concurrent Dispatch can evict the record and delete its row before the write
+// lands; the write then verifies the record is gone and removes itself again.
+// Without that check a stale row would be replayed after the next restart.
+func (d *Dispatcher) persistLiveOutbox(record *outboxRecord, entry OutboxEntry) {
+	d.persistOutbox(entry)
+	if d.cfg.Outbox == nil || d.outboxLive(record) {
+		return
+	}
+	if err := d.cfg.Outbox.RemoveOutbox(entry.EndpointID, entry.ID); err != nil {
+		d.logger.Warn("webhook_outbox_remove_failed",
+			"endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+	}
+}
+
+// outboxLive reports whether the outbox still holds this exact record. A
+// record evicted by the cap is not live even when a new entry reuses its key.
+func (d *Dispatcher) outboxLive(record *outboxRecord) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	current, ok := d.outbox[record.entry.Key()]
+	return ok && current == record
+}
+
+// advanceOutbox records the failed attempt and the next due time before the
+// backoff wait, so a restart resumes the schedule instead of restarting it.
+func (d *Dispatcher) advanceOutbox(record *outboxRecord, attempts int, next time.Time) {
+	key := record.entry.Key()
+	d.mu.Lock()
+	current, ok := d.outbox[key]
+	if ok && current == record {
+		record.entry.Attempts = attempts
+		record.entry.NextAttemptAt = next
+	}
+	entry := record.entry
+	d.mu.Unlock()
+	if !ok || current != record {
+		return
+	}
+	d.persistLiveOutbox(record, entry)
+}
+
+// completeOutbox removes a finished delivery from the outbox and its store.
+// It is idempotent: an entry already evicted by the cap is not re-removed.
+func (d *Dispatcher) completeOutbox(record *outboxRecord) {
+	key := record.entry.Key()
+	d.mu.Lock()
+	current, ok := d.outbox[key]
+	if ok && current == record {
+		delete(d.outbox, key)
+	}
+	d.mu.Unlock()
+	if !ok || current != record {
+		return
+	}
+	if d.cfg.Outbox == nil {
+		return
+	}
+	if err := d.cfg.Outbox.RemoveOutbox(record.entry.EndpointID, record.entry.ID); err != nil {
+		d.logger.Warn("webhook_outbox_remove_failed",
+			"endpoint", record.entry.EndpointID, "event", record.entry.Event, "error", err)
+	}
+}
+
+// finalizeOutbox removes an entry whose retry budget is already spent and
+// records the dead letter a crash interrupted.
+func (d *Dispatcher) finalizeOutbox(record *outboxRecord) {
+	d.completeOutbox(record)
+	d.record(Delivery{
+		ID:         fmt.Sprintf("%s:%d", record.entry.ID, record.entry.Attempts),
+		EndpointID: record.entry.EndpointID,
+		Event:      record.entry.Event,
+		Attempt:    record.entry.Attempts,
+		Status:     StatusDeadLetter,
+		Error:      "retry budget exhausted",
+		At:         d.cfg.Now(),
+	})
 }
 
 // send performs one signed POST. It returns the HTTP status (0 when no

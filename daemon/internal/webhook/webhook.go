@@ -6,6 +6,12 @@
 // per endpoint and globally, so operators can inspect failures without a
 // database.
 //
+// Accepted events also live in a bounded outbox until they succeed or
+// dead-letter, so a restart resumes the pending backlog instead of losing it:
+// an entry carries the exact scrubbed body, the attempts already spent and the
+// next due time, and the cap evicts the oldest entry rather than growing
+// without limit.
+//
 // The package never logs payloads, signatures or endpoint secrets: log lines
 // carry ids, event types and HTTP status only. Payload data is scrubbed before
 // it leaves the process, so credentials a caller accidentally puts in an event
