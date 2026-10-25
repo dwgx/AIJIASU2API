@@ -22,6 +22,8 @@ interface MockOrderState {
   orders: Order[]
   planSeq: number
   orderSeq: number
+  /** Whether the mock 易支付 adapter is configured; tests toggle this. */
+  epayEnabled: boolean
   /** `${tenantId}:${userId}:${key}` → the request it first answered. */
   requests: Map<string, { requestHash: string; orderId: string }>
 }
@@ -187,9 +189,9 @@ function seedOrders(now: number, plans: Plan[]): Order[] {
       userId: 'u-02',
       planId: starter.id,
       plan: starter,
-      provider: 'manual',
+      provider: 'epay',
       state: 'paid',
-      providerRef: 'OFFLINE-2026-1024-03',
+      providerRef: 'EPAY-2026-1024-03',
       reviewRequired: false,
       createdAt: iso(now - DAY_MS),
       paidAt: iso(now - DAY_MS + 3_600_000),
@@ -247,6 +249,7 @@ function stateValue(): MockOrderState {
     orders: seedOrders(now, plans),
     planSeq: plans.length,
     orderSeq: 6,
+    epayEnabled: true,
     requests: new Map(),
   }
   return state
@@ -255,6 +258,16 @@ function stateValue(): MockOrderState {
 /** Resets plans, orders and idempotency records (tests call this). */
 export function resetOrderMock(): void {
   state = null
+}
+
+/** Toggles the mock 易支付 adapter so the disabled UI path is testable. */
+export function setMockEpayEnabled(enabled: boolean): void {
+  stateValue().epayEnabled = enabled
+}
+
+/** Read-only view of the mock adapter state for the admin status chip. */
+export function mockEpayEnabled(): boolean {
+  return stateValue().epayEnabled
 }
 
 function sortedOrders(orders: Order[]): Order[] {
@@ -372,6 +385,35 @@ export function mockCancelOrder(
   order.state = 'cancelled'
   order.cancelledAt = iso(Date.now())
   return clone(order)
+}
+
+/**
+ * Build a deterministic hosted-checkout URL for an own awaiting order. A
+ * checkout records provider intent only; it never changes the state to paid.
+ */
+export function mockCheckoutOrder(
+  id: string,
+  type: 'alipay' | 'wxpay',
+  owner?: { tenantId: string; userId: string },
+): { payUrl: string } {
+  const state = stateValue()
+  const order = findOrder(id)
+  if (owner && (order.tenantId !== owner.tenantId || order.userId !== owner.userId)) {
+    throw new ApiError(404, 'Order not found', 'NOT_FOUND')
+  }
+  if (order.state !== 'awaiting_payment') {
+    throw new ApiError(409, 'Only awaiting-payment orders can be checked out', 'CONFLICT')
+  }
+  if (!state.epayEnabled) {
+    throw new ApiError(503, 'epay checkout is not configured', 'UPSTREAM_UNAVAILABLE')
+  }
+  order.provider = 'epay'
+  const money = `${Math.floor(order.plan.amountMinor / 100)}.${String(order.plan.amountMinor % 100).padStart(2, '0')}`
+  return {
+    payUrl:
+      `https://pay.example.com/submit.php?pid=1001&type=${encodeURIComponent(type)}` +
+      `&out_trade_no=${encodeURIComponent(order.id)}&money=${money}&sign=demo`,
+  }
 }
 
 function activate(order: Order, now: number): void {

@@ -43,6 +43,7 @@ import {
   mockAdminOrders,
   mockAdminPlans,
   mockCancelOrder,
+  mockEpayEnabled,
   mockRefundOrder,
   mockSettleOrder,
   mockSetPlanActive,
@@ -113,6 +114,7 @@ import type {
   Order,
   PanelSettings,
   PanelUser,
+  PaymentStatus,
   Plan,
   ProxyNode,
   RenewalAccountView,
@@ -3428,6 +3430,27 @@ export const api = {
     if (!USE_MOCK) return http<Plan[]>('/v1/admin/plans')
     await wait()
     return mockAdminPlans()
+  },
+
+  /**
+   * Payment-provider state for the admin surface. The daemon's settings payload
+   * may carry an additive `epayEnabled` flag; when it does not, the chip stays
+   * "unknown" instead of turning an absent field into a disabled claim.
+   */
+  async providerStatus(): Promise<PaymentStatus> {
+    if (USE_MOCK) {
+      await wait()
+      return { epay: mockEpayEnabled() ? 'enabled' : 'disabled' }
+    }
+    try {
+      const settings = await http<PanelSettings>('/v1/settings')
+      if (typeof settings.epayEnabled === 'boolean') {
+        return { epay: settings.epayEnabled ? 'enabled' : 'disabled' }
+      }
+      return { epay: 'unknown', reason: 'this daemon does not report an epay status' }
+    } catch {
+      return { epay: 'unknown', reason: 'payment status could not be read' }
+    }
   },
 
   /** GET /v1/admin/orders — every tenant's orders, newest first. */

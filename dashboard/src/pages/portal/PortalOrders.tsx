@@ -13,7 +13,7 @@ import {
 } from '../../components/primitives'
 import { formatDate } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
-import { portalApi } from '../../lib/portal-api'
+import { PortalError, portalApi } from '../../lib/portal-api'
 import type { Order } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
 
@@ -28,8 +28,41 @@ export default function PortalOrders() {
   const orders = useAsync(() => portalApi.orders(), [])
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  const [paying, setPaying] = useState<string | null>(null)
+  const [epayDisabled, setEpayDisabled] = useState(false)
 
   const reviewRequired = (orders.data ?? []).some((order) => order.reviewRequired)
+
+  const pay = async (order: Order) => {
+    setPaying(order.id)
+    try {
+      const { payUrl } = await portalApi.checkoutOrder(order.id, 'alipay')
+      const opened = window.open(payUrl, '_blank')
+      if (!opened) {
+        push(t('portal.orders.payBlocked'), 'default')
+        return
+      }
+      // The payment page is cross-origin; drop the opener handle immediately.
+      try {
+        opened.opener = null
+      } catch {
+        // A browser may expose a read-only opener; the tab still opened.
+      }
+      // Opening the hosted page is not a payment fact; reload so the recorded
+      // provider intent (epay) is reflected, while the state stays awaiting.
+      push(t('portal.orders.payOpened'), 'success')
+      orders.reload()
+    } catch (cause) {
+      if (cause instanceof PortalError && cause.status === 503) {
+        setEpayDisabled(true)
+        push(t('portal.orders.epayDisabled'), 'default')
+        return
+      }
+      push(t('portal.orders.payFailed'), 'danger')
+    } finally {
+      setPaying(null)
+    }
+  }
 
   const cancel = async () => {
     if (!cancelTarget) return
@@ -106,12 +139,24 @@ export default function PortalOrders() {
       label: '',
       render: (order) =>
         order.state === 'awaiting_payment' && !order.reviewRequired ? (
-          <Button
-            variant="ghost"
-            onClick={() => setCancelTarget(order)}
-          >
-            {t('portal.orders.cancel')}
-          </Button>
+          <div className="order-actions">
+            {epayDisabled ? (
+              <span className="order-hint" title={t('portal.orders.epayDisabled')}>
+                {t('portal.orders.offlineSettlement')}
+              </span>
+            ) : (
+              <Button
+                variant="primary"
+                loading={paying === order.id}
+                onClick={() => pay(order)}
+              >
+                {paying === order.id ? t('portal.orders.paying') : t('portal.orders.pay')}
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => setCancelTarget(order)}>
+              {t('portal.orders.cancel')}
+            </Button>
+          </div>
         ) : null,
     },
   ]

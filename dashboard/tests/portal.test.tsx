@@ -144,6 +144,37 @@ describe('portal client — cookie session and CSRF', () => {
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
   })
+
+  it('posts the checkout type with CSRF and surfaces a disabled 503', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(LIVE_SESSION))
+      .mockResolvedValueOnce(jsonResponse({ payUrl: 'https://pay.example.com/submit.php?out_trade_no=ord-01' }))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { error: { code: 'UPSTREAM_UNAVAILABLE', message: 'epay checkout is not configured' } },
+          503,
+        ),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { portalApi: live } = await livePortal()
+    await live.login({ email: 'ada@example.com', password: 'secret' })
+    const checkout = await live.checkoutOrder('ord-01', 'wxpay')
+    expect(checkout.payUrl).toContain('out_trade_no=ord-01')
+
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain('/v1/portal/orders/ord-01/checkout')
+    expect(init.method).toBe('POST')
+    expect(headersOf(init).get('X-CSRF-Token')).toBe('csrf-live-1')
+    expect(headersOf(init).has('Authorization')).toBe(false)
+    expect(JSON.parse(String(init.body))).toEqual({ type: 'wxpay' })
+
+    await expect(live.checkoutOrder('ord-02')).rejects.toMatchObject({
+      status: 503,
+      code: 'UPSTREAM_UNAVAILABLE',
+    })
+  })
 })
 
 describe('portal client — mock parity', () => {

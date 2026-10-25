@@ -3923,6 +3923,13 @@ svg {
   line-height: 16px;
 }
 
+.account-card__note {
+  color: var(--warning);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  line-height: 13px;
+}
+
 .account-card__meter {
   display: block;
   width: 100%;

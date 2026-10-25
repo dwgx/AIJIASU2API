@@ -19,7 +19,18 @@ export interface Account {
   username: string
   platform: Platform
   state: AccountState
+  /** Manual lease cap enforced by this daemon, 1–2000. */
   concurrency: number
+  /**
+   * The vendor's purchased 同时连接数 (simultaneous-connection allowance).
+   * Absent on daemons that predate the login-result field; treat it as 1.
+   */
+  useCount?: number
+  /**
+   * Lease capacity this daemon actually serves, derived as
+   * `min(useCount, AJS_ACCOUNT_SLOTS)`. Absent on older daemons; default 1.
+   */
+  effectiveSlots?: number
   regions: string[]
   nodeCount: number
   liveNodeCount: number
@@ -200,6 +211,20 @@ export interface EntitlementGrant {
   revokedAt: string | null
 }
 
+/** The payment providers the daemon can name on an order. */
+export type PaymentProvider = 'manual' | 'stripe' | 'epay'
+
+/**
+ * Admin-visible provider state. `unknown` means the daemon does not expose a
+ * status field (older builds): the UI must not claim either state.
+ */
+export type EpayStatus = 'enabled' | 'disabled' | 'unknown'
+
+export interface PaymentStatus {
+  epay: EpayStatus
+  reason?: string
+}
+
 /**
  * `reviewRequired` is a flag, not a state: a mismatch (late settlement,
  * conflicting reference, refund without recorded payment) quarantines the
@@ -308,6 +333,8 @@ export interface PanelSettings {
   leaseTtl: string
   subscriptionRefreshSec: number
   theme: ThemeName
+  /** Optional additive flag: newer daemons may report 易支付 availability. */
+  epayEnabled?: boolean
 }
 
 export interface CreateAccountInput {

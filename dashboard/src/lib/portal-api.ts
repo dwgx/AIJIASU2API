@@ -2,6 +2,7 @@ import { ApiError } from './errors'
 import { getDb } from './mock'
 import {
   mockCancelOrder,
+  mockCheckoutOrder,
   mockCreateOrder,
   mockListOrders,
   mockListPlans,
@@ -70,6 +71,11 @@ export interface PortalSignupResult {
 export interface PortalKeyCreated {
   key: ApiKey
   secret: string
+}
+
+/** POST /v1/portal/orders/{id}/checkout — a hosted URL, never a payment fact. */
+export interface PortalCheckoutResult {
+  payUrl: string
 }
 
 /** Query for the tenant usage view; the daemon ignores owner filters. */
@@ -852,6 +858,33 @@ export const portalApi = {
       body: { planId },
       headers: { 'Idempotency-Key': idempotencyKey },
     })
+  },
+
+  /**
+   * POST /v1/portal/orders/{id}/checkout — returns the 易支付 hosted URL.
+   * This is intent, not payment: the order stays awaiting_payment until a
+   * verified provider notify or reconciliation settles it.
+   */
+  async checkoutOrder(
+    id: string,
+    type: 'alipay' | 'wxpay' = 'alipay',
+  ): Promise<PortalCheckoutResult> {
+    if (mockEnabled()) {
+      await wait()
+      const tenant = mockActiveTenant()
+      try {
+        return mockCheckoutOrder(id, type, { tenantId: tenant.id, userId: tenant.userId ?? '' })
+      } catch (cause) {
+        if (cause instanceof ApiError) {
+          throw new PortalError(cause.status, cause.message, cause.code)
+        }
+        throw cause
+      }
+    }
+    return request<PortalCheckoutResult>(
+      `/v1/portal/orders/${encodeURIComponent(id)}/checkout`,
+      { method: 'POST', body: { type } },
+    )
   },
 
   /** POST /v1/portal/orders/{id}/cancel — awaiting-payment orders only. */

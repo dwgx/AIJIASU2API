@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(105)
-    expect(entries).toHaveLength(129)
+    expect(Object.keys(doc.paths)).toHaveLength(107)
+    expect(entries).toHaveLength(131)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -286,10 +286,12 @@ describe('docs/openapi.json', () => {
       '/v1/portal/plans': true,
       '/v1/portal/orders': true,
       '/v1/portal/orders/{id}': true,
+      '/v1/portal/orders/{id}/checkout': true,
       '/v1/portal/orders/{id}/cancel': true,
-      // The payment webhook authenticates its provider signature over the raw
-      // body; a provider cannot send a bearer token.
+      // The payment webhooks authenticate their provider signature over the
+      // raw body; a provider cannot send a bearer token.
       '/v1/payments/stripe': true,
+      '/v1/payments/epay/notify': true,
     }
     for (const { method, path, operation } of entries) {
       if (path === '/healthz' || portalPaths[path]) continue
@@ -390,6 +392,7 @@ describe('docs/openapi.json', () => {
       ['get', '/v1/portal/orders'],
       ['post', '/v1/portal/orders'],
       ['get', '/v1/portal/orders/{id}'],
+      ['post', '/v1/portal/orders/{id}/checkout'],
       ['post', '/v1/portal/orders/{id}/cancel'],
     ] as Array<[string, string]>) {
       const operation = doc.paths[path]?.[method]
@@ -399,6 +402,7 @@ describe('docs/openapi.json', () => {
     }
     for (const [method, path] of [
       ['post', '/v1/portal/orders'],
+      ['post', '/v1/portal/orders/{id}/checkout'],
       ['post', '/v1/portal/orders/{id}/cancel'],
     ] as Array<[string, string]>) {
       expect(parameterNames(doc.paths[path]![method]!), `${method} ${path}`).toContain(
@@ -447,6 +451,18 @@ describe('docs/openapi.json', () => {
     expect(webhook?.responses['503']).toEqual({
       $ref: '#/components/responses/ServiceUnavailable',
     })
+
+    const epay = doc.paths['/v1/payments/epay/notify']?.post
+    expect(epay).toBeDefined()
+    expect(epay?.security).toEqual([])
+    expect(epay?.['x-implementation-phase']).toBe('P0')
+    expect(epay?.responses['503']).toEqual({
+      $ref: '#/components/responses/ServiceUnavailable',
+    })
+    expect(schema('OrderCheckoutRequest').properties?.type).toMatchObject({
+      enum: ['alipay', 'wxpay'],
+    })
+    expect(schema('OrderCheckoutResponse').required).toEqual(['payUrl'])
 
     // The state machine and the honest settlement inputs are part of the
     // contract: a reference alone is not an attestation.
@@ -536,8 +552,18 @@ describe('docs/openapi.json', () => {
       expect(schema(name).properties, name).toBeTruthy()
     }
     expect(schema('Account').required).toEqual(expect.arrayContaining([
-      'id', 'label', 'username', 'platform', 'state', 'concurrency', 'regions', 'expiresAt',
+      'id', 'label', 'username', 'platform', 'state', 'concurrency', 'useCount', 'effectiveSlots',
+      'regions', 'expiresAt',
     ]))
+    expect(schema('Account').properties?.useCount).toMatchObject({
+      type: 'integer', minimum: 1, maximum: 2000,
+    })
+    expect(schema('Account').properties?.effectiveSlots).toMatchObject({
+      type: 'integer', minimum: 1, maximum: 2000,
+    })
+    expect(String(schema('CreateLeaseResult').properties?.warning?.description)).toContain(
+      'multi_session_unimplemented',
+    )
     expect(schema('ProxyNode').required).toEqual(expect.arrayContaining([
       'id', 'accountId', 'state', 'egressIp', 'protocol', 'gatePort',
     ]))

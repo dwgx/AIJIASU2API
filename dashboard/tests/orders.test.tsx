@@ -8,6 +8,7 @@ import {
   MOCK_PORTAL_PASSWORD,
   portalApi,
 } from '../src/lib/portal-api'
+import { setMockEpayEnabled } from '../src/lib/order-mock'
 import type { Order } from '../src/lib/types'
 
 const GIB = 1024 ** 3
@@ -109,10 +110,10 @@ describe('portal plans and orders', () => {
     expect(within(row).queryByText('Paid — activation pending')).not.toBeInTheDocument()
     expect(within(row).queryByText('Active')).not.toBeInTheDocument()
     expect(
-      screen.getByText(/No online payment has been taken\. Pay offline/),
+      screen.getByText(/No payment is recorded until the provider confirms it/),
     ).toBeInTheDocument()
     expect(
-      screen.getByText(/Online payment is unavailable\. An administrator records offline settlement\./),
+      screen.getByText(/Online payment is available only when the operator enables/),
     ).toBeInTheDocument()
   })
 
@@ -244,6 +245,62 @@ describe('portal plans and orders', () => {
     await signIn()
     await expect(portalApi.cancelOrder('ord-04')).rejects.toMatchObject({ status: 404 })
   })
+
+  it('opens the 易支付 checkout in a new tab without claiming payment', async () => {
+    await signIn()
+    const order = await portalApi.createOrder('plan-01', 'portal-pay')
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue({} as Window)
+    const { user } = await openPortal('Orders')
+
+    const row = await findRow(order.id)
+    await user.click(within(row).getByRole('button', { name: 'Pay now' }))
+
+    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1))
+    const [payUrl, target] = openSpy.mock.calls[0]
+    expect(String(payUrl)).toContain(`out_trade_no=${order.id}`)
+    expect(String(payUrl)).toContain('pay.example.com')
+    expect(target).toBe('_blank')
+
+    // Opening a hosted page is intent, not payment: the row stays awaiting.
+    expect(within(rowForSync(order.id)).getByText('Awaiting payment')).toBeInTheDocument()
+    expect(
+      within(rowForSync(order.id)).queryByText('Paid — activation pending'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('labels the pay action 去支付 in the Chinese portal', async () => {
+    localStorage.setItem('ajs.lang', 'zh')
+    await signIn()
+    const order = await portalApi.createOrder('plan-01', 'zh-portal-pay')
+    window.history.pushState({}, '', '/portal')
+    render(<App />)
+    await screen.findByRole('heading', { name: '客户中心', level: 1 })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('tab', { name: '订单' }))
+
+    const row = await findRow(order.id)
+    expect(within(row).getByRole('button', { name: '去支付' })).toBeInTheDocument()
+  })
+
+  it('shows the offline settlement state when 易支付 is disabled', async () => {
+    await signIn()
+    const order = await portalApi.createOrder('plan-01', 'portal-pay-disabled')
+    setMockEpayEnabled(false)
+    const openSpy = vi.spyOn(window, 'open')
+    const { user } = await openPortal('Orders')
+
+    const row = await findRow(order.id)
+    await user.click(within(row).getByRole('button', { name: 'Pay now' }))
+
+    await waitFor(() =>
+      expect(within(rowForSync(order.id)).getByText('Offline settlement')).toBeInTheDocument(),
+    )
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(
+      within(rowForSync(order.id)).queryByRole('button', { name: 'Pay now' }),
+    ).not.toBeInTheDocument()
+    expect(await screen.findByText(/易支付 is not enabled/)).toBeInTheDocument()
+  })
 })
 
 function rowForSync(id: string): HTMLElement {
@@ -276,6 +333,21 @@ describe('admin orders', () => {
     expect(screen.getByText('ord-02')).toBeInTheDocument()
     expect(screen.getByText('ord-05')).toBeInTheDocument()
     expect(screen.getAllByText('Reconcile this order offline.').length).toBeGreaterThan(0)
+  })
+
+  it('shows each order’s payment provider and the 易支付 status chip', async () => {
+    await openAdmin()
+
+    expect(await screen.findByText('Epay enabled')).toBeInTheDocument()
+    expect(within(await findRow('ord-03')).getByText('易支付')).toBeInTheDocument()
+    expect(within(await findRow('ord-01')).getByText('Manual (offline)')).toBeInTheDocument()
+  })
+
+  it('marks 易支付 disabled when the adapter is off', async () => {
+    setMockEpayEnabled(false)
+    await openAdmin()
+
+    expect(await screen.findByText('Epay disabled')).toBeInTheDocument()
   })
 
   it('requires a receipt reference, then attests, activates and refunds', async () => {
@@ -411,5 +483,22 @@ describe('admin orders', () => {
     expect(await screen.findByText('标记已收到线下付款')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '按状态筛选' })).toBeInTheDocument()
     expect(screen.getByText('全部订单')).toBeInTheDocument()
+  })
+})
+
+describe('account capacity', () => {
+  it('shows the vendor 同时连接数 allowance on the account card with an honest note', async () => {
+    window.history.pushState({}, '', '/accounts')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Accounts', level: 1 })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    const list = await screen.findByRole('list', { name: 'Vendor accounts' })
+    const card = within(list).getAllByRole('listitem')[0]
+
+    expect(within(card).getByText('Simultaneous connections')).toBeInTheDocument()
+    expect(within(card).getByText('200')).toBeInTheDocument()
+    expect(within(card).getByText('Multi-slot pending')).toBeInTheDocument()
   })
 })

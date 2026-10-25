@@ -170,6 +170,7 @@ function AccountCard({
   const capacity = account.nodeCount > 0 ? Math.min(1, Math.max(0, account.liveNodeCount / account.nodeCount)) : 0
   const capacityPct = Math.round(capacity * 100)
   const countdown = renewalCountdown(account.expiresAt)
+  const useCount = account.useCount ?? 1
 
   return (
     <article role="listitem" className={clsx('account-card', selected && 'is-selected')}>
@@ -221,8 +222,15 @@ function AccountCard({
           </dd>
         </div>
         <div className="account-card__metric">
-          <dt>{t('accounts.columnConcurrency')}</dt>
-          <dd>{account.concurrency}</dd>
+          <dt>{t('accounts.columnUseCount')}</dt>
+          <dd>
+            <span>{useCount}</span>
+            {useCount > 1 ? (
+              <span className="account-card__note" title={t('accounts.useCountNote', { count: useCount })}>
+                {t('accounts.useCountPending')}
+              </span>
+            ) : null}
+          </dd>
         </div>
         <div className="account-card__metric">
           <dt>{t('accounts.columnUsage')}</dt>
@@ -599,6 +607,12 @@ export default function Accounts() {
       render: (account) => <span className="cell-mono">{account.concurrency}</span>,
     },
     {
+      key: 'useCount',
+      label: t('accounts.columnUseCount'),
+      align: 'right',
+      render: (account) => <span className="cell-mono">{account.useCount ?? 1}</span>,
+    },
+    {
       key: 'usage',
       label: t('accounts.columnUsage'),
       align: 'right',
@@ -844,7 +858,7 @@ export default function Accounts() {
           view === 'cards' ? (
             <AccountCardsSkeleton />
           ) : (
-            <TableSkeleton rows={6} columns={8} />
+            <TableSkeleton rows={6} columns={9} />
           )
         ) : view === 'cards' ? (
           <AccountCards

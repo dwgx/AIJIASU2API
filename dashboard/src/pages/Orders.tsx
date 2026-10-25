@@ -54,6 +54,7 @@ export default function Orders() {
   const { push } = useToast()
   const orders = useAsync(() => api.listOrders(), [])
   const plans = useAsync(() => api.listPlans(), [])
+  const payment = useAsync(() => api.providerStatus(), [])
   const [filter, setFilter] = useState<OrderFilter>('all')
   const [busy, setBusy] = useState<string | null>(null)
   const [attestTarget, setAttestTarget] = useState<Order | null>(null)
@@ -218,6 +219,24 @@ export default function Orders() {
       ),
     },
     {
+      key: 'provider',
+      label: t('orders.provider'),
+      render: (order) => (
+        <div className="order-plan">
+          <Badge
+            tone={order.provider === 'epay' ? 'success' : order.provider === 'stripe' ? 'info' : 'neutral'}
+          >
+            {t(
+              order.provider === 'manual' || order.provider === 'stripe' || order.provider === 'epay'
+                ? `orders.provider.${order.provider}`
+                : 'orders.provider.unknown',
+            )}
+          </Badge>
+          <span className="order-plan__meta mono">{order.provider}</span>
+        </div>
+      ),
+    },
+    {
       key: 'amount',
       label: t('orders.amount'),
       align: 'right',
@@ -298,17 +317,32 @@ export default function Orders() {
       <PageHeader
         title={t('orders.title')}
         subtitle={t('orders.subtitle')}
-        refresh={summarizeRefresh([orders, plans])}
+        refresh={summarizeRefresh([orders, plans, payment])}
         actions={
-          <Button
-            icon={<RefreshCw size={14} />}
-            onClick={() => {
-              orders.reload()
-              plans.reload()
-            }}
-          >
-            {t('common.refresh')}
-          </Button>
+          <div className="order-actions">
+            <Badge
+              tone={
+                payment.data?.epay === 'enabled'
+                  ? 'success'
+                  : payment.data?.epay === 'disabled'
+                    ? 'neutral'
+                    : 'warning'
+              }
+              title={payment.data?.reason}
+            >
+              {t(`orders.epay.${payment.data?.epay ?? 'unknown'}`)}
+            </Badge>
+            <Button
+              icon={<RefreshCw size={14} />}
+              onClick={() => {
+                orders.reload()
+                plans.reload()
+                payment.reload()
+              }}
+            >
+              {t('common.refresh')}
+            </Button>
+          </div>
         }
       />
 
@@ -359,7 +393,7 @@ export default function Orders() {
           }
         >
           {orders.status === 'loading' ? (
-            <TableSkeleton rows={5} columns={9} />
+            <TableSkeleton rows={5} columns={10} />
           ) : orders.status === 'error' ? (
             <ErrorState message={t('orders.loadFailed')} onRetry={orders.reload} />
           ) : (
