@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 438 tests in 46 files.
+- Tests: Vitest + React Testing Library + jsdom, 450 tests in 47 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -59,9 +59,11 @@ The console ships in English and Chinese. Both switches are always visible:
 - **Document language.** The provider sets `<html lang>` to `zh-CN` or `en`, so assistive
   technology and the browser see the active language.
 - **Coverage.** Every user-visible string — shell, pages, Lab, dialogs, empty/error states — is
-  translated; English is the source dictionary and Chinese must mirror every key. Account labels,
-  server names, IPs and API field values are data and are never translated. The command palette
-  still finds pages in either language.
+  translated; English is the source dictionary and Chinese must mirror every key. The Chinese copy
+  is a natural mainland-product rewrite rather than a literal translation: 账号 is the login
+  identity (账户 is reserved for billing), and terms follow the product glossary — 新增账号,
+  登录爱加速, 客户中心, 流量额度, 租约. Account labels, server names, IPs and API field values are
+  data and are never translated. The command palette still finds pages in either language.
 - **Tests.** `tests/i18n.test.tsx` asserts dictionary parity and non-empty values, interpolation
   and English/key fallback, switching the sidebar and Lab to Chinese plus `document.lang`, restoring
   a stored choice on a fresh mount, the `zh*` browser default, switching back to English from
@@ -74,7 +76,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 438 tests in 46 files
+npm test           # Vitest, 450 tests in 47 files
 npm run typecheck  # tsc -b
 ```
 
@@ -863,7 +865,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 438 Vitest tests in 46 files (65 at the 2026-10-23 record; see
+- 450 Vitest tests in 47 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -1034,9 +1036,9 @@ page shows its failure state. Mock mode is always exercisable and seeds one acti
 to `u-01`), one pending applicant and one suspended tenant.
 
 - **Routes.** `/portal/login`, `/portal/signup`, `/portal/pending` and `/portal` (tabs **Leases**,
-  **Usage**, **Keys**, **Plans**, **Orders**); any other `/portal/*` path redirects to `/portal`. A
-  visitor without a session (401) is redirected to the login page; a 403 renders the
-  suspended/not-allowed message instead of an empty panel.
+  **Usage**, **Keys**, **Plans**, **Orders**, **Activity**); any other `/portal/*` path redirects
+  to `/portal`. A visitor without a session (401) is redirected to the login page; a 403 renders
+  the suspended/not-allowed message instead of an empty panel.
 - **Session.** The client sends `credentials:"include"` and never a bearer token, and it writes no
   token to `localStorage` or `sessionStorage`. The cookie is the daemon's `__Host-ajs_portal`
   (`Secure; HttpOnly; SameSite=Strict; Path=/`); the CSRF token from login (or from
@@ -1054,7 +1056,9 @@ to `u-01`), one pending applicant and one suspended tenant.
   the tenant's rows; Keys lists metadata only, issues a key with a show-once secret and revokes
   after a confirmation. Plans lists active plans only and creates an order under a per-dialog
   idempotency key; Orders lists only the tenant's own orders with an always-visible
-  offline-settlement banner, a review-required banner and a cancel confirm for an awaiting order.
+  payment-status banner, a review-required banner, a **Pay now** button for an awaiting order
+  (opens the returned 易支付 `payUrl` in a new tab) and a clear **Offline settlement** state when
+  the adapter answers 503, plus a cancel confirm. Opening checkout never marks an order paid.
   The daemon's per-IP, per-address and per-tenant buckets answer 429 with `Retry-After`, which the
   page surfaces as a wait-in-seconds message.
 - **Copy.** Errors are stable portal strings rather than daemon messages: one credential refusal,
@@ -1065,7 +1069,8 @@ to `u-01`), one pending applicant and one suspended tenant.
 `/orders` is the operator settlement surface over `/v1/admin/orders` and `/v1/admin/plans`; the
 portal's **Plans** and **Orders** tabs are its customer half (`/v1/portal/plans`,
 `/v1/portal/orders`). The daemon owns the state machine, and the console never invents a payment:
-every dialog records something that already happened offline.
+every manual dialog records something that already happened offline, while **Pay now** only opens
+the provider's hosted checkout and never marks an order paid.
 
 - **States.** `awaiting_payment → paid → active`; `awaiting_payment → cancelled`;
   `paid|active → refunded|charged_back`. `paid` means the money was recorded and activation is
@@ -1075,7 +1080,8 @@ every dialog records something that already happened offline.
 - **Plans.** The admin **Plans** card lists every plan — inactive included — with price, lease term
   and monthly quota; the switch is a confirm that deactivates or reactivates it. Deactivation only
   blocks new orders: existing orders keep their immutable priced snapshot, which the confirm says.
-  The portal lists active plans only and says an administrator records offline settlement.
+  The portal lists active plans only and says checkout is available when the operator enables
+  易支付, otherwise an administrator records offline settlement.
 - **Order creation (portal).** **Create order** opens a summary confirm that states the request
   takes no online payment; one idempotency key is generated per open dialog, so a retry replays the
   order instead of duplicating it. A 409 (changed plan or an existing open order) is shown as the
@@ -1088,7 +1094,16 @@ every dialog records something that already happened offline.
   already completed offline, revokes the grant immediately and keeps the payment history. The
   daemon records a chargeback from external evidence and always flags review. Neither control
   transfers money; a partial or unsupported reversal is left for review without mutation.
-- **Stripe-compatible stub.** `POST /v1/payments/stripe` is the daemon's only payment-provider
+- **易支付 (epay) checkout.** The portal **Orders** tab shows **Pay now** for an awaiting order;
+  `POST /v1/portal/orders/{id}/checkout` returns a hosted `payUrl`, which the page opens in a new
+  tab. A checkout records provider intent only — the order stays `awaiting_payment` until a
+  verified notify or a 60-second reconciliation query settles it. A 503 replaces the button with
+  **Offline settlement**. The daemon enables epay only when `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID` and
+  `AJS_EPAY_KEY` are all set (`AJS_EPAY_SIGN_TYPE` must be MD5; `AJS_EPAY_NOTIFY_URL` and
+  `AJS_EPAY_RETURN_URL` default to the tenant origin). The admin order table adds a provider badge
+  (`manual` / `epay` / `stripe`) and an epay enabled/disabled chip from the daemon status field
+  when present.
+- **Stripe-compatible stub.** `POST /v1/payments/stripe` is the Stripe-compatible provider
   route; it verifies a signature over the raw body and stays disabled (503) until
   `AJS_STRIPE_WEBHOOK_SECRET` is configured. The console has no control for it and never shows a
   card form.
@@ -1102,10 +1117,10 @@ every dialog records something that already happened offline.
 |---|---|---|
 | `/` | Overview | 4 metric tiles, ingress/egress chart, account health, activity, quick actions; with `telemetryAvailable:false` the chart and traffic KPIs are replaced by a no-telemetry empty state (real counts and account health stay); a compact gate-health panel sits under the metric tiles |
 | `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account monthly budget meters and per-user quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
-| `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
+| `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), 同时连接数 (`useCount`) metric with multi-slot note, login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, create dialog (user, platform, optional account pin, TTL, per-dialog idempotency key), rotate, release confirm, TTL |
-| `/orders` | Orders | plan card (price, lease term, monthly quota, activate/deactivate confirm), order table filtered by state or review flag, offline-receipt attestation, activation retry, offline refund and cancel confirms, grant expiry; every dialog states that no online payment is taken |
+| `/orders` | Orders | plan card (price, lease term, monthly quota, activate/deactivate confirm), order table filtered by state or review flag with payment-provider column and epay status chip, offline-receipt attestation, activation retry, offline refund and cancel confirms, grant expiry; every dialog states that no online payment is taken |
 | `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor (the daemon's gate enforces it, with the monthly quota, only under `AJS_GATE_AUTH=userpass`) |
 | `/requests` | Requests | gate-flow table with search/time/status/method/protocol/account-node/user/source filters, user and protocol columns, shared pagination footer, row detail drawer, mutation lab drawer |
@@ -1117,7 +1132,7 @@ every dialog records something that already happened offline.
 | `/portal/login` | Portal sign in | email/password against `/v1/portal/login`, one uniform credential message, pending/suspended refusal, rate-limit copy with `Retry-After`, link to signup |
 | `/portal/signup` | Portal signup | name, email, password + confirmation with local validation, then the pending page; no session is issued |
 | `/portal/pending` | Portal pending | the application-received state and the operator-approval explanation |
-| `/portal` | Portal dashboard | standalone customer shell: **Leases**, **Usage** (7/30/90 days, zero-filled chart), **Keys** (issue with show-once secret, revoke confirm), **Plans** (active plans, create order under an idempotency key) and **Orders** (own orders, offline-settlement banner, cancel confirm); redirects to login without a session |
+| `/portal` | Portal dashboard | standalone customer shell: **Leases**, **Usage** (7/30/90 days, zero-filled chart), **Keys** (issue with show-once secret, revoke confirm), **Plans** (active plans, create order under an idempotency key), **Orders** (own orders, payment-status banner, **Pay now** → 易支付 `payUrl` in a new tab, **Offline settlement** when epay is disabled, cancel confirm) and **Activity** (own audit rows, cursor load-more); redirects to login without a session |
 
 `*` redirects to `/`.
 
@@ -1209,6 +1224,7 @@ tests/
   webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
   platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
   portal.test.tsx         portal client cookie/CSRF contract, mock tenant scoping, signup/pending, own-data UI, zh
+  portal-activity.test.tsx tenant-scoped activity rows, cursor load-more, empty state, zh
   orders.test.tsx         portal plans/orders and admin orders/plans: idempotency, honest states, attestation, refund, review flag, zh
 ```
 
@@ -1227,8 +1243,14 @@ render as `<article role="listitem">` inside
 |---|---|
 | Head | selection checkbox, label + username, state `Badge` with `StatusDot` (pulses while active) |
 | Meta | platform chip, region list, or `any region` |
-| Metrics | Nodes `live/total` with a thin capacity bar (mint; amber track at 0 live), concurrency, usage via `formatBytes` |
+| Metrics | Nodes `live/total` with a thin capacity bar (mint; amber track at 0 live), 同时连接数 (`useCount`; a `Multi-slot pending` note appears when >1), usage via `formatBytes` |
 | Foot | `Expires` label, expiry date + relative time, test login, pause/resume, delete (same labels and handlers as the table) |
+
+The 同时连接数 metric is the vendor's purchased `useCount`, not an APC setting. The daemon
+enforces `effectiveSlots = min(useCount, AJS_ACCOUNT_SLOTS)` with `AJS_ACCOUNT_SLOTS` defaulting
+to `1`; a card above one shows the `Multi-slot pending` note because APC still serves only one FV
+session per account. A second lease at the default cap is refused as 429
+`account_slots_exhausted`, and raising the cap returns `warning: multi_session_unimplemented`.
 
 The grid is `repeat(auto-fill, minmax(280px, 1fr))` with a 12 px gap and collapses to one column
 below 760 px; card actions wrap and the card body never forces horizontal scroll. Selected cards get
@@ -1603,4 +1625,5 @@ and reports healthy on `/healthz`.
 
 ## License
 
-Repository code is MIT; see the root [`LICENSE`](../LICENSE).
+Repository code is MIT; see the root [`LICENSE`](../LICENSE) and [`NOTICE`](../NOTICE) for
+third-party software, icon and map-data attribution.

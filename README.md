@@ -45,9 +45,10 @@ binds exactly one panel user, and own-data leases/usage/keys, plus a through-gat
 `/v1/health/nodes` row, `lease.created`/`lease.revoked`/`lease.expired` webhook events, and
 durable monthly quota counters that survive request-log eviction and a restart — is served and
 covered offline only. The order wave — an admin plan catalogue, customer orders, offline
-settlement attestation, idempotent entitlement activation and a Stripe-compatible webhook that
-stays disabled until `AJS_STRIPE_WEBHOOK_SECRET` is configured — is served and covered offline
-only: an order is never evidence of payment, no card data is stored and no route charges a card.
+settlement attestation, idempotent entitlement activation, a Stripe-compatible webhook and a
+易支付 (epay) hosted checkout + signed form notify + 60-second query reconciler — is served and
+covered offline only: an order is never evidence of payment, no card data is stored and no daemon
+route charges a card.
 Startup recovery demotes a persisted `LIVE`/`DRAINING` node to `STALE` when
 no in-process gate serves it, and the opt-in `AJS_AUTO_LOGIN=1` reopens eligible sessions once per
 boot. Panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
@@ -91,16 +92,19 @@ As of 2026-10-25:
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
   **Verify egress** check. The same bundle also serves the customer portal as a separate shell —
   `/portal/login`, `/portal/signup`, `/portal/pending` and `/portal` with **Leases**, **Usage**,
-  **Keys**, **Plans** and **Orders** tabs — using the daemon's `__Host-ajs_portal` cookie (no
-  bearer, no Web Storage) and an in-memory CSRF token; mock mode seeds one active, one pending and
-  one suspended tenant. Plans creates an order under a per-dialog idempotency key and Orders lists
-  only the tenant's own orders with a cancel confirm; the operator **Orders** page filters by state
+  **Keys**, **Plans**, **Orders** and **Activity** tabs — using the daemon's `__Host-ajs_portal`
+  cookie (no bearer, no Web Storage) and an in-memory CSRF token; mock mode seeds one active, one
+  pending and one suspended tenant. Plans creates an order under a per-dialog idempotency key and
+  Orders lists only the tenant's own orders with a **Pay now** 易支付 checkout, an
+  offline-settlement fallback and a cancel confirm; the operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  438 Vitest tests in 46 files. The UI is bilingual: a `中` / `EN` switch
+  450 Vitest tests in 47 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
-  language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
-  labels, server names, IPs and API values are data and are never translated. Settings is a
+  language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
+  Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
+  identity, 客户中心 for portal, 流量额度 for quota), and account labels, server names, IPs and API
+  values are data and are never translated. Settings is a
   nine-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
   Access, Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later**
   states for controls the daemon does not read yet; Integrations now carries the live webhook
@@ -161,7 +165,11 @@ As of 2026-10-25:
   platform wave: `/v1/leases` (create a lease for a user and platform with an optional account pin
   and TTL; an `Idempotency-Key` replays the original lease, a second active lease for the same user
   and platform is a 409, and quota/concurrency/capacity refusals are 429 — revoke needs
-  `confirm:true` and, with a Resin panel, deletes the panel lease before the store row),
+  `confirm:true` and, with a Resin panel, deletes the panel lease before the store row). Each
+  account reports the vendor's 同时连接数 (`useCount`) and an `effectiveSlots =
+  min(useCount, AJS_ACCOUNT_SLOTS)` cap; a second lease beyond the default cap of 1 is 429
+  `account_slots_exhausted`, and a cap above 1 still carries `warning:
+  multi_session_unimplemented` because only one FV session per account is served.
   `/v1/device-pool` (list, generate, assign/release/retire/quarantine/purge with
   confirm tokens, passphrase export/import), `/v1/scoped-keys` (`ajs_sk_` least-privilege keys
   with a per-route scope table, account/region read restrictions and `usage:read`/`renewal:read`/
@@ -187,13 +195,21 @@ As of 2026-10-25:
   that outlive request-log eviction and a restart.
   The order wave serves `/v1/admin/plans*` (validated plan catalogue, soft-deactivate),
   `/v1/portal/plans` and `/v1/portal/orders*` (own orders only; create is idempotent on
-  `Idempotency-Key` and allows one open order per user), `/v1/admin/orders*` (filter, get, settle,
-  refund, chargeback, cancel) and the one unauthenticated `/v1/payments/stripe` route behind
-  `AJS_STRIPE_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body with a five-minute tolerance; unset
-  leaves it answering 503). Settlement is an admin attestation of offline funds, activation is a
-  separate idempotent grant keyed by order id, and a refund or chargeback revokes that grant and
-  restores the previous quota. The state machine is `awaiting_payment → paid → active`, with
-  terminal `cancelled`, `refunded` and `charged_back`. No route charges a card or transfers money.
+  `Idempotency-Key` and allows one open order per user), `/v1/portal/orders/{id}/checkout`
+  (易支付 `{payUrl}`), `/v1/admin/orders*` (filter, get, settle, refund, chargeback, cancel),
+  the unauthenticated `/v1/payments/stripe` route behind `AJS_STRIPE_WEBHOOK_SECRET`
+  (HMAC-SHA256 over the raw body with a five-minute tolerance; unset leaves it answering 503)
+  and the unauthenticated `/v1/payments/epay/notify` callback (MD5 form signature; disabled
+  without `AJS_EPAY_GATEWAY`/`AJS_EPAY_PID`/`AJS_EPAY_KEY`, with optional
+  `AJS_EPAY_SIGN_TYPE`/`AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL`). A 60-second, ±10%-jittered
+  reconciler queries `api.php?act=order` for pending epay orders and settles `TRADE_SUCCESS`
+  rows, bounded to 50 orders per pass. Manual settlement is an admin attestation of offline
+  funds; an epay notify or reconciliation records the gateway-confirmed payment through the same
+  store path. Activation is a separate idempotent grant keyed by order id, and a refund or
+  chargeback revokes that grant and restores the previous quota. The state machine is
+  `awaiting_payment → paid → active`, with
+  terminal `cancelled`, `refunded` and `charged_back`. No daemon route charges a card or transfers
+  money; the epay route only returns the gateway's hosted `payUrl`.
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
@@ -211,8 +227,8 @@ As of 2026-10-25:
   persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
   egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
   no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 979 Go test
-  functions — 938 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  accounts once per process, pausing a jittered 60 s after a failed login. 1022 `func Test`
+  functions — 981 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -324,11 +340,13 @@ As of 2026-10-25:
   receiver has consumed a `lease.*` event, and the durable quota counters have been exercised only
   by store tests, never by a full month of live traffic.
 - **The order wave is offline-tested only.** No customer has created an order and no administrator
-  has attested an offline receipt outside `httptest`, and no real Stripe event has reached
-  `/v1/payments/stripe` — the adapter is disabled until `AJS_STRIPE_WEBHOOK_SECRET` is set.
-  Settlement records money an operator attests was received offline; the daemon never charges a
-  card, stores no card data and sends no payment request. Refund and chargeback record evidence and
-  revoke the entitlement; they transfer nothing. Plan activation, the single grant per order and
+  has attested an offline receipt outside `httptest`, and no real Stripe or 易支付 event has
+  reached `/v1/payments/stripe` or `/v1/payments/epay/notify` — both adapters stay disabled until
+  their secrets are configured.
+  Manual settlement records money an operator attests was received offline; an epay notify or
+  reconciliation records a gateway-confirmed payment. In every case the daemon never charges a
+  card, stores no card data and sends no payment request. Refund and chargeback record evidence
+  and revoke the entitlement; they transfer nothing. Plan activation, the single grant per order and
   the review quarantine have store and HTTP coverage only, and the operator and portal order
   surfaces have run against the deterministic mock store, not a browser against a live order.
 
@@ -340,10 +358,11 @@ for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT
 candidate analysis behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (104 paths, 128 operations, 174 schemas at the last sync): every route registered in
+surface (107 paths, 131 operations, 176 schemas at the last sync): every route registered in
 `daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
 schedules, scoped keys, the platform views (renewal, usage, health, webhooks), plans and orders,
-the Stripe-compatible payment webhook, the customer tenant portal and tenant administration,
+the Stripe-compatible and 易支付 payment callbacks, the customer tenant portal and tenant
+administration,
 panel backup and the Lab — plus the proposed P1 interfaces.
 Scoped API keys (`ajs_sk_`, least privilege with per-route scopes and account/region restrictions)
 are served as P0. Each operation carries
@@ -435,8 +454,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (438 tests in 46 files), `cd daemon && go test ./...`
-(938 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (450 tests in 47 files), `cd daemon && go test ./...`
+(981 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and

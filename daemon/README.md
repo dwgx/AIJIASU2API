@@ -77,7 +77,9 @@ The order wave (`AJS-298`) adds an admin plan catalogue, customer orders, offlin
 attestation and idempotent entitlement activation under the same portal flag. Payment confirmation
 and activation are separate audited commands: a created order is never a payment success, manual
 settlement records an admin-verified offline receipt, and the Stripe-compatible webhook stays
-disabled until `AJS_STRIPE_WEBHOOK_SECRET` is configured. See [Orders and activation](#orders-and-activation-ajs-298).
+disabled until `AJS_STRIPE_WEBHOOK_SECRET` is configured. `AJS-315` adds 易支付 (epay) hosted
+checkout, signed form notify and 60-second query reconciliation beside those paths. See
+[Orders and activation](#orders-and-activation-ajs-298).
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -136,7 +138,7 @@ internal/store/webhooks.go   persisted webhook receivers
 internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states, eviction healing
 internal/health/egress.go    through-gate egress sampler: SOCKS5 CONNECT + HTTP target, 60-sample rings
 internal/renewal/            cached public plan catalogue and per-account expiry
-internal/payment/            manual offline attestation + Stripe-compatible signature verifier (disabled without a secret)
+internal/payment/            manual attestation, Stripe-compatible verifier and 易支付 checkout/notify/query (disabled without config)
 internal/usage/              request-log aggregation: windows, accounts, users, days, targets, retention
 internal/webhook/            dispatcher, HMAC signing, SSRF policy, retry/backoff, delivery ring, scrub
 internal/webhook/events_lease.go  shared lease.* payload (ids, platform, expiry; no credential)
@@ -1137,9 +1139,14 @@ answers 201 with `{lease, replayed?, warning?}`.
   exhausted monthly quota → 429 `quota_exceeded`; an active lease for the same user and platform →
   409 `lease_conflict`; unknown pinned account → 404 `account_not_found`; a pin of another platform
   → 400 `invalid_lease`; a pinned account that is paused, failed or expired → 409
-  `account_unavailable`; the account already at its concurrency → 429 `concurrency_exceeded`; no
-  account of that platform can take another lease → 429 `concurrency_exceeded` or `no_capacity`,
-  depending on which guard blocked it.
+  `account_unavailable`; the account already at its concurrency → 429 `concurrency_exceeded`; the
+  account already holds its effective slot count → 429 `account_slots_exhausted`; no account of
+  that platform can take another lease → 429 `concurrency_exceeded` or `no_capacity`, depending on
+  which guard blocked it. **Effective slots** are `min(account.useCount, AJS_ACCOUNT_SLOTS)`, with
+  `useCount` the vendor's purchased 同时连接数 (1–2000, default 1) and `AJS_ACCOUNT_SLOTS` defaulting
+  to `1`. Above one, a successful create also returns `warning: multi_session_unimplemented`: the
+  lease row is real, but this daemon still serves only one FV session per account until per-slot
+  device identities and multiple sessions are implemented.
 - **TTL.** `ttlSeconds: 0` uses the user's sticky TTL, then the panel lease TTL; an explicit value
   must be 60 s – 7 days. An unsupported platform, a malformed body or an out-of-range TTL is 400
   (`invalid_lease` / `INVALID_ARGUMENT`).
@@ -1298,11 +1305,18 @@ test binary as the child.
 | `AJS_TENANT_ORIGIN` | `-tenant-origin` | — | exact browser origin allowed on signup, login and every unsafe portal request, for example `https://panel.example.com`. Required when `AJS_TENANT_PORTAL=1`; a path/query/userinfo fails startup. A non-`https` origin is accepted with a warning (the cookie is `Secure`, so browsers will not send it over plain HTTP) |
 | `AJS_TRUSTED_PROXIES` | `-trusted-proxies` | — | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed for portal rate limiting; empty trusts no forwarding header and uses the socket peer. A malformed entry fails startup |
 | `AJS_STRIPE_WEBHOOK_SECRET` | `-stripe-webhook-secret` | — | signing secret for the Stripe-compatible webhook (`POST /v1/payments/stripe`). Empty leaves the adapter disabled: the route answers 503 and never falls back to manual settlement. Set it only when a real provider is configured; the value is never logged |
+| `AJS_EPAY_GATEWAY` | `-epay-gateway` | — | 易支付 gateway base URL, for example `https://pay.example.com/`; `submit.php` and `api.php` are resolved below it. Empty leaves epay disabled |
+| `AJS_EPAY_PID` | `-epay-pid` | — | 易支付 merchant id sent as `pid` on checkout and notify. All-or-nothing with the gateway and key |
+| `AJS_EPAY_KEY` | `-epay-key` | — | 易支付 merchant key used for MD5 signing and order queries. Never logged, never persisted; empty disables epay |
+| `AJS_EPAY_SIGN_TYPE` | `-epay-sign-type` | `MD5` | signature algorithm; must be `MD5` (case-insensitive) when epay is configured. Any other value disables the adapter instead of signing with a different algorithm |
+| `AJS_EPAY_NOTIFY_URL` | `-epay-notify-url` | derived | public URL the gateway posts the signed notify to; empty derives `AJS_TENANT_ORIGIN + /v1/payments/epay/notify` |
+| `AJS_EPAY_RETURN_URL` | `-epay-return-url` | derived | public browser return URL after checkout; empty derives `AJS_TENANT_ORIGIN + /portal` |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
+| `AJS_ACCOUNT_SLOTS` | — | `1` | per-account lease slot cap, 1–2000. Effective slots = `min(vendor UseCount, this value)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Keep the default `1` for live use: multi-session is not implemented, and any value above 1 makes lease creates carry `warning: multi_session_unimplemented`. An invalid value falls back to `1` |
 | `AJS_AUTO_LOGIN` | — | `0` | `1` runs the startup auto-login after the snapshot is loaded: at most one vendor `Login` per account per process start for accounts with a sealed password and a current node or selection (`paused`/`expired` skipped), serialized in store order, followed by the normal `SyncAccount` gate sync and one `account.login` event. A failure pauses a jittered 60s (`48–72s`) before the next account and is never retried. Requires `AJS_ACCOUNT_LOGIN=1`; otherwise startup logs `auto_login_disabled`. Off by default, so a boot contacts no vendor host |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile: `linux-4.2.3.0` (default, live-tested) or `linux-4.3.0.1` (static analysis only; unsigned live acceptance unverified); an unknown value fails startup when login is enabled |
@@ -1777,7 +1791,7 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   `reference` and `offlineFundsReceived:true`. The provider never sees the order: the store stamps
   the snapshot amount, records one `PaymentEvent`, audits `payment.settled`, then activates.
   Replaying the same reference replays the recorded event; a different reference on a settled order
-  answers 409. There is no online payment claim and no card data anywhere.
+  answers 409. Manual settlement makes no online payment claim, and the daemon stores no card data.
 - **Activation.** One locked transaction keyed by the unique grant `orderId` creates the lease
   (`expiresAt = paidAt + leaseTtlSeconds`), sets the user's `quotaBytesMonth` and stores the
   previous quota in the grant. Concurrent or restarted attempts reuse the grant: no second lease,
@@ -1790,24 +1804,38 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   or un-revoking a key. The default `RefundPolicy` allows only full refunds of paid/active orders
   with a reference; a partial refund stays unchanged, audits `refund.review` and never becomes a
   new payment. Reversal history is retained.
-- **Webhook.** `POST /v1/payments/stripe` is the one unauthenticated `/v1` route: it verifies
-  `Stripe-Signature` over the exact raw body with HMAC-SHA256 and a five-minute tolerance before
-  parsing. Only checkout completion, refund and dispute events are mapped; metadata must name the
-  order and amount/currency must match the snapshot. Duplicate event ids are no-ops. Without
-  `AJS_STRIPE_WEBHOOK_SECRET` the adapter is disabled and the route answers 503; it never falls
-  back to manual settlement.
+- **Webhook.** `POST /v1/payments/stripe` is one of two unauthenticated `/v1` payment routes: it
+  verifies `Stripe-Signature` over the exact raw body with HMAC-SHA256 and a five-minute tolerance
+  before parsing. Only checkout completion, refund and dispute events are mapped; metadata must
+  name the order and amount/currency must match the snapshot. Duplicate event ids are no-ops.
+  Without `AJS_STRIPE_WEBHOOK_SECRET` the adapter is disabled and the route answers 503; it never
+  falls back to manual settlement.
+- **易支付 (epay).** `POST /v1/portal/orders/{id}/checkout` returns `{payUrl}` for an own
+  `awaiting_payment` order: `pid`, `type=alipay|wxpay`, `out_trade_no`, `money` (two decimals),
+  `notify_url`, `return_url`, `name` (the plan name) and `sign_type=MD5` are signed with
+  `md5(canonical-sorted-querystring + KEY)`. A checkout records provider intent only; it never
+  settles. `POST /v1/payments/epay/notify` is the second unauthenticated route: it verifies the MD5
+  signature, `pid`, `trade_status=TRADE_SUCCESS` and `money ==` the immutable snapshot before
+  applying the same store settlement path, keyed by `trade_no` for idempotency. It answers the
+  plain-text protocol (`success` only for accepted/duplicate, otherwise `fail`). A 60-second,
+  ±10%-jittered poller queries `api.php?act=order` for pending epay orders, settles
+  `TRADE_SUCCESS` rows and audits `epay.reconcile`; it is bounded to 50 orders per pass and starts
+  only when `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID` and `AJS_EPAY_KEY` are all set. The merchant key,
+  signature and `payUrl` query are never logged; amounts come from the order snapshot.
 - **Persistence and audit.** `Snapshot` gains additive `plans`, `orders` and `paymentEvents` rows
   plus their sequence counters. An order row stores only SHA-256 idempotency/request hashes, never
   the raw key. A malformed restored row is failed closed into `cancelled` + `reviewRequired` with
-  no grant. Audited actions: `order.created`, `order.cancelled`, `payment.settled`,
-  `payment.activation_retry`, `entitlement.granted`, `refund.completed`, `refund.review`,
-  `chargeback.recorded`, `entitlement.revoked`, `webhook.rejected`, `plan.created`,
-  `plan.updated`, `plan.deactivated`; details carry a reference fingerprint, never the reference,
-  payload or signature. Customer events: `order.created|cancelled|paid|activated|refunded|charged_back`.
+  no grant. Audited actions: `order.created`, `order.checkout`, `order.cancelled`,
+  `payment.settled`, `payment.activation_retry`, `entitlement.granted`, `refund.completed`,
+  `refund.review`, `chargeback.recorded`, `entitlement.revoked`, `webhook.rejected`,
+  `epay.reconcile`, `plan.created`, `plan.updated`, `plan.deactivated`; details carry a reference
+  fingerprint, never the reference, payload or signature. Customer events:
+  `order.created|cancelled|paid|activated|refunded|charged_back`.
 
-Operations: creating an order is not a payment. Reconcile offline receipts before attesting;
-`refund` records money already returned; a webhook secret is optional and rotating it simply
-disables the endpoint until the new value is configured. Back up `state.json` before enabling the
+Operations: creating an order is not a payment and an epay checkout is only provider intent.
+Reconcile offline receipts before attesting manual settlement; `refund` records money already
+returned; a webhook secret is optional and rotating it simply disables the endpoint until the new
+value is configured. Back up `state.json` before enabling the
 portal; orders and payment events are part of that snapshot.
 
 ## Secret storage
@@ -2288,13 +2316,13 @@ objects.
 | GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
 | GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); the traffic series is empty and totals are zero with `telemetryAvailable:false` — the gate meter feeds the request log (`/v1/usage`), not this series |
 | GET | `/v1/openapi.json` | the OpenAPI 3.1 contract, served from the embedded byte-for-byte copy of `docs/openapi.json` with a strong `ETag` (SHA-256) and `If-None-Match` → 304; same bearer auth as the rest of `/v1/*` |
-| GET | `/v1/accounts` | list; filters `state`, `limit`, `offset` |
+| GET | `/v1/accounts` | list; filters `state`, `limit`, `offset`; each row carries the vendor `useCount` and the derived `effectiveSlots` (see [Lease allocation](#lease-allocation)) |
 | POST | `/v1/accounts` | create; duplicate label → 409; password sealed when `AJS_MASTER_KEY` is set, otherwise discarded |
 | GET | `/v1/accounts/io/capabilities` | export/import limits and gates: `encryptedExport:true`, `plaintextExport` (`AJS_ALLOW_PLAINTEXT_EXPORT`), `maxImportRows:1000`, `maxExportAccounts:1000`, `maxDeleteIDs:100`, `maxBodyBytes`, `maxImportBodyBytes` |
 | POST | `/v1/accounts/export` | `{ids?\|filter?, format:"encrypted"\|"json"\|"csv", passphrase?, includeDevice?, confirmPlaintext?}` → the file itself (`.ajsx`/`.json`/`.csv`) with `no-store` and `X-AJS-Export-*` headers. Encrypted is the default and always available; JSON/CSV need `AJS_ALLOW_PLAINTEXT_EXPORT=1` **and** `confirmPlaintext:"EXPORT"`; passphrase is encrypted-only; CSV refuses device identity; `ids` and `filter` are mutually exclusive; > 1 000 accounts → 400; a concurrent import/export/bulk-delete → 409 |
 | POST | `/v1/accounts/import` | `{source:{kind:"json"\|"csv"\|"encrypted", content, passphrase?}, options:{mode, matchBy, onConflict, initialState, idPolicy, devicePolicy, preserveTimestamps, dryRun}}` → per-row plan/apply result. Defaults: atomic, label, skip, paused, new, restore_if_missing. `dryRun:true` previews without mutating; atomic applies nothing when a row fails; partial applies the valid rows; > 1 000 rows or a bad envelope → 400 |
 | POST | `/v1/accounts/bulk-delete` | `{ids[], dryRun?, mode:"continue"\|"stop"}` → per-row `deleted`/`would_delete`/`not_found`/`failed`/`skipped` with counts. ≤ 100 ids; each row runs the account delete hook (stop gates/sessions) before the store delete, so a hook or sealer failure leaves that account and its secret intact |
-| GET | `/v1/accounts/{id}` | single account |
+| GET | `/v1/accounts/{id}` | single account, including `useCount` and `effectiveSlots` |
 | PATCH | `/v1/accounts/{id}` | partial label/username/platform/state/concurrency/regions/expiresAt/trafficBudgetBytes (`null` clears the monthly budget, `0` refuses every byte) |
 | DELETE | `/v1/accounts/{id}` | with `AJS_ACCOUNT_LOGIN=1`: stop the account's gates and sessions first (stop failure → 500, nothing deleted); then remove the account, its nodes, its leases and its sealed secret (sealer file immediately, snapshot at the next save) and retire its device identity as a tombstone (pool mode; the legacy plaintext map is deleted) for re-add restore; a sealer failure → 503 with the account and its secret intact; keep audit |
 | POST | `/v1/accounts/{id}/actions/login` | with `AJS_ACCOUNT_LOGIN=1`: vendor login + `loginSync`, then `active`/`expired`, a retained `LoginResult` and one gate per usable server; otherwise refresh `lastLoginAt` and clear `auth_failed` |
@@ -2315,7 +2343,7 @@ objects.
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
 | POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
 | GET | `/v1/leases` | list; filter `user_id` |
-| POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`no_capacity` |
+| POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`account_slots_exhausted`/`no_capacity`; `warning: multi_session_unimplemented` when effectiveSlots > 1 |
 | POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17 |
 | DELETE | `/v1/leases/{id}` | body `{confirm:true}` → 204; panel: delete Resin lease (404 idempotent), then store row; fallback: store release; decrement node `inUse`; a missing confirm → 400 |
 | GET | `/v1/users` | list |
@@ -2357,6 +2385,7 @@ objects.
 | GET | `/v1/portal/session` | `{tenant,user,csrfToken}` for the cookie session; `csrfToken` is returned again so a page reload can mutate. Missing/expired/revoked session → 401 |
 | POST | `/v1/portal/logout` | requires `X-CSRF-Token`; revokes this session, clears the cookie → 204 |
 | GET | `/v1/portal/leases` | only `Lease.UserID == tenant.userId`, filtered before pagination; `limit`/`offset` supported |
+| GET | `/v1/portal/audit` | the signed-in tenant's own audit rows, newest first; `limit` default 50, max 200, `before` is the last audit id (stable cursor). Foreign and admin rows are filtered before the window; detail URLs are redacted |
 | GET | `/v1/portal/usage?from=&to=` | `UsageSummary` over only the linked user's rows; `userId`/`account` query filters are ignored. Account budgets stay null; the user row carries the quota and monthly total |
 | GET | `/v1/portal/keys` | the linked user's `ApiKey[]` metadata, newest first; hashes and secrets are never serialized |
 | POST | `/v1/portal/keys` | `{label}` → 201 `{key,secret}`; the `ajs_live_` secret is shown once; at most ten active keys per tenant (over the cap → 429 `QUOTA_EXCEEDED`) |
@@ -2369,6 +2398,7 @@ objects.
 | GET | `/v1/portal/orders` | only `Order.TenantID == tenant.id` and `userId == tenant.userId`, filtered before pagination; newest first |
 | POST | `/v1/portal/orders` | `{planId}` + optional `Idempotency-Key` → 201 `Order` in `awaiting_payment`; the same key and plan replays 200, a different plan 409, an inactive plan 409, a second open order 409. Never a payment success |
 | GET | `/v1/portal/orders/{id}` | one own order; a foreign or unknown id → 404 |
+| POST | `/v1/portal/orders/{id}/checkout` | `{type:"alipay" / "wxpay"}` + `X-CSRF-Token` → 200 `{payUrl}`; signed 易支付 redirect for one own `awaiting_payment` order. A checkout is intent, never payment; disabled epay → 503, foreign id → 404, non-awaiting → 409 |
 | POST | `/v1/portal/orders/{id}/cancel` | requires `X-CSRF-Token`; only `awaiting_payment` → `cancelled` (terminal); a repeat cancel is 200 unchanged, any other state 409 |
 | GET | `/v1/admin/plans?limit=&offset=` | the full catalogue, including inactive rows (admin token or scoped `admin` only) |
 | POST | `/v1/admin/plans` | `{name,amountMinor,currency,leaseTtlSeconds,quotaBytes,active?}` → 201 `Plan`; invalid price/currency/TTL/quota → 400 |
@@ -2382,6 +2412,7 @@ objects.
 | POST | `/v1/admin/orders/{id}/chargeback` | `{reference,reason?}` → 200 `Order`; records external dispute evidence, revokes the grant and flags review |
 | POST | `/v1/admin/orders/{id}/cancel` | cancels `awaiting_payment` → 200; a repeat is 200 unchanged, any other state 409 |
 | POST | `/v1/payments/stripe` | no bearer: verifies `Stripe-Signature` over the raw body (HMAC-SHA256, five-minute tolerance), maps checkout-completion/refund/dispute events and acknowledges duplicates. A bad signature/stale timestamp → 400, an unknown type → 200 `ignored`, no secret configured → 503 |
+| POST | `/v1/payments/epay/notify` | no bearer: form-encoded 易支付 callback. Verifies MD5 sign, `pid`, `trade_status=TRADE_SUCCESS` and `money` against the order snapshot, then settles idempotently by `trade_no`. Answers `success` only for accepted/duplicate, otherwise `fail`; disabled epay → 503 `fail` |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
 | POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
 | POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,exitRecommended,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1`; after an apply the process refuses further `state.json` saves and answers `exitRecommended:true` (admin-only) |
@@ -2399,7 +2430,7 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 | `NOT_FOUND` | 404 | unknown id or route, unknown catalog server, no catalog target |
 | `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete, a lease create refused as `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict` |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
-| `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals, not `/v1/*` errors: SOCKS5 `05 02`, and `429`/`403` on the HTTP CONNECT listener |
+| `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded`, `account_slots_exhausted` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals, not `/v1/*` errors: SOCKS5 `05 02`, and `429`/`403` on the HTTP CONNECT listener |
 | `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds), a scoped key over its per-minute budget, or a portal IP/email/tenant bucket (`Retry-After` is one refill interval) |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token, or a missing/expired/revoked/unlinked portal session |
 | `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account; a portal request with a wrong/missing origin, CSRF token or non-active tenant |
@@ -2428,8 +2459,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (104 paths, 128 operations,
-  174 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (107 paths, 131 operations,
+  176 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, the portal cookie or webhook
@@ -2524,8 +2555,8 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **938 `func Test` functions across 121 `_test.go` files** (recounted 2026-10-25);
-the emulator module adds 41 functions in 13 files. Every suite runs offline.
+The tree holds **981 `func Test` functions across 131 `_test.go` files** (`TestMain` excluded;
+recounted 2026-10-25); the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
 200, seed counts and exact field names, account create/409/delete, node
@@ -3150,7 +3181,7 @@ HTTP 200
 $ jq length /tmp/ajs-accounts.json
 6
 $ jq -c '.[0]' /tmp/ajs-accounts.json
-{"id":"acc-01","label":"Northwind Ops","username":"demo-northwind","platform":"android","state":"active","concurrency":200,"regions":["cn-zj","cn-sh","hk"],"nodeCount":3,"liveNodeCount":2,"usageBytes":82400000000,"expiresAt":"2026-11-10T03:05:57.130488609Z","lastLoginAt":"2026-10-23T02:53:57.130488609Z","createdAt":"2026-07-19T03:05:57.130488609Z"}
+{"id":"acc-01","label":"Northwind Ops","username":"demo-northwind","platform":"android","state":"active","concurrency":200,"useCount":1,"effectiveSlots":1,"regions":["cn-zj","cn-sh","hk"],"nodeCount":3,"liveNodeCount":2,"usageBytes":82400000000,"expiresAt":"2026-11-10T03:05:57.130488609Z","lastLoginAt":"2026-10-23T02:53:57.130488609Z","createdAt":"2026-07-19T03:05:57.130488609Z"}
 
 $ curl -s -o /tmp/ajs-unauth.json -w 'HTTP %{http_code}\n' http://127.0.0.1:2261/v1/accounts
 HTTP 401
@@ -4029,3 +4060,8 @@ header or credential). No live vendor call was made.
   writes unencrypted credentials to the operator's disk; the encrypted `.ajsx` envelope is the
   intended path. The account-IO mutex is per process, so two daemons sharing a state file can
   still interleave writes (as with any snapshot write).
+
+## License
+
+Repository code is MIT — see the root [`LICENSE`](../LICENSE) and [`NOTICE`](../NOTICE) for
+third-party software, icon and map-data attribution.
