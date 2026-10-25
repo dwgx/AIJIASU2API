@@ -138,7 +138,7 @@ describe('lease page states', () => {
     const dialog = await screen.findByRole('dialog', { name: '创建租约' })
     expect(within(dialog).getByLabelText('用户')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('平台')).toBeInTheDocument()
-    expect(within(dialog).getByLabelText('账户')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('账号')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('TTL')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: '创建租约' })).toBeInTheDocument()
   })

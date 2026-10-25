@@ -395,10 +395,10 @@ describe('portal UI — own data', () => {
     localStorage.setItem('ajs.lang', 'zh')
     render(<App />)
     expect(
-      await screen.findByRole('heading', { name: '登录客户门户', level: 1 }),
+      await screen.findByRole('heading', { name: '登录客户中心', level: 1 }),
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument()
-    expect(screen.getByText('还没有账户？')).toBeInTheDocument()
+    expect(screen.getByText('还没有账号？')).toBeInTheDocument()
     expect(document.documentElement.lang).toBe('zh-CN')
   })
 })

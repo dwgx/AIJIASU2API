@@ -386,13 +386,13 @@ describe('usage page', () => {
 
     expect(await screen.findByRole('heading', { name: '用量', level: 1 })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: '用量窗口' })).toBeInTheDocument()
-    expect(screen.getByRole('table', { name: '按账户用量' })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: '按账号统计用量' })).toBeInTheDocument()
     expect(screen.getAllByText('请求数').length).toBeGreaterThan(0)
-    expect(screen.getByRole('progressbar', { name: 'ada.ops 月配额' })).toBeInTheDocument()
-    expect(screen.getByText('历史仅保留最新的 10,000 个请求（约 7 天）。')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'ada.ops 每月流量额度' })).toBeInTheDocument()
+    expect(screen.getByText('历史只保留最新 10,000 个请求（约 7 天）。')).toBeInTheDocument()
     expect(screen.getByText('预算（仅供参考）')).toHaveAttribute(
       'title',
-      '网关尚未强制执行配额',
+      '网关暂未强制执行流量额度',
     )
   })
 

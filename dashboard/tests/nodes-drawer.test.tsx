@@ -177,7 +177,7 @@ describe('nodes drawer', () => {
     const drawer = await openDrawer(user, 'cn-zj-01', 'zh')
 
     expect(within(drawer).getByText('中国 · 浙江')).toBeInTheDocument()
-    expect(within(drawer).getByText('厂商声称')).toBeInTheDocument()
+    expect(within(drawer).getByText('爱加速声明')).toBeInTheDocument()
     expect(within(drawer).getByText('未校验')).toBeInTheDocument()
     expect(within(drawer).getByRole('button', { name: '校验出口' })).toBeInTheDocument()
 

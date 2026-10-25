@@ -465,15 +465,15 @@ describe('admin orders', () => {
     await signIn()
     window.history.pushState({}, '', '/portal')
     const portalView = render(<App />)
-    await screen.findByRole('heading', { name: '我的门户', level: 1 })
+    await screen.findByRole('heading', { name: '客户中心', level: 1 })
     const user = userEvent.setup()
     await user.click(screen.getByRole('tab', { name: '套餐' }))
 
     expect(await screen.findByText('Starter')).toBeInTheDocument()
     const starter = screen.getByText('Starter').closest('li')
     if (!starter) throw new Error('Starter plan card is not mounted')
-    expect(within(starter).getByText('每月配额')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '为Starter创建订单' })).toBeInTheDocument()
+    expect(within(starter).getByText('每月流量额度')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '为 Starter 创建订单' })).toBeInTheDocument()
     portalView.unmount()
 
     await portalApi.createOrder('plan-01', 'zh-admin-flow')

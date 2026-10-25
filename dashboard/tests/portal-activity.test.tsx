@@ -148,7 +148,7 @@ describe('portal activity', () => {
   it('renders the tab, table and empty copy in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
     await signIn()
-    await openPortal('活动', '我的门户')
+    await openPortal('活动', '客户中心')
 
     expect(
       await screen.findByRole('heading', { name: '我的活动', level: 2 }),
@@ -157,6 +157,6 @@ describe('portal activity', () => {
       expect(screen.getByRole('columnheader', { name: header })).toBeInTheDocument()
     }
     expect(await screen.findByText('Key prefix ajs_live_mock_01')).toBeInTheDocument()
-    expect(screen.getByText('您账户的租约、订单、密钥与会话记录。')).toBeInTheDocument()
+    expect(screen.getByText('您账号的租约、订单、密钥和会话记录。')).toBeInTheDocument()
   })
 })
