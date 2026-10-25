@@ -53,7 +53,8 @@ catalog.
 The platform wave adds the customer read views and registries: cached renewal plans and
 per-account expiry (`/v1/renewal/*`, redirects refused), flow-metered request-log usage
 (`/v1/usage`; gate flows append rows unless `AJS_FLOW_METER=0`), a loopback gate health sampler
-(`/v1/health/nodes`, `AJS_HEALTH_MAX_NODES` rings with eviction healing), outbound webhooks with
+(`/v1/health/nodes`, `AJS_HEALTH_MAX_NODES` rings with eviction healing) plus an
+opt-in through-gate egress sampler (`AJS_EGRESS_PROBE=1`), outbound webhooks with
 HMAC signing, an SSRF policy, bounded retries, a persisted delivery history and a dead-letter
 audit row (`/v1/webhooks*`), passphrase-encrypted panel backup, inspect and restore (`/v1/backup*`),
 plus least-privilege scoped API keys
@@ -61,8 +62,16 @@ plus least-privilege scoped API keys
 `usage:read`/`renewal:read`/`health:read`/`events:read` customer reads). The same wave adds
 customer-visible event replay and a server-sent event stream (`/v1/events`,
 `/v1/events/stream`) over the bounded ring the webhook sink fills. None of them calls a vendor host:
-renewal prices come from the public purchase page and are cached, usage is derived from the
-request log, and the health probe dials `127.0.0.1` only.
+renewal prices come from the public purchase page and are cached, the usage window is derived from
+the request log while its quota figures come from the durable monthly counters, and the health
+probe dials `127.0.0.1` only.
+
+The tenant wave adds an opt-in customer portal (`/v1/portal/*` and `/v1/admin/tenants*` behind
+`AJS_TENANT_PORTAL=1` plus `AJS_TENANT_ORIGIN`). A `Tenant` is a login identity linked 1:1 to a
+`PanelUser`; signup stores a pending tenant only, login issues a `__Host-ajs_portal` cookie session
+with a CSRF token, and admin approval binds exactly one user. The same wave emits
+`lease.created`/`lease.revoked`/`lease.expired` webhook events and keeps durable monthly usage
+counters, so a quota is never renewed by request-log eviction.
 
 - Module: `ajsaccountd` · Go 1.26 toolchain · standard library plus `ajsproxy`
 - Listen: `127.0.0.1:2261` by default
@@ -84,6 +93,7 @@ request log, and the health probe dials `127.0.0.1` only.
 go.mod
 cmd/ajs-accountd/main.go     flags/env, listener, graceful shutdown
 internal/model/model.go      wire structs, inputs and patches
+internal/model/tenant.go     tenant, session and key wire structs; closed status vocabulary
 internal/store/              mutex-protected state + test/mock seed
 internal/store/seed.go       mock-compatible seed data and health derivation
 internal/store/demo.go       seed-row purge behind AJS_DROP_DEMO
@@ -104,14 +114,20 @@ internal/api/schedules.go    schedule CRUD, preview, run-now and run history han
 internal/api/scoped_keys.go  scope table, scoped-key handlers and the auth identity
 internal/api/device_pool.go  device-pool HTTP lifecycle handlers
 internal/api/platform.go     renewal, usage, health and webhook handlers
+internal/api/tenant_auth.go  portal middleware: cookie session, CSRF, origin, rate limits, trusted proxies
+internal/api/portal.go       customer portal handlers: signup/login/session/logout, own leases/usage/keys
+internal/api/admin_tenants.go  tenant administration: list, approve, suspend, resume
 internal/api/events.go       event replay page and server-sent event stream handlers
 internal/api/backup.go       panel backup, inspect and restore handlers (admin-only)
 internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
+internal/store/tenants.go    tenant signup/auth, Argon2id hashes, cookie sessions, CSRF, tenant keys
 internal/store/webhooks.go   persisted webhook receivers
 internal/health/             loopback gate sampler: 30 s probes, 120-sample rings, states, eviction healing
+internal/health/egress.go    through-gate egress sampler: SOCKS5 CONNECT + HTTP target, 60-sample rings
 internal/renewal/            cached public plan catalogue and per-account expiry
 internal/usage/              request-log aggregation: windows, accounts, users, days, targets, retention
 internal/webhook/            dispatcher, HMAC signing, SSRF policy, retry/backoff, delivery ring, scrub
+internal/webhook/events_lease.go  shared lease.* payload (ids, platform, expiry; no credential)
 internal/events/             bounded event ring: monotonic cursors, scrub, fan-out, cursor expiry
 internal/backup/             passphrase-encrypted panel backup: deterministic tar, manifest, envelope, diff
 internal/ratelimit/          per-scoped-key token bucket (rateLimitPerMin)
@@ -1130,6 +1146,12 @@ is 503 with the store row left in place — and finally the store row is release
 decremented and one `lease.revoke` audit row written. Without a panel the store release is the whole
 path and an unknown id is 404. A hook failure after the commit is returned in the `Warning` header.
 
+Both commits emit one webhook event after the store write: `lease.created` (never on an
+idempotent replay, whose original create already emitted it) and `lease.revoked`. The expiry sweep
+has no request handler, so the store calls its expiry hook and the daemon emits `lease.expired`
+once per released row. All three share the payload `{leaseId, userId, platform, accountId,
+expiresAt}` and carry no key, token or credential.
+
 `internal/store/leases_test.go` covers allocation, replay, duplicate user/platform, user quota,
 account concurrency, no capacity, a suspended user, revoke/expire releasing the node and snapshot
 survival; `internal/api/leases_test.go` covers the HTTP retry/conflict contract, both 429 reasons,
@@ -1260,6 +1282,9 @@ test binary as the child.
 | `AJS_TLS_LISTEN` | — | `127.0.0.1:2262` | HTTPS admin address; only meaningful with the pair set. `AJS_TLS_LISTEN` alone, or one half of the pair, fails startup; the address must differ from `AJS_LISTEN`; `AJS_ALLOW_INSECURE=1` still refuses a non-loopback bind |
 | `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token unless `AJS_ALLOW_INSECURE=1`; at least 32 characters; the placeholders the repo ships or prints (`change-me`, `changeme`, `change_me`, `admin`, `test`, `password`, `secret`, `local-test-token`, `replace-me-with-openssl-rand-hex-32`) are refused at startup |
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth; refused unless `AJS_LISTEN` is loopback (`127.0.0.1`, `::1` or `localhost`) |
+| `AJS_TENANT_PORTAL` | `-tenant-portal` | `0` | `1` registers the customer portal chains `/v1/portal/*` and `/v1/admin/tenants*`; off leaves them unregistered, so they answer 404 and no identity is synthesized. Enabling it requires `AJS_TENANT_ORIGIN`. `AJS_ALLOW_INSECURE=1` never bypasses either chain |
+| `AJS_TENANT_ORIGIN` | `-tenant-origin` | — | exact browser origin allowed on signup, login and every unsafe portal request, for example `https://panel.example.com`. Required when `AJS_TENANT_PORTAL=1`; a path/query/userinfo fails startup. A non-`https` origin is accepted with a warning (the cookie is `Secure`, so browsers will not send it over plain HTTP) |
+| `AJS_TRUSTED_PROXIES` | `-trusted-proxies` | — | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed for portal rate limiting; empty trusts no forwarding header and uses the socket peer. A malformed entry fails startup |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
@@ -1293,6 +1318,9 @@ test binary as the child.
 | `AJS_GATE_HTTP_OFFSET` | — | `1000` | distance between a node's SOCKS5 gate port and its HTTP CONNECT port, `1`–`65534` (unset = default; `0`, negative, `65535+` and non-integers fail startup). The controller reserves the pair as a unit and retries the next base port when either half is taken |
 | `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most `AJS_HEALTH_MAX_NODES` watched nodes |
 | `AJS_HEALTH_MAX_NODES` | — | `16` | node rings the sampler retains, clamped to 1–64; a non-integer fails startup when the sampler is enabled (an out-of-range integer is clamped, not rejected; the value is not read under `AJS_HEALTH_PROBE=0`). Beyond the cap the sampler evicts an unwatched ring first; when every ring is watched it evicts the least-recently-used one and records it, and the reconciler re-arms a watched-but-evicted key on its next 15 s sweep (one attempt per key per sweep, one log line per minute) |
+| `AJS_EGRESS_PROBE` | — | off | `1` enables the through-gate egress sampler, so `GET /v1/health/nodes` reports real HTTP egress instead of only a loopback handshake. Every sample is one flow through the node's gate and the vendor session behind it, so it is off by default. Only the exact value `1` enables it, and it needs the loopback sampler (`AJS_HEALTH_PROBE` on) because that watch set is what arms and disarms it. With `AJS_GATE_AUTH=userpass` the gate refuses the probe's no-auth greeting and every sample records `proxy`; the daemon logs `egress_probe_unauthenticated` at startup |
+| `AJS_EGRESS_INTERVAL` | — | `60s` | egress probe period (`time.ParseDuration`); must be at least `10s`, and a malformed or shorter value fails startup. The floor is deliberate: each probe spends one vendor flow and the account's budget |
+| `AJS_EGRESS_TARGET` | — | `https://www.gstatic.com/generate_204` | absolute `http(s)` URL fetched through the gate; only a 2xx answer is a success (a redirect or error page records `http` with its status). A malformed URL fails startup, and a URL carrying userinfo is refused so a credential cannot reach the startup log |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
 | `AJS_WEBHOOK_ALLOW_PRIVATE` | — | `0` | lab/test opt-out: `1` lets a receiver point at loopback, RFC 1918, IPv6 unique-local and link-local addresses. Without it a resolved private address is rejected (an unresolvable name is allowed at registration and re-checked at dial time); cloud metadata names (`metadata`, `metadata.google.internal`) are rejected either way |
 | `AJS_BACKUP_ALLOW_RESTORE` | — | `0` | `1` lets `POST /v1/backup/restore` write the panel files while the daemon runs; the request still needs `dryRun:false` and `confirm:"RESTORE"`, and the response sets `restartRequired`. Off by default because the running process would overwrite the restored `state.json` with its stale in-memory panel on the next snapshot. Startup logs a warning when set |
@@ -1348,8 +1376,8 @@ Four read views, the webhook registry and the panel backup routes are wired in `
 |---|---|
 | `GET /v1/renewal/plans` | `internal/renewal` cached public purchase page; response carries `source` (`live`/`cache`/`static`) and `stale`. A failed refresh is soft and still answers 200 with the fallback table. The fetch refuses redirects (a 3xx is an ordinary non-2xx failure, so the cache or static table answers) and sends no cookie jar and no authorization header. The prices are the vendor's public list; the daemon never posts to a payment endpoint or calls a purchase API |
 | `GET /v1/renewal/accounts/{id}` | account `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL (never carries an account id or token); unknown account → 404 |
-| `GET /v1/usage?from=&to=&account=&userId=` | `internal/usage` over `store.Requests()`; `from`/`to` accept RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or >366-day windows → 400. The body is `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}`: `rowsRetained` is the request-log cap (10 000) and `retentionDays` the inclusive UTC-day span the retained rows actually cover (`0` = no rows), so a wide window can be labelled as partial. Rows come from completed gate flows (`AJS_FLOW_METER`, on by default; those rows carry `source:"gate"`), the mutation lab (`source:"mutation-lab"`) and the seed (`source:"proxy"`) |
-| `GET /v1/health/nodes` | `internal/health` sampler over live gate ports; one row per watched node with `count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`minMs`/`maxMs`/`state` and the newest sample. `AJS_HEALTH_PROBE=0` → `enabled:false`; `AJS_HEALTH_MAX_NODES` bounds the retained rings |
+| `GET /v1/usage?from=&to=&account=&userId=` | `internal/usage` over `store.Requests()`; `from`/`to` accept RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or >366-day windows → 400. The body is `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}`: `rowsRetained` is the request-log cap (10 000) and `retentionDays` the inclusive UTC-day span the retained rows actually cover (`0` = no rows), so a wide window can be labelled as partial. Rows come from completed gate flows (`AJS_FLOW_METER`, on by default; those rows carry `source:"gate"`), the mutation lab (`source:"mutation-lab"`) and the seed (`source:"proxy"`). The window figures aggregate those rows, but each account/user row's `usedBytes` (and an account's derived `remainingBytes`) comes from the durable current-month counters ([Persistence](#persistence-ajs-45)), not from the retained rows, so it does not shrink when a request row is evicted; `trafficBudgetBytes` is the configured budget |
+| `GET /v1/health/nodes` | `internal/health` sampler over live gate ports; one row per watched node with `count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`minMs`/`maxMs`/`state` and the newest sample. `AJS_HEALTH_PROBE=0` → `enabled:false`; `AJS_HEALTH_MAX_NODES` bounds the retained rings. With `AJS_EGRESS_PROBE=1` each row also carries `egress` (`state`/`count`/`ok`/`successRate`/`p50Ms`/`p95Ms`/`last`) measured through the node's gate; a disabled egress sampler answers `egress:{enabled:false,reason:"AJS_EGRESS_PROBE=0"}` |
 | `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `internal/webhook` dispatcher plus the persisted receiver rows in `state.json` |
 | `POST /v1/backup` | seals `state.json`, `secrets.json` and `device-secrets.json` into one passphrase-encrypted `.ajsb` envelope (AES-256-GCM over a deterministic tar, PBKDF2-SHA256 at 600 000 iterations, the whole header authenticated) and answers the file itself with `no-store` and `X-AJS-Backup-Blobs`. Admin-only |
 | `POST /v1/backup/inspect` | header-only inspect of a posted envelope; with `passphrase` it also returns the decrypted manifest (`name`, `size`, `sha256`, `required`). It never touches the state directory and returns no blob, so it works on a daemon with no state dir. Admin-only |
@@ -1374,7 +1402,25 @@ outcome. States are `ok`, `degraded` (success rate below 0.9 or p95 above
 failed samples carry `errorClass` (`timeout`, `refused`, `unreachable`,
 `other`). A node that was never watched is omitted from the response.
 
+With `AJS_EGRESS_PROBE=1` the same watch set also carries an egress window:
+every `AJS_EGRESS_INTERVAL` (default 60 s) the sampler asks the node's own gate
+for `AJS_EGRESS_TARGET` (default `https://www.gstatic.com/generate_204`) with
+an 8 s timeout, keeping 60 samples per node. Every sample is a real flow
+through the gate and the vendor session behind it, which is why the probe is
+off by default; it stops when the gate is unwatched and never outlives a
+disconnect. A 2xx answer is the only success; a redirect or non-2xx records
+`http` with its status, a gate or SOCKS5 refusal records `proxy`, and an
+exchange with no response records `timeout`. Egress uses the same
+`ok`/`degraded`/`down` vocabulary with a 3 s p95 threshold, because the sample
+includes TLS and the vendor path rather than one loopback handshake. The
+response adds one `egress` block per row; `egress.enabled:false` names
+`AJS_EGRESS_PROBE=0` instead of reporting a zero aggregate.
+
 Webhook events emitted by the daemon: `account.login`, `account.logout`,
+`lease.created`/`lease.revoked`/`lease.expired` (the create and revoke
+handlers emit after the store commits, and the expiry sweep reports each
+released row once; an idempotent create replay never re-emits, and the payload
+carries only `leaseId`, `userId`, `platform`, `accountId` and `expiresAt`),
 `node.connected`, `node.disconnected`, `node.switched`, `schedule.fired`,
 `schedule.failed` (the scheduler calls `Config.OnRun` after recording a run),
 `account.renewal_due`/`account.expired` (the once-per-local-day renewal
@@ -1574,6 +1620,8 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 Routes absent from the table are admin-only — the scoped-key registry, users, API keys, requests
 mutation, reconcile, update, the webhook registry (`/v1/webhooks*`), the panel backup routes
 (`/v1/backup*`) and `/v1/device-pool*` — so a key without `admin` gets 403 `FORBIDDEN` there.
+The customer portal chain is also absent: a scoped key is never a tenant identity, and tenant
+administration needs the admin token or a key carrying the `admin` scope.
 The three read scopes cover one read route family each; they grant no write and do not bypass the
 account/region filter. `accountIds` and `regions` narrow what a key may **read**: a `GET`/`HEAD` for an
 account outside the list, or a list filtered by such an `account_id`, answers 403 `FORBIDDEN`;
@@ -1592,6 +1640,64 @@ Each key also carries a per-minute request budget: `rateLimitPerMin` (default **
 request answers 429 `RATE_LIMITED` with `Retry-After` set to one refill interval, so a retry at
 that point finds a token. A 403 still carries the headers, so a caller can tell a scope failure
 from a budget failure. The admin bearer token is never rate-limited.
+
+## Customer tenant portal (AJS-289)
+
+`internal/store/tenants.go`, `internal/api/tenant_auth.go`, `internal/api/portal.go` and
+`internal/api/admin_tenants.go` implement
+the customer tenant layer from `DESIGN-TENANT.md`. A `Tenant` is a login identity linked 1:1 to an
+existing `PanelUser`; the linked user owns leases, usage and API keys. Signup is pending and creates
+nothing; approval performs the explicit bind. The dashboard's admin bearer, scoped keys and
+`AJS_ALLOW_INSECURE` behaviour are unchanged, and `routeScopes` gains no entry: the portal and
+tenant-admin chains are separate.
+
+- **Opt-in.** `AJS_TENANT_PORTAL=1` registers the routes; without it `/v1/portal/*` and
+  `/v1/admin/tenants*` are unregistered and answer 404. Enabling it requires
+  `AJS_TENANT_ORIGIN`; a partial configuration aborts startup. A snapshot written before this
+  feature loads with zero tenants and no identity backfill, and rollback simply turns the flag off.
+- **Cookie, not bearer.** Login generates 32 random bytes; only their SHA-256 is persisted. The
+  cookie is `__Host-ajs_portal` with `Secure; HttpOnly; SameSite=Strict; Path=/`, an eight-hour
+  absolute expiry and a thirty-minute idle expiry. Every request re-checks the hash, both expiries,
+  revocation, tenant status, the linked user and `PanelUser.Enabled`; any failure is 401/403, never
+  an anonymous or admin fallback. Logout and suspension revoke the session, and the revocation
+  survives a restart because it is part of the snapshot.
+- **CSRF and origin.** Signup, login and every unsafe portal method require the exact configured
+  `Origin` and refuse `Sec-Fetch-Site: cross-site`. After login, every unsafe method (logout and key
+  mutations included) requires the session's random `X-CSRF-Token`, compared by SHA-256 in constant
+  time. Credentialed CORS is not enabled.
+- **Own data only.** Leases are filtered by the linked user id before pagination; usage aggregates
+  only rows whose immutable `userId` matches (an empty or different owner is never joined by name);
+  keys list/issue/revoke use the linked user id, and a foreign key id answers 404 exactly like an
+  unknown one.
+- **Rate limits.** Dedicated buckets, prefixed `portal:`, cover per-IP and per-address signup/login,
+  per-tenant key writes and a global per-IP ceiling. A refusal is 429 `RATE_LIMITED` with
+  `Retry-After`. The scoped-key limiter is a separate instance, so portal traffic cannot spend a
+  legacy key's budget. Forwarding headers are believed only from `AJS_TRUSTED_PROXIES`.
+- **Storage.** `Snapshot` gains additive `tenants` and `portalSessions` fields. A tenant row stores
+  the Argon2id PHC string (`m=65536,t=3,p=2`, 64 MiB, two concurrent hashes at most); a session row
+  stores only the cookie and CSRF SHA-256 digests, never the raw values. Malformed rows, duplicate
+  emails/links or a missing linked user quarantine that tenant (deny access) instead of bricking
+  the panel; malformed sessions are dropped.
+- **Admin lifecycle.** `POST /v1/admin/tenants/{id}/approve` supplies exactly one existing
+  `userId` or a `CreateUserInput` and commits the optional user creation, the link, activation and
+  the audit row under one lock. `suspend` disables the user and revokes the tenant's sessions and
+  every API/scoped key it owns; `resume` re-enables the user but never un-revokes a key.
+
+Operations: back up `state.json` before enabling; serve the portal only over HTTPS (the cookie is
+`Secure`); set `AJS_TENANT_ORIGIN` to the exact portal origin; and put a TLS-terminating proxy in
+front only if its address is listed in `AJS_TRUSTED_PROXIES`. A tenant with a broken link, an
+unknown status or a malformed hash is denied rather than repaired automatically.
+
+```bash
+AJS_TENANT_PORTAL=1 AJS_TENANT_ORIGIN=https://panel.example.com \
+  AJS_ADMIN_TOKEN=$(openssl rand -hex 32) ./ajs-accountd
+# signup -> 202 {"status":"pending"}; admin lists and approves:
+curl -H "Authorization: Bearer $AJS_ADMIN_TOKEN" \
+  "https://panel.example.com/v1/admin/tenants?status=pending"
+curl -X POST -H "Authorization: Bearer $AJS_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"userId":"u-01"}' \
+  "https://panel.example.com/v1/admin/tenants/t-01/approve"
+```
 
 ## Secret storage
 
@@ -1683,23 +1789,44 @@ $AJS_STATE_FILE (default $AJS_STATE_DIR/state.json)
   version          2  (v1 is accepted; its device map migrates at startup)
   accounts         []Account        nodes      []ProxyNode
   leases           []Lease          users      []PanelUser
-  keys             []APIKey         requests   []RequestLog
-  audit            []AuditEvent     settings   PanelSettings
-  keyHashes        {keyId: sha256}  secrets    {accountId: base64(sealed)}
+  keys             []APIKey         scopedKeys []ScopedKey
+  requests         []RequestLog     audit      []AuditEvent
+  settings         PanelSettings
+  usageMonth       "YYYY-MM"        monthlyUsage {userId: bytes}  accountUsage {accountId: bytes}
+  keyHashes        {keyId: sha256}  scopedKeyHashes {keyId: sha256}
+  secrets          {accountId: base64(sealed)}
   deviceBindings   {accountId: deviceId}
   devicePool       []DeviceRecord   (index only; raw material is sealed elsewhere)
   selections       {accountId: Selection}
   serverStats      {"accountId:serverId": ServerStat}
   schedules        []Schedule       scheduleRuns []ScheduleRun
   scheduleFires    []ScheduleFire   reminderMarks {key: ReminderMark}
-  scheduleSeq runSeq
-  accountSeq userSeq keySeq mutationSeq auditSeq
+  webhookEndpoints []WebhookEndpoint  webhookDeliveries []WebhookDelivery
+  tenants          []tenantRecord   portalSessions []PortalSession
+  scheduleSeq runSeq webhookSeq tenantSeq
+  accountSeq userSeq keySeq scopedKeySeq mutationSeq auditSeq
 ```
 
 - `Store.Snapshot()` copies every collection, counter, key hash and sealed
   secret under one `RLock`, then marshals outside the lock. Plaintext
   credentials never enter the document: `secrets` holds the AES-256-GCM
   envelopes from `internal/secret`, and `keyHashes` holds only SHA-256 digests.
+- **Quota durability.** `usageMonth` (a UTC `YYYY-MM`), `monthlyUsage` (user id
+  → bytes) and `accountUsage` (account id → bytes) are durable quota state, not
+  a view over the request log. The gate meter advances them while a flow
+  relays (every 256 KiB), so in-flight traffic counts before its row exists and
+  bytes are charged to the month in which they crossed the tunnel; a completed
+  row that was already metered live does not add its total again. The
+  10,000-row request-log cap evicts rows for display only — eviction never
+  lowers a counter, so log churn cannot renew a quota. A snapshot carries the
+  counters; a restore of an older snapshot without them, or of one written in a
+  previous month, rebuilds both maps from the restored current-month `gate`
+  rows, and a hand-edited counter for a deleted user or account is dropped
+  rather than failing the restore. A month boundary resets and rebuilds at the
+  first read after it. `PanelUser.UsedBytes` is derived from `monthlyUsage` on
+  every read and is written as `0` in the snapshot, so one month's total cannot
+  freeze into the next; deleting a user drops that user's counter, and
+  `PurgeDemo` drops only entries whose user it removed.
 - `Store.Save(path)` writes the document to a `0600` temporary file in the
   target directory, fsyncs it, renames it over the target, then best-effort
   fsyncs the directory. A reader sees the old or the new document, never a
@@ -2102,8 +2229,8 @@ objects.
 | GET | `/v1/system/update` | read-only GitHub release check. `AJS_UPDATE_REPO` unset → `{"enabled":false,"current":…}` with no network. Otherwise `GET <AJS_UPDATE_API_BASE>/repos/<repo>/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: ajs-accountd` (10 s client) → `{enabled:true,current,latest,updateAvailable,url,name,publishedAt,checkedAt}`. `updateAvailable` uses a simple semver compare (`v` optional, numeric dot segments): a draft or pre-release tag is **not** newer unless the running version is itself a pre-release. GitHub non-200/transport/parse failure → 502 `UPSTREAM_UNAVAILABLE`; no token is used or echoed. Never executes an update — the host runs `deploy/update.sh` |
 | GET | `/v1/renewal/plans` | cached public price table (`source` `live`/`cache`/`static`, `stale`); a failed refresh still answers 200 with the fallback |
 | GET | `/v1/renewal/accounts/{id}` | `expiresAt` → `daysLeft`, `urgency` (`none`/`soon`/`due`/`overdue`) and the official purchase URL, never an account id or token; unknown account → 404 |
-| GET | `/v1/usage?from=&to=&account=&userId=` | `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}` over the request log (gate flows, mutation lab and seed); `rowsRetained` is the 10 000-row cap, `retentionDays` the inclusive UTC-day span the retained rows cover (`0` = no rows), so a wide window can be labelled as partial. `from`/`to` take RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or > 366-day windows → 400 |
-| GET | `/v1/health/nodes` | loopback probe aggregate per watched node (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `minMs`, `maxMs`, `consecutiveFailures`, `last`); `AJS_HEALTH_PROBE=0` → `{enabled:false,reason}`; `AJS_HEALTH_MAX_NODES` (default 16, 1–64) bounds the retained rings |
+| GET | `/v1/usage?from=&to=&account=&userId=` | `{from,to,requests,bytes,errors,accounts,users,days,topTargets,truncated,rowsRetained,retentionDays}` over the request log (gate flows, mutation lab and seed); `rowsRetained` is the 10 000-row cap, `retentionDays` the inclusive UTC-day span the retained rows cover (`0` = no rows), so a wide window can be labelled as partial. Account and user `usedBytes` (and an account's derived `remainingBytes`) are the durable current-month counters, not the window; `trafficBudgetBytes` is the configured budget and `quotaEnforced` is true when at least one visible account has one. `from`/`to` take RFC 3339 or `YYYY-MM-DD` (UTC), absent = trailing 30 days; invalid, reversed or > 366-day windows → 400 |
+| GET | `/v1/health/nodes` | loopback probe aggregate per watched node (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `minMs`, `maxMs`, `consecutiveFailures`, `last`); `AJS_HEALTH_PROBE=0` → `{enabled:false,reason}`; `AJS_HEALTH_MAX_NODES` (default 16, 1–64) bounds the retained rings; `AJS_EGRESS_PROBE=1` adds an `egress` block per row (`state`, `count`, `ok`, `successRate`, `p50Ms`, `p95Ms`, `last`), otherwise `egress:{enabled:false,reason:"AJS_EGRESS_PROBE=0"}` |
 | GET | `/v1/webhooks` | persisted receivers plus `secretAvailable`; never the signing secret |
 | POST | `/v1/webhooks` | `{url,events?,description?,enabled?}` → 201 with the signing secret exactly once; `https` unless loopback or `AJS_WEBHOOK_ALLOW_HTTP=1`; non-private destination unless `AJS_WEBHOOK_ALLOW_PRIVATE=1`; max 32 endpoints |
 | PATCH | `/v1/webhooks/{id}` | `{enabled}` only; enabling a receiver whose secret is gone → 409 |
@@ -2111,6 +2238,19 @@ objects.
 | GET | `/v1/webhooks/{id}/deliveries` | delivery attempts for that endpoint, newest first: persisted rows (50 per endpoint, 500 total, survive a restart) merged with the live 200-attempt ring, deduped by delivery id; `?limit` defaults to 200 and is clamped to 500, a non-positive value → 400 |
 | GET | `/v1/events?since=&limit=&wait=` | retained customer events after `since`, oldest first: `{events,nextCursor,oldestCursor,dropped}`. `limit` defaults to 100 and is clamped to 500; `wait` (a Go duration, capped at 25 s) turns a current cursor into a long poll that answers as soon as the next event arrives. A malformed cursor → 400 `INVALID_ARGUMENT`; an evicted one → 410 `CURSOR_EXPIRED` with `details.oldestCursor`. Scope `events:read`; a key restricted by `accountIds`/`regions` → 403 |
 | GET | `/v1/events/stream` | `text/event-stream` replay plus live events: one `id:`/`event:`/`data:` frame each (data is the `Event` JSON object), resume from `Last-Event-ID` or `since`, a 15 s `: keepalive` comment, `X-Accel-Buffering: no`; closes when the client disconnects or the daemon stops. Scope `events:read` |
+| POST | `/v1/portal/signup` | `{email,password,displayName}` → 202 `{status:"pending"}`; a new and a duplicate canonical address return the same body and create no user, lease or key. Origin-checked and rate-limited per IP and address |
+| POST | `/v1/portal/login` | `{email,password}` → 200 `{tenant,user,csrfToken}` and `Set-Cookie: __Host-ajs_portal=…; Secure; HttpOnly; SameSite=Strict; Path=/`. Bad credentials → 401 `UNAUTHORIZED`; a verified pending/suspended tenant → 403 `FORBIDDEN` with no cookie |
+| GET | `/v1/portal/session` | `{tenant,user,csrfToken}` for the cookie session; `csrfToken` is returned again so a page reload can mutate. Missing/expired/revoked session → 401 |
+| POST | `/v1/portal/logout` | requires `X-CSRF-Token`; revokes this session, clears the cookie → 204 |
+| GET | `/v1/portal/leases` | only `Lease.UserID == tenant.userId`, filtered before pagination; `limit`/`offset` supported |
+| GET | `/v1/portal/usage?from=&to=` | `UsageSummary` over only the linked user's rows; `userId`/`account` query filters are ignored. Account budgets stay null; the user row carries the quota and monthly total |
+| GET | `/v1/portal/keys` | the linked user's `ApiKey[]` metadata, newest first; hashes and secrets are never serialized |
+| POST | `/v1/portal/keys` | `{label}` → 201 `{key,secret}`; the `ajs_live_` secret is shown once; at most ten active keys per tenant (over the cap → 429 `QUOTA_EXCEEDED`) |
+| DELETE | `/v1/portal/keys/{id}` | requires `X-CSRF-Token`; atomic ownership check, foreign/unknown id → 404, owner revoke is idempotent → 204 |
+| GET | `/v1/admin/tenants?status=&limit=&offset=` | admin list/filter by `pending`/`active`/`suspended` (admin token or scoped `admin` only) |
+| POST | `/v1/admin/tenants/{id}/approve` | `{userId}` XOR `{user:{…CreateUserInput}}`; binds exactly one user and activates atomically. Duplicate link → 409; the tenant stays pending on any failure |
+| POST | `/v1/admin/tenants/{id}/suspend` | disables the linked user and revokes the tenant's sessions plus every API/scoped key it owns in one commit; idempotent |
+| POST | `/v1/admin/tenants/{id}/resume` | re-enables the user; keys revoked by the suspension stay revoked |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
 | POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
 | POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1` (admin-only) |
@@ -2129,9 +2269,9 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 | `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete, a lease create refused as `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict` |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
 | `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals, not `/v1/*` errors: SOCKS5 `05 02`, and `429`/`403` on the HTTP CONNECT listener |
-| `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds) or a scoped key over its per-minute budget (`Retry-After` is one refill interval) |
-| `UNAUTHORIZED` | 401 | missing/wrong bearer token |
-| `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account |
+| `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds), a scoped key over its per-minute budget, or a portal IP/email/tenant bucket (`Retry-After` is one refill interval) |
+| `UNAUTHORIZED` | 401 | missing/wrong bearer token, or a missing/expired/revoked/unlinked portal session |
+| `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account; a portal request with a wrong/missing origin, CSRF token or non-active tenant |
 | `BACKUP_BUSY` | 409 | a backup or restore already holds the panel-file lock |
 | `BACKUP_LIVE_NODE` | 409 | a restore was asked for while a node is `LIVE`; `details` names the count and the first node |
 | `BACKUP_DAEMON_RUNNING` | 409 | an apply was asked for while the daemon runs and `AJS_BACKUP_ALLOW_RESTORE` is not `1` |
@@ -2157,8 +2297,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (79 paths, 98 operations,
-  153 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (91 paths, 111 operations,
+  163 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, or the route table in
@@ -2253,7 +2393,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **815 `func Test` functions across 104 `_test.go` files** (recounted 2026-10-25);
+The tree holds **881 `func Test` functions across 113 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -2411,6 +2551,31 @@ is described under [HTTP CONNECT listener](#http-connect-listener-ajs-271).
 IP and CIDR accepted and normalized, duplicates collapsed, scheme/port/bracket refusals, the
 64-entry cap) and the derived `usedBytes` that `/v1/usage` reports. `internal/api/flows_test.go`
 adds the end-to-end row: a real gate flow served through `/v1/lab/flows`.
+
+The tenant and egress wave adds its own files. `internal/api/portal_test.go` covers signup's
+uniform 202 and its no-side-effect contract, pending/suspended login refusal, the active cookie
+session, logout revocation across a restart, CSRF and origin enforcement, own-data
+leases/usage/keys, the ambiguous-row usage refusal, atomic and exclusive approval, suspend/resume,
+the identity boundaries (a portal cookie cannot administer tenants, and `AJS_ALLOW_INSECURE=1`
+does not bypass either chain), the per-IP and per-email signup/login buckets and their isolation
+from the scoped-key limiter, the ten-key cap, the
+64 KiB body bound, no store secret in the session view, `AJS_TENANT_ORIGIN` normalization,
+`AJS_TRUSTED_PROXIES` parsing and the proxy-only `X-Forwarded-For` read.
+`internal/store/tenants_test.go` pins pending/idempotent signup, the status matrix, the exclusive
+approval bind, the eight-hour/thirty-minute session lifecycle and its per-tenant cap, revocation
+surviving a restore, suspend/resume revocation, key ownership and cap, per-row quarantine of
+broken tenants, and a pre-portal snapshot loading with zero tenants.
+`internal/health/egress_test.go` covers the sampler (defaults and target validation, a probe
+through a real gate, non-2xx and redirect classification, timeout and refused gate, no probe
+without a watch, unwatch dropping the window, ring bounds, aggregation/state and stop joining
+probes); `internal/api/health_egress_test.go` pins the `egress` block shape, the disabled reason,
+the empty window and a monitor without the seam; `cmd/ajs-accountd/egress_env_test.go` pins
+`AJS_EGRESS_PROBE`, `AJS_EGRESS_INTERVAL`, the redacted target log and the tracker arming both
+samplers. `internal/webhook/events_lease_test.go` and
+`cmd/ajs-accountd/lease_events_test.go` pin the three lease event types in the catalogue, the
+credential-free payload and the sweep → sink path. `internal/store/usage_durability_test.go`
+pins the durable monthly counters across request-log eviction, a snapshot roundtrip, a month
+rollover and a legacy snapshot rebuilt from its current-month gate rows.
 
 `internal/runtime/panel_test.go` drives the real client and publisher against a
 fake Resin admin server (`httptest`) with a fake clock. It asserts the exact

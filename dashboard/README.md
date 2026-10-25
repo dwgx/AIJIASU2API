@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 400 tests in 44 files.
+- Tests: Vitest + React Testing Library + jsdom, 423 tests in 45 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 400 tests in 44 files
+npm test           # Vitest, 423 tests in 45 files
 npm run typecheck  # tsc -b
 ```
 
@@ -387,6 +387,13 @@ daemon's 30 s cadence), pause while the tab is hidden, and stop polling when the
   pills; the card badge counts them.
 - **Compact.** State counts plus the worst node, its success rate and a sparkline built from the
   page's own successive polls (two samples minimum), with a link to `/nodes`.
+- **Egress.** When the daemon runs the through-gate sampler (`AJS_EGRESS_PROBE=1`), the full
+  panel adds an **Egress through gate** card: one row per watched node with the egress state,
+  p50, p95, success rate and the newest failure (`timeout`, `refused`, `unreachable`, `proxy`,
+  `http` with its status, or `other`). A node with no sample yet reads `waiting`, never `ok`.
+  `egress.enabled:false` shows **Egress sampling is off** with the daemon reason
+  (`AJS_EGRESS_PROBE=0`) and no table; a daemon that omits `egress` entirely renders no card. The
+  compact variant stays loopback-only.
 - **Honesty.** A failed poll keeps the last good table with the stale marker; `enabled:false`
   shows the daemon's reason (`AJS_HEALTH_PROBE=0`) instead of an empty table; an empty sampler
   explains that no gate is being watched. The sampler keeps at most `AJS_HEALTH_MAX_NODES` node
@@ -497,7 +504,9 @@ and seed rows — so the numbers reset with the request log's 10 000-row retenti
   row is written per account per hour. When any visible account has a budget the daemon sends
   `quotaEnforced:true`, the user table labels its quota column **Quota** instead of **Budget
   (advisory)**, and the account table adds a monthly meter (`trafficBudgetBytes` against
-  `usedBytes`) with the remaining headroom. User quotas are advisory under the default no-auth
+  `usedBytes`) with the remaining headroom. `usedBytes` is the daemon's durable current-month
+  counter, not a sum over the retained rows, so evicting old request rows never lowers the meter
+  or renews a budget. User quotas are advisory under the default no-auth
   loopback gate, because such a flow carries no user identity; with `AJS_GATE_AUTH=userpass` the
   gate authenticates the panel user, refuses a flow at the user's monthly quota, and the metered
   row advances the same per-user total.
@@ -834,13 +843,16 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   survive a daemon restart; the default page is 200 and a larger limit is clamped to 500.
   The dashboard never invents an attempt.
 - **Events.** The subscription list is the daemon's closed catalogue: `account.login`,
-  `account.logout`, `account.expired`, `account.renewal_due`, `node.connected`,
-  `node.disconnected`, `node.switched`, `schedule.fired`, `schedule.failed`, `device.retired`,
-  `audit.critical`. All eleven are emitted: the account actions produce login/logout,
-  `node.*` comes from the node controller, `schedule.fired`/`schedule.failed` follow a recorded
-  run, `account.renewal_due`/`account.expired` come from the once-per-local-day renewal sweep,
-  `device.retired` follows a retire, and `audit.critical` is emitted for every critical audit row
-  (the webhook's own `webhook.*` audit rows are skipped so a delivery cannot re-emit itself).
+  `account.logout`, `account.expired`, `account.renewal_due`, `lease.created`,
+  `lease.revoked`, `lease.expired`, `node.connected`, `node.disconnected`,
+  `node.switched`, `schedule.fired`, `schedule.failed`, `device.retired`,
+  `audit.critical`. All fourteen are emitted: the account actions produce login/logout,
+  the lease create/revoke handlers and the expiry sweep produce the three `lease.*`
+  events, `node.*` comes from the node controller, `schedule.fired`/`schedule.failed`
+  follow a recorded run, `account.renewal_due`/`account.expired` come from the
+  once-per-local-day renewal sweep, `device.retired` follows a retire, and
+  `audit.critical` is emitted for every critical audit row (the webhook's own
+  `webhook.*` audit rows are skipped so a delivery cannot re-emit itself).
 - **Signature.** Every delivery carries `X-APC-Event`, `X-APC-Delivery`, `X-APC-Timestamp` and
   `X-APC-Signature`. The receiver-side recipe — exact formula, raw-body rule, 5-minute timestamp
   tolerance and Node/Go snippets — is in
@@ -850,7 +862,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 400 Vitest tests in 44 files (65 at the 2026-10-23 record; see
+- 423 Vitest tests in 45 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -896,6 +908,14 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   deliveries drawer (newest-first rows, the 50-row page and the last-delivery read from index 0).
   `tests/platform-client.test.ts` pins the client contract for renewal, usage,
   health and webhooks (live URL/query/method/bearer header and deterministic mock data).
+  `tests/portal.test.tsx` covers the customer portal: the client sends `credentials:"include"`
+  with the `X-CSRF-Token` header on unsafe calls and never a bearer, maps 401/429 without
+  persisting the token, keeps leases/usage/keys scoped to the signed-in tenant in mock parity,
+  issues a show-once secret and revokes only owned keys, refuses pending and suspended logins,
+  keeps signup pending-only, signs in and writes nothing to Web Storage, rejects bad credentials
+  with one message, validates the signup form before calling the daemon, redirects a visitor
+  without a session, renders own leases, usage tiles and the zero-filled chart, and renders the
+  portal in Chinese.
   `tests/lab.test.tsx` covers the Lab page: overview posture badges and effective flags (a secret
   value never reaches the DOM), gate counters plus redacted session SIDs, the `enabled:false`
   bodies for gates/sessions and egress, servers/protocol/device tabs, log pause/resume and
@@ -993,6 +1013,39 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `screenshots/toast.png` | `/leases` → first **Copy** → toast `Proxy URL copied` |
 | `screenshots/mobile-nav.png` | 390×844 → **Open navigation** → sidebar drawer |
 
+## Customer portal
+
+`/portal/*` is a second, customer-facing surface in the same bundle, served without the operator
+shell, the admin navigation or the panel token gate (`src/pages/portal/`, `src/lib/portal-api.ts`).
+It is the console's half of the daemon's tenant chain: a live build needs `AJS_TENANT_PORTAL=1` plus
+`AJS_TENANT_ORIGIN` on the daemon, and without the flag every `/v1/portal/*` call is a 404 and each
+page shows its failure state. Mock mode is always exercisable and seeds one active tenant (linked
+to `u-01`), one pending applicant and one suspended tenant.
+
+- **Routes.** `/portal/login`, `/portal/signup`, `/portal/pending` and `/portal` (tabs **Leases**,
+  **Usage**, **Keys**); any other `/portal/*` path redirects to `/portal`. A visitor without a
+  session (401) is redirected to the login page; a 403 renders the suspended/not-allowed message
+  instead of an empty panel.
+- **Session.** The client sends `credentials:"include"` and never a bearer token, and it writes no
+  token to `localStorage` or `sessionStorage`. The cookie is the daemon's `__Host-ajs_portal`
+  (`Secure; HttpOnly; SameSite=Strict; Path=/`); the CSRF token from login (or from
+  `GET /v1/portal/session` after a reload) lives in memory for the tab and is replayed as
+  `X-CSRF-Token` on every unsafe call (logout, key issue, key revoke).
+- **Signup and approval.** Signup posts email, display name and a password, then shows the pending
+  page — it creates no user, lease or key, and a duplicate address gets the same 202. The form's
+  local minimum is 10 characters while the daemon requires 12, so a 10–11 character password
+  passes the form and is refused by the server. The daemon answers a pending or suspended tenant
+  with a 403 and no cookie (bad credentials are a uniform 401), and the UI shows one shared
+  inactive-tenant message. Approval, suspension and resume
+  stay in the operator API (`/v1/admin/tenants*`), never in the portal.
+- **Own data.** Leases show the linked user's rows only (platform, node, gate, status, expiry,
+  requests, bytes); Usage offers 7/30/90-day windows with tiles and a zero-filled daily chart over
+  the tenant's rows; Keys lists metadata only, issues a key with a show-once secret and revokes
+  after a confirmation. The daemon's per-IP, per-address and per-tenant buckets answer 429 with
+  `Retry-After`, which the page surfaces as a wait-in-seconds message.
+- **Copy.** Errors are stable portal strings rather than daemon messages: one credential refusal,
+  one rate-limit line, one unavailable line and one generic failure, in both languages.
+
 ## Routes
 
 | Route | Page | Primary surfaces |
@@ -1010,6 +1063,10 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
 | `/settings` | Settings | nine-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Access, Audit; dirty save/reset, honest **Stored only**/**Coming later** states; Integrations carries the live webhook registry and Access the scoped-key manager |
 | `/backup` | Backup | create a passphrase-sealed `.ajsb` envelope and download it, inspect a pasted/uploaded envelope header plus manifest, and dry-run a restore diff; apply stays disabled with the `AJS_BACKUP_ALLOW_RESTORE`/no-LIVE-node explanation |
+| `/portal/login` | Portal sign in | email/password against `/v1/portal/login`, one uniform credential message, pending/suspended refusal, rate-limit copy with `Retry-After`, link to signup |
+| `/portal/signup` | Portal signup | name, email, password + confirmation with local validation, then the pending page; no session is issued |
+| `/portal/pending` | Portal pending | the application-received state and the operator-approval explanation |
+| `/portal` | Portal dashboard | standalone customer shell: **Leases**, **Usage** (7/30/90 days, zero-filled chart), **Keys** (issue with show-once secret, revoke confirm); redirects to login without a session |
 
 `*` redirects to `/`.
 
@@ -1017,7 +1074,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 
 ```text
 src/
-  App.tsx                 lazy routes for all 13 pages
+  App.tsx                 lazy routes: 13 operator pages under the admin shell + 4 portal routes
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
@@ -1025,6 +1082,7 @@ src/
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows · 7 device-pool records
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
     api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
+    portal-api.ts         tenant client: cookie session, in-memory CSRF, mock tenants, PortalError
     nodes.ts              catalog query state + region grouping + client-side geo filters
     geo.ts                offline province/city resolution and map aggregation
     format.ts             bytes, dates, TTL, proxy URL helpers
@@ -1050,6 +1108,7 @@ src/
     usage/                UsageChart
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
   pages/                  Overview, Usage, Accounts, Nodes, Leases, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
+  pages/portal/           PortalLogin, PortalSignup, PortalPending, PortalDashboard, PortalLeases, PortalUsage, PortalKeys, PortalFrame
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   a11y-mobile.test.tsx    icon-only names, skip link, scroll regions, 390 px row cards, touch targets
@@ -1096,6 +1155,7 @@ tests/
   health-panel.test.tsx   health states, compact/full variants, disabled reason, stale poll
   webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
   platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
+  portal.test.tsx         portal client cookie/CSRF contract, mock tenant scoping, signup/pending, own-data UI, zh
 ```
 
 ### Accounts views
