@@ -29,6 +29,7 @@ describe('app shell', () => {
     const pages: Array<[string, string]> = [
       ['Accounts', 'Accounts'],
       ['Nodes', 'Nodes'],
+      ['Operations', 'Operations'],
       ['Leases', 'Leases'],
       ['Users', 'Users'],
       ['Requests', 'Requests'],

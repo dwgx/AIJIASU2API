@@ -1,18 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../../lib/api'
+import type { EventStreamHandle } from '../../lib/api'
 import { formatDateTimeSeconds, formatTime } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
-import type { EventRecord, EventsPage } from '../../lib/types'
+import type { EventRecord, EventStreamState } from '../../lib/types'
 import { Badge, Card } from '../primitives'
 import './EventsFeed.css'
 
-/** Rows the panel keeps; the daemon page size matches it so one poll can fill it. */
+/** Rows the panel keeps; a cold cursor may replay the daemon's whole ring. */
 const MAX_EVENTS = 100
-/** The server caps a long poll below its 120 s write timeout. */
-const LONG_POLL_WAIT = '20s'
-/** A long poll already waited server-side; an empty answer just polls again. */
-const EMPTY_RETRY_MS = 1_000
-const ERROR_RETRY_MS = 3_000
 const MAX_DATA_KEYS = 3
 const MAX_DATA_VALUE = 64
 
@@ -50,103 +46,91 @@ function fullEventData(data?: Record<string, unknown>): string {
 }
 
 /**
- * Live event feed for the Logs page. It replays the daemon ring from the last
- * cursor, then long-polls /v1/events. A hidden tab aborts the in-flight poll
- * and resumes from the same cursor when it becomes visible again; the newest
- * 100 events are kept, and the daemon's dropped counter is surfaced verbatim.
+ * Live event feed for the Logs page. It consumes /v1/events/stream through the
+ * SSE client in `api`: the daemon replays from the last event id, then streams
+ * live frames, and the client reconnects with exponential backoff from that
+ * same cursor. A hidden tab closes the stream and reopens it from the cursor
+ * when visible again. The newest 100 events are kept.
  */
 export function EventsFeed() {
   const { t } = useI18n()
   const [events, setEvents] = useState<EventRecord[]>([])
-  const [dropped, setDropped] = useState(0)
-  const [error, setError] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState(false)
   const [paused, setPaused] = useState(false)
+  const [streamState, setStreamState] = useState<EventStreamState>('connecting')
+  const [retryInSec, setRetryInSec] = useState<number | null>(null)
   const cursorRef = useRef('')
-  const runningRef = useRef(false)
-  const timerRef = useRef<number | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
+  const handleRef = useRef<EventStreamHandle | null>(null)
 
   useEffect(() => {
-    const clearTimer = () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current)
-        timerRef.current = null
-      }
-    }
+    let disposed = false
 
-    const applyPage = (page: EventsPage) => {
-      setLoaded(true)
-      setDropped(page.dropped)
-      setError(null)
-      if (page.events.length > 0) {
-        cursorRef.current = page.nextCursor || page.events[page.events.length - 1].id
-        setEvents((current) => {
-          const seen = new Set(current.map((event) => event.id))
-          const fresh = page.events.filter((event) => !seen.has(event.id)).reverse()
-          return fresh.length > 0 ? fresh.concat(current).slice(0, MAX_EVENTS) : current
-        })
-      } else if (page.nextCursor) {
-        cursorRef.current = page.nextCursor
-      }
-    }
-
-    const poll = async () => {
-      if (!runningRef.current) return
-      const controller = new AbortController()
-      abortRef.current = controller
-      try {
-        const page = await api.listEvents(
-          { since: cursorRef.current, wait: LONG_POLL_WAIT, limit: MAX_EVENTS },
-          { signal: controller.signal },
-        )
-        if (!runningRef.current || controller.signal.aborted) return
-        applyPage(page)
-        timerRef.current = window.setTimeout(
-          () => void poll(),
-          page.events.length > 0 ? 0 : EMPTY_RETRY_MS,
-        )
-      } catch (cause) {
-        if (!runningRef.current || controller.signal.aborted) return
-        setLoaded(true)
-        setError(cause instanceof Error ? cause.message : t('events.failed'))
-        timerRef.current = window.setTimeout(() => void poll(), ERROR_RETRY_MS)
-      }
-    }
-
-    const start = () => {
-      if (runningRef.current) return
-      runningRef.current = true
-      void poll()
-    }
-
-    const stop = () => {
-      runningRef.current = false
-      abortRef.current?.abort()
-      abortRef.current = null
-      clearTimer()
+    const connect = () => {
+      if (disposed) return
+      handleRef.current?.close()
+      handleRef.current = api.subscribeEvents({
+        since: cursorRef.current,
+        onEvent: (event) => {
+          if (disposed) return
+          cursorRef.current = event.id
+          setEvents((current) => {
+            if (current.some((row) => row.id === event.id)) return current
+            return [event, ...current].slice(0, MAX_EVENTS)
+          })
+        },
+        onState: (state, info) => {
+          if (disposed) return
+          setStreamState(state)
+          setRetryInSec(
+            info?.retryInMs ? Math.max(1, Math.ceil(info.retryInMs / 1_000)) : null,
+          )
+        },
+      })
     }
 
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
         setPaused(true)
-        stop()
-      } else {
-        setPaused(false)
-        start()
+        setStreamState('paused')
+        handleRef.current?.close()
+        handleRef.current = null
+        return
       }
+      setPaused(false)
+      setStreamState('connecting')
+      connect()
     }
 
     const hidden = document.visibilityState === 'hidden'
     setPaused(hidden)
-    if (hidden) stop()
-    else start()
+    if (hidden) setStreamState('paused')
+    else connect()
     document.addEventListener('visibilitychange', onVisibility)
+
     return () => {
+      disposed = true
       document.removeEventListener('visibilitychange', onVisibility)
-      stop()
+      handleRef.current?.close()
+      handleRef.current = null
     }
-  }, [t])
+  }, [])
+
+  const badgeTone = paused
+    ? 'neutral'
+    : streamState === 'live'
+      ? 'success'
+      : streamState === 'offline'
+        ? 'danger'
+        : 'warning'
+  const badgeKey = paused
+    ? 'events.paused'
+    : streamState === 'live'
+      ? 'events.live'
+      : streamState === 'offline'
+        ? 'events.offline'
+        : streamState === 'connecting'
+          ? 'events.connecting'
+          : 'events.reconnecting'
+  const disconnected = streamState === 'reconnecting' || streamState === 'offline'
 
   return (
     <Card
@@ -154,26 +138,24 @@ export function EventsFeed() {
       subtitle={t('events.subtitle')}
       actions={
         <div className="events-feed__meta">
-          {dropped > 0 ? (
-            <Badge tone="warning">{t('events.dropped', { count: dropped })}</Badge>
-          ) : null}
-          <Badge tone={paused ? 'neutral' : error ? 'warning' : 'success'}>
-            {t(paused ? 'events.paused' : error ? 'events.reconnecting' : 'events.live')}
-          </Badge>
+          <Badge tone={badgeTone}>{t(badgeKey)}</Badge>
           <span className="events-feed__count">
             {t('events.count', { count: events.length, max: MAX_EVENTS })}
           </span>
         </div>
       }
     >
-      {error ? (
+      {disconnected ? (
         <p className="form-error" role="alert">
-          {error}
+          {t('events.streamError')}
+          {retryInSec !== null ? ` ${t('events.retryIn', { seconds: retryInSec })}` : ''}
         </p>
       ) : null}
       {events.length === 0 ? (
         <p className="events-feed__empty">
-          {error ? t('events.failed') : t(loaded ? 'events.empty' : 'events.loading')}
+          {t(streamState === 'connecting' || streamState === 'reconnecting'
+            ? 'events.loading'
+            : 'events.empty')}
         </p>
       ) : (
         <ul className="events-feed__list" aria-label={t('events.listLabel')}>

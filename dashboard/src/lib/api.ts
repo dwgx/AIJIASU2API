@@ -94,8 +94,10 @@ import type {
   DisconnectResult,
   EgressCheckResult,
   EgressView,
+  EventRecord,
   EventsPage,
   EventsQuery,
+  EventStreamState,
   FlowsView,
   GateView,
   HealthView,
@@ -111,6 +113,8 @@ import type {
   MutationLabInput,
   NodeHealth,
   NodeState,
+  Operation,
+  OperationQuery,
   Order,
   PanelSettings,
   PanelUser,
@@ -132,6 +136,9 @@ import type {
   ScheduleTrigger,
   SchedulesPayload,
   ScopedKey,
+  SelectNodeInput,
+  SelectNodeResponse,
+  SelectNodeResult,
   ScopedKeyCreateInput,
   ScopedKeyCreated,
   ServerCatalogQuery,
@@ -2128,6 +2135,406 @@ function mockWebhookDeliveries(id: string, query: WebhookDeliveriesQuery): Deliv
   return clone(query.limit === undefined ? rows : rows.slice(0, query.limit))
 }
 
+/* --------------------------------------------------------------------------
+ * Operations — mock of daemon/internal/api/operations.go
+ *
+ * The mock keeps the same observable contract: a target is validated before
+ * any record exists, a second queued/running operation for the account is
+ * refused, and the queued record advances on each GET (queued → running →
+ * terminal). Advancing on read keeps tests deterministic: no background timer
+ * mutates the store between assertions.
+ * ------------------------------------------------------------------------ */
+
+function isActiveOperation(operation: Operation): boolean {
+  return operation.state === 'queued' || operation.state === 'running'
+}
+
+function mockLiveNode(accountId: string): ProxyNode | undefined {
+  return getDb().nodes.find(
+    (node) => node.accountId === accountId && node.state === 'LIVE',
+  )
+}
+
+function mockListOperations(query: OperationQuery = {}): Operation[] {
+  const limit = Math.min(200, Math.max(1, Math.trunc(query.limit ?? 50)))
+  const rows = getDb().operations.filter((operation) => {
+    if (query.accountId && operation.accountId !== query.accountId) return false
+    if (query.state && operation.state !== query.state) return false
+    if (query.type && operation.type !== query.type) return false
+    return true
+  })
+  return clone(rows.slice(0, limit))
+}
+
+/** Applies the next transition of a mock operation; terminal rows are untouched. */
+function mockAdvanceOperation(operation: Operation): void {
+  if (!isActiveOperation(operation)) return
+  const now = Date.now()
+  if (operation.state === 'queued') {
+    operation.state = 'running'
+    operation.startedAt = new Date(now).toISOString()
+    return
+  }
+  const serverId = operation.target.serverId ?? ''
+  const previous = mockLiveNode(operation.accountId)
+  try {
+    const result = mockConnect(operation.accountId, serverId, now, 'connect')
+    operation.state = 'succeeded'
+    operation.steps = [
+      ...operation.steps,
+      { name: 'switch', state: 'ok', durationMs: result.durationMs },
+    ]
+    operation.result = {
+      changed: !result.alreadyConnected,
+      accountId: result.accountId,
+      nodeId: result.nodeId,
+      serverId: result.serverId,
+      gatePort: result.gatePort,
+      egressIp: result.egressIp,
+      sessionHealthy: true,
+      ...(previous && previous.id !== result.nodeId ? { previousNodeId: previous.id } : {}),
+      durationMs: result.durationMs,
+      ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+    }
+  } catch (cause) {
+    operation.state = 'failed'
+    operation.steps = [
+      ...operation.steps,
+      { name: 'switch', state: 'failed', durationMs: 0 },
+    ]
+    operation.error = {
+      code: cause instanceof ApiError ? cause.code ?? 'INTERNAL' : 'INTERNAL',
+      message: cause instanceof Error ? cause.message : 'the guarded switch failed',
+    }
+  }
+  operation.finishedAt = new Date(now).toISOString()
+}
+
+function mockGetOperation(id: string): Operation {
+  const operation = getDb().operations.find((candidate) => candidate.id === id)
+  if (!operation) throw new ApiError(404, 'operation not found', 'NOT_FOUND')
+  mockAdvanceOperation(operation)
+  return clone(operation)
+}
+
+function mockSelectNode(accountId: string, input: SelectNodeInput): SelectNodeResponse {
+  const now = Date.now()
+  const db = getDb()
+  if (!db.accounts.some((account) => account.id === accountId)) {
+    throw mockCatalogError(404, null, `account ${accountId} not found`)
+  }
+  const ifCurrent = input.ifCurrent ?? 'noop'
+  if (!['noop', 'error', 'reselect'].includes(ifCurrent)) {
+    throw mockCatalogError(400, null, 'ifCurrent must be one of noop, error, reselect')
+  }
+  const timeout = input.timeoutSeconds ?? 60
+  if (!Number.isFinite(timeout) || timeout < 10 || timeout > 120) {
+    throw mockCatalogError(400, null, 'timeoutSeconds must be between 10 and 120')
+  }
+  const requested = input.target
+  const forms = [requested?.serverId, requested?.nodeId, requested?.region].filter(
+    (value) => (value ?? '').trim() !== '',
+  ).length
+  if (requested && forms !== 1) {
+    throw mockCatalogError(400, null, 'target must name exactly one of serverId, nodeId, region')
+  }
+  if (!requested && forms === 0) {
+    const selection = mockSelections.get(accountId)
+    if (!selection) throw mockCatalogError(400, null, 'target is required when the account has no selection')
+    return mockSelectNode(accountId, { ...input, target: { serverId: selection.serverId } })
+  }
+
+  let serverId = (requested?.serverId ?? '').trim()
+  let nodeId = (requested?.nodeId ?? '').trim()
+  const region = (requested?.region ?? '').trim().toLowerCase()
+  const strategy = (requested?.strategy ?? '').trim().toLowerCase() || 'next'
+  if (region && strategy !== 'next' && strategy !== 'first') {
+    throw mockCatalogError(400, null, 'strategy must be next or first')
+  }
+  if (!serverId && nodeId) {
+    const node = db.nodes.find(
+      (candidate) => candidate.accountId === accountId && candidate.id === nodeId,
+    )
+    if (!node) throw mockCatalogError(404, null, 'node is not in the account')
+    serverId = node.label
+  }
+  if (!serverId && region) {
+    const page = buildAccountServers(db, accountId, now, { offset: 0, limit: 500 })
+    const candidates = page.servers
+      .filter((server) => server.region.toLowerCase() === region && server.nodeState !== 'LIVE')
+      .sort((left, right) => left.id.localeCompare(right.id))
+    if (candidates.length === 0) {
+      throw mockCatalogError(409, 'NO_ALTERNATE_SERVER', 'no other eligible server exists in the requested region')
+    }
+    serverId = strategy === 'first' ? candidates[0]!.id : candidates[candidates.length - 1]!.id
+    nodeId = candidates.find((server) => server.id === serverId)?.nodeId ?? ''
+  }
+  if (!serverId) throw mockCatalogError(400, null, 'serverId is required')
+
+  const { server } = mockCatalogTarget(accountId, serverId, now)
+  const current = mockLiveNode(accountId)
+  if (current && current.label === serverId) {
+    if (ifCurrent === 'noop') {
+      return {
+        kind: 'result',
+        result: {
+          changed: false,
+          accountId,
+          nodeId: current.id,
+          serverId,
+          gatePort: current.gatePort,
+          egressIp: current.egressIp,
+          sessionHealthy: true,
+          durationMs: 2,
+        },
+      }
+    }
+    if (ifCurrent === 'error') {
+      throw mockCatalogError(409, 'ALREADY_CURRENT', 'account is already on the requested server')
+    }
+    const page = buildAccountServers(db, accountId, now, { offset: 0, limit: 500 })
+    const alternate = page.servers
+      .filter(
+        (candidate) =>
+          candidate.region === server.region &&
+          candidate.id !== serverId &&
+          candidate.nodeState !== 'DOWN',
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))[0]
+    if (!alternate) {
+      throw mockCatalogError(409, 'NO_ALTERNATE_SERVER', 'no other eligible server exists in the requested region')
+    }
+    serverId = alternate.id
+    nodeId = alternate.nodeId ?? ''
+  }
+
+  const busy = db.operations.find(
+    (operation) => operation.accountId === accountId && isActiveOperation(operation),
+  )
+  if (busy) {
+    throw mockCatalogError(409, 'ACCOUNT_BUSY', 'another operation is in progress for this account', {
+      currentOperationId: busy.id,
+    })
+  }
+  const operation: Operation = {
+    id: `op-${String(++db.operationSeq).padStart(4, '0')}`,
+    type: current ? 'account.switch' : 'account.connect',
+    state: 'queued',
+    accountId,
+    target: {
+      serverId,
+      ...(nodeId ? { nodeId } : {}),
+      ...(region ? { region, strategy } : {}),
+    },
+    requestedBy: 'operator',
+    createdAt: new Date(now).toISOString(),
+    startedAt: '',
+    finishedAt: '',
+    steps: [{ name: 'validate', state: 'ok', durationMs: 3 }],
+    result: null,
+    error: null,
+  }
+  db.operations.unshift(operation)
+  return { kind: 'operation', operation: clone(operation) }
+}
+
+/* --------------------------------------------------------------------------
+ * Server-sent events — GET /v1/events/stream
+ *
+ * The browser EventSource cannot set an Authorization header, so a live build
+ * that bakes VITE_PANEL_TOKEN still needs a same-origin proxy (or the loopback
+ * insecure daemon) for this stream. The daemon's 15 s keepalive comment keeps
+ * proxies from closing an idle connection.
+ * ------------------------------------------------------------------------ */
+
+export interface EventStreamInfo {
+  /** Consecutive failed attempts since the last successful open. */
+  attempt: number
+  /** Delay before the next attempt; absent once the stream is open. */
+  retryInMs?: number
+  /** Cursor the next attempt will resume from (empty after a cursor reset). */
+  lastEventId: string
+}
+
+export interface EventStreamOptions {
+  /** Builds the stream URL for a cursor; called on every (re)connect. */
+  url: (since: string) => string
+  onEvent: (event: EventRecord) => void
+  onState?: (state: EventStreamState, info?: EventStreamInfo) => void
+  /** Test seam; defaults to the browser EventSource. */
+  eventSourceFactory?: (url: string) => EventSource
+  /** Defaults to true; false reports `offline` after the first failure. */
+  reconnect?: boolean
+  initialRetryMs?: number
+  maxRetryMs?: number
+  /** Drop the cursor after this many consecutive failures (expired ring). */
+  resetCursorAfter?: number
+}
+
+export interface EventStreamHandle {
+  close: () => void
+  lastEventId: () => string
+}
+
+export interface SubscribeEventsOptions {
+  /** Last event id to resume from; empty replays the retained ring from oldest. */
+  since?: string
+  onEvent: (event: EventRecord) => void
+  onState?: (state: EventStreamState, info?: EventStreamInfo) => void
+  /** Test seam; when set, the live EventSource client is used even in mock mode. */
+  eventSourceFactory?: (url: string) => EventSource
+}
+
+const EVENT_STREAM_INITIAL_RETRY_MS = 1_000
+const EVENT_STREAM_MAX_RETRY_MS = 15_000
+const EVENT_STREAM_RESET_CURSOR_AFTER = 5
+
+function eventStreamUrl(since: string): string {
+  const params = new URLSearchParams()
+  if (since) params.set('since', since)
+  const search = params.toString()
+  return `${API_BASE}/v1/events/stream${search ? `?${search}` : ''}`
+}
+
+/**
+ * Owns one EventSource at a time. The browser's built-in retry is disabled by
+ * closing the source on error: the replacement URL carries the last event id
+ * as `since`, so a reconnect resumes without a gap. Backoff doubles up to
+ * `maxRetryMs`; after `resetCursorAfter` failures the cursor is dropped, which
+ * recovers from a restarted or evicted ring instead of looping on a 400/410.
+ */
+export function openEventStream(options: EventStreamOptions): EventStreamHandle {
+  const factory = options.eventSourceFactory ?? ((url: string) => new EventSource(url))
+  const reconnect = options.reconnect !== false
+  const initialRetryMs = options.initialRetryMs ?? EVENT_STREAM_INITIAL_RETRY_MS
+  const maxRetryMs = options.maxRetryMs ?? EVENT_STREAM_MAX_RETRY_MS
+  const resetCursorAfter = options.resetCursorAfter ?? EVENT_STREAM_RESET_CURSOR_AFTER
+  let source: EventSource | null = null
+  let timer: number | null = null
+  let closed = false
+  let lastId = ''
+  let attempts = 0
+
+  const emitState = (state: EventStreamState, info?: Partial<EventStreamInfo>) => {
+    if (closed) return
+    options.onState?.(state, { attempt: attempts, lastEventId: lastId, ...info })
+  }
+
+  const handleMessage = (message: MessageEvent) => {
+    if (closed) return
+    const wireId = typeof message.lastEventId === 'string' ? message.lastEventId : ''
+    if (wireId) lastId = wireId
+    let event: EventRecord
+    try {
+      event = JSON.parse(String(message.data)) as EventRecord
+    } catch {
+      return
+    }
+    if (!event || typeof event.id !== 'string' || typeof event.type !== 'string') return
+    if (event.id) lastId = event.id
+    options.onEvent(event)
+  }
+
+  const detach = () => {
+    if (!source) return
+    source.onopen = null
+    source.onerror = null
+    source.onmessage = null
+    for (const type of WEBHOOK_EVENTS) {
+      source.removeEventListener(type, handleMessage as EventListener)
+    }
+    source.close()
+    source = null
+  }
+
+  const scheduleReconnect = () => {
+    if (closed) return
+    if (!reconnect) {
+      emitState('offline')
+      return
+    }
+    attempts += 1
+    if (attempts > resetCursorAfter) lastId = ''
+    const retryInMs = Math.min(initialRetryMs * 2 ** (attempts - 1), maxRetryMs)
+    emitState('reconnecting', { retryInMs })
+    timer = window.setTimeout(() => {
+      timer = null
+      connect(false)
+    }, retryInMs)
+  }
+
+  const connect = (initial: boolean) => {
+    if (closed) return
+    detach()
+    let next: EventSource
+    try {
+      next = factory(options.url(lastId))
+    } catch {
+      scheduleReconnect()
+      return
+    }
+    source = next
+    next.onopen = () => {
+      if (closed) return
+      attempts = 0
+      emitState('live')
+    }
+    next.onerror = () => {
+      if (closed) return
+      detach()
+      scheduleReconnect()
+    }
+    next.onmessage = handleMessage
+    for (const type of WEBHOOK_EVENTS) {
+      next.addEventListener(type, handleMessage as EventListener)
+    }
+    emitState(initial ? 'connecting' : 'reconnecting')
+  }
+
+  connect(true)
+
+  return {
+    close() {
+      closed = true
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      detach()
+    },
+    lastEventId: () => lastId,
+  }
+}
+
+/** Deterministic mock transport: replay the retained ring, then stay open. */
+function mockEventStream(options: SubscribeEventsOptions): EventStreamHandle {
+  let closed = false
+  let lastId = options.since?.trim() ?? ''
+  let page: EventsPage
+  try {
+    page = mockEventsPage({ since: lastId, limit: 100 })
+  } catch {
+    // A cursor from a previous mock dataset is not retained; restart from the
+    // oldest event exactly as the SSE client does after a cursor reset.
+    lastId = ''
+    page = mockEventsPage({ limit: 100 })
+  }
+  for (const event of page.events) {
+    if (closed) break
+    lastId = event.id
+    options.onEvent(event)
+  }
+  if (!closed) {
+    options.onState?.('live', { attempt: 0, lastEventId: lastId })
+  }
+  return {
+    close() {
+      closed = true
+    },
+    lastEventId: () => lastId,
+  }
+}
+
 export const api = {
   async listAccounts(): Promise<Account[]> {
     if (!USE_MOCK) return http<Account[]>('/v1/accounts')
@@ -2645,6 +3052,70 @@ export const api = {
     await wait()
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     return clone(mockEventsPage(query))
+  },
+
+  /**
+   * Opens the daemon's SSE stream. Live mode owns one EventSource and
+   * reconnects from the last event id; mock mode replays the deterministic
+   * ring and stays open. A test may pass `eventSourceFactory` to exercise the
+   * live reconnect path in mock mode.
+   */
+  subscribeEvents(options: SubscribeEventsOptions): EventStreamHandle {
+    if (!USE_MOCK || options.eventSourceFactory) {
+      return openEventStream({
+        url: eventStreamUrl,
+        onEvent: options.onEvent,
+        onState: options.onState,
+        eventSourceFactory: options.eventSourceFactory,
+      })
+    }
+    return mockEventStream(options)
+  },
+
+  /**
+   * GET /v1/operations — durable operations, newest first. The page polls this
+   * only while at least one returned record is queued or running.
+   */
+  async listOperations(query: OperationQuery = {}): Promise<Operation[]> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.accountId) params.set('accountId', query.accountId)
+      if (query.state) params.set('state', query.state)
+      if (query.type) params.set('type', query.type)
+      if (query.limit) params.set('limit', String(query.limit))
+      const search = params.toString()
+      return http<Operation[]>(`/v1/operations${search ? `?${search}` : ''}`)
+    }
+    await wait()
+    return mockListOperations(query)
+  },
+
+  /** GET /v1/operations/{id} — one record; the mock advances queued → terminal. */
+  async getOperation(id: string): Promise<Operation> {
+    if (!USE_MOCK) return http<Operation>(`/v1/operations/${encodeURIComponent(id)}`)
+    await wait()
+    return mockGetOperation(id)
+  },
+
+  /**
+   * POST /v1/accounts/{id}/actions/select-node. A 202 answers the queued
+   * operation, a 200 answers the idempotent already-current result; the
+   * caller follows the former with getOperation until it is terminal.
+   */
+  async selectNode(accountId: string, input: SelectNodeInput = {}): Promise<SelectNodeResponse> {
+    if (!USE_MOCK) {
+      const response = await request(
+        `/v1/accounts/${encodeURIComponent(accountId)}/actions/select-node`,
+        { method: 'POST', body: JSON.stringify(input) },
+        catalogActionError,
+      )
+      const body = (await response.json()) as Operation | SelectNodeResult
+      return response.status === 202
+        ? { kind: 'operation', operation: body as Operation }
+        : { kind: 'result', result: body as SelectNodeResult }
+    }
+    await wait()
+    return mockSelectNode(accountId, input)
   },
 
   async getMetrics(range: MetricRange): Promise<Metrics> {

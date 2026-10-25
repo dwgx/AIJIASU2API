@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 450 tests in 47 files.
+- Tests: Vitest + React Testing Library + jsdom, 457 tests in 50 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -76,7 +76,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 450 tests in 47 files
+npm test           # Vitest, 457 tests in 50 files
 npm run typecheck  # tsc -b
 ```
 
@@ -162,17 +162,45 @@ Behaviour:
   kept in `sessionStorage["ajs.panelToken"]` for that tab only, never rendered back, and a submit
   retries every mounted loader with the bearer header. **Clear session token** in Settings drops it.
 
+## Operations page
+
+`/operations` is the scriptable control surface over
+`POST /v1/accounts/{id}/actions/select-node` and the durable operation records in
+`daemon/internal/api/operations.go`.
+
+- **History.** `GET /v1/operations?limit=200` lists records newest first with state, account,
+  target, started/finished stamps, wall duration and the stable error code. The state filter is
+  client-side and the shared footer paginates the result. The list starts a 2 s poll only while at
+  least one record is `queued` or `running`, and stops as soon as the page is terminal.
+- **Select node.** Account → server (the account's retained catalog, with ineligible rows
+  disabled) → `ifCurrent` (`noop` / `error` / `reselect`) and a 10–120 s timeout. A 200 answers the
+  idempotent already-current result; a 202 answers the queued operation and the panel follows
+  `GET /v1/operations/{id}` every second until it is terminal, then reloads the history. A refusal
+  keeps the daemon's message, shows the error code in the history, and leaves the form usable.
+- **Mock parity.** The mock store seeds terminal records and advances a queued record on each GET
+  (queued → running → terminal), so the page is reviewable offline without a background timer.
+- **SSE.** The Logs live-events card consumes `/v1/events/stream` through `EventSource`. The client
+  closes the source on error and reconnects from the last event id with exponential backoff
+  (1 s → 15 s, cursor dropped after five consecutive failures), shows
+  `Connecting` / `Live` / `Reconnecting` / `Offline` / `Paused`, and resumes from the same cursor
+  when a hidden tab becomes visible. Mock mode replays the deterministic ring and stays open.
+  `EventSource` cannot send the panel bearer token, so a token-protected deployment needs the
+  same-origin BFF/reverse proxy the live build already assumes.
+
 ## Polling and stale data
 
 Every list page refreshes itself on the interval from `docs/PAGES.md` §2.2. Polling lives in one
-place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`.
+place — `src/lib/useAsync.ts` — and each page opts in with `{ intervalMs }`. The Operations page
+keeps that hook but owns a 2 s timer that exists only while a record is in flight; live events use
+SSE instead of polling.
 
 | Surface | Interval | Notes |
 |---|---|---|
 | Overview metrics | 10 s | the same page polls accounts, nodes, leases and audit at 15 s |
 | Accounts / Nodes / Leases / Users | 15 s | Users polls both users and API keys |
 | Requests flows | 5 s | polls `/v1/lab/flows?limit=200`; mutation history 10 s, node labels 15 s |
-| Logs (audit) | 15 s | SSE runtime logs remain `[PROPOSED]` |
+| Operations | 2 s while active | only while a record is queued or running; terminal history costs no requests |
+| Logs (audit) | 15 s | audit rows poll; live events stream over SSE `/v1/events/stream` with cursor reconnect |
 | Gate health | 15 s | `/v1/health/nodes`; the daemon probes every 30 s, so the panel is one probe behind at most |
 | Schedules | 15 s | schedules poll at 15 s, the account list at 30 s |
 | Device pool | 30 s | `/v1/device-pool`; the assign dialog loads the account list once on mount |
@@ -865,7 +893,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 450 Vitest tests in 47 files (65 at the 2026-10-23 record; see
+- 457 Vitest tests in 50 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -874,6 +902,12 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   `tests/useAsync.test.tsx` drives polling with fake timers (interval, hidden pause, resume, unmount,
   dedupe, failed poll, reload, dependency change, `enabled: false`) and checks the stale dot plus the
   in-flight activity flag behind the topbar progress line.
+  `tests/operations.test.tsx` covers the history columns and Chinese copy, the 2 s poll that stops
+  once every record is terminal, and the select-node form following a 202 record to its terminal
+  result. `tests/event-stream.test.ts` drives the SSE client with a fake `EventSource`: reconnect
+  from the last event id, doubling backoff, cursor reset after repeated failures and the offline
+  path; `tests/events-feed.test.tsx` covers the visible connecting/live/reconnecting/paused states,
+  the 100-row cap and dedupe.
   `tests/accounts-view.test.tsx` covers the table default, switching both ways, the
   `ajs.accounts.view` preference across remounts, an invalid stored value, card anatomy, card
   selection plus the shared test-login action, the mobile grid and its CSS contract.
@@ -1119,6 +1153,7 @@ the provider's hosted checkout and never marks an order paid.
 | `/usage` | Usage | 7/30/90/366-day window, account filter, summary tiles with previous-window deltas over the equal-length preceding window, per-day chart, per-account monthly budget meters and per-user quota meters, top targets, a `rowsRetained`/`retentionDays` history note, and an explicit `truncated` callout when the request-log window is clipped |
 | `/accounts` | Accounts | filterable table or card grid (view switch), centered add-account modal (concurrency fixed at 1), 同时连接数 (`useCount`) metric with multi-slot note, login test, pause/resume, delete confirm, bulk select, import/export, renewal countdown and drawer |
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
+| `/operations` | Operations | durable select-node history (state, account, target, started/finished, duration, error code) with a state filter and shared pagination; select-node form (account, retained-catalog server, `ifCurrent`, timeout) that follows the 202 operation to its terminal state; polls only while a record is queued or running |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, create dialog (user, platform, optional account pin, TTL, per-dialog idempotency key), rotate, release confirm, TTL |
 | `/orders` | Orders | plan card (price, lease term, monthly quota, activate/deactivate confirm), order table filtered by state or review flag with payment-provider column and epay status chip, offline-receipt attestation, activation retry, offline refund and cancel confirms, grant expiry; every dialog states that no online payment is taken |
 | `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
@@ -1175,7 +1210,7 @@ src/
     usage/                UsageChart
     orders/               OrderState badge/money/term formatters
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
-  pages/                  Overview, Usage, Accounts, Nodes, Leases, Orders, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
+  pages/                  Overview, Usage, Accounts, Nodes, Operations, Leases, Orders, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
   pages/portal/           PortalLogin, PortalSignup, PortalPending, PortalDashboard, PortalLeases, PortalUsage, PortalKeys, PortalPlans, PortalOrders, PortalFrame
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
@@ -1349,6 +1384,8 @@ contract only):
 | Lab account reads | `GET /v1/accounts/{id}/{servers,device}` (`servers` takes `q/region/status/province/city/offset/limit/sort` and returns `snapshotId` + `geo`) | `[PROPOSED]`; served by `ajs-accountd` |
 | Account export/import/bulk delete | `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/{export,import,bulk-delete}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Catalog target and session | `GET/PUT/DELETE /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/{connect,disconnect,reconnect}` | `[PROPOSED]`; served by `ajs-accountd` |
+| Operations | `GET /v1/operations?accountId=&state=&type=&limit=`, `GET/DELETE /v1/operations/{id}`, `POST /v1/accounts/{id}/actions/select-node` | `[PROPOSED]`; served by `ajs-accountd` |
+| Events | `GET /v1/events?since=&limit=&wait=`, `GET /v1/events/stream` (SSE, cursor in `Last-Event-ID` or `since`) | `[SPEC]` / `[PROPOSED]`; served by `ajs-accountd` |
 | Schedules | `GET/POST /v1/schedules`, `GET/PATCH/DELETE /v1/schedules/{id}`, `GET/POST /v1/schedules/preview`, `POST /v1/schedules/{id}/actions/run`, `GET /v1/schedules/{id}/runs` | `[PROPOSED]`; served by `ajs-accountd` |
 | Renewal | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` | `[PROPOSED]`; served by `ajs-accountd` |
 | Usage | `GET /v1/usage?from=&to=&account=&userId=` | `[PROPOSED]`; served by `ajs-accountd` |
@@ -1616,11 +1653,12 @@ and reports healthy on `/healthz`.
   corresponding mode is off — the page shows the reason rather than fabricating rows.
 - Mock state is in memory; refreshing the tab discards edits (Settings → Reset dataset does the same
   explicitly).
-- Log export is a placeholder, and SSE is not implemented in v1; polling is (see
-  [Polling and stale data](#polling-and-stale-data)). The vendor catalog is the only
-  server-paged, server-sorted list (500 rows per request max); every other table paginates a
-  bounded in-memory list locally, so a table can page but never query beyond what its poll
-  returned.
+- Log export is a placeholder. Live events use SSE (`/v1/events/stream`); every other list polls
+  (see [Polling and stale data](#polling-and-stale-data)). `EventSource` cannot attach the panel
+  bearer header, so a token-protected live deployment must proxy the stream same-origin (the
+  loopback insecure daemon needs no token). The vendor catalog is the only server-paged,
+  server-sorted list (500 rows per request max); every other table paginates a bounded in-memory
+  list locally, so a table can page but never query beyond what its poll returned.
 - Documentation scope, not a limitation: `dashboard/docs/` is the AJS-20 design contract; the
   accent slice only adds §3.9 (accent table) to `DESIGN-SYSTEM.md` and leaves the rest of the
   contract unchanged.

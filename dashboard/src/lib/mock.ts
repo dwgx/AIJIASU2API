@@ -50,6 +50,7 @@ import type {
   Lease,
   LogEntry,
   Metrics,
+  Operation,
   PanelSettings,
   PanelUser,
   Platform,
@@ -109,6 +110,9 @@ export interface MockDb {
   mutationSeq: number
   /** Epoch ms of the last guarded egress check per nodeId; reset with the dataset. */
   egressCheckedAt: Record<string, number>
+  /** Durable select-node operations, newest first; terminal fixtures plus queued ones. */
+  operations: Operation[]
+  operationSeq: number
   /** Device pool records (hash-only views, exactly as the API returns them). */
   devicePool: DevicePoolRecord[]
   /** In-memory stand-in for the sealed material; never persisted or rendered. */
@@ -430,6 +434,105 @@ function buildAudit(now: number): AuditEvent[] {
   }))
 }
 
+/**
+ * Terminal operation fixtures for the mock store. The list page is a history
+ * first, so the seed carries every terminal state and no queued/running row:
+ * a fresh page must not poll until the operator queues a switch.
+ */
+function buildOperations(now: number): Operation[] {
+  return [
+    {
+      id: 'op-0004',
+      type: 'account.switch',
+      state: 'succeeded',
+      accountId: 'acc-01',
+      target: { serverId: 'hk-01', nodeId: 'node-03' },
+      requestedBy: 'operator',
+      createdAt: iso(now - 42 * MINUTE),
+      startedAt: iso(now - 42 * MINUTE + 180),
+      finishedAt: iso(now - 42 * MINUTE + 2_100),
+      steps: [
+        { name: 'validate', state: 'ok', durationMs: 3 },
+        { name: 'switch', state: 'ok', durationMs: 1_917 },
+      ],
+      result: {
+        changed: true,
+        accountId: 'acc-01',
+        nodeId: 'node-03',
+        serverId: 'hk-01',
+        gatePort: 13002,
+        egressIp: '203.0.113.13',
+        sessionHealthy: true,
+        previousNodeId: 'node-01',
+        durationMs: 1_917,
+      },
+      error: null,
+    },
+    {
+      id: 'op-0003',
+      type: 'account.connect',
+      state: 'failed',
+      accountId: 'acc-06',
+      target: { serverId: 'hk-03', nodeId: 'node-12' },
+      requestedBy: 'operator',
+      createdAt: iso(now - 3 * HOUR),
+      startedAt: iso(now - 3 * HOUR + 120),
+      finishedAt: iso(now - 3 * HOUR + 2_400),
+      steps: [
+        { name: 'validate', state: 'ok', durationMs: 2 },
+        { name: 'switch', state: 'failed', durationMs: 2_278 },
+      ],
+      result: null,
+      error: {
+        code: 'UPSTREAM_UNAVAILABLE',
+        message: 'the vendor did not answer the session request',
+        details: { reason: 'UPSTREAM_UNAVAILABLE' },
+      },
+    },
+    {
+      id: 'op-0002',
+      type: 'account.connect',
+      state: 'canceled',
+      accountId: 'acc-05',
+      target: { serverId: 'us-lax-01', nodeId: 'node-11' },
+      requestedBy: 'operator',
+      createdAt: iso(now - 8 * HOUR),
+      startedAt: '',
+      finishedAt: iso(now - 8 * HOUR + 900),
+      steps: [{ name: 'validate', state: 'ok', durationMs: 4 }],
+      result: null,
+      error: null,
+    },
+    {
+      id: 'op-0001',
+      type: 'account.switch',
+      state: 'succeeded',
+      accountId: 'acc-02',
+      target: { serverId: 'jp-tyo-01', nodeId: 'node-04' },
+      requestedBy: 'system:schedules',
+      createdAt: iso(now - 26 * HOUR),
+      startedAt: iso(now - 26 * HOUR + 210),
+      finishedAt: iso(now - 26 * HOUR + 1_650),
+      steps: [
+        { name: 'validate', state: 'ok', durationMs: 2 },
+        { name: 'switch', state: 'ok', durationMs: 1_438 },
+      ],
+      result: {
+        changed: true,
+        accountId: 'acc-02',
+        nodeId: 'node-04',
+        serverId: 'jp-tyo-01',
+        gatePort: 13003,
+        egressIp: '198.51.100.21',
+        sessionHealthy: true,
+        previousNodeId: 'node-05',
+        durationMs: 1_438,
+      },
+      error: null,
+    },
+  ]
+}
+
 export function buildMetrics(range: '24h' | '7d', now: number, accounts: Account[]): Metrics {
   const points = range === '24h' ? 48 : 56
   const step = range === '24h' ? 30 * MINUTE : 3 * HOUR
@@ -484,6 +587,8 @@ export function createDb(now = Date.now()): MockDb {
     leaseSeq: 8,
     mutationSeq: 0,
     egressCheckedAt: {},
+    operations: buildOperations(now),
+    operationSeq: 4,
     devicePool: devicePool.records,
     deviceMaterials: devicePool.materials,
     devicePoolSeq: devicePool.seq,

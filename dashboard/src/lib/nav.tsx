@@ -63,6 +63,13 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: 'servers regions latency capacity drain 服务器 区域 延迟 容量 排水 节点',
       },
       {
+        to: '/operations',
+        labelKey: 'nav.operations',
+        icon: ApcRequestsIcon,
+        keywords:
+          'operations async switch select node durable queued running succeeded failed canceled 运维 操作 异步 切换 选择 节点 排队 运行 成功 失败 取消',
+      },
+      {
         to: '/leases',
         labelKey: 'nav.leases',
         icon: ApcLeasesIcon,

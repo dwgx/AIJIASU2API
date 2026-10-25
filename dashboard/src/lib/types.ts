@@ -1488,6 +1488,109 @@ export interface EventsQuery {
   wait?: string
 }
 
+/* --------------------------------------------------------------------------
+ * Operations — daemon/internal/model/operations.go
+ *
+ * POST /v1/accounts/{id}/actions/select-node validates a target synchronously,
+ * then queues one durable operation. A 202 body is the queued Operation; the
+ * caller polls GET /v1/operations/{id} until `state` is terminal. An already
+ * current target answers 200 with the result and no operation.
+ * ------------------------------------------------------------------------ */
+
+/** queued → running → succeeded | failed | canceled. */
+export type OperationState = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+
+/** The guarded switch the executor ran; both use the same connect path. */
+export type OperationType = 'account.switch' | 'account.connect'
+
+/** The resolved selection target. At most one request form is stored. */
+export interface OperationTarget {
+  serverId?: string
+  nodeId?: string
+  region?: string
+  strategy?: string
+}
+
+/** One timed executor boundary such as validate or switch. */
+export interface OperationStep {
+  name: string
+  state: 'ok' | 'failed' | 'canceled'
+  durationMs: number
+}
+
+/** The client-safe failure of one operation; the cause stays in the daemon log. */
+export interface OperationError {
+  code: string
+  message: string
+  details?: Record<string, string>
+}
+
+/** Terminal result of a select-node operation and the idempotent 200 body. */
+export interface SelectNodeResult {
+  /** False only when the requested server was already the live one. */
+  changed: boolean
+  accountId: string
+  nodeId?: string
+  serverId: string
+  gatePort?: number
+  egressIp?: string
+  sessionHealthy: boolean
+  previousNodeId?: string
+  rollbackAttempted?: boolean
+  rollback?: string
+  durationMs?: number
+  warnings?: string[]
+}
+
+/** One durable async transition. */
+export interface Operation {
+  id: string
+  type: OperationType
+  state: OperationState
+  accountId: string
+  target: OperationTarget
+  requestedBy: string
+  /** RFC 3339; empty until the matching transition. */
+  createdAt: string
+  startedAt: string
+  finishedAt: string
+  steps: OperationStep[]
+  result: SelectNodeResult | null
+  error: OperationError | null
+}
+
+/** GET /v1/operations query; empty fields are omitted from the request. */
+export interface OperationQuery {
+  accountId?: string
+  state?: OperationState
+  type?: string
+  /** 1–200; the daemon defaults to 50. */
+  limit?: number
+}
+
+/** POST /v1/accounts/{id}/actions/select-node body. */
+export interface SelectNodeInput {
+  /** Exactly one of serverId, nodeId or region. */
+  target?: OperationTarget
+  /** Advisory: the guarded switch fixes its own drain grace. */
+  drainSeconds?: number
+  /** 10–120 seconds; the daemon defaults to 60. */
+  timeoutSeconds?: number
+  /** What to do when the target is already live. Defaults to noop. */
+  ifCurrent?: 'noop' | 'error' | 'reselect'
+  rollback?: boolean
+  /** True blocks until terminal; false answers 202 with the queued record. */
+  wait?: boolean
+}
+
+/** POST select-node answer: 202 queued operation, or the 200 idempotent result. */
+export type SelectNodeResponse =
+  | { kind: 'operation'; operation: Operation }
+  | { kind: 'result'; result: SelectNodeResult }
+
+/** Connection state of the SSE client, shown next to the event feed. */
+export type EventStreamState = 'connecting' | 'live' | 'reconnecting' | 'paused' | 'offline'
+
 export type WebhookDeliveryStatus = 'success' | 'failed' | 'dead_letter'
 
 /** One persisted receiver. The signing secret is never part of a read. */
