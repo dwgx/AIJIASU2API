@@ -17,6 +17,10 @@ const (
 	// defaultQuotaAuditInterval throttles quota.exceeded audit rows to one
 	// per account per hour. A busy gate would otherwise fill the audit ring.
 	defaultQuotaAuditInterval = time.Hour
+	// quotaFillRetries bounds how often a cache fill re-reads the store after a
+	// concurrent cache mutation. Each retry is one short store read; a fill
+	// that keeps colliding reports its read without caching it.
+	quotaFillRetries = 2
 )
 
 // Quota is the gate's per-account monthly traffic budget admission policy.
@@ -33,10 +37,19 @@ type Quota struct {
 	now           func() time.Time
 	cacheTTL      time.Duration
 	auditInterval time.Duration
+	// readUsage is the durable monthly counter read behind a cache fill. It is
+	// a field, not a direct store call, so a test can hold a fill between its
+	// read and its install; production always points it at store.MonthlyUsage.
+	readUsage func(accountID string) int64
 
-	mu      sync.Mutex
-	usage   map[string]quotaUsage
-	audited map[string]time.Time
+	mu sync.Mutex
+	// generation orders the cache mutations per account. A fill snapshots it
+	// before reading the store and installs only when no advance or
+	// invalidation landed since, so an older read can never replace a newer
+	// cached total.
+	generation map[string]uint64
+	usage      map[string]quotaUsage
+	audited    map[string]time.Time
 }
 
 // quotaUsage is one cached monthly total for one account.
@@ -62,14 +75,19 @@ func newQuota(st *store.Store, now func() time.Time, cacheTTL, auditInterval tim
 	if auditInterval <= 0 {
 		auditInterval = defaultQuotaAuditInterval
 	}
-	return &Quota{
+	q := &Quota{
 		store:         st,
 		now:           now,
 		cacheTTL:      cacheTTL,
 		auditInterval: auditInterval,
+		generation:    make(map[string]uint64),
 		usage:         make(map[string]quotaUsage),
 		audited:       make(map[string]time.Time),
 	}
+	if st != nil {
+		q.readUsage = st.MonthlyUsage
+	}
+	return q
 }
 
 // Check reports whether accountID may open another flow. A nil budget means
@@ -77,8 +95,9 @@ func newQuota(st *store.Store, now func() time.Time, cacheTTL, auditInterval tim
 // once the month's gate-metered bytes reach it, so a zero budget refuses every
 // flow. used and budget are returned for the gate's rejection log only.
 //
-// Check is called from the gate's flow goroutine: it takes two short store
-// reads on a cache miss and never blocks on IO.
+// Check is called from the gate's flow goroutine: it takes one short account
+// read plus a bounded number of monthly-total reads on a cache miss, and never
+// blocks on IO.
 func (q *Quota) Check(accountID string) (ok bool, used, budget int64) {
 	if q == nil || q.store == nil {
 		return true, 0, 0
@@ -103,6 +122,9 @@ func (q *Quota) Invalidate(accountID string) {
 		return
 	}
 	q.mu.Lock()
+	// The generation moves even though the entry is deleted: a fill that read
+	// the store before the row landed must not install that read afterwards.
+	q.generation[accountID]++
 	delete(q.usage, accountID)
 	q.mu.Unlock()
 }
@@ -118,6 +140,10 @@ func (q *Quota) advance(accountID string, n int64) {
 	now := q.now()
 	month := now.UTC().Format("2006-01")
 	q.mu.Lock()
+	// The generation moves even when no entry is populated: a cold cache fill
+	// may be holding a store read from before this chunk and must retry
+	// instead of installing it.
+	q.generation[accountID]++
 	if entry, ok := q.usage[accountID]; ok && entry.month == month {
 		entry.bytes += n
 		entry.expires = now.Add(q.cacheTTL)
@@ -128,27 +154,49 @@ func (q *Quota) advance(accountID string, n int64) {
 
 // monthlyUsage returns the cached total for the current UTC month, computing
 // it from the store on a miss or after the month changed.
+//
+// The store read runs outside q.mu, so the install is a compare-and-set on the
+// account's cache generation: an advance, an invalidation or another fill that
+// lands in between makes the read older than the cached total, and installing
+// it would move the admission total backwards. A collision answers from the
+// fresher cached total, or re-reads the store after an invalidation. The
+// retries are bounded: an exhausted fill reports its read uncached, so a stale
+// value can never be installed.
 func (q *Quota) monthlyUsage(accountID string) int64 {
-	now := q.now()
-	month := now.UTC().Format("2006-01")
+	for attempt := 0; ; attempt++ {
+		now := q.now()
+		month := now.UTC().Format("2006-01")
 
-	q.mu.Lock()
-	if entry, ok := q.usage[accountID]; ok && entry.month == month && now.Before(entry.expires) {
+		q.mu.Lock()
+		if entry, ok := q.usage[accountID]; ok && entry.month == month && now.Before(entry.expires) {
+			q.mu.Unlock()
+			return entry.bytes
+		}
+		generation := q.generation[accountID]
 		q.mu.Unlock()
-		return entry.bytes
-	}
-	q.mu.Unlock()
 
-	used := q.store.MonthlyUsage(accountID)
+		used := q.readUsage(accountID)
 
-	q.mu.Lock()
-	q.usage[accountID] = quotaUsage{
-		month:   month,
-		bytes:   used,
-		expires: now.Add(q.cacheTTL),
+		q.mu.Lock()
+		if q.generation[accountID] == generation {
+			q.generation[accountID]++
+			q.usage[accountID] = quotaUsage{
+				month:   month,
+				bytes:   used,
+				expires: now.Add(q.cacheTTL),
+			}
+			q.mu.Unlock()
+			return used
+		}
+		if entry, ok := q.usage[accountID]; ok && entry.month == month && now.Before(entry.expires) {
+			q.mu.Unlock()
+			return entry.bytes
+		}
+		q.mu.Unlock()
+		if attempt >= quotaFillRetries {
+			return used
+		}
 	}
-	q.mu.Unlock()
-	return used
 }
 
 // auditExceeded writes one quota.exceeded audit row per account per interval.

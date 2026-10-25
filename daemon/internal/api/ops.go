@@ -190,8 +190,31 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Audit(limit))
 }
 
+// settingsView is the GET and PATCH /v1/settings payload: the persisted panel
+// settings plus the read-only payment adapter state. The payment fields are
+// derived from the live adapter on every read and never stored, so they cannot
+// drift from what the checkout and notify routes actually serve.
+type settingsView struct {
+	model.PanelSettings
+	// EpayEnabled is true only when the 易支付 adapter is configured and
+	// serving checkout; a nil or incomplete adapter reports false.
+	EpayEnabled bool `json:"epayEnabled"`
+	// EpayMode names the adapter's settlement shape; empty while disabled.
+	EpayMode string `json:"epayMode,omitempty"`
+}
+
+// settingsView decorates the stored settings with the live adapter state.
+func (s *Server) settingsView(settings model.PanelSettings) settingsView {
+	view := settingsView{PanelSettings: settings}
+	if s.cfg.Epay != nil && s.cfg.Epay.Configured() && s.cfg.Epay.Enabled() {
+		view.EpayEnabled = true
+		view.EpayMode = s.cfg.Epay.Mode()
+	}
+	return view
+}
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.store.Settings())
+	writeJSON(w, http.StatusOK, s.settingsView(s.store.Settings()))
 }
 
 func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
@@ -199,12 +222,17 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &raw) {
 		return
 	}
+	// epayEnabled and epayMode are read-only fields derived from the payment
+	// adapter. They are accepted so the dashboard can PATCH back the object it
+	// read, and ignored: settingsView recomputes them from the adapter.
 	allowed := map[string]struct{}{
 		"transport":              {},
 		"healthIntervalSec":      {},
 		"leaseTtl":               {},
 		"subscriptionRefreshSec": {},
 		"theme":                  {},
+		"epayEnabled":            {},
+		"epayMode":               {},
 	}
 	for key := range raw {
 		if _, ok := allowed[key]; !ok {
@@ -227,7 +255,7 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	writeJSON(w, http.StatusOK, s.settingsView(settings))
 }
 
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {

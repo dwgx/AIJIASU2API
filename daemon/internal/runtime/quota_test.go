@@ -149,6 +149,105 @@ func TestQuotaCacheDropsStaleMonthEntry(t *testing.T) {
 	}
 }
 
+// TestQuotaStaleFillCannotOverwriteAdvance pins the cache-fill race: a fill
+// that read the store before a chunk landed must not install that read after
+// advance moved the cached total forward, or admission undercounts until the
+// TTL. The read hook pauses the fill between its store read and its install,
+// which is the exact window the compare-and-set has to reject.
+func TestQuotaStaleFillCannotOverwriteAdvance(t *testing.T) {
+	st := store.NewEmpty()
+	account := quotaTestAccount(t, st, "Northwind Ops")
+	budget := int64(1000)
+	setQuotaBudget(t, st, account.ID, &budget)
+	appendQuotaRow(t, st, account, 10)
+
+	now := time.Now().UTC()
+	q := newQuota(st, func() time.Time { return now }, time.Minute, time.Hour)
+	if _, used, _ := q.Check(account.ID); used != 10 {
+		t.Fatalf("first check used = %d, want 10", used)
+	}
+
+	// Expire the entry without touching its generation: the next Check has to
+	// read the store, which is where the fill pauses.
+	now = now.Add(2 * time.Minute)
+
+	readDone := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	q.readUsage = func(accountID string) int64 {
+		used := st.MonthlyUsage(accountID)
+		if first {
+			first = false
+			close(readDone)
+			<-release
+		}
+		return used
+	}
+
+	checks := make(chan int64, 1)
+	go func() {
+		_, used, _ := q.Check(account.ID)
+		checks <- used
+	}()
+
+	<-readDone
+	appendQuotaRow(t, st, account, 30)
+	q.advance(account.ID, 30)
+	close(release)
+
+	if used := <-checks; used != 40 {
+		t.Fatalf("concurrent check used = %d, want the advanced 40", used)
+	}
+	if _, used, _ := q.Check(account.ID); used != 40 {
+		t.Fatalf("cached check used = %d, want 40 after the fill", used)
+	}
+}
+
+// TestQuotaColdFillCannotOverwriteAdvance pins the same race on a cold cache:
+// advance has no entry to move, so it must still invalidate the fill's read or
+// the pre-chunk total gets cached. The read hook blocks only the first read;
+// the fill's retry reads the store again.
+func TestQuotaColdFillCannotOverwriteAdvance(t *testing.T) {
+	st := store.NewEmpty()
+	account := quotaTestAccount(t, st, "Northwind Ops")
+	budget := int64(1000)
+	setQuotaBudget(t, st, account.ID, &budget)
+
+	now := time.Now().UTC()
+	q := newQuota(st, func() time.Time { return now }, time.Minute, time.Hour)
+
+	readDone := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	q.readUsage = func(accountID string) int64 {
+		used := st.MonthlyUsage(accountID)
+		if first {
+			first = false
+			close(readDone)
+			<-release
+		}
+		return used
+	}
+
+	checks := make(chan int64, 1)
+	go func() {
+		_, used, _ := q.Check(account.ID)
+		checks <- used
+	}()
+
+	<-readDone
+	appendQuotaRow(t, st, account, 30)
+	q.advance(account.ID, 30)
+	close(release)
+
+	if used := <-checks; used != 30 {
+		t.Fatalf("concurrent check used = %d, want the advanced 30", used)
+	}
+	if _, used, _ := q.Check(account.ID); used != 30 {
+		t.Fatalf("cached check used = %d, want 30 after the fill", used)
+	}
+}
+
 // TestQuotaAuditThrottle proves quota.exceeded is written once per account per
 // hour, not once per refused flow.
 func TestQuotaAuditThrottle(t *testing.T) {
@@ -270,7 +369,7 @@ func TestFlowMeterGateFactoryEnforcesQuota(t *testing.T) {
 	meter := NewFlowMeter(st)
 	session := &quotaGateSession{}
 	srv, err := meter.GateFactory()(gate.Config{
-		NodeID:    account.ID + ":s1",
+		NodeID:    nodeID(model.SlotKey{AccountID: account.ID, Index: 1}, "s1"),
 		AccountID: account.ID,
 		Listen:    "127.0.0.1:0",
 	}, session)

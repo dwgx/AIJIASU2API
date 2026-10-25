@@ -7813,6 +7813,16 @@
           },
           "theme": {
             "$ref": "#/components/schemas/ThemeName"
+          },
+          "epayEnabled": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "True only when the 易支付 adapter is configured and serving checkout. Derived from the live adapter, never stored."
+          },
+          "epayMode": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Settlement shape reported by the adapter (\"webhook\"); absent while epay is disabled."
           }
         },
         "required": [
@@ -7820,7 +7830,8 @@
           "healthIntervalSec",
           "leaseTtl",
           "subscriptionRefreshSec",
-          "theme"
+          "theme",
+          "epayEnabled"
         ]
       },
       "SettingsPatch": {
@@ -7840,9 +7851,19 @@
           },
           "theme": {
             "$ref": "#/components/schemas/ThemeName"
+          },
+          "epayEnabled": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "Read-only. Ignored on write so a client can PATCH back the object it read."
+          },
+          "epayMode": {
+            "type": "string",
+            "readOnly": true,
+            "description": "Read-only. Ignored on write so a client can PATCH back the object it read."
           }
         },
-        "description": "Partial settings update. Unknown fields are rejected with INVALID_ARGUMENT."
+        "description": "Partial settings update. Unknown fields are rejected with INVALID_ARGUMENT; the read-only epay fields are accepted and ignored."
       },
       "Topology": {
         "type": "object",
