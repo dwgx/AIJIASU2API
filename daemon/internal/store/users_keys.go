@@ -20,7 +20,12 @@ import (
 func (s *Store) CreateUser(in model.CreateUserInput) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createUserLocked(in)
+}
 
+// createUserLocked is CreateUser without the lock. Approval uses it to create
+// and bind the user under the same commit as the tenant activation.
+func (s *Store) createUserLocked(in model.CreateUserInput) (model.PanelUser, error) {
 	name := strings.TrimSpace(in.Name)
 	switch {
 	case name == "":
@@ -221,7 +226,12 @@ func (s *Store) SetUserAllowlist(id string, allowlist []string) (model.PanelUser
 func (s *Store) CreateKey(userID, label string) (model.APIKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createKeyLocked(userID, label)
+}
 
+// createKeyLocked is CreateKey without the lock, so the portal path can apply
+// its active-key cap and issue the key under one commit.
+func (s *Store) createKeyLocked(userID, label string) (model.APIKey, string, error) {
 	userIdx := s.userIndexLocked(userID)
 	if userIdx < 0 {
 		return model.APIKey{}, "", notFoundf("user %q not found", userID)

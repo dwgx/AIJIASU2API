@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -110,6 +110,14 @@
     {
       "name": "Backup",
       "description": "Admin-only full-panel backup: seal the state directory into an encrypted envelope, inspect it, and restore it."
+    },
+    {
+      "name": "Portal",
+      "description": "Customer tenant portal (AJS_TENANT_PORTAL=1). Authenticates only the __Host-ajs_portal cookie, requires X-CSRF-Token on unsafe methods, and exposes only the linked user's data."
+    },
+    {
+      "name": "Tenant Admin",
+      "description": "Tenant approval, suspension and resumption. Requires the admin token or a scoped key carrying the admin scope; insecure mode does not bypass it."
     }
   ],
   "paths": {
@@ -4595,6 +4603,621 @@
           }
         }
       }
+    },
+    "/v1/portal/signup": {
+      "post": {
+        "operationId": "portalSignup",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Request a tenant account; a new and a duplicate email return the same 202 body.",
+        "x-implementation-phase": "P0",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSignupInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Signup accepted. The tenant is pending approval and owns no user, lease or key; a duplicate address returns this same body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSignupAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/login": {
+      "post": {
+        "operationId": "portalLogin",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Verify a tenant password and issue the session cookie and CSRF token.",
+        "x-implementation-phase": "P0",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantLoginInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Active tenant signed in. The response sets __Host-ajs_portal.",
+            "headers": {
+              "Set-Cookie": {
+                "description": "__Host-ajs_portal=<raw>; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=28800.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSessionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/session": {
+      "get": {
+        "operationId": "portalSession",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Return the signed-in tenant, linked user metadata and the session CSRF token.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current session metadata; never a hash or secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSessionView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/logout": {
+      "post": {
+        "operationId": "portalLogout",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Revoke the current session and clear the cookie.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session revoked; the cookie is cleared."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/leases": {
+      "get": {
+        "operationId": "portalListLeases",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "List only the linked user's active leases.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's leases; another user's row is never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Lease"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/portal/usage": {
+      "get": {
+        "operationId": "portalUsage",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Aggregate usage for only the linked user; owner and account filters are ignored.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). Defaults to 30 days before to."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 3339 timestamp or UTC date (YYYY-MM-DD). A bare date includes the whole day."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage summary restricted to the caller's immutable user id. Account budget fields are null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/portal/keys": {
+      "get": {
+        "operationId": "portalListKeys",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "List the linked user's API key metadata, newest first.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key metadata only; hashes and secrets are never serialized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKey"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      },
+      "post": {
+        "operationId": "portalCreateKey",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Issue an API key for the linked user and return the secret once.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantKeyCreateRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Key created. The secret is returned exactly once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateKeyResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/v1/portal/keys/{id}": {
+      "delete": {
+        "operationId": "portalRevokeKey",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Revoke one key owned by the linked user; a foreign id answers 404.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Key revoked (idempotent)."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/admin/tenants": {
+      "get": {
+        "operationId": "listTenants",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "List tenants, optionally filtered by status.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "One page of tenants in seed order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Tenant"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TenantStatus"
+            },
+            "description": "Exact lifecycle filter; absent lists every tenant."
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ]
+      }
+    },
+    "/v1/admin/tenants/{id}/approve": {
+      "post": {
+        "operationId": "approveTenant",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "Bind exactly one user and activate a pending tenant atomically.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Tenant activated with its one linked user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tenant"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantApproveRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/tenants/{id}/suspend": {
+      "post": {
+        "operationId": "suspendTenant",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "Disable the linked user and revoke the tenant's sessions and API keys.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Tenant suspended; sessions and keys are revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tenant"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
+    },
+    "/v1/admin/tenants/{id}/resume": {
+      "post": {
+        "operationId": "resumeTenant",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "Re-enable the linked user; keys revoked by the suspension stay revoked.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Tenant active again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tenant"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -4603,6 +5226,12 @@
         "type": "http",
         "scheme": "bearer",
         "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback."
+      },
+      "portalCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-ajs_portal",
+        "description": "Opaque tenant session set only by POST /v1/portal/login as HttpOnly; Secure; SameSite=Strict; Path=/ with an eight-hour absolute and thirty-minute idle expiry. JavaScript cannot read it. Every unsafe portal request must also send the per-session X-CSRF-Token returned by login and GET /v1/portal/session. The portal chain is registered only when AJS_TENANT_PORTAL=1."
       }
     },
     "responses": {
@@ -4617,7 +5246,7 @@
         }
       },
       "Unauthorized": {
-        "description": "UNAUTHORIZED: missing or invalid bearer token.",
+        "description": "UNAUTHORIZED: missing or invalid bearer token, or a missing, expired, revoked or unlinked portal session.",
         "content": {
           "application/json": {
             "schema": {
@@ -4627,7 +5256,7 @@
         }
       },
       "Forbidden": {
-        "description": "FORBIDDEN: the scoped key is valid but lacks the route scope or the requested account is outside its accountIds/regions.",
+        "description": "FORBIDDEN: the scoped key lacks the route scope, the account is outside its accountIds/regions, or a portal request failed its origin, CSRF or tenant-status check.",
         "content": {
           "application/json": {
             "schema": {
@@ -4657,7 +5286,7 @@
         }
       },
       "PayloadTooLarge": {
-        "description": "INVALID_ARGUMENT: request body exceeds the route limit (1 MiB, 4 MiB for account import, 16 MiB for device-pool import, 97 MiB for backup inspect/restore).",
+        "description": "INVALID_ARGUMENT: request body exceeds the route limit (1 MiB, 64 KiB for portal routes, 4 MiB for account import, 16 MiB for device-pool import, 97 MiB for backup inspect/restore).",
         "content": {
           "application/json": {
             "schema": {
@@ -4826,6 +5455,17 @@
           "maxLength": 128
         },
         "description": "Retry-safe create key. A replay returns the original lease with replayed=true instead of allocating a second node."
+      },
+      "PortalCSRF": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "description": "Per-session CSRF token returned by login and GET /v1/portal/session. Required on every unsafe portal request, including logout and key revocation; compared by SHA-256 in constant time."
       }
     },
     "schemas": {
@@ -10357,6 +10997,190 @@
           "manifest",
           "diff"
         ]
+      },
+      "TenantStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "active",
+          "suspended"
+        ],
+        "description": "pending owns no PanelUser, lease or key; active is bound to exactly one user; suspended has its user disabled and its sessions and API keys revoked."
+      },
+      "Tenant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "Canonical lowercase address; unique across tenants."
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TenantStatus"
+          },
+          "userId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Linked PanelUser id; null until approval."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "approvedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null while pending."
+          },
+          "suspendedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null unless suspended."
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "displayName",
+          "status",
+          "userId",
+          "createdAt",
+          "approvedAt",
+          "suspendedAt"
+        ]
+      },
+      "TenantSignupInput": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 254
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 12,
+            "maxLength": 256,
+            "description": "Hashed with Argon2id; the plaintext is never stored or logged."
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "displayName"
+        ]
+      },
+      "TenantSignupAccepted": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "TenantLoginInput": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "TenantSessionView": {
+        "type": "object",
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/Tenant"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PanelUser"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Linked user metadata; never contains a credential."
+          },
+          "csrfToken": {
+            "type": "string",
+            "description": "Per-session CSRF token for X-CSRF-Token. Rotated after a daemon restart; re-read this route before mutating."
+          }
+        },
+        "required": [
+          "tenant",
+          "user",
+          "csrfToken"
+        ]
+      },
+      "TenantKeyCreateRequest": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        "description": "An empty label selects the daemon default. A tenant may hold at most ten active keys."
+      },
+      "TenantApproveRequest": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "Bind an existing PanelUser."
+          },
+          "user": {
+            "$ref": "#/components/schemas/CreateUserInput"
+          }
+        },
+        "description": "Supply exactly one of userId or user. The bind, the optional user creation, activation and the audit row commit atomically."
       }
     }
   }

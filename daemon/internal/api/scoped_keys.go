@@ -141,7 +141,11 @@ func (id authIdentity) allowsRoute(method, pattern string) bool {
 }
 
 func (id authIdentity) hasScope(scope model.Scope) bool {
-	for _, candidate := range id.key.Scopes {
+	return hasScope(id.key.Scopes, scope)
+}
+
+func hasScope(scopes []model.Scope, scope model.Scope) bool {
+	for _, candidate := range scopes {
 		if candidate == scope {
 			return true
 		}

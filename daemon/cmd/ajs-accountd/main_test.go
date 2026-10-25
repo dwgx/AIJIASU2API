@@ -358,3 +358,37 @@ func TestAutoLoginEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestTenantPortalConfig(t *testing.T) {
+	origin, proxies, err := tenantPortalConfig(false, "", "")
+	if err != nil || origin != "" || len(proxies) != 0 {
+		t.Fatalf("disabled config = %q/%v/%v", origin, proxies, err)
+	}
+
+	origin, proxies, err = tenantPortalConfig(true, " https://Panel.Example.COM/ ", "127.0.0.1, 10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	if origin != "https://panel.example.com" {
+		t.Fatalf("origin = %q, want the normalized origin", origin)
+	}
+	if len(proxies) != 2 {
+		t.Fatalf("proxies = %v, want two entries", proxies)
+	}
+
+	if _, _, err := tenantPortalConfig(true, "", ""); err == nil {
+		t.Fatal("enabled portal without an origin was accepted")
+	}
+	if _, _, err := tenantPortalConfig(true, "https://panel.example.com/admin", ""); err == nil {
+		t.Fatal("origin with a path was accepted")
+	}
+	if _, _, err := tenantPortalConfig(false, "", "not-an-ip"); err == nil {
+		t.Fatal("malformed trusted proxy was accepted")
+	}
+	// A configured origin without the flag is returned so run() can warn; it
+	// does not fail startup.
+	origin, _, err = tenantPortalConfig(false, "https://panel.example.com", "")
+	if err != nil || origin != "https://panel.example.com" {
+		t.Fatalf("disabled with origin = %q/%v", origin, err)
+	}
+}

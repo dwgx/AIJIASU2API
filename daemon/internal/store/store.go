@@ -169,6 +169,19 @@ type Store struct {
 	// periodic snapshot writes them, so dispatch never waits on the disk.
 	webhookDeliveries []model.WebhookDelivery
 
+	// tenants and portalSessions are the customer portal state (DESIGN-TENANT
+	// §3). A tenant is a login identity linked one-to-one to a user; sessions
+	// hold only SHA-256 digests of the cookie and CSRF values. Both collections
+	// are additive snapshot fields, so a pre-portal snapshot loads with zero
+	// tenants and no identity backfill.
+	tenants        []tenantRecord
+	portalSessions []model.PortalSession
+
+	// tenantHashSem bounds concurrent Argon2 calls. It is a leaf semaphore:
+	// it is never acquired while s.mu is held, so a slow hash cannot block the
+	// rest of the panel.
+	tenantHashSem chan struct{}
+
 	// pendingLabels holds the lowercased labels of account creates that are
 	// sealing their password outside the write lock. A label is reserved
 	// before the slow call so a concurrent create or rename cannot take it.
@@ -178,6 +191,7 @@ type Store struct {
 	userSeq      int
 	keySeq       int
 	scopedKeySeq int
+	tenantSeq    int
 	mutationSeq  int
 	auditSeq     int
 	scheduleSeq  int
@@ -262,6 +276,9 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		reminderMarks:     make(map[string]model.ReminderMark),
 		webhookEndpoints:  []model.WebhookEndpoint{},
 		webhookDeliveries: []model.WebhookDelivery{},
+		tenants:           []tenantRecord{},
+		portalSessions:    []model.PortalSession{},
+		tenantHashSem:     make(chan struct{}, tenantHashConcurrency),
 	}
 }
 

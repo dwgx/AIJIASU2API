@@ -97,6 +97,15 @@ type Snapshot struct {
 	// with an empty history.
 	WebhookDeliveries []model.WebhookDelivery `json:"webhookDeliveries,omitempty"`
 
+	// Tenants and PortalSessions are the customer portal state
+	// (DESIGN-TENANT §3). Both are additive and omitempty: a pre-portal
+	// snapshot loads with zero tenants and no identity backfill. Password and
+	// session values are stored only as hashes; a raw cookie or CSRF token
+	// never enters this document.
+	Tenants        []tenantRecord        `json:"tenants,omitempty"`
+	PortalSessions []model.PortalSession `json:"portalSessions,omitempty"`
+	TenantSeq      int                   `json:"tenantSeq,omitempty"`
+
 	AccountSeq   int `json:"accountSeq"`
 	UserSeq      int `json:"userSeq"`
 	KeySeq       int `json:"keySeq"`
@@ -187,6 +196,18 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	snap.WebhookSeq = s.webhookSeq
 	snap.WebhookDeliveries = append([]model.WebhookDelivery(nil), s.webhookDeliveries...)
+	snap.Tenants = make([]tenantRecord, len(s.tenants))
+	for i, rec := range s.tenants {
+		snap.Tenants[i] = rec
+		snap.Tenants[i].Tenant = cloneTenant(rec.Tenant)
+	}
+	snap.PortalSessions = make([]model.PortalSession, len(s.portalSessions))
+	for i, session := range s.portalSessions {
+		session.CSRFToken = ""
+		session.RevokedAt = copyStringPtr(session.RevokedAt)
+		snap.PortalSessions[i] = session
+	}
+	snap.TenantSeq = s.tenantSeq
 	snap.AccountSeq = s.accountSeq
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
@@ -301,6 +322,17 @@ func (s *Store) Restore(data []byte) error {
 	s.scopedKeySeq = snap.ScopedKeySeq
 	s.mutationSeq = snap.MutationSeq
 	s.auditSeq = snap.AuditSeq
+	// Portal state is installed after validation quarantined broken rows, so a
+	// malformed tenant or session denies access instead of bricking the panel.
+	s.tenants = snap.Tenants
+	if s.tenants == nil {
+		s.tenants = []tenantRecord{}
+	}
+	s.portalSessions = snap.PortalSessions
+	if s.portalSessions == nil {
+		s.portalSessions = []model.PortalSession{}
+	}
+	s.tenantSeq = snap.TenantSeq
 	// Both histories are newest first: a snapshot written by an older build
 	// (or edited by hand) is cut to the retention window, never the reverse.
 	if len(s.requests) > RequestRetention {
@@ -525,6 +557,13 @@ func (snap *Snapshot) validate() error {
 	if err := snap.validateWebhooks(); err != nil {
 		return err
 	}
+	// Tenant and session problems are quarantined per row, not rejected: a
+	// hand-edited or partially migrated snapshot must not brick the panel, and
+	// a quarantined tenant is denied at authentication time.
+	if err := snap.validateTenants(users); err != nil {
+		return err
+	}
+	snap.validatePortalSessions()
 	if snap.UsageMonth != "" {
 		if _, err := time.Parse("2006-01", snap.UsageMonth); err != nil {
 			return fmt.Errorf("state snapshot has an invalid usage month %q", snap.UsageMonth)
@@ -829,7 +868,16 @@ func (snap *Snapshot) normalize() {
 	if snap.WebhookEndpoints == nil {
 		snap.WebhookEndpoints = []model.WebhookEndpoint{}
 	}
+	if snap.Tenants == nil {
+		snap.Tenants = []tenantRecord{}
+	}
+	if snap.PortalSessions == nil {
+		snap.PortalSessions = []model.PortalSession{}
+	}
 	snap.WebhookDeliveries = normalizeWebhookDeliveries(snap.WebhookDeliveries)
+	for _, tenant := range snap.Tenants {
+		snap.TenantSeq = max(snap.TenantSeq, sequenceOf(tenant.ID, "t-"))
+	}
 	for _, endpoint := range snap.WebhookEndpoints {
 		snap.WebhookSeq = max(snap.WebhookSeq, sequenceOf(endpoint.ID, "wh-"))
 	}

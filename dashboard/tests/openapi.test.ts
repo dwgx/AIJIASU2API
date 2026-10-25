@@ -58,7 +58,7 @@ interface OpenAPIDocument {
   security: Array<Record<string, string[]>>
   paths: Record<string, Record<string, Operation>>
   components: {
-    securitySchemes: Record<string, { type?: string; scheme?: string }>
+    securitySchemes: Record<string, { type?: string; scheme?: string; in?: string; name?: string }>
     schemas: Record<string, JsonSchema>
   }
 }
@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(79)
-    expect(entries).toHaveLength(98)
+    expect(Object.keys(doc.paths)).toHaveLength(91)
+    expect(entries).toHaveLength(111)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -265,16 +265,100 @@ describe('docs/openapi.json', () => {
     }
   })
 
-  it('requires bearer auth everywhere except /healthz', () => {
+  it('requires bearer auth everywhere except /healthz and the portal cookie chain', () => {
     expect(doc.security).toEqual([{ bearerAuth: [] }])
     expect(doc.components.securitySchemes.bearerAuth).toMatchObject({ type: 'http', scheme: 'bearer' })
     const health = doc.paths['/healthz']?.get
     expect(health).toBeDefined()
     expect(health?.security).toEqual([])
+    // The portal is its own authentication chain: it authenticates the opaque
+    // cookie, never the admin bearer, and overrides the global requirement.
+    const portalPaths: Record<string, true> = {
+      '/v1/portal/signup': true,
+      '/v1/portal/login': true,
+      '/v1/portal/session': true,
+      '/v1/portal/logout': true,
+      '/v1/portal/leases': true,
+      '/v1/portal/usage': true,
+      '/v1/portal/keys': true,
+      '/v1/portal/keys/{id}': true,
+    }
     for (const { method, path, operation } of entries) {
-      if (path === '/healthz') continue
+      if (path === '/healthz' || portalPaths[path]) continue
       expect(operation.security, `${method} ${path}`).toBeUndefined()
     }
+  })
+
+  it('documents the tenant portal cookie chain and admin tenant lifecycle', () => {
+    expect(doc.components.securitySchemes.portalCookie).toMatchObject({
+      type: 'apiKey',
+      in: 'cookie',
+      name: '__Host-ajs_portal',
+    })
+
+    // Signup and login are the public protocol: no cookie yet.
+    expect(doc.paths['/v1/portal/signup']?.post.security).toEqual([])
+    expect(doc.paths['/v1/portal/login']?.post.security).toEqual([])
+    // Every authenticated portal route names the cookie scheme explicitly.
+    for (const [method, path] of [
+      ['get', '/v1/portal/session'],
+      ['post', '/v1/portal/logout'],
+      ['get', '/v1/portal/leases'],
+      ['get', '/v1/portal/usage'],
+      ['get', '/v1/portal/keys'],
+      ['post', '/v1/portal/keys'],
+      ['delete', '/v1/portal/keys/{id}'],
+    ] as Array<[string, string]>) {
+      expect(doc.paths[path]?.[method]?.security, `${method} ${path}`).toEqual([
+        { portalCookie: [] },
+      ])
+    }
+
+    // Unsafe portal methods require the per-session header.
+    for (const [method, path] of [
+      ['post', '/v1/portal/logout'],
+      ['post', '/v1/portal/keys'],
+      ['delete', '/v1/portal/keys/{id}'],
+    ] as Array<[string, string]>) {
+      expect(parameterNames(doc.paths[path]![method]!), `${method} ${path}`).toContain(
+        'header:X-CSRF-Token',
+      )
+    }
+
+    // The tenant lifecycle is admin-only, so it inherits the global bearer.
+    for (const [method, path] of [
+      ['get', '/v1/admin/tenants'],
+      ['post', '/v1/admin/tenants/{id}/approve'],
+      ['post', '/v1/admin/tenants/{id}/suspend'],
+      ['post', '/v1/admin/tenants/{id}/resume'],
+    ] as Array<[string, string]>) {
+      const operation = doc.paths[path]?.[method]
+      expect(operation, `${method} ${path}`).toBeDefined()
+      expect(operation?.security, `${method} ${path}`).toBeUndefined()
+      expect(operation?.['x-implementation-phase']).toBe('P0')
+    }
+
+    for (const name of [
+      'Tenant',
+      'TenantSignupInput',
+      'TenantSignupAccepted',
+      'TenantLoginInput',
+      'TenantSessionView',
+      'TenantKeyCreateRequest',
+      'TenantApproveRequest',
+    ]) {
+      expect(schema(name).properties, name).toBeTruthy()
+    }
+    expect(schema('TenantStatus').enum).toEqual(['pending', 'active', 'suspended'])
+    expect(schema('Tenant').required).toEqual(expect.arrayContaining([
+      'id', 'email', 'displayName', 'status', 'userId', 'createdAt',
+    ]))
+    expect(schema('TenantSignupInput').properties?.password).toMatchObject({
+      writeOnly: true,
+      minLength: 12,
+    })
+    expect(schema('TenantSessionView').properties?.csrfToken).toMatchObject({ type: 'string' })
+    expect(schema('TenantSignupAccepted').properties?.status?.enum).toEqual(['pending'])
   })
 
   it('marks the proposed P1 interfaces', () => {

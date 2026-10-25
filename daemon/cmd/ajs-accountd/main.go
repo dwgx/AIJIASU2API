@@ -66,6 +66,9 @@ func run() error {
 	platformName := flag.String("platform-name", os.Getenv("AJS_PLATFORM_NAME"), "Resin platform name (env AJS_PLATFORM_NAME; default: the subscription name)")
 	updateRepo := flag.String("update-repo", os.Getenv("AJS_UPDATE_REPO"), "GitHub owner/repo for the update check (env AJS_UPDATE_REPO); empty disables the check")
 	updateAPIBase := flag.String("update-api-base", envOr("AJS_UPDATE_API_BASE", api.DefaultUpdateAPIBase), "GitHub API base URL for the update check (env AJS_UPDATE_API_BASE)")
+	tenantPortal := flag.Bool("tenant-portal", os.Getenv("AJS_TENANT_PORTAL") == "1", "enable the customer tenant portal (env AJS_TENANT_PORTAL=1)")
+	tenantOrigin := flag.String("tenant-origin", os.Getenv("AJS_TENANT_ORIGIN"), "exact browser origin allowed for portal writes (env AJS_TENANT_ORIGIN)")
+	trustedProxies := flag.String("trusted-proxies", os.Getenv("AJS_TRUSTED_PROXIES"), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (env AJS_TRUSTED_PROXIES)")
 	flag.Parse()
 
 	// The HTTPS admin listener is opt-in (AJS-276): AJS_TLS_CERT and
@@ -92,6 +95,14 @@ func run() error {
 	// the repository — including the one .env.example ships — so startup
 	// refuses those values. The insecure lab mode is the explicit opt-out.
 	if err := validateAdminToken(*token, *insecure); err != nil {
+		return err
+	}
+	// AJS_TENANT_PORTAL is the opt-in. Enabling it without an exact browser
+	// origin would leave every signup/login/mutation unchecked, so that
+	// partial configuration aborts before the listener starts. A configured
+	// origin without the flag is ignored with a warning (see below).
+	tenantOriginValue, trustedProxyValues, err := tenantPortalConfig(*tenantPortal, *tenantOrigin, *trustedProxies)
+	if err != nil {
 		return err
 	}
 
@@ -435,6 +446,20 @@ func run() error {
 		logger.Warn("backup_restore_enabled",
 			"reason", "AJS_BACKUP_ALLOW_RESTORE=1: POST /v1/backup/restore may replace the panel files while the daemon runs")
 	}
+	if *tenantPortal {
+		if !strings.HasPrefix(tenantOriginValue, "https://") {
+			logger.Warn("tenant_portal_insecure_origin",
+				"origin", tenantOriginValue,
+				"reason", "the portal cookie is Secure and SameSite=Strict; browsers only send it over HTTPS")
+		}
+		if *insecure {
+			logger.Warn("tenant_portal_insecure_mode",
+				"reason", "AJS_ALLOW_INSECURE=1 does not bypass the portal session or tenant-admin checks")
+		}
+	} else if tenantOriginValue != "" {
+		logger.Warn("tenant_origin_ignored",
+			"reason", "AJS_TENANT_ORIGIN is set but AJS_TENANT_PORTAL is not 1")
+	}
 	server := api.New(api.Config{
 		AdminToken:           *token,
 		AllowInsecure:        *insecure,
@@ -443,6 +468,9 @@ func run() error {
 		StateDir:             envOr("AJS_STATE_DIR", "./data"),
 		StatePath:            statePath,
 		AllowBackupRestore:   os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1",
+		TenantPortal:         *tenantPortal,
+		TenantOrigin:         tenantOriginValue,
+		TrustedProxies:       trustedProxyValues,
 		Panel:                panel,
 		LoginService:         loginService,
 		LoginHook:            loginHook,
@@ -1121,6 +1149,25 @@ var placeholderAdminTokens = map[string]struct{}{
 // short value is guessable no matter which characters it uses. 32 characters
 // is what `openssl rand -hex 32` emits.
 const minAdminTokenLen = 32
+
+// tenantPortalConfig validates the three portal environment values together.
+// A partial configuration is refused: enabling the portal without an exact
+// origin would leave signup, login and every mutation unchecked, and a
+// malformed proxy entry would silently trust the wrong peer.
+func tenantPortalConfig(enabled bool, originRaw, proxyRaw string) (string, []string, error) {
+	origin, err := api.NormalizeTenantOrigin(originRaw)
+	if err != nil {
+		return "", nil, err
+	}
+	if enabled && origin == "" {
+		return "", nil, errors.New("AJS_TENANT_PORTAL=1 requires AJS_TENANT_ORIGIN, for example https://panel.example.com")
+	}
+	proxies := splitList(proxyRaw)
+	if _, err := api.ParseTrustedProxies(proxies); err != nil {
+		return "", nil, err
+	}
+	return origin, proxies, nil
+}
 
 // validateAdminToken is the startup guard for the panel bearer token (S2).
 // The insecure mode keeps the old behaviour: it exists for local lab runs,

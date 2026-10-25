@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,6 +190,19 @@ type Config struct {
 	// is deliberate: the running daemon keeps the replaced panel in memory and
 	// writes it over state.json on its next snapshot.
 	AllowBackupRestore bool
+	// TenantPortal enables the customer portal chains (/v1/portal/* and
+	// /v1/admin/tenants*). It is false unless AJS_TENANT_PORTAL=1, in which
+	// case the routes are not registered at all and answer 404. The feature is
+	// additive: existing dashboard auth and scoped keys are unchanged.
+	TenantPortal bool
+	// TenantOrigin is the exact browser Origin allowed on signup, login and
+	// every unsafe portal request (AJS_TENANT_ORIGIN, normalized to
+	// scheme://host). Empty while the portal is enabled fails closed.
+	TenantOrigin string
+	// TrustedProxies lists the direct peers whose X-Forwarded-For header is
+	// believed for portal rate limiting (AJS_TRUSTED_PROXIES, IPs or CIDRs).
+	// Empty trusts no forwarding header.
+	TrustedProxies []string
 }
 
 // Server wires the store to an http.Handler.
@@ -213,6 +227,14 @@ type Server struct {
 	// rateLimiter enforces each scoped key's rateLimitPerMin. The admin token
 	// never consults it.
 	rateLimiter *ratelimit.Limiter
+
+	// tenantLimiter enforces the portal buckets (IP, email, tenant, global).
+	// It is a separate Limiter so portal traffic can never consume a scoped
+	// key's budget.
+	tenantLimiter *ratelimit.Limiter
+
+	// trustedProxies are the peers whose X-Forwarded-For is believed.
+	trustedProxies []netip.Prefix
 
 	// backupMu serializes backup and restore: both read or replace the same
 	// state-directory files. TryLock turns a concurrent request into 409
@@ -250,6 +272,21 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 		s.webhookSecrets = make(map[string]string)
 	}
 	s.rateLimiter = ratelimit.New(ratelimit.WithClock(cfg.RateLimitClock))
+	s.tenantLimiter = ratelimit.New(ratelimit.WithClock(cfg.RateLimitClock))
+	if normalized, err := NormalizeTenantOrigin(cfg.TenantOrigin); err != nil {
+		// New cannot return an error; main validates the env before calling it.
+		// Fail closed here so a hand-built Config cannot allow a malformed
+		// origin.
+		logger.Error("tenant_origin_invalid", "error", err)
+		s.cfg.TenantOrigin = ""
+	} else {
+		s.cfg.TenantOrigin = normalized
+	}
+	trusted, err := ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		logger.Error("trusted_proxies_invalid", "error", err)
+	}
+	s.trustedProxies = trusted
 	s.handler = s.buildHandler()
 	return s
 }
@@ -395,6 +432,28 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/backup", s.handleBackupCreate)
 	rt.handle(http.MethodPost, "/v1/backup/inspect", s.handleBackupInspect)
 	rt.handle(http.MethodPost, "/v1/backup/restore", s.handleBackupRestore)
+
+	// Customer portal chains (DESIGN-TENANT). Both are opt-in: without
+	// AJS_TENANT_PORTAL=1 the routes are not registered and answer 404, and
+	// no identity is synthesized for them. The portal chain authenticates only
+	// its own cookie; the admin chain requires the admin token or the admin
+	// scope and is absent from routeScopes.
+	if s.cfg.TenantPortal {
+		rt.handle(http.MethodPost, "/v1/portal/signup", s.handlePortalSignup)
+		rt.handle(http.MethodPost, "/v1/portal/login", s.handlePortalLogin)
+		rt.handle(http.MethodGet, "/v1/portal/session", s.handlePortalSession)
+		rt.handle(http.MethodPost, "/v1/portal/logout", s.handlePortalLogout)
+		rt.handle(http.MethodGet, "/v1/portal/leases", s.handlePortalLeases)
+		rt.handle(http.MethodGet, "/v1/portal/usage", s.handlePortalUsage)
+		rt.handle(http.MethodGet, "/v1/portal/keys", s.handlePortalListKeys)
+		rt.handle(http.MethodPost, "/v1/portal/keys", s.handlePortalCreateKey)
+		rt.handle(http.MethodDelete, "/v1/portal/keys/{id}", s.handlePortalRevokeKey)
+
+		rt.handle(http.MethodGet, "/v1/admin/tenants", s.handleListTenants)
+		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/approve", s.handleApproveTenant)
+		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/suspend", s.handleSuspendTenant)
+		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/resume", s.handleResumeTenant)
+	}
 }
 
 // handleTopologyView serves the Resin panel view when configured and the
@@ -499,6 +558,11 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 				// backup.MaxEnvelopeBytes inside the handler.
 				limit = maxBackupBodyBytes
 			}
+			if strings.HasPrefix(r.URL.Path, "/v1/portal/") {
+				// Portal bodies are a few short fields; a large body is never
+				// legitimate and would only feed the Argon2 path.
+				limit = 64 << 10
+			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
@@ -512,17 +576,38 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 // /healthz stays open, and AllowInsecure disables the check entirely.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The portal chain is its own authentication world: a cookie session
+		// is the only identity, and neither the admin token nor a scoped key
+		// can stand in for one. When the feature is off the routes are absent,
+		// so the request falls through to the router's 404.
+		if isPortalPath(r.URL.Path) {
+			if !s.cfg.TenantPortal {
+				next.ServeHTTP(w, r)
+				return
+			}
+			s.servePortalAuth(w, r, next)
+			return
+		}
+		adminTenant := isAdminTenantPath(r.URL.Path)
 		if !strings.HasPrefix(r.URL.Path, "/v1/") && r.URL.Path != "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if s.cfg.AllowInsecure {
+		// AJS_ALLOW_INSECURE keeps its legacy effect on the dashboard routes,
+		// but tenant administration is never anonymous: it needs the admin
+		// token or a scoped admin principal even in insecure mode.
+		if s.cfg.AllowInsecure && !adminTenant {
 			next.ServeHTTP(w, r)
 			return
 		}
 		const prefix = "Bearer "
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, prefix) {
+			if adminTenant && portalCookiePresent(r) {
+				writeError(w, http.StatusForbidden, CodeForbidden,
+					"a portal session cannot administer tenants")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
 			return
 		}
@@ -534,7 +619,17 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		key, ok := s.store.AuthenticateScopedKey(token)
 		if !ok {
+			if adminTenant && portalCookiePresent(r) {
+				writeError(w, http.StatusForbidden, CodeForbidden,
+					"a portal session cannot administer tenants")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		if adminTenant && !hasScope(key.Scopes, model.ScopeAdmin) {
+			writeError(w, http.StatusForbidden, CodeForbidden,
+				"tenant administration requires the admin scope")
 			return
 		}
 		// The limit is charged before the account restriction check so a
@@ -733,6 +828,12 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, CodeConflict, err.Error())
+	case errors.Is(err, store.ErrQuota):
+		writeError(w, http.StatusTooManyRequests, CodeQuotaExceeded, err.Error())
+	case errors.Is(err, store.ErrUnauthorized):
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, err.Error())
+	case errors.Is(err, store.ErrForbidden):
+		writeError(w, http.StatusForbidden, CodeForbidden, err.Error())
 	case errors.Is(err, store.ErrUpstream):
 		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, err.Error())
 	default:
