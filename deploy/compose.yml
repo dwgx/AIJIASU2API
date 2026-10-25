@@ -28,8 +28,17 @@ services:
     environment:
       AJS_LISTEN: 127.0.0.1:2261
       AJS_STATE_DIR: /data
+      # Optional HTTPS admin listener (AJS-276). Configure it through .env:
+      # AJS_TLS_CERT=/certs/fullchain.pem, AJS_TLS_KEY=/certs/privkey.pem and
+      # optionally AJS_TLS_LISTEN (default 127.0.0.1:2262). The mount below
+      # provides /certs; a partial configuration aborts startup.
     volumes:
       - accountd-data:/data
+      # TLS material for the optional HTTPS listener. The directory may be
+      # empty — the daemon reads it only when AJS_TLS_CERT/AJS_TLS_KEY are
+      # set — and it is mounted read-only so the daemon cannot rewrite its own
+      # certificate. Put *.pem files here: they are gitignored.
+      - ./certs:/certs:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2261/healthz"]

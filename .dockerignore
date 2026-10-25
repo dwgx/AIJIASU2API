@@ -18,6 +18,11 @@
 **/.env.*
 !**/.env.example
 
+# AJS-276: the optional HTTPS admin pair lives in deploy/certs (bind-mounted at
+# runtime, never built in). A private key must not reach the build stage or a
+# remote builder cache.
+deploy/certs/
+
 **/data/
 **/state.json
 **/secrets.json

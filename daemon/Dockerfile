@@ -33,8 +33,9 @@ RUN apk add --no-cache ca-certificates \
 
 COPY --from=build /out/ajs-accountd /usr/local/bin/ajs-accountd
 
-# Loopback by default: the daemon has no TLS and a bearer token baked into the
-# dashboard bundle, so it must not listen on a routable address.
+# Loopback by default: the plaintext listener has no TLS and a bearer token
+# baked into the dashboard bundle, so it must not listen on a routable address.
+# AJS_TLS_* can add an HTTPS listener for remote use; see deploy/README.md.
 ENV AJS_LISTEN=127.0.0.1:2261 \
     AJS_STATE_DIR=/data
 

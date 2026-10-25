@@ -68,6 +68,15 @@ func run() error {
 	updateAPIBase := flag.String("update-api-base", envOr("AJS_UPDATE_API_BASE", api.DefaultUpdateAPIBase), "GitHub API base URL for the update check (env AJS_UPDATE_API_BASE)")
 	flag.Parse()
 
+	// The HTTPS admin listener is opt-in (AJS-276): AJS_TLS_CERT and
+	// AJS_TLS_KEY together enable it on AJS_TLS_LISTEN (default
+	// 127.0.0.1:2262). A partial configuration aborts here, before any state
+	// is opened, instead of silently serving a different transport.
+	tlsCfg, err := api.ParseTLSConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+
 	// S4: AJS_ALLOW_INSECURE=1 must stay on loopback. Without this guard a
 	// single env var turns the loopback control plane into an unauthenticated
 	// network service (state-changing POSTs are CSRF-able there).
@@ -75,6 +84,9 @@ func run() error {
 		if err := requireLoopback(*listen); err != nil {
 			return err
 		}
+	}
+	if err := validateTLSListener(*listen, tlsCfg, *insecure); err != nil {
+		return err
 	}
 	// S2: a placeholder token is a working admin API whose value is printed in
 	// the repository — including the one .env.example ships — so startup
@@ -471,13 +483,37 @@ func run() error {
 	// every open stream instead of burning the 5 s shutdown budget.
 	httpServer.RegisterOnShutdown(eventRing.Close)
 
-	errCh := make(chan error, 1)
+	// The HTTPS listener is a second socket over the same handler, built here
+	// so an unreadable or mismatched certificate pair fails startup before
+	// either listener accepts a connection. It copies the plaintext server's
+	// timeouts and leaves that server untouched, so loopback HTTP keeps
+	// working beside it.
+	var tlsServer *http.Server
+	if tlsCfg.Enabled() {
+		tlsServer, err = api.NewTLSServer(httpServer, tlsCfg)
+		if err != nil {
+			return err
+		}
+		tlsServer.RegisterOnShutdown(eventRing.Close)
+	}
+
+	errCh := make(chan error, 2)
 	go func() { errCh <- httpServer.ListenAndServe() }()
+	if tlsServer != nil {
+		go func() { errCh <- tlsServer.ListenAndServeTLS("", "") }()
+	}
 	authMode := "bearer"
 	if *insecure {
 		authMode = "insecure"
 	}
 	logger.Info("ajs-accountd listening", "addr", *listen, "auth", authMode)
+	if tlsServer != nil {
+		// Address only: the certificate and key paths stay out of the log
+		// along with their contents.
+		logger.Info("tls_listener_started", "addr", tlsCfg.Listen, "min_version", "1.2")
+	} else {
+		logger.Info("tls_disabled", "reason", "AJS_TLS_CERT and AJS_TLS_KEY are not set")
+	}
 
 	select {
 	case <-ctx.Done():
@@ -487,8 +523,19 @@ func run() error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
+		if tlsServer != nil {
+			if err := tlsServer.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("shutdown tls listener: %w", err)
+			}
+		}
 		return nil
 	case err := <-errCh:
+		// One listener failing must not leave the daemon half-served: close
+		// the sibling so the process exits instead of answering on one port.
+		_ = httpServer.Close()
+		if tlsServer != nil {
+			_ = tlsServer.Close()
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -1104,13 +1151,19 @@ func validateAdminToken(token string, insecure bool) error {
 // only boundary left; without this check one env var publishes an open admin
 // API on every interface.
 func requireLoopback(listen string) error {
+	return requireLoopbackEnv(listen, "AJS_LISTEN")
+}
+
+// requireLoopbackEnv is requireLoopback for a named listener variable, so the
+// error tells the operator which address to change.
+func requireLoopbackEnv(listen, env string) error {
 	host := listen
 	if parsed, _, err := net.SplitHostPort(listen); err == nil {
 		host = parsed
 	}
 	host = strings.Trim(strings.TrimSpace(host), "[]")
 	if host == "" {
-		return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback AJS_LISTEN, got %q (an empty host binds every interface)", listen)
+		return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback %s, got %q (an empty host binds every interface)", env, listen)
 	}
 	lower := strings.ToLower(host)
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
@@ -1119,7 +1172,25 @@ func requireLoopback(listen string) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback AJS_LISTEN (127.0.0.1, ::1 or localhost), got %q", listen)
+	return fmt.Errorf("AJS_ALLOW_INSECURE=1 needs a loopback %s (127.0.0.1, ::1 or localhost), got %q", env, listen)
+}
+
+// validateTLSListener is the startup guard for the optional HTTPS listener.
+// Two listeners cannot share one address, and AJS_ALLOW_INSECURE=1 turns the
+// admin API into an unauthenticated service: the plaintext guard pins
+// AJS_LISTEN to loopback, and the TLS listener — whose whole purpose is to be
+// reachable beyond loopback — must not become the way around it.
+func validateTLSListener(listen string, cfg api.TLSConfig, insecure bool) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	if cfg.Listen == listen {
+		return fmt.Errorf("AJS_TLS_LISTEN and AJS_LISTEN are both %q; the HTTPS listener needs its own address", listen)
+	}
+	if insecure {
+		return requireLoopbackEnv(cfg.Listen, api.EnvTLSListen)
+	}
+	return nil
 }
 
 // validateLoginHosts is the scheme allowlist for AJS_API_HOSTS (S11). The
