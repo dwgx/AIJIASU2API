@@ -1232,9 +1232,9 @@ export interface UsageQuery {
 /* --------------------------------------------------------------------------
  * Health — daemon/internal/health/health.go
  *
- * GET /v1/health/nodes samples loopback gates only. Percentiles, min and max
- * are computed over successful probes; `last` is the newest sample regardless
- * of outcome.
+ * GET /v1/health/nodes samples loopback gates and, when AJS_EGRESS_PROBE=1,
+ * measures HTTP egress through each live gate. Percentiles are computed over
+ * successful probes; `last` is the newest sample regardless of outcome.
  * ------------------------------------------------------------------------ */
 
 export type NodeHealthState = 'ok' | 'degraded' | 'down'
@@ -1267,6 +1267,49 @@ export interface NodeHealth {
   maxMs: number
   consecutiveFailures: number
   last?: HealthSample
+  /** Absent when the daemon does not run the through-gate probe. */
+  egress?: NodeEgressHealth
+}
+
+/** Through-gate failure classes; `http` means the target answered outside 2xx. */
+export type EgressErrorClass =
+  | 'timeout'
+  | 'refused'
+  | 'unreachable'
+  | 'proxy'
+  | 'http'
+  | 'other'
+
+/** One HTTP exchange through the node's gate. `at` is when the probe started. */
+export interface EgressSample {
+  /** RFC 3339 with nanoseconds. */
+  at: string
+  /** SOCKS5 handshake, TLS and response, end to end. */
+  latencyMs: number
+  ok: boolean
+  /** Target HTTP status; absent when no response was read. */
+  status?: number
+  /** Empty/absent when `ok` is true. */
+  errorClass?: EgressErrorClass | string
+}
+
+/**
+ * One node's egress aggregate. `enabled:false` names the switch that turned
+ * sampling off instead of pretending a zero aggregate was measured.
+ */
+export interface NodeEgressHealth {
+  enabled: boolean
+  reason?: string
+  /** Absent when `enabled` is false. */
+  state?: NodeHealthState
+  count: number
+  ok: number
+  /** OK/Count over the whole window, 0..1. */
+  successRate: number
+  p50Ms: number
+  p95Ms: number
+  consecutiveFailures: number
+  last?: EgressSample
 }
 
 /** GET /v1/health/nodes; `enabled:false` carries the daemon's reason. */

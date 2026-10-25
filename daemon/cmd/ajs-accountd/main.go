@@ -249,10 +249,16 @@ func run() error {
 	usageAggregator := usage.New(usage.Config{RetentionRows: store.RequestRetention})
 
 	var healthSampler *health.Sampler
+	var egressSampler *health.EgressSampler
 	var healthView api.HealthMonitor
 	var healthWatches *healthTracker
 	if os.Getenv("AJS_HEALTH_PROBE") == "0" {
 		logger.Info("health_probe_disabled", "reason", "AJS_HEALTH_PROBE=0")
+		if egressProbeEnabled() {
+			// Egress follows the health sampler's watch set: with no loopback
+			// sampler there is no live-gate signal to attach to.
+			logger.Warn("egress_probe_ignored", "reason", "AJS_HEALTH_PROBE=0")
+		}
 	} else {
 		maxNodes, err := healthMaxNodes()
 		if err != nil {
@@ -263,7 +269,31 @@ func run() error {
 		// Registered before the controller's stop defer, so probes stop after
 		// the gates they sample are closed.
 		defer healthSampler.Stop()
-		healthWatches = newHealthTracker(healthSampler)
+		if egressProbeEnabled() {
+			if gateAuth == gate.AuthUserPass {
+				// The probe speaks the gate's no-auth SOCKS5 mode. In
+				// userpass mode the gate refuses that greeting, so every
+				// sample records a proxy failure rather than a silent pass.
+				logger.Warn("egress_probe_unauthenticated",
+					"reason", "AJS_GATE_AUTH=userpass refuses the no-auth probe; egress samples will record proxy failures")
+			}
+			egressCfg, err := egressConfig()
+			if err != nil {
+				return err
+			}
+			egressSampler, err = health.NewEgressSampler(egressCfg)
+			if err != nil {
+				return fmt.Errorf("AJS_EGRESS_TARGET: %w", err)
+			}
+			egressSampler.Start(ctx)
+			// Same ordering as the loopback sampler: the gates close first.
+			defer egressSampler.Stop()
+			logger.Info("egress_probe_enabled",
+				"interval", egressCfg.Interval.String(),
+				"timeout", egressCfg.Timeout.String(),
+				"target", egressLogTarget(egressCfg.Target))
+		}
+		healthWatches = newHealthTracker(healthSampler, egressSampler)
 		healthView = healthWatches
 		logger.Info("health_probe_enabled",
 			"interval", health.DefaultInterval.String(),
@@ -721,6 +751,64 @@ func healthMaxNodes() (int, error) {
 	return nodes, nil
 }
 
+// minEgressInterval keeps a misconfigured AJS_EGRESS_INTERVAL from turning
+// every sample into a vendor flow: each probe spends the account's session
+// capacity and budget, so a sub-10s cadence is refused rather than clamped.
+const minEgressInterval = 10 * time.Second
+
+// egressProbeEnabled reports whether AJS_EGRESS_PROBE opts into the
+// through-gate probe. Only the exact value "1" enables it; the probe is off by
+// default because every sample is real egress through the vendor session.
+func egressProbeEnabled() bool {
+	return strings.TrimSpace(os.Getenv("AJS_EGRESS_PROBE")) == "1"
+}
+
+// egressConfig parses the optional egress knobs. An empty interval keeps the
+// 60s default, a malformed or too-short one fails startup, and an empty target
+// keeps https://www.gstatic.com/generate_204. NewEgressSampler validates the
+// target so a typo aborts startup instead of recording every probe as a
+// failure.
+func egressConfig() (health.EgressConfig, error) {
+	// Start from the effective defaults so the startup log reports the cadence
+	// the sampler will actually use, not the zero value that New would fill.
+	cfg := health.EgressConfig{
+		Interval: health.DefaultEgressInterval,
+		Timeout:  health.DefaultEgressTimeout,
+		Target:   strings.TrimSpace(os.Getenv("AJS_EGRESS_TARGET")),
+	}
+	raw := strings.TrimSpace(os.Getenv("AJS_EGRESS_INTERVAL"))
+	if raw == "" {
+		return cfg, nil
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil {
+		return cfg, fmt.Errorf("AJS_EGRESS_INTERVAL %q must be a duration such as 60s", raw)
+	}
+	if interval < minEgressInterval {
+		return cfg, fmt.Errorf("AJS_EGRESS_INTERVAL %q must be at least %s", raw, minEgressInterval)
+	}
+	cfg.Interval = interval
+	return cfg, nil
+}
+
+// egressLogTarget renders AJS_EGRESS_TARGET for the startup log without any
+// userinfo, query or fragment. The target is an operator setting, but a URL is
+// an easy place to paste a token; the log keeps only scheme, host and path.
+func egressLogTarget(raw string) string {
+	if raw == "" {
+		return health.DefaultEgressTarget
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "invalid"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
+}
+
 // healthReconcileInterval is how often the sampler is re-aligned with the
 // controller's running gates. The API updates it immediately on
 // connect/disconnect/login/logout; the sweep covers gates opened by the
@@ -737,13 +825,14 @@ type healthGateSource interface {
 	Snapshot() []runtime.NodeRuntime
 }
 
-// healthTracker adapts *health.Sampler to api.HealthMonitor and remembers the
-// watched keys, so the reconciler can unwatch gates the controller no longer
-// runs and re-arm a key the sampler evicted. It serializes Watch/Unwatch
-// because a port change needs the sampler's retained ring re-armed, and
-// Unwatch waits for the probe goroutine.
+// healthTracker adapts *health.Sampler (and, when enabled, *health.EgressSampler)
+// to api.HealthMonitor and remembers the watched keys, so the reconciler can
+// unwatch gates the controller no longer runs and re-arm a key the sampler
+// evicted. It serializes Watch/Unwatch because a port change needs the
+// sampler's retained ring re-armed, and Unwatch waits for the probe goroutine.
 type healthTracker struct {
 	sampler *health.Sampler
+	egress  *health.EgressSampler
 	now     func() time.Time
 
 	mu           sync.Mutex
@@ -751,8 +840,13 @@ type healthTracker struct {
 	lastRearmLog time.Time
 }
 
-func newHealthTracker(sampler *health.Sampler) *healthTracker {
-	return &healthTracker{sampler: sampler, now: time.Now, watched: make(map[string]int)}
+func newHealthTracker(sampler *health.Sampler, egress *health.EgressSampler) *healthTracker {
+	return &healthTracker{
+		sampler: sampler,
+		egress:  egress,
+		now:     time.Now,
+		watched: make(map[string]int),
+	}
 }
 
 func (t *healthTracker) Watch(key string, port int) error {
@@ -760,10 +854,21 @@ func (t *healthTracker) Watch(key string, port int) error {
 	defer t.mu.Unlock()
 	if current, ok := t.watched[key]; ok && current != port {
 		t.sampler.Unwatch(key)
+		if t.egress != nil {
+			t.egress.Unwatch(key)
+		}
 		delete(t.watched, key)
 	}
 	if err := t.sampler.Watch(key, port); err != nil {
 		return err
+	}
+	if t.egress != nil {
+		// The egress sampler follows the same live-gate set. Its only
+		// failures are the validation errors the loopback watch already
+		// refused and a stopped sampler; report them so the sweep retries.
+		if err := t.egress.Watch(key, port); err != nil {
+			return err
+		}
 	}
 	t.watched[key] = port
 	return nil
@@ -773,11 +878,29 @@ func (t *healthTracker) Unwatch(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sampler.Unwatch(key)
+	if t.egress != nil {
+		t.egress.Unwatch(key)
+	}
 	delete(t.watched, key)
 }
 
 func (t *healthTracker) Stats(key string) (health.Stats, bool) {
 	return t.sampler.Stats(key)
+}
+
+// EgressStats exposes the through-gate window to the API. A daemon started
+// without AJS_EGRESS_PROBE has no egress sampler, and the API then reports the
+// block as disabled instead of inventing an empty aggregate.
+func (t *healthTracker) EgressStats(key string) (health.EgressStats, bool) {
+	if t.egress == nil {
+		return health.EgressStats{}, false
+	}
+	return t.egress.Stats(key)
+}
+
+// EgressEnabled reports whether the through-gate probe is running.
+func (t *healthTracker) EgressEnabled() bool {
+	return t.egress != nil
 }
 
 // Evicted reports whether the sampler dropped this key's window at its node

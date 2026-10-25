@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HealthPanel } from '../src/components/nodes/HealthPanel'
 import { api } from '../src/lib/api'
 import { LanguageProvider } from '../src/lib/i18n'
-import type { HealthView, NodeHealth } from '../src/lib/types'
+import type { HealthView, NodeEgressHealth, NodeHealth } from '../src/lib/types'
 
 const AT = '2026-10-24T12:00:00Z'
 
@@ -50,6 +50,42 @@ const DOWN_NODE = makeNode({
 
 const VIEW: HealthView = { enabled: true, nodes: [OK_NODE, DEGRADED_NODE, DOWN_NODE] }
 
+const EGRESS_OK: NodeEgressHealth = {
+  enabled: true,
+  state: 'ok',
+  count: 60,
+  ok: 58,
+  successRate: 58 / 60,
+  p50Ms: 310,
+  p95Ms: 780,
+  consecutiveFailures: 0,
+  last: { at: AT, latencyMs: 305, ok: true, status: 204 },
+}
+
+const EGRESS_HTTP: NodeEgressHealth = {
+  enabled: true,
+  state: 'degraded',
+  count: 30,
+  ok: 24,
+  successRate: 24 / 30,
+  p50Ms: 400,
+  p95Ms: 1200,
+  consecutiveFailures: 1,
+  last: { at: AT, latencyMs: 520, ok: false, status: 503, errorClass: 'http' },
+}
+
+const EGRESS_DOWN: NodeEgressHealth = {
+  enabled: true,
+  state: 'down',
+  count: 12,
+  ok: 2,
+  successRate: 2 / 12,
+  p50Ms: 900,
+  p95Ms: 1500,
+  consecutiveFailures: 6,
+  last: { at: AT, latencyMs: 8000, ok: false, errorClass: 'timeout' },
+}
+
 function renderPanel(variant: 'full' | 'compact' = 'full') {
   return render(
     <MemoryRouter>
@@ -77,6 +113,20 @@ function rowOf(name: string): HTMLElement {
   const cell = screen.getByText(name)
   const row = cell.closest('tr')
   if (!row) throw new Error(`no table row for ${name}`)
+  return row
+}
+
+function egressCard(title = 'Egress through gate'): HTMLElement {
+  const heading = screen.getByRole('heading', { name: title })
+  const card = heading.closest('section')
+  if (!card) throw new Error(`no egress card for ${title}`)
+  return card
+}
+
+function egressRow(name: string, title?: string): HTMLElement {
+  const cell = within(egressCard(title)).getByText(name)
+  const row = cell.closest('tr')
+  if (!row) throw new Error(`no egress row for ${name}`)
   return row
 }
 
@@ -120,6 +170,11 @@ describe('HealthPanel', () => {
     // Percentiles cover successful probes only; an all-failed window has none,
     // and no sparkline can be drawn from failed probes either.
     expect(within(downRow).getAllByText('—')).toHaveLength(3)
+    // A daemon without the through-gate seam omits the egress block, so the
+    // panel must not invent an egress section.
+    expect(
+      screen.queryByRole('heading', { name: 'Egress through gate' }),
+    ).not.toBeInTheDocument()
   })
 
   it('builds the sparkline from successive samples and keeps the last 60', async () => {
@@ -274,5 +329,122 @@ describe('HealthPanel', () => {
 
     expect(await screen.findByText('daemon offline')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('renders measured egress through each gate with its last error', async () => {
+    vi.spyOn(api, 'getNodeHealth').mockResolvedValue({
+      enabled: true,
+      nodes: [
+        makeNode({ nodeId: 'node-a', label: 'alpha', state: 'ok', egress: EGRESS_OK }),
+        makeNode({ nodeId: 'node-b', label: 'bravo', state: 'degraded', egress: EGRESS_HTTP }),
+        makeNode({ nodeId: 'node-c', label: 'charlie', state: 'down', egress: EGRESS_DOWN }),
+      ],
+    })
+    renderPanel()
+
+    expect(
+      await screen.findByRole('heading', { name: 'Egress through gate' }),
+    ).toBeInTheDocument()
+
+    const okRow = egressRow('alpha')
+    expect(within(okRow).getByText('ok')).toBeInTheDocument()
+    expect(within(okRow).getByText('310 ms')).toBeInTheDocument()
+    expect(within(okRow).getByText('780 ms')).toBeInTheDocument()
+    expect(within(okRow).getByText('96.7%')).toBeInTheDocument()
+    expect(within(okRow).getByText('305 ms')).toBeInTheDocument()
+
+    const httpRow = egressRow('bravo')
+    expect(within(httpRow).getByText('degraded')).toBeInTheDocument()
+    expect(within(httpRow).getByText('400 ms')).toBeInTheDocument()
+    expect(within(httpRow).getByText('1,200 ms')).toBeInTheDocument()
+    expect(within(httpRow).getByText('80.0%')).toBeInTheDocument()
+    expect(within(httpRow).getByText('HTTP 503')).toBeInTheDocument()
+
+    const downRow = egressRow('charlie')
+    expect(within(downRow).getByText('down')).toBeInTheDocument()
+    expect(within(downRow).getByText('900 ms')).toBeInTheDocument()
+    expect(within(downRow).getByText('1,500 ms')).toBeInTheDocument()
+    expect(within(downRow).getByText('16.7%')).toBeInTheDocument()
+    expect(within(downRow).getByText('timeout')).toBeInTheDocument()
+  })
+
+  it('names the switch when egress sampling is off', async () => {
+    vi.spyOn(api, 'getNodeHealth').mockResolvedValue({
+      enabled: true,
+      nodes: [
+        makeNode({
+          nodeId: 'node-a',
+          label: 'alpha',
+          state: 'ok',
+          egress: {
+            enabled: false,
+            reason: 'AJS_EGRESS_PROBE=0',
+            count: 0,
+            ok: 0,
+            successRate: 0,
+            p50Ms: 0,
+            p95Ms: 0,
+            consecutiveFailures: 0,
+          },
+        }),
+      ],
+    })
+    renderPanel()
+
+    expect(
+      await screen.findByRole('heading', { name: 'Egress through gate' }),
+    ).toBeInTheDocument()
+    const card = egressCard()
+    expect(within(card).getByText('Egress sampling is off')).toBeInTheDocument()
+    expect(within(card).getByText('Daemon reason: AJS_EGRESS_PROBE=0')).toBeInTheDocument()
+    expect(within(card).queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('marks an egress window with no sample as waiting, not ok', async () => {
+    vi.spyOn(api, 'getNodeHealth').mockResolvedValue({
+      enabled: true,
+      nodes: [
+        makeNode({
+          nodeId: 'node-a',
+          label: 'alpha',
+          state: 'ok',
+          egress: {
+            enabled: true,
+            state: 'ok',
+            count: 0,
+            ok: 0,
+            successRate: 0,
+            p50Ms: 0,
+            p95Ms: 0,
+            consecutiveFailures: 0,
+          },
+        }),
+      ],
+    })
+    renderPanel()
+
+    expect(
+      await screen.findByRole('heading', { name: 'Egress through gate' }),
+    ).toBeInTheDocument()
+    const egress = egressRow('alpha')
+    expect(within(egress).getByText('waiting')).toBeInTheDocument()
+    expect(within(egress).queryByText('ok')).not.toBeInTheDocument()
+    expect(within(egress).getByText('no sample')).toBeInTheDocument()
+    expect(within(egress).getAllByText('—')).toHaveLength(3)
+  })
+
+  it('renders the egress copy in Chinese', async () => {
+    localStorage.setItem('ajs.lang', 'zh')
+    vi.spyOn(api, 'getNodeHealth').mockResolvedValue({
+      enabled: true,
+      nodes: [makeNode({ nodeId: 'node-c', label: 'charlie', state: 'down', egress: EGRESS_DOWN })],
+    })
+    renderPanel()
+
+    expect(await screen.findByRole('heading', { name: '网关出口探测' })).toBeInTheDocument()
+    expect(within(egressCard('网关出口探测')).getByText('最近错误')).toBeInTheDocument()
+    const row = egressRow('charlie', '网关出口探测')
+    expect(within(row).getByText('故障')).toBeInTheDocument()
+    expect(within(row).getByText('超时')).toBeInTheDocument()
   })
 })

@@ -1,12 +1,17 @@
-// Package health samples loopback gate latency for the console.
+// Package health measures gate health for the console.
 //
-// A probe is one TCP handshake to 127.0.0.1:<gate port> followed by an
-// immediate close: no payload, no proxy protocol, no credential and no vendor
-// traffic. The sampler keeps one bounded ring per node key, folds the window
-// into p50/p95/min/max, success rate and an ok|degraded|down state, and never
-// talks to a vendor host.
+// The loopback Sampler's probe is one TCP handshake to 127.0.0.1:<gate port>
+// followed by an immediate close: no payload, no proxy protocol, no credential
+// and no vendor traffic. It keeps one bounded ring per node key, folds the
+// window into p50/p95/min/max, success rate and an ok|degraded|down state, and
+// never talks to a vendor host.
 //
-// The sampler owns every goroutine it starts. Start launches one per watched
+// The opt-in EgressSampler measures real egress instead: one HTTP request
+// through the node's own SOCKS5 gate to a configured target, kept in a bounded
+// per-node ring with the same state vocabulary. It only samples a watched live
+// gate and is off unless the daemon enables it.
+//
+// Both samplers own every goroutine they start. Start launches one per watched
 // node; Stop cancels and joins all of them, so a stopped sampler leaves
 // nothing running. The package is a pure library: it registers no route and
 // reads no environment variable.

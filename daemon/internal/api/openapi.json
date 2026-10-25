@@ -4103,7 +4103,7 @@
           "Health"
         ],
         "summary": "Read loopback gate health for every watched node.",
-        "description": "Requires health:read for a scoped key. A key restricted by accountIds/regions only sees nodes of its own accounts; enabled=false carries the daemon's reason when probing is off.",
+        "description": "Requires health:read for a scoped key. A key restricted by accountIds/regions only sees nodes of its own accounts; enabled=false carries the daemon's reason when probing is off. Each row may carry an egress block measured through the node's own gate; egress.enabled=false names the switch that turned egress sampling off.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -10459,6 +10459,9 @@
           },
           "last": {
             "$ref": "#/components/schemas/HealthSample"
+          },
+          "egress": {
+            "$ref": "#/components/schemas/EgressHealth"
           }
         },
         "required": [
@@ -10494,6 +10497,109 @@
         "required": [
           "enabled",
           "nodes"
+        ]
+      },
+      "EgressSample": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "RFC 3339 instant the probe started, with nanoseconds."
+          },
+          "latencyMs": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "description": "SOCKS5 handshake, TLS and response, end to end."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599,
+            "description": "Target HTTP status; absent when no response was read."
+          },
+          "errorClass": {
+            "type": "string",
+            "enum": [
+              "timeout",
+              "refused",
+              "unreachable",
+              "proxy",
+              "http",
+              "other"
+            ],
+            "description": "Absent when ok is true. http means the target answered outside 2xx."
+          }
+        },
+        "required": [
+          "at",
+          "latencyMs",
+          "ok"
+        ]
+      },
+      "EgressHealth": {
+        "type": "object",
+        "description": "One node's HTTP egress measured through its live gate. enabled=false names the switch that turned sampling off instead of reporting a zero aggregate.",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Present when egress sampling is off."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "down"
+            ],
+            "description": "Absent when enabled is false."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "successRate": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "p50Ms": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "p95Ms": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "consecutiveFailures": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last": {
+            "$ref": "#/components/schemas/EgressSample"
+          }
+        },
+        "required": [
+          "enabled",
+          "count",
+          "ok",
+          "successRate",
+          "p50Ms",
+          "p95Ms",
+          "consecutiveFailures"
         ]
       },
       "WebhookEvent": {

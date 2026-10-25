@@ -403,6 +403,7 @@ describe('docs/openapi.json', () => {
       'AccountImportResult', 'BulkDeleteRequest', 'BulkDeleteResult', 'Schedule', 'ScopedKey',
       'RenewalPlan', 'RenewalPlansView', 'RenewalAccountView', 'UsageBucket', 'UsageAccount',
       'UsageUser', 'UsageTarget', 'UsageSummary', 'HealthSample', 'NodeHealth', 'HealthView',
+      'EgressHealth', 'EgressSample',
       'WebhookEndpoint', 'WebhookCreate', 'WebhookCreated', 'WebhookPatch', 'Delivery',
       'ErrorResponse',
     ]
@@ -507,6 +508,33 @@ describe('docs/openapi.json', () => {
 
     const health = doc.paths['/v1/health/nodes']?.get
     expect(health && responseSchema(health, '200')).toEqual({ $ref: '#/components/schemas/HealthView' })
+    // Egress is optional per node: a daemon without the through-gate probe
+    // omits the block, and one with it reports the switch when disabled.
+    expect(schema('NodeHealth').properties?.egress).toEqual({
+      $ref: '#/components/schemas/EgressHealth',
+    })
+    const egress = schema('EgressHealth')
+    expect(egress.required).toEqual(
+      expect.arrayContaining([
+        'enabled',
+        'count',
+        'ok',
+        'successRate',
+        'p50Ms',
+        'p95Ms',
+        'consecutiveFailures',
+      ]),
+    )
+    expect(egress.properties?.state?.enum).toEqual(['ok', 'degraded', 'down'])
+    expect(egress.properties?.reason).toMatchObject({ type: 'string' })
+    expect(schema('EgressSample').properties?.errorClass?.enum).toEqual([
+      'timeout',
+      'refused',
+      'unreachable',
+      'proxy',
+      'http',
+      'other',
+    ])
 
     const create = doc.paths['/v1/webhooks']?.post
     expect(create).toBeDefined()

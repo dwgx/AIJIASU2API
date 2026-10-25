@@ -5,9 +5,11 @@ import { api } from '../../lib/api'
 import { formatNumber, formatTime } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
 import type {
+  EgressErrorClass,
   HealthErrorClass,
   HealthSample,
   HealthView,
+  NodeEgressHealth,
   NodeHealth,
   NodeHealthState,
   Status,
@@ -46,6 +48,13 @@ const ERROR_CLASS_KEY: Record<HealthErrorClass, string> = {
   other: 'health.error.other',
 }
 
+/** Egress adds the two classes a loopback connect can never produce. */
+const EGRESS_ERROR_KEY: Record<EgressErrorClass, string> = {
+  ...ERROR_CLASS_KEY,
+  proxy: 'health.egress.error.proxy',
+  http: 'health.egress.error.http',
+}
+
 interface NodeHistory {
   /** Identity of the newest retained sample; a repeated poll must not add a point. */
   key: string
@@ -58,7 +67,7 @@ interface HealthPolling {
 }
 
 /** A measured zero is still a measurement; it reads as `0%`, not `0.0%`. */
-function successPercent(node: NodeHealth): string {
+function successPercent(node: { successRate: number }): string {
   const value = node.successRate * 100
   return `${value === 0 ? '0' : value.toFixed(1)}%`
 }
@@ -277,6 +286,120 @@ function HealthTable({
   )
 }
 
+/**
+ * Egress through each live gate. The daemon reports `enabled:false` plus the
+ * switch that turned sampling off, and this card repeats that reason instead
+ * of drawing an empty aggregate. A node with no sample yet is marked waiting,
+ * never ok: no evidence is not a success.
+ */
+function EgressCard({ nodes }: { nodes: NodeHealth[] }) {
+  const { t } = useI18n()
+  const rows = nodes.flatMap((node) => (node.egress ? [{ node, egress: node.egress }] : []))
+  if (rows.length === 0) return null
+  const enabled = rows.filter(({ egress }) => egress.enabled)
+  if (enabled.length === 0) {
+    const reason = rows.find(({ egress }) => egress.reason)?.egress.reason
+    return (
+      <Card title={t('health.egress.title')} subtitle={t('health.egress.subtitle')}>
+        <div className="health-disabled" role="status">
+          <p className="health-disabled__title">{t('health.egress.disabled')}</p>
+          <p className="health-disabled__desc">{t('health.egress.disabledDesc')}</p>
+          {reason ? (
+            <p className="health-disabled__reason mono">
+              {t('health.disabledReason', { reason })}
+            </p>
+          ) : null}
+        </div>
+      </Card>
+    )
+  }
+
+  return (
+    <Card title={t('health.egress.title')} subtitle={t('health.egress.subtitle')}>
+      <div
+        className="health-table-wrap"
+        role="region"
+        aria-label={t('health.egress.tableCaption')}
+        tabIndex={0}
+      >
+        <table className="health-table">
+          <caption className="sr-only">{t('health.egress.tableCaption')}</caption>
+          <thead>
+            <tr>
+              <th scope="col">{t('health.columnNode')}</th>
+              <th scope="col">{t('health.columnState')}</th>
+              <th scope="col" className="is-num">
+                {t('health.columnP50')}
+              </th>
+              <th scope="col" className="is-num">
+                {t('health.columnP95')}
+              </th>
+              <th scope="col" className="is-num">
+                {t('health.columnSuccess')}
+              </th>
+              <th scope="col">{t('health.egress.columnLast')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {enabled.map(({ node, egress }) => {
+              const name = node.label?.trim() ? node.label.trim() : node.nodeId
+              const measured = egress.count > 0
+              const hasSuccess = egress.ok > 0
+              const state = measured ? HEALTH_STATE[egress.state ?? 'ok'] : null
+              const last = egress.last
+              const errorKey = last?.errorClass
+                ? EGRESS_ERROR_KEY[last.errorClass as EgressErrorClass] ??
+                  'health.error.other'
+                : null
+              return (
+                <tr key={node.nodeId} className={`health-row health-row--${egress.state ?? 'ok'}`}>
+                  <th scope="row">
+                    <span className="cell-strong mono" title={node.nodeId}>
+                      {name}
+                    </span>
+                  </th>
+                  <td>
+                    {state ? (
+                      <StatusPill status={state.status}>{t(state.labelKey)}</StatusPill>
+                    ) : (
+                      <Badge tone="neutral">{t('health.egress.waiting')}</Badge>
+                    )}
+                  </td>
+                  <td className="is-num mono">
+                    {hasSuccess ? `${formatNumber(Math.round(egress.p50Ms))} ms` : '—'}
+                  </td>
+                  <td
+                    className="is-num mono"
+                    title={hasSuccess ? undefined : t('health.noSuccessfulSamples')}
+                  >
+                    {hasSuccess ? `${formatNumber(Math.round(egress.p95Ms))} ms` : '—'}
+                  </td>
+                  <td className="is-num mono">{measured ? successPercent(egress) : '—'}</td>
+                  <td>
+                    {!last ? (
+                      <span className="cell-sub">{t('health.noSample')}</span>
+                    ) : last.ok ? (
+                      <span className="mono">{formatNumber(Math.round(last.latencyMs))} ms</span>
+                    ) : (
+                      <Badge tone="danger">
+                        {last.status
+                          ? t('health.egress.httpStatus', { status: last.status })
+                          : errorKey
+                            ? t(errorKey)
+                            : t('health.failed')}
+                      </Badge>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
 function FullHealthPanel({
   health,
   history,
@@ -298,42 +421,45 @@ function FullHealthPanel({
       : null
 
   return (
-    <Card
-      title={t('health.title')}
-      subtitle={t('health.subtitle')}
-      actions={
-        <>
-          {view?.enabled && nodes.length > 0 ? (
-            <Badge tone={allOk ? 'success' : counts.down > 0 ? 'danger' : 'warning'}>
-              {t('health.counts', counts)}
-            </Badge>
-          ) : null}
-          <IconButton
-            label={t('health.refreshAria')}
-            icon={<RefreshCw size={14} />}
-            onClick={health.reload}
-          />
-        </>
-      }
-    >
-      {health.status === 'error' && !view ? (
-        <ErrorState message={health.error ?? t('common.unknownError')} onRetry={health.reload} />
-      ) : health.status === 'loading' && !view ? (
-        <HealthSkeleton />
-      ) : !view ? (
-        <HealthSkeleton />
-      ) : !view.enabled ? (
-        <DisabledHealth view={view} compact={false} />
-      ) : nodes.length === 0 ? (
-        <EmptyState title={t('health.emptyTitle')} description={t('health.emptyDesc')} />
-      ) : (
-        <>
-          {allOk ? <p className="callout callout--muted">{t('health.allOk')}</p> : null}
-          {staleText ? <p className="callout callout--warning">{staleText}</p> : null}
-          <HealthTable view={view} history={history} />
-        </>
-      )}
-    </Card>
+    <>
+      <Card
+        title={t('health.title')}
+        subtitle={t('health.subtitle')}
+        actions={
+          <>
+            {view?.enabled && nodes.length > 0 ? (
+              <Badge tone={allOk ? 'success' : counts.down > 0 ? 'danger' : 'warning'}>
+                {t('health.counts', counts)}
+              </Badge>
+            ) : null}
+            <IconButton
+              label={t('health.refreshAria')}
+              icon={<RefreshCw size={14} />}
+              onClick={health.reload}
+            />
+          </>
+        }
+      >
+        {health.status === 'error' && !view ? (
+          <ErrorState message={health.error ?? t('common.unknownError')} onRetry={health.reload} />
+        ) : health.status === 'loading' && !view ? (
+          <HealthSkeleton />
+        ) : !view ? (
+          <HealthSkeleton />
+        ) : !view.enabled ? (
+          <DisabledHealth view={view} compact={false} />
+        ) : nodes.length === 0 ? (
+          <EmptyState title={t('health.emptyTitle')} description={t('health.emptyDesc')} />
+        ) : (
+          <>
+            {allOk ? <p className="callout callout--muted">{t('health.allOk')}</p> : null}
+            {staleText ? <p className="callout callout--warning">{staleText}</p> : null}
+            <HealthTable view={view} history={history} />
+          </>
+        )}
+      </Card>
+      {view?.enabled && nodes.length > 0 ? <EgressCard nodes={nodes} /> : null}
+    </>
   )
 }
 

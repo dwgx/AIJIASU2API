@@ -94,7 +94,7 @@ func evictedKeys(tracker *healthTracker, keys ...string) []string {
 // evicted per sweep, and the next sweep must re-arm it within that tick.
 func TestReconcileHealthWatchesHealsEvictedKey(t *testing.T) {
 	sampler := newHealthTestSampler(t, 2)
-	tracker := newHealthTracker(sampler)
+	tracker := newHealthTracker(sampler, nil)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	source := &fakeHealthSource{nodes: []runtime.NodeRuntime{
 		{NodeID: "a", Port: 1001},
@@ -130,7 +130,7 @@ func TestReconcileHealthWatchesHealsEvictedKey(t *testing.T) {
 // logged at most once per minute even though the sweep runs every 15s.
 func TestReconcileHealthWatchesThrottlesRearmLog(t *testing.T) {
 	sampler := newHealthTestSampler(t, 1)
-	tracker := newHealthTracker(sampler)
+	tracker := newHealthTracker(sampler, nil)
 	clock := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	tracker.now = func() time.Time { return clock }
 	var log bytes.Buffer
@@ -169,7 +169,7 @@ func TestReconcileHealthWatchesThrottlesRearmLog(t *testing.T) {
 // happened.
 func TestReconcileHealthWatchesLogsRearmFailure(t *testing.T) {
 	sampler := newHealthTestSampler(t, 1)
-	tracker := newHealthTracker(sampler)
+	tracker := newHealthTracker(sampler, nil)
 	source := &fakeHealthSource{nodes: []runtime.NodeRuntime{
 		{NodeID: "a", Port: 1001},
 		{NodeID: "b", Port: 1002},
@@ -193,7 +193,7 @@ func TestReconcileHealthWatchesLogsRearmFailure(t *testing.T) {
 // logger is allowed.
 func TestReconcileHealthWatchesUnwatchesStoppedGates(t *testing.T) {
 	sampler := newHealthTestSampler(t, 4)
-	tracker := newHealthTracker(sampler)
+	tracker := newHealthTracker(sampler, nil)
 	source := &fakeHealthSource{nodes: []runtime.NodeRuntime{
 		{NodeID: "a", Port: 1001},
 		{NodeID: "b", Port: 1002},

@@ -1951,6 +1951,18 @@ const EN = {
     'Successful probe latencies observed since this panel opened (max 60).',
   'health.sampleCount': '{count} samples',
   'health.sampleCountOne': '{count} sample',
+  'health.egress.title': 'Egress through gate',
+  'health.egress.subtitle':
+    'HTTP measured through each live gate, not a loopback connect.',
+  'health.egress.tableCaption': 'Egress health through node gates',
+  'health.egress.columnLast': 'Last error',
+  'health.egress.waiting': 'waiting',
+  'health.egress.disabled': 'Egress sampling is off',
+  'health.egress.disabledDesc':
+    'The daemon is not measuring HTTP egress through node gates.',
+  'health.egress.error.http': 'HTTP status',
+  'health.egress.error.proxy': 'gate refused',
+  'health.egress.httpStatus': 'HTTP {status}',
 
   /* Scoped keys ----------------------------------------------------------- */
   'access.cardTitle': 'Scoped keys',
@@ -4265,6 +4277,16 @@ const ZH: Record<string, string> = {
   'health.sparklineHint': '此面板打开后观察到的成功探测延迟（最多 60 次）。',
   'health.sampleCount': '{count} 次采样',
   'health.sampleCountOne': '{count} 次采样',
+  'health.egress.title': '网关出口探测',
+  'health.egress.subtitle': '经每个节点在线网关测量的 HTTP 出口，而非回环连接。',
+  'health.egress.tableCaption': '节点网关出口健康',
+  'health.egress.columnLast': '最近错误',
+  'health.egress.waiting': '等待采样',
+  'health.egress.disabled': '出口采样已关闭',
+  'health.egress.disabledDesc': '守护进程未通过节点网关测量 HTTP 出口。',
+  'health.egress.error.http': 'HTTP 状态',
+  'health.egress.error.proxy': '网关拒绝',
+  'health.egress.httpStatus': 'HTTP {status}',
 
   /* Scoped keys ----------------------------------------------------------- */
   'access.cardTitle': '限定范围密钥',

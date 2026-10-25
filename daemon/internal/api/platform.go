@@ -36,6 +36,19 @@ type HealthMonitor interface {
 	Stats(key string) (health.Stats, bool)
 }
 
+// EgressMonitor is the optional through-gate egress view a HealthMonitor may
+// also implement. It is separate from HealthMonitor so an older sampler (and
+// every test double that only probes loopback) keeps compiling; a monitor
+// without it reports no egress block at all.
+type EgressMonitor interface {
+	EgressStats(key string) (health.EgressStats, bool)
+	EgressEnabled() bool
+}
+
+// reasonEgressDisabled is the switch the egress block names when the daemon
+// runs without an egress sampler.
+const reasonEgressDisabled = "AJS_EGRESS_PROBE=0"
+
 // WebhookSecretStore persists signing secrets outside the state snapshot.
 // The main package backs it with secret.Store; a nil value selects the
 // in-memory fallback (secrets do not survive a restart).
@@ -300,6 +313,7 @@ type healthNodeView struct {
 	MaxMs               float64           `json:"maxMs"`
 	ConsecutiveFailures int               `json:"consecutiveFailures"`
 	Last                *healthSampleView `json:"last,omitempty"`
+	Egress              *healthEgressView `json:"egress,omitempty"`
 }
 
 type healthSampleView struct {
@@ -309,10 +323,36 @@ type healthSampleView struct {
 	ErrorClass string  `json:"errorClass,omitempty"`
 }
 
+// healthEgressView is one node's through-gate egress aggregate. enabled=false
+// carries the switch that turned sampling off, so the panel can explain the
+// missing numbers instead of drawing an empty chart.
+type healthEgressView struct {
+	Enabled             bool                    `json:"enabled"`
+	Reason              string                  `json:"reason,omitempty"`
+	State               string                  `json:"state,omitempty"`
+	Count               int                     `json:"count"`
+	OK                  int                     `json:"ok"`
+	SuccessRate         float64                 `json:"successRate"`
+	P50Ms               float64                 `json:"p50Ms"`
+	P95Ms               float64                 `json:"p95Ms"`
+	ConsecutiveFailures int                     `json:"consecutiveFailures"`
+	Last                *healthEgressSampleView `json:"last,omitempty"`
+}
+
+type healthEgressSampleView struct {
+	At         string  `json:"at"`
+	LatencyMs  float64 `json:"latencyMs"`
+	OK         bool    `json:"ok"`
+	Status     int     `json:"status,omitempty"`
+	ErrorClass string  `json:"errorClass,omitempty"`
+}
+
 // handleHealthNodes serves GET /v1/health/nodes: one row per watched node with
 // the retained aggregate and the newest sample. Nodes that were never watched
 // (or whose ring is between an eviction and the next reconciler heal) are
 // omitted, and an account-restricted key only sees nodes of its own accounts.
+// A monitor that also measures egress adds one `egress` block per row; a
+// monitor without that seam omits the block entirely.
 func (s *Server) handleHealthNodes(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Health == nil {
 		writeJSON(w, http.StatusOK, healthNodesResponse{
@@ -324,6 +364,7 @@ func (s *Server) handleHealthNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes := s.store.Nodes()
 	visible, restricted := s.visibleAccountIDs(r)
+	egress, hasEgress := s.cfg.Health.(EgressMonitor)
 	out := make([]healthNodeView, 0, len(nodes))
 	for _, node := range nodes {
 		if restricted {
@@ -358,9 +399,46 @@ func (s *Server) handleHealthNodes(w http.ResponseWriter, r *http.Request) {
 				ErrorClass: stats.Last.ErrorClass,
 			}
 		}
+		if hasEgress {
+			view.Egress = egressNodeView(egress, node.ID)
+		}
 		out = append(out, view)
 	}
 	writeJSON(w, http.StatusOK, healthNodesResponse{Enabled: true, Nodes: out})
+}
+
+// egressNodeView renders one node's egress block. A disabled probe names the
+// switch that turned it off instead of reporting a zero aggregate; an enabled
+// probe with no sample yet keeps count 0 and state ok, which is the same
+// "no evidence of failure" contract the loopback window uses.
+func egressNodeView(monitor EgressMonitor, key string) *healthEgressView {
+	if !monitor.EgressEnabled() {
+		return &healthEgressView{Enabled: false, Reason: reasonEgressDisabled}
+	}
+	stats, ok := monitor.EgressStats(key)
+	if !ok {
+		return &healthEgressView{Enabled: true, State: health.StateOK}
+	}
+	view := &healthEgressView{
+		Enabled:             true,
+		State:               stats.State,
+		Count:               stats.Count,
+		OK:                  stats.OK,
+		SuccessRate:         stats.SuccessRate,
+		P50Ms:               stats.P50Ms,
+		P95Ms:               stats.P95Ms,
+		ConsecutiveFailures: stats.ConsecutiveFailures,
+	}
+	if !stats.Last.At.IsZero() {
+		view.Last = &healthEgressSampleView{
+			At:         stats.Last.At.UTC().Format(time.RFC3339Nano),
+			LatencyMs:  stats.Last.LatencyMs,
+			OK:         stats.Last.OK,
+			Status:     stats.Last.Status,
+			ErrorClass: stats.Last.ErrorClass,
+		}
+	}
+	return view
 }
 
 // watchHealth registers one live gate. Errors are logged: a health probe is a
