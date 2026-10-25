@@ -134,6 +134,9 @@ func normalizeNode(node model.ProxyNode) (model.ProxyNode, error) {
 
 // DeleteNode removes a node and every lease that pointed at it. It does not
 // touch the node's gate: the caller owns the listener and closes it first.
+// A lease is a customer entitlement, so each removed lease is revoked
+// explicitly in the audit (slot, generation, node id) instead of disappearing
+// with the row.
 func (s *Store) DeleteNode(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,6 +150,10 @@ func (s *Store) DeleteNode(id string) error {
 	kept := s.leases[:0]
 	for _, lease := range s.leases {
 		if lease.NodeID == id {
+			s.normalizeLeaseLocked(&lease)
+			s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
+				fmt.Sprintf("Lease on %s revoked · node_deleted", lease.NodeLabel),
+				leaseAuditMeta(lease, "node_deleted"))
 			continue
 		}
 		kept = append(kept, lease)
@@ -154,15 +161,44 @@ func (s *Store) DeleteNode(id string) error {
 	s.leases = kept
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
-		fmt.Sprintf("Node removed · account %s", node.AccountID))
+		fmt.Sprintf("Node removed · account %s", node.AccountID), s.nodeAuditMetaLocked(node))
 	return nil
+}
+
+// nodeAuditMetaLocked is the attribution every node lifecycle row carries: the
+// node id, its account, its slot index and the serving generation. A legacy
+// node (Slot 0) reports slot 0 / generation 0 rather than omitting the keys, so
+// a two-slot trace can group rows without guessing.
+func (s *Store) nodeAuditMetaLocked(node model.ProxyNode) map[string]string {
+	return map[string]string{
+		"nodeId":     node.ID,
+		"accountId":  node.AccountID,
+		"slot":       strconv.Itoa(node.Slot),
+		"generation": strconv.FormatUint(s.slotGenerationLocked(node), 10),
+	}
+}
+
+// leaseAuditMeta is the attribution every lease.revoke row carries: the lease,
+// the account and node it served, and the slot/generation the customer was
+// sold. A legacy lease reports slot 0 / generation 0.
+func leaseAuditMeta(lease model.Lease, reason string) map[string]string {
+	return map[string]string{
+		"leaseId":    lease.ID,
+		"accountId":  lease.AccountID,
+		"nodeId":     lease.NodeID,
+		"slot":       strconv.Itoa(lease.Slot),
+		"generation": strconv.FormatUint(lease.Generation, 10),
+		"reason":     reason,
+	}
 }
 
 // DeleteNodeUnleased removes a node only while no active lease points at it.
 // The undesired-node cleanup uses it: a node that still carries a customer
 // lease must stay visible (DOWN) until the lease is revoked explicitly, so a
-// cleanup pass cannot silently drop a live entitlement. The bool reports
-// whether the node was removed; false means it was kept because it is leased.
+// cleanup pass cannot silently drop a live entitlement. The check and the
+// removal run under one write lock, which closes the check-then-close window a
+// lease could otherwise slip through. The bool reports whether the node was
+// removed; false means it was kept because it is leased.
 func (s *Store) DeleteNodeUnleased(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,7 +216,7 @@ func (s *Store) DeleteNodeUnleased(id string) (bool, error) {
 	s.nodes = append(s.nodes[:idx], s.nodes[idx+1:]...)
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
-		fmt.Sprintf("Node removed · account %s", node.AccountID))
+		fmt.Sprintf("Node removed · account %s", node.AccountID), s.nodeAuditMetaLocked(node))
 	return true, nil
 }
 

@@ -323,9 +323,14 @@ func (p *ResinPanel) reconcileLocked(ctx context.Context) error {
 	subscriptionID := ""
 	if content == "" {
 		// Resin rejects empty content on create and PATCH, and a parsed empty
-		// body would evict every node. A fully drained pool leaves the
-		// subscription untouched until a node returns.
-		p.logger.Warn("resin: no LIVE nodes; subscription publish skipped",
+		// body would evict every node. A pool with zero LIVE nodes must not
+		// keep advertising its last (now dead) port either, so the subscription
+		// is withdrawn: absence is the explicit cleared marker, and the next
+		// LIVE render recreates it through EnsureSubscription.
+		if err := p.pub.Withdraw(ctx); err != nil {
+			return fmt.Errorf("runtime: withdraw empty subscription: %w", err)
+		}
+		p.logger.Warn("resin: no LIVE nodes; subscription withdrawn",
 			"subscription", p.cfg.SubscriptionName)
 	} else {
 		subscription, _, err := p.client.EnsureSubscription(ctx, p.cfg.SubscriptionName, content, p.cfg.UpdateInterval)
@@ -358,9 +363,9 @@ func (p *ResinPanel) reconcileLocked(ctx context.Context) error {
 
 	p.mu.Lock()
 	p.started = true
-	if subscriptionID != "" {
-		p.subscriptionID = subscriptionID
-	}
+	// Unconditional: an empty render has just withdrawn the subscription, so
+	// the recorded id must not survive the withdrawal.
+	p.subscriptionID = subscriptionID
 	p.platformID = platform.ID
 	p.content = content
 	p.nodes = index

@@ -245,17 +245,66 @@ type Liveness interface {
 // identity, so every later flow of the same session fails the same way.
 const vendorKickMarker = "disconnected by another connection"
 
-// isVendorKick reports whether one data-channel error is the vendor telling us
-// that another connection owns the account.
-func isVendorKick(err error) bool {
-	return err != nil && strings.Contains(err.Error(), vendorKickMarker)
+// vendorSessionLossMarkers are the vendor's data-channel refusals that mean the
+// authenticated session itself can no longer carry flows: a takeover, an
+// expired or revoked session, or a demand to authenticate again. The vendor
+// phrases the same loss differently across builds (AJS-353 observed
+// "session expired; authenticate again" on an authenticated SID), so detection
+// is a vocabulary match, not one exact string. Matching is case-insensitive.
+//
+// The list deliberately excludes target-level failures: the carrier reports a
+// refused destination separately ("socks connect failed: rep=N"), and an
+// unknown data-channel refusal leaves the session Alive instead of guessing.
+var vendorSessionLossMarkers = []string{
+	vendorKickMarker,
+	"another connection",
+	"taken over",
+	"kicked",
+	"session expired",
+	"session has expired",
+	"session is expired",
+	"session invalid",
+	"session is invalid",
+	"invalid session",
+	"session not found",
+	"no such session",
+	"session closed",
+	"session terminated",
+	"session timeout",
+	"session timed out",
+	"sid expired",
+	"invalid sid",
+	"authenticate again",
+	"re-authenticate",
+	"reauthenticate",
+	"log in again",
+	"login again",
+	"logged in elsewhere",
+	"login expired",
+	"not logged in",
+}
+
+// isSessionLoss reports whether one data-channel error is the vendor saying the
+// authenticated session is gone, so the runtime must contain the slot instead
+// of retrying the flow.
+func isSessionLoss(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range vendorSessionLossMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // flowSession adapts *fvfacade.Session to FlowSession.
 type flowSession struct {
 	sess   *fvfacade.Session
 	closed atomic.Bool
-	kicked atomic.Bool
+	lost   atomic.Bool
 }
 
 // Compile-time proof that the adapter satisfies the shared interfaces.
@@ -286,8 +335,8 @@ func (s *flowSession) OpenFlow(ctx context.Context, host string, port int) (net.
 		return nil, errors.New("account: flow session is closed")
 	}
 	conn, err := s.sess.OpenStreamContext(ctx, host, port)
-	if isVendorKick(err) {
-		s.kicked.Store(true)
+	if isSessionLoss(err) {
+		s.lost.Store(true)
 	}
 	return conn, err
 }
@@ -298,14 +347,15 @@ func (s *flowSession) Healthy() bool { return s.SID() != "" }
 
 // Alive reports whether the session can still carry flows. It is a passive
 // check with no I/O: it turns false once the session is closed or the vendor
-// refused a data channel because another connection took the account. The
-// runtime polls it, so a vendor kick leaves the slot out of service within one
-// liveness window even though the SID and the local listener survive.
+// refused a data channel because the authenticated session is gone (a
+// takeover, an expiry, or a demand to authenticate again). The runtime polls
+// it, so such a loss leaves the slot out of service within one liveness window
+// even though the SID and the local listener survive.
 func (s *flowSession) Alive() bool {
 	if s == nil || s.sess == nil {
 		return false
 	}
-	return !s.closed.Load() && !s.kicked.Load()
+	return !s.closed.Load() && !s.lost.Load()
 }
 
 func (s *flowSession) Close() error {

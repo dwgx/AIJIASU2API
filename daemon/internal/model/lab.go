@@ -86,6 +86,8 @@ type FlowView struct {
 	ID         string `json:"id"`
 	NodeID     string `json:"nodeId"`
 	AccountID  string `json:"accountId"`
+	Slot       int    `json:"slot,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
 	SID        string `json:"sid,omitempty"`
 	UserID     string `json:"userId,omitempty"`
 	UserName   string `json:"userName,omitempty"`

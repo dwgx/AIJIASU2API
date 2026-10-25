@@ -318,15 +318,23 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 			return model.ProxyNode{}, conflictf("node label %q is already used by %q", node.Label, other.ID)
 		}
 	}
+	previousGeneration := uint64(0)
+	if previous, ok := s.accountSlots[slot.SlotKey]; ok {
+		previousGeneration = previous.Generation
+	}
+	if slot.Generation == 0 {
+		slot.Generation = previousGeneration
+	}
 	// The slot write is the only fallible step of the commit, so it runs before
 	// the node is touched: a rejected slot leaves the node table unchanged.
 	if err := s.upsertSlotLocked(slot); err != nil {
 		return model.ProxyNode{}, err
 	}
 	// A start is the lifecycle event a later audit needs to pair with a switch
-	// or disconnect. Re-committing an already LIVE gate is a refresh, not a
-	// start, so it writes nothing.
-	started := idx < 0 || s.nodes[idx].State != model.NodeLive
+	// or disconnect, and exactly one row per (slot, generation) is the rule a
+	// two-slot trace needs. Re-committing the same generation (a DRAINING gate
+	// returned to LIVE, or a refresh) is not a new start, so it writes nothing.
+	started := idx < 0 || slot.Generation != previousGeneration
 	if idx >= 0 {
 		existing := s.nodes[idx]
 		if node.InUse == 0 {
@@ -414,13 +422,15 @@ func (s *Store) RecordSlotKick(kick SlotKick) (model.AccountSlot, error) {
 	}
 	s.accountSlots[kick.Key] = slot
 	meta := map[string]string{
-		"slot":      kick.Key.String(),
-		"kickCount": strconv.Itoa(slot.KickCount),
-		"state":     string(slot.State),
-		"reason":    detail,
+		"slot":       kick.Key.String(),
+		"kickCount":  strconv.Itoa(slot.KickCount),
+		"state":      string(slot.State),
+		"reason":     detail,
+		"generation": strconv.FormatUint(slot.Generation, 10),
 	}
 	if slot.ServerID != "" {
 		meta["serverId"] = slot.ServerID
+		meta["nodeId"] = kick.Key.NodeID(slot.ServerID)
 	}
 	if slot.RetryAfter != "" {
 		meta["retryAfter"] = slot.RetryAfter
@@ -473,9 +483,14 @@ func (s *Store) SetSlotFailure(key model.SlotKey, serverID, reason string) error
 		slot.ServerID = serverID
 	}
 	s.accountSlots[key] = slot
-	meta := map[string]string{"slot": key.String(), "reason": detail}
+	meta := map[string]string{
+		"slot":       key.String(),
+		"reason":     detail,
+		"generation": strconv.FormatUint(slot.Generation, 10),
+	}
 	if serverID != "" {
 		meta["serverId"] = serverID
+		meta["nodeId"] = key.NodeID(serverID)
 	}
 	s.addAuditLocked(model.SeverityWarn, "system", "slot.failure", key.String(),
 		"Slot down · "+detail, meta)
@@ -518,9 +533,16 @@ func (s *Store) DisableSlot(key model.SlotKey) error {
 	slot.LastAttemptAt = iso(s.now())
 	slot.LastError = "disabled"
 	s.accountSlots[key] = slot
+	meta := map[string]string{
+		"slot":       key.String(),
+		"serverId":   slot.ServerID,
+		"generation": strconv.FormatUint(slot.Generation, 10),
+	}
+	if slot.ServerID != "" {
+		meta["nodeId"] = key.NodeID(slot.ServerID)
+	}
 	s.addAuditLocked(model.SeverityInfo, "operator", "slot.disable", key.String(),
-		"Slot disabled · capacity reduced",
-		map[string]string{"slot": key.String(), "serverId": slot.ServerID})
+		"Slot disabled · capacity reduced", meta)
 	return nil
 }
 

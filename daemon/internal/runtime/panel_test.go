@@ -185,6 +185,18 @@ func (f *fakeResin) platformValue() resin.Platform {
 	return *f.platform
 }
 
+// subscriptionValue returns the subscription Resin currently serves, or nil
+// when none is published.
+func (f *fakeResin) subscriptionValue() *resin.Subscription {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.subscription == nil {
+		return nil
+	}
+	sub := *f.subscription
+	return &sub
+}
+
 func (f *fakeResin) setLease(account string, lease resin.Lease) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -245,6 +257,17 @@ func (f *fakeResin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.subscription = sub
 		f.mu.Unlock()
 		writeJSON(w, http.StatusCreated, sub)
+
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/subscriptions/"):
+		f.mu.Lock()
+		if f.subscription == nil {
+			f.mu.Unlock()
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "subscription not found")
+			return
+		}
+		f.subscription = nil
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/v1/subscriptions/"):
 		var patch resin.SubscriptionPatch

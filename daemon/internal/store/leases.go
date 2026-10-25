@@ -252,7 +252,13 @@ func (s *Store) RevokeLease(id string) (model.Lease, error) {
 	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "lease.revoke", lease.UserName,
 		fmt.Sprintf("Lease on %s revoked", lease.NodeLabel),
-		map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID})
+		map[string]string{
+			"leaseId":    lease.ID,
+			"accountId":  lease.AccountID,
+			"nodeId":     lease.NodeID,
+			"slot":       strconv.Itoa(lease.Slot),
+			"generation": strconv.FormatUint(lease.Generation, 10),
+		})
 	return lease, nil
 }
 
@@ -316,7 +322,14 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
 		revoked = append(revoked, lease)
 		s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
 			fmt.Sprintf("Lease on %s revoked · %s", lease.NodeLabel, detail),
-			map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID, "reason": detail})
+			map[string]string{
+				"leaseId":    lease.ID,
+				"accountId":  lease.AccountID,
+				"nodeId":     lease.NodeID,
+				"slot":       strconv.Itoa(lease.Slot),
+				"generation": strconv.FormatUint(lease.Generation, 10),
+				"reason":     detail,
+			})
 	}
 	s.leases = kept
 	// InUse is derived from the active rows, so it cannot drift after a partial
@@ -442,11 +455,14 @@ func leaseAccountAvailable(account model.Account, now time.Time) error {
 // slot that already serves a lease must not widen admission.
 func (s *Store) pickLeaseNodeLocked(accountID string) int {
 	used := make(map[string]struct{}, len(s.leases))
-	usedSlots := make(map[int]struct{}, len(s.leases))
+	// A slot is owned by (account, index), never by the index alone: two
+	// accounts may each serve their own slot 1, and a lease on A#1 must not
+	// consume B#1's capacity.
+	usedSlots := make(map[model.SlotKey]struct{}, len(s.leases))
 	for _, lease := range s.leases {
 		used[lease.NodeID] = struct{}{}
 		if lease.Slot > 0 {
-			usedSlots[lease.Slot] = struct{}{}
+			usedSlots[model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}] = struct{}{}
 		}
 	}
 	best, bestRank := -1, 3
@@ -461,10 +477,11 @@ func (s *Store) pickLeaseNodeLocked(accountID string) int {
 		// been marked by a vendor kick, and reports the listener the row
 		// reserved; a legacy node (Slot 0) is unchanged.
 		if node.Slot > 0 {
-			if _, taken := usedSlots[node.Slot]; taken {
+			key := model.SlotKey{AccountID: node.AccountID, Index: node.Slot}
+			if _, taken := usedSlots[key]; taken {
 				continue
 			}
-			slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+			slot, ok := s.accountSlots[key]
 			if !ok || slot.State != model.SlotLive || slot.Health == model.SlotHealthVendorKick {
 				continue
 			}

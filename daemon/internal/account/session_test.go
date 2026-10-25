@@ -231,6 +231,10 @@ type mockFVConfig struct {
 	cseid    string
 	host     string
 	port     int
+	// dataRefusal, when set, makes the data channel answer
+	// "code=403 / fm=<dataRefusal>" instead of relaying a flow. It models the
+	// vendor refusing an authenticated SID (AJS-353).
+	dataRefusal string
 }
 
 // mockFV is an in-process FV server speaking the protocol-2 binary carrier.
@@ -415,6 +419,11 @@ func (m *mockFV) serveData(sessionKey []byte) error {
 	div, err := hex.DecodeString(fields["n"])
 	if err != nil || len(div) != fvfacade.IVSize {
 		return fmt.Errorf("data n = %q", fields["n"])
+	}
+	if m.cfg.dataRefusal != "" {
+		// The authenticated SID is refused before any destination exchange,
+		// exactly the vendor's session-loss shape.
+		return writeCarrierText(conn, key, "code=403\nfm="+m.cfg.dataRefusal+"\n")
 	}
 	up, err := fvfacade.NewCTR(sessionKey, div)
 	if err != nil {

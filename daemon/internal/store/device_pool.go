@@ -2619,9 +2619,9 @@ func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
 	if rec.AssignedSlotKey != nil {
 		key = *rec.AssignedSlotKey
 	}
-	if s.deviceLiveNodeSlotLocked(key) {
+	if s.deviceServingNodeSlotLocked(key) {
 		return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
-			"slot %s has a live node; log out before releasing its device", key.String())
+			"slot %s still has a node in service (LIVE, DRAINING or starting); log out before releasing its device", key.String())
 	}
 	label := s.deviceAccountLabelLocked(rec.AssignedAccountID)
 	now := iso(s.now())
@@ -2684,9 +2684,9 @@ func (s *Store) RetireDevice(deviceID, reason string) (DeviceRecord, error) {
 		if rec.AssignedSlotKey != nil {
 			key = *rec.AssignedSlotKey
 		}
-		if s.deviceLiveNodeSlotLocked(key) {
+		if s.deviceServingNodeSlotLocked(key) {
 			return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
-				"slot %s has a live node; log out before retiring its device", key.String())
+				"slot %s still has a node in service (LIVE, DRAINING or starting); log out before retiring its device", key.String())
 		}
 		s.clearSlotBindingLocked(key)
 		rec.AssignedAccountID = ""

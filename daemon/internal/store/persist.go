@@ -340,6 +340,13 @@ func (s *Store) Restore(data []byte) error {
 	if err := snap.validate(); err != nil {
 		return err
 	}
+	// Structural validation only checks shape. A snapshot can still carry a
+	// LIVE slot with no bound listener, a duplicate slot entitlement or a lease
+	// stamped with an older generation; repair those before the document is
+	// installed, with one audit row per repair.
+	if repaired := snap.reconcileSlotClaims(s.now()); repaired > 0 {
+		slog.Warn("slot_claims_reconciled", "count", repaired)
+	}
 	snap.normalize()
 
 	s.mu.Lock()
@@ -605,6 +612,7 @@ func (snap *Snapshot) validate() error {
 	}
 	nodes := make(map[string]struct{}, len(snap.Nodes))
 	nodeSlots := make(map[string]int, len(snap.Nodes))
+	nodeAccounts := make(map[string]string, len(snap.Nodes))
 	for _, node := range snap.Nodes {
 		if node.ID == "" {
 			return errors.New("state snapshot has a node without an id")
@@ -614,6 +622,7 @@ func (snap *Snapshot) validate() error {
 		}
 		nodes[node.ID] = struct{}{}
 		nodeSlots[node.ID] = node.Slot
+		nodeAccounts[node.ID] = node.AccountID
 		if node.Slot > 0 {
 			if node.ServerID == "" {
 				return fmt.Errorf("state snapshot node %q has slot %d without a server id", node.ID, node.Slot)
@@ -642,6 +651,13 @@ func (snap *Snapshot) validate() error {
 			if !ok || slot != lease.Slot {
 				return fmt.Errorf("state snapshot lease %q names node %q with slot %d, want slot %d",
 					lease.ID, lease.NodeID, slot, lease.Slot)
+			}
+			// The slot is identified by (account, index), so the lease must
+			// agree with the node's account: a mismatched account would pin
+			// the wrong account's slot in admission and audit.
+			if account := nodeAccounts[lease.NodeID]; lease.AccountID != account {
+				return fmt.Errorf("state snapshot lease %q names node %q of account %q, lease account is %q",
+					lease.ID, lease.NodeID, account, lease.AccountID)
 			}
 		}
 	}
@@ -1144,6 +1160,151 @@ func (snap *Snapshot) migrateDeviceSlotBindings() {
 			rec.AssignedSlotKey = &key
 		}
 	}
+}
+
+// reconcileSlotClaims repairs the slot/lease invariants a snapshot may violate
+// without failing the whole load. It runs after structural validation and
+// before the document is installed, so a restored store never serves a claim
+// the mutation paths would have refused:
+//
+//   - a LIVE slot row needs a LIVE node of the same slot that reports the
+//     slot's gate port; a READY/STALE node has no bound listener, so the row
+//     is demoted to DOWN (this is the persisted shape a crash or a hand-edited
+//     document can leave behind);
+//   - an active slot lease must point at a LIVE node bound to the LIVE slot
+//     row; otherwise the entitlement is dropped instead of advertised;
+//   - at most one active lease may hold an (account, index) slot; later
+//     duplicates are dropped;
+//   - a surviving slot lease carries its slot's serving generation and the
+//     node's mirrored endpoint fields, so a pre-fix row cannot keep an older
+//     generation.
+//
+// Every repair writes one system audit row. A document that already satisfies
+// the invariants is returned untouched, so a round trip stays byte-identical.
+func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
+	if len(snap.AccountSlots) == 0 && len(snap.Leases) == 0 {
+		return 0
+	}
+	nodes := make(map[string]model.ProxyNode, len(snap.Nodes))
+	for _, node := range snap.Nodes {
+		nodes[node.ID] = node
+	}
+	slots := make(map[model.SlotKey]*model.AccountSlot, len(snap.AccountSlots))
+	for i := range snap.AccountSlots {
+		slots[snap.AccountSlots[i].SlotKey] = &snap.AccountSlots[i]
+	}
+	seq := snap.AuditSeq
+	for _, event := range snap.Audit {
+		seq = max(seq, sequenceOf(event.ID, "audit-"))
+	}
+	repaired := 0
+	audit := func(action, target, detail string, meta map[string]string) {
+		seq++
+		snap.Audit = prependCapped(snap.Audit, model.AuditEvent{
+			ID:       fmt.Sprintf("audit-%03d", seq),
+			TS:       iso(now),
+			Severity: model.SeverityWarn,
+			Actor:    "system",
+			Action:   action,
+			Target:   target,
+			Detail:   detail,
+			Meta:     meta,
+		}, AuditRetention)
+	}
+	// bound is the set of slots a LIVE node actually serves. A READY node may
+	// still remember a port from the session that died, so state and port are
+	// both required.
+	bound := make(map[model.SlotKey]struct{}, len(snap.Nodes))
+	for _, node := range snap.Nodes {
+		if node.Slot <= 0 || node.State != model.NodeLive || node.GatePort <= 0 {
+			continue
+		}
+		slot, ok := slots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+		if !ok || slot.State != model.SlotLive || slot.GatePort != node.GatePort {
+			continue
+		}
+		bound[slot.SlotKey] = struct{}{}
+	}
+	for i := range snap.AccountSlots {
+		slot := &snap.AccountSlots[i]
+		if slot.State != model.SlotLive {
+			continue
+		}
+		if _, ok := bound[slot.SlotKey]; ok {
+			continue
+		}
+		slot.State = model.SlotDown
+		slot.Health = model.SlotHealthDegraded
+		slot.LastAttemptAt = iso(now)
+		slot.LastError = "gate_not_bound_after_restore"
+		audit("slot.recovered_unbound", slot.SlotKey.String(),
+			"Restore demoted an unbound LIVE slot to DOWN",
+			map[string]string{"slot": slot.SlotKey.String(), "state": string(slot.State)})
+		repaired++
+	}
+	held := make(map[model.SlotKey]struct{}, len(snap.Leases))
+	kept := snap.Leases[:0]
+	for _, lease := range snap.Leases {
+		if lease.Slot <= 0 {
+			kept = append(kept, lease)
+			continue
+		}
+		key := model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}
+		slot, slotOK := slots[key]
+		node, nodeOK := nodes[lease.NodeID]
+		reason := ""
+		switch {
+		case !slotOK:
+			reason = "slot row is missing"
+		case slot.State != model.SlotLive:
+			reason = "slot is " + string(slot.State)
+		case !nodeOK:
+			reason = "node row is missing"
+		case node.State != model.NodeLive || node.GatePort <= 0 || node.GatePort != slot.GatePort:
+			reason = "no bound listener"
+		}
+		if reason != "" {
+			audit("lease.unbound_dropped", lease.ID,
+				"Restore dropped an active lease with no bound slot: "+reason,
+				map[string]string{
+					"leaseId": lease.ID, "nodeId": lease.NodeID,
+					"slot": key.String(), "reason": reason,
+				})
+			repaired++
+			continue
+		}
+		if _, duplicate := held[key]; duplicate {
+			audit("lease.duplicate_dropped", lease.ID,
+				"Restore dropped a duplicate active lease for slot "+key.String(),
+				map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID, "slot": key.String()})
+			repaired++
+			continue
+		}
+		held[key] = struct{}{}
+		if lease.Generation != slot.Generation {
+			from := lease.Generation
+			lease.Slot = slot.Index
+			lease.Generation = slot.Generation
+			lease.NodeLabel = node.Label
+			lease.Region = node.Region
+			lease.EgressIP = node.EgressIP
+			lease.Protocol = node.Protocol
+			lease.GatePort = node.GatePort
+			audit("lease.generation_repaired", lease.ID,
+				fmt.Sprintf("Restore advanced lease generation %d → %d", from, slot.Generation),
+				map[string]string{
+					"leaseId":        lease.ID,
+					"nodeId":         node.ID,
+					"slot":           key.String(),
+					"fromGeneration": strconv.FormatUint(from, 10),
+					"toGeneration":   strconv.FormatUint(slot.Generation, 10),
+				})
+			repaired++
+		}
+		kept = append(kept, lease)
+	}
+	snap.Leases = kept
+	return repaired
 }
 
 // validateAccountSlots rejects a document whose slot rows cannot be loaded

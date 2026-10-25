@@ -52,6 +52,7 @@ var (
 // the real client.
 type Client interface {
 	PatchSubscription(ctx context.Context, id, content string) (resin.Subscription, error)
+	DeleteSubscription(ctx context.Context, id string) error
 	RefreshSubscription(ctx context.Context, id string) error
 	GetPlatform(ctx context.Context, id string) (resin.Platform, error)
 	PatchPlatformFilters(ctx context.Context, platformID string, filters []string) (resin.Platform, error)
@@ -340,6 +341,38 @@ func (p *Publisher) Publish(ctx context.Context, nodes []Node) error {
 		p.mu.Unlock()
 	}
 	return p.refresh(ctx, subscription)
+}
+
+// Withdraw removes the published subscription so Resin stops advertising a
+// pool that has no LIVE nodes. It is the empty-render path: Resin rejects an
+// empty content PATCH, so the subscription's absence is the explicit cleared
+// marker. Before the first publish there is nothing to withdraw and it is a
+// no-op; a subscription Resin already deleted (NOT_FOUND) is also a no-op. The
+// panel recreates the subscription through EnsureSubscription on the next
+// render with a LIVE node.
+func (p *Publisher) Withdraw(ctx context.Context) error {
+	p.publishMu.Lock()
+	defer p.publishMu.Unlock()
+
+	p.mu.Lock()
+	subscription := p.subscription
+	p.mu.Unlock()
+	if subscription == "" {
+		return nil
+	}
+	if p.client == nil {
+		return errors.New("publisher: nil resin client")
+	}
+	if err := p.client.DeleteSubscription(ctx, subscription); err != nil && !resin.IsNotFound(err) {
+		return fmt.Errorf("publisher: delete subscription: %w", err)
+	}
+	p.mu.Lock()
+	p.subscription = ""
+	p.lastGood = ""
+	p.lastPublishAt = time.Time{}
+	p.needsRefresh = false
+	p.mu.Unlock()
+	return nil
 }
 
 // refresh forces a subscription update, retrying with backoff. On total

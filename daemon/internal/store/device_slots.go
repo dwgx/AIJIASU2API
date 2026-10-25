@@ -120,6 +120,14 @@ func (s *Store) requireSlotDeviceLocked(key model.SlotKey, recordID string) erro
 			return conflictf("slot %s is bound to device %q but the session used no device record",
 				key.String(), boundID)
 		}
+		// Empty is the pool-disabled legacy identity, not a wildcard. A
+		// pool-enabled slot that lost its binding (released after a drain, or
+		// never bound) must not commit LIVE: the session in hand was opened
+		// with an identity the slot no longer owns.
+		if s.deviceSealer != nil {
+			return conflictf("slot %s has no device binding; a pool-enabled slot cannot commit without one",
+				key.String())
+		}
 		return nil
 	}
 	if !bound || boundID != recordID {
@@ -203,11 +211,17 @@ func (s *Store) deviceRecordBoundSlotLocked(recordID string) (model.SlotKey, boo
 	return model.SlotKey{}, false
 }
 
-// deviceLiveNodeSlotLocked reports whether a live node exists for the exact
-// slot. Slot 0 is the legacy single-slot spelling and belongs to slot 1.
-func (s *Store) deviceLiveNodeSlotLocked(key model.SlotKey) bool {
+// deviceServingNodeSlotLocked reports whether the slot still has a node that
+// can carry an authenticated session: LIVE, DRAINING (its gate may still be
+// listening until the switch/cleanup closes it), or a start that has not
+// committed yet. A DOWN or STALE row has no listener, so it does not pin the
+// device. Slot 0 is the legacy single-slot spelling and belongs to slot 1.
+func (s *Store) deviceServingNodeSlotLocked(key model.SlotKey) bool {
 	for _, node := range s.nodes {
-		if node.AccountID != key.AccountID || node.State != model.NodeLive {
+		if node.AccountID != key.AccountID {
+			continue
+		}
+		if !slotNodeInService(node.State) {
 			continue
 		}
 		if key.Index == 1 {
@@ -221,6 +235,18 @@ func (s *Store) deviceLiveNodeSlotLocked(key model.SlotKey) bool {
 		}
 	}
 	return false
+}
+
+// slotNodeInService reports whether a node state can still hold an
+// authenticated vendor session or its listener. DRAINING is deliberately
+// included: it only stops new flows and is not proof the gate closed.
+func slotNodeInService(state model.NodeState) bool {
+	switch state {
+	case model.NodeLive, model.NodeDraining, model.NodeStarting, model.NodeReady:
+		return true
+	default:
+		return false
+	}
 }
 
 // deviceRecordMatchesSlot reports whether a retired record belongs to the

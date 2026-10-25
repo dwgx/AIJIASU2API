@@ -30,9 +30,10 @@ type switchGate struct {
 	closed  atomic.Bool
 	active  int
 
-	startErr error
-	drainErr error
-	closeErr error
+	closeBlock *threatBlock
+	startErr   error
+	drainErr   error
+	closeErr   error
 }
 
 func (g *switchGate) Start(context.Context) error {
@@ -54,6 +55,10 @@ func (g *switchGate) Undrain() error {
 }
 
 func (g *switchGate) Close() error {
+	if g.closeBlock != nil {
+		g.closeBlock.once.Do(func() { close(g.closeBlock.entered) })
+		<-g.closeBlock.release
+	}
 	g.closed.Store(true)
 	return g.closeErr
 }
@@ -67,30 +72,47 @@ func (g *switchGate) State() gate.State {
 // switchGateFactory records one gate per node id and lets a test inject start,
 // drain and close failures.
 type switchGateFactory struct {
-	mu        sync.Mutex
-	gates     map[string]*switchGate
-	startErrs map[string]error
-	drainErrs map[string]error
-	closeErrs map[string]error
+	mu          sync.Mutex
+	gates       map[string]*switchGate
+	closeBlocks map[string]*threatBlock
+	startErrs   map[string]error
+	drainErrs   map[string]error
+	closeErrs   map[string]error
 }
 
 func newSwitchGateFactory() *switchGateFactory {
 	return &switchGateFactory{
-		gates:     make(map[string]*switchGate),
-		startErrs: make(map[string]error),
-		drainErrs: make(map[string]error),
-		closeErrs: make(map[string]error),
+		gates:       make(map[string]*switchGate),
+		closeBlocks: make(map[string]*threatBlock),
+		startErrs:   make(map[string]error),
+		drainErrs:   make(map[string]error),
+		closeErrs:   make(map[string]error),
 	}
+}
+
+// blockClose makes the next Close of nodeID wait until the returned block is
+// released. It is the deterministic window between a cleanup's lease check and
+// its node deletion.
+func (f *switchGateFactory) blockClose(nodeID string) *threatBlock {
+	block := &threatBlock{entered: make(chan struct{}), release: make(chan struct{})}
+	f.mu.Lock()
+	f.closeBlocks[nodeID] = block
+	if g, ok := f.gates[nodeID]; ok {
+		g.closeBlock = block
+	}
+	f.mu.Unlock()
+	return block
 }
 
 func (f *switchGateFactory) build(cfg gate.Config, _ gate.Session) (runtime.Gate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	g := &switchGate{
-		nodeID:   cfg.NodeID,
-		startErr: f.startErrs[cfg.NodeID],
-		drainErr: f.drainErrs[cfg.NodeID],
-		closeErr: f.closeErrs[cfg.NodeID],
+		nodeID:     cfg.NodeID,
+		closeBlock: f.closeBlocks[cfg.NodeID],
+		startErr:   f.startErrs[cfg.NodeID],
+		drainErr:   f.drainErrs[cfg.NodeID],
+		closeErr:   f.closeErrs[cfg.NodeID],
 	}
 	f.gates[cfg.NodeID] = g
 	return g, nil

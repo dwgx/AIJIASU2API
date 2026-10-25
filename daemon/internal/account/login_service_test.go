@@ -571,7 +571,7 @@ func TestLoginServiceForget(t *testing.T) {
 		AuthResult: "OK",
 		Servers:    map[string]apifacade.Server{"s1": {ID: "s1", Sts: "ok"}},
 		FetchedAt:  time.Now().UTC(),
-	}) {
+	}, time.Now().UTC()) {
 		t.Fatal("remember refused a live result")
 	}
 	if _, ok := service.Result(account.ID); !ok {

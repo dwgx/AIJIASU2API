@@ -690,6 +690,8 @@ func (c *serialClient) PatchSubscription(context.Context, string, string) (resin
 	return resin.Subscription{}, nil
 }
 
+func (c *serialClient) DeleteSubscription(context.Context, string) error { return nil }
+
 func (c *serialClient) RefreshSubscription(context.Context, string) error { return nil }
 
 func (c *serialClient) GetPlatform(_ context.Context, id string) (resin.Platform, error) {

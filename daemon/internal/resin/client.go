@@ -209,6 +209,14 @@ func (c *Client) PatchSubscription(ctx context.Context, id, content string) (Sub
 	return c.PatchSubscriptionFields(ctx, id, SubscriptionPatch{Content: &content})
 }
 
+// DeleteSubscription removes one subscription. It is the withdrawal path for a
+// pool with no LIVE nodes: Resin rejects empty content, and a stale body would
+// keep advertising dead ports. A missing subscription is a NOT_FOUND APIError.
+func (c *Client) DeleteSubscription(ctx context.Context, id string) error {
+	path := "/api/v1/subscriptions/" + url.PathEscape(id)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 // PatchSubscriptionFields applies a partial subscription update, e.g. content
 // plus update interval.
 func (c *Client) PatchSubscriptionFields(ctx context.Context, id string, patch SubscriptionPatch) (Subscription, error) {

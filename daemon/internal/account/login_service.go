@@ -92,7 +92,18 @@ type LoginService struct {
 	mu       sync.Mutex
 	results  map[string]LoginResult
 	controls map[string]*Control
-	closed   bool
+	// started records when the retained login attempt began. The node
+	// controller compares it with a stop fence: a login that was already in
+	// flight when the account was stopped completes with a fresh FetchedAt but
+	// is not an operator reopen.
+	started map[string]time.Time
+	closed  bool
+
+	// accountLocks serialize one account's login attempt against Forget. A
+	// logout or delete must not return while an in-flight login can still
+	// retain a result for it, so Forget waits for that login and then drops
+	// whatever it retained.
+	accountLocks map[string]*sync.Mutex
 }
 
 // NewLoginService validates cfg and returns a service. It performs no I/O and
@@ -123,14 +134,16 @@ func NewLoginService(st *store.Store, cfg LoginConfig) (*LoginService, error) {
 		logger = slog.Default()
 	}
 	return &LoginService{
-		store:    st,
-		cfg:      cfg,
-		hosts:    hosts,
-		profile:  profile,
-		noSign:   cfg.NoSigning || profile.SigningMode == "none",
-		logger:   logger,
-		results:  make(map[string]LoginResult),
-		controls: make(map[string]*Control),
+		store:        st,
+		cfg:          cfg,
+		hosts:        hosts,
+		profile:      profile,
+		noSign:       cfg.NoSigning || profile.SigningMode == "none",
+		logger:       logger,
+		results:      make(map[string]LoginResult),
+		controls:     make(map[string]*Control),
+		started:      make(map[string]time.Time),
+		accountLocks: make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -148,6 +161,12 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	if s.isClosed() {
 		return model.Account{}, ErrClosed
 	}
+	// The attempt starts now, before it waits for another login of the same
+	// account: a stop fence installed after this instant must refuse the
+	// result even when the vendor call completes later.
+	startedAt := s.now()
+	unlock := s.lockAccount(accountID)
+	defer unlock()
 	account, ok := s.store.Account(accountID)
 	if !ok {
 		return model.Account{}, &store.Error{
@@ -223,7 +242,7 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 		}
 		result.Servers = synced.Servers
 	}
-	if !s.remember(accountID, control, result) {
+	if !s.remember(accountID, control, result, startedAt) {
 		control.Close()
 		return model.Account{}, ErrClosed
 	}
@@ -269,6 +288,42 @@ func (s *LoginService) deviceForSlot(key model.SlotKey) (store.DeviceIdentity, e
 	return identity, nil
 }
 
+// now is the service clock: the configured Now when set, else the wall clock.
+// It stamps FetchedAt and the attempt start, so a pinned clock makes the
+// controller's stop-fence comparison deterministic in tests.
+func (s *LoginService) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// lockAccount serializes one account's login attempt against Forget. The lock
+// map is guarded by mu and never shrinks: its entries are bounded by the
+// number of accounts the daemon has logged in.
+func (s *LoginService) lockAccount(accountID string) func() {
+	s.mu.Lock()
+	lock := s.accountLocks[accountID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		s.accountLocks[accountID] = lock
+	}
+	s.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
+// LoginStarted returns when the retained login attempt for accountID began.
+// The node controller compares it with a stop fence, so a login that was
+// already in flight when the account was logged out or deleted cannot clear
+// the fence by completing afterwards.
+func (s *LoginService) LoginStarted(accountID string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	started, ok := s.started[accountID]
+	return started, ok
+}
+
 // Result returns the last successful login result for accountID. The result
 // carries Secrets, which format as "[redacted]"; callers must not reveal them
 // outside the wire path.
@@ -286,11 +341,18 @@ func (s *LoginService) Result(accountID string) (LoginResult, bool) {
 // Logout and delete call it so the catalog cannot keep serving a snapshot for
 // an account with no session (DESIGN-CATALOG §3.12). It performs no vendor call
 // and is idempotent.
+//
+// It waits for an in-flight login of the same account, then drops whatever
+// that login retained: a logout that committed while the vendor call was still
+// running must not leave a result the controller could sync later.
 func (s *LoginService) Forget(accountID string) {
+	unlock := s.lockAccount(accountID)
+	defer unlock()
 	s.mu.Lock()
 	control := s.controls[accountID]
 	delete(s.controls, accountID)
 	delete(s.results, accountID)
+	delete(s.started, accountID)
 	s.mu.Unlock()
 	if control != nil {
 		control.Close()
@@ -312,6 +374,7 @@ func (s *LoginService) Close() {
 		delete(s.controls, id)
 	}
 	clear(s.results)
+	clear(s.started)
 	s.mu.Unlock()
 
 	for _, control := range controls {
@@ -326,13 +389,15 @@ func (s *LoginService) isClosed() bool {
 }
 
 // remember stores the login result and its control for the future session
-// factory. It reports false when Close won the race.
+// factory. It reports false when Close won the race. startedAt is when the
+// attempt began, not when it finished: the controller's stop fence uses it to
+// refuse a login that was already in flight when the account was stopped.
 //
 // An empty server list never replaces a retained non-empty one: a failed or
 // empty loginSync means "unknown", and the node controller treats an empty
 // list as "delete every node". Enforcing that here also closes the race
 // between two concurrent logins for the same account.
-func (s *LoginService) remember(accountID string, control *Control, result LoginResult) bool {
+func (s *LoginService) remember(accountID string, control *Control, result LoginResult, startedAt time.Time) bool {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -349,9 +414,10 @@ func (s *LoginService) remember(accountID string, control *Control, result Login
 	previous := s.controls[accountID]
 	s.controls[accountID] = control
 	if result.FetchedAt.IsZero() {
-		result.FetchedAt = time.Now().UTC()
+		result.FetchedAt = s.now()
 	}
 	s.results[accountID] = cloneLoginResult(result)
+	s.started[accountID] = startedAt
 	s.mu.Unlock()
 
 	if previous != nil && previous != control {

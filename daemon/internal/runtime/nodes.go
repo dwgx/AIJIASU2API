@@ -71,6 +71,14 @@ type LoginResults interface {
 	Result(accountID string) (account.LoginResult, bool)
 }
 
+// LoginStarts is the optional login-attempt view the controller reads to tell
+// an operator reopen from a login that was already in flight when the account
+// was stopped. *account.LoginService implements it; an opener without it keeps
+// the FetchedAt comparison.
+type LoginStarts interface {
+	LoginStarted(accountID string) (time.Time, bool)
+}
+
 // SessionOpener opens one authenticated FV session per node.
 // *account.Factory implements it.
 type SessionOpener interface {
@@ -441,10 +449,11 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 		return fmt.Errorf("%w: %s", ErrNoLoginResult, accountID)
 	}
 	if since, fenced := c.accountStopped(accountID); fenced {
-		// A login that completed after the stop is the operator reopening the
-		// account; a retained result from before it is the late sync that must
-		// not reopen a slot the delete/logout already closed.
-		if result.FetchedAt.IsZero() || result.FetchedAt.After(since) {
+		// A login that began after the stop is the operator reopening the
+		// account. A login that was already in flight when the stop ran is the
+		// late sync that must not reopen a slot the delete/logout closed, even
+		// though its result was retained with a fresh FetchedAt.
+		if c.loginBeganAfter(accountID, result, since) {
 			c.clearAccountStopped(accountID)
 		} else {
 			return &SwitchError{
@@ -457,6 +466,15 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	acct, ok := c.store.Account(accountID)
 	if !ok {
 		return &store.Error{Kind: store.ErrNotFound, Message: fmt.Sprintf("account %q not found", accountID)}
+	}
+	if acct.State != model.AccountActive {
+		// A login hook that lands while the account is paused (a logout or
+		// delete committed first) must not install a listener behind it.
+		return &SwitchError{
+			Reason:  ReasonAccountState,
+			Message: "account is not active; log in again",
+			Details: map[string]string{"state": string(acct.State)},
+		}
 	}
 
 	capacity := c.slotCapacity(acct)
@@ -523,8 +541,17 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 				c.logger.Warn("slot_removal_blocked_by_lease", "account_id", accountID, "slot", plan.key.String())
 				continue
 			}
+			// The check above ran before the close, which can block. Capture
+			// the gate id first: a lease created in that window belongs to a
+			// listener that is already gone, so it is revoked explicitly
+			// (audited with slot/generation) instead of left as a dead
+			// endpoint.
+			closedID, hadGate := c.slotGates[plan.key]
 			if errs := c.closeSlotLocked(plan.key); len(errs) > 0 {
 				failures = append(failures, fmt.Errorf("slot %s: %w", plan.key.String(), errors.Join(errs...)))
+			}
+			if hadGate {
+				c.revokeLeasesAfterCloseLocked(plan.key, closedID, "no_server")
 			}
 			c.markSlotDownLocked(plan.key, acct, plan.srv, "no_server")
 			continue
@@ -896,6 +923,48 @@ func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Accoun
 	return nil
 }
 
+// revokeLeasesAfterCloseLocked is the containment step for a lease that
+// appeared between a slot's lease check and its gate close. The listener is
+// already gone, so the lease is a dead endpoint: it is revoked explicitly (one
+// audited lease.revoke row per lease, with slot/generation), the node leaves
+// service without a port and one slot.leases_revoked row names the ids. A slot
+// with no lease in that window is untouched.
+func (c *NodeController) revokeLeasesAfterCloseLocked(key model.SlotKey, nodeID, reason string) {
+	if len(c.store.NodeLeases(nodeID)) == 0 {
+		return
+	}
+	revoked := c.store.InvalidateNodeLeases(nodeID, "slot_closed:"+reason)
+	if node, ok := c.store.Node(nodeID); ok {
+		node.State = model.NodeDown
+		node.GatePort = 0
+		node.EgressIP = ""
+		if _, err := c.store.PutNode(node); err != nil {
+			c.logger.Warn("slot_close_revoke_node_failed", "account_id", key.AccountID,
+				"node_id", nodeID, "error", err)
+		}
+	}
+	meta := map[string]string{
+		"slot":   key.String(),
+		"nodeId": nodeID,
+		"reason": reason,
+		"leases": strconv.Itoa(len(revoked)),
+	}
+	if slot, ok := c.store.Slot(key); ok {
+		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
+	}
+	if len(revoked) > 0 {
+		ids := make([]string, 0, len(revoked))
+		for _, lease := range revoked {
+			ids = append(ids, lease.ID)
+		}
+		meta["leaseIds"] = strings.Join(ids, ",")
+	}
+	c.store.WriteAudit(model.SeverityWarn, "system", "slot.leases_revoked", nodeID,
+		"Slot closed with no target · lease that appeared during close revoked", meta)
+	c.logger.Warn("slot_leases_revoked_after_close", "account_id", key.AccountID,
+		"slot", key.String(), "node_id", nodeID, "leases", len(revoked), "reason", reason)
+}
+
 // markSlotDownLocked records a slot that could not be served: the node loses
 // its gate port and the slot row keeps its device, ports and generation through
 // SetSlotFailure. With no resolved server the slot's existing node row is the
@@ -1100,12 +1169,26 @@ func (c *NodeController) accountStopped(accountID string) (time.Time, bool) {
 	return since, fenced
 }
 
-// clearAccountStopped removes the fence: a login completed after the stop, so
-// the operator reopened the account.
+// clearAccountStopped removes the fence: a login that began after the stop is
+// the operator reopening the account.
 func (c *NodeController) clearAccountStopped(accountID string) {
 	c.stopMu.Lock()
 	delete(c.closedAccounts, accountID)
 	c.stopMu.Unlock()
+}
+
+// loginBeganAfter reports whether the retained login attempt for accountID
+// began strictly after the stop fence. The attempt start is the right witness:
+// a login that was in flight when the account was stopped finishes with a
+// fresh FetchedAt, but it is not an operator reopen. An opener that does not
+// expose the attempt start (a test fake) falls back to the fetch time; a
+// provider that tracks neither keeps the legacy reopen behaviour.
+func (c *NodeController) loginBeganAfter(accountID string, result account.LoginResult, since time.Time) bool {
+	if starts, ok := c.logins.(LoginStarts); ok {
+		started, ok := starts.LoginStarted(accountID)
+		return ok && started.After(since)
+	}
+	return result.FetchedAt.IsZero() || result.FetchedAt.After(since)
 }
 
 // CheckLiveness scans every running gate once and contains the ones that can no
@@ -1178,9 +1261,22 @@ func (c *NodeController) containKickLocked(id string, running *nodeGate, detail 
 	if current, ok := c.slotGates[running.slot]; ok && current == id {
 		delete(c.slotGates, running.slot)
 	}
+	// Only the generation that owns the slot may transition it. A stale gate
+	// left over from an earlier generation (a close that raced a newer start)
+	// must not mark the newer session DOWN, revoke its leases or overwrite its
+	// node; closing its own listener above is all it may do.
+	if slot, ok := c.store.Slot(running.slot); ok && slot.Generation > running.generation {
+		c.logger.Warn("slot_kick_stale_generation", "node_id", id, "account_id", running.accountID,
+			"slot", running.slot.String(), "generation", running.generation,
+			"current_generation", slot.Generation)
+		return
+	}
 	if node, ok := c.store.Node(id); ok {
 		node.State = model.NodeDown
 		node.GatePort = 0
+		// A DOWN node has no listener, so it must not keep advertising an
+		// egress address either.
+		node.EgressIP = ""
 		if _, err := c.store.PutNode(node); err != nil {
 			c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", running.accountID,
 				"state", string(model.NodeDown), "error", err)
@@ -1199,6 +1295,7 @@ func (c *NodeController) containKickLocked(id string, running *nodeGate, detail 
 	revoked := c.store.InvalidateNodeLeases(id, detail)
 	c.logger.Warn("slot_vendor_kick", "node_id", id, "account_id", running.accountID,
 		"slot", running.slot.String(), "server_id", running.serverID,
+		"generation", running.generation,
 		"kick_count", slot.KickCount, "state", string(slot.State),
 		"retry_after", slot.RetryAfter, "leases_revoked", len(revoked))
 }
@@ -1378,8 +1475,37 @@ func (c *NodeController) removeUndesiredLocked(accountID string, desired map[str
 		failures = append(failures, c.closeGateLocked(id, running)...)
 		delete(c.running, id)
 		delete(c.slotGates, running.slot)
-		if err := c.store.DeleteNode(id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		// The lease check above ran before the gate close, which can block.
+		// DeleteNodeUnleased repeats the check under the store's write lock, so
+		// a lease created in that window keeps its node instead of being
+		// silently deleted with it.
+		removed, err := c.store.DeleteNodeUnleased(id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			failures = append(failures, fmt.Errorf("node %s: delete: %w", id, err))
+			continue
+		}
+		if !removed {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			// A customer lease appeared while the listener was closing. The
+			// gate is already gone, so the row must not keep advertising the
+			// dead port; the lease row stays visible for its owner, because
+			// cleanup never revokes a customer entitlement on its own.
+			if node, ok := c.store.Node(id); ok {
+				node.State = model.NodeDown
+				node.GatePort = 0
+				node.EgressIP = ""
+				if _, err := c.store.PutNode(node); err != nil {
+					failures = append(failures, fmt.Errorf("node %s: mark down: %w", id, err))
+				}
+			}
+			// Keep the row for the lease's owner and skip the second sweep, so
+			// one kept node is reported once.
+			desired[id] = struct{}{}
+			failures = append(failures, fmt.Errorf("node %s: kept, a lease appeared while its gate was closing", id))
+			c.logger.Warn("node_removal_blocked_by_lease", "node_id", id, "account_id", accountID,
+				"server_id", running.serverID, "slot", running.slot.String(), "generation", running.generation)
 			continue
 		}
 		c.logger.Info("node_removed", "node_id", id, "account_id", accountID, "server_id", running.serverID)

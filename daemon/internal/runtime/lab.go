@@ -364,6 +364,8 @@ func (v *LabView) Flows(limit int) (model.FlowsView, string) {
 			ID:         record.ID,
 			NodeID:     row.nodeID,
 			AccountID:  row.accountID,
+			Slot:       record.Slot,
+			Generation: record.Generation,
 			SID:        row.sid,
 			UserID:     record.UserID,
 			UserName:   record.UserName,
