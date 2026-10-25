@@ -116,7 +116,11 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// The store cascade removes the node rows, so the sampler keys must be
 	// captured before the mutation.
 	nodeIDs := s.accountNodeIDs(id)
-	if err := s.runAccountDeleteHook(r.Context(), id); err != nil {
+	release, err := s.stopAccountForMutation(r.Context(), id, s.cfg.AccountDeleteHook)
+	if err != nil {
+		if release != nil {
+			release()
+		}
 		// A hook failure is a runtime failure, not a store contract error, so
 		// it answers 500 instead of the mapped store status. The detail stays
 		// in the log; the account and its nodes are untouched.
@@ -124,6 +128,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+	defer release()
 	if err := s.store.DeleteAccount(id); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -141,15 +146,32 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// runAccountDeleteHook stops the account's runtime gates before the store
-// cascade removes its nodes. Unlike the login hook its error is returned: the
-// caller aborts the delete instead of orphaning a listening gate. A nil hook
-// keeps the store-only behaviour of a daemon without AJS_ACCOUNT_LOGIN=1.
-func (s *Server) runAccountDeleteHook(ctx context.Context, accountID string) error {
-	if s.cfg.AccountDeleteHook == nil {
-		return nil
+// AccountStopClaimer is the optional account-wide stop claim *runtime.NodeController
+// implements. When the catalog provides it, the logout and delete handlers hold
+// the claim across their store mutation and release it afterwards. A SyncAccount
+// for the account waits for the claim and then re-checks the committed state,
+// so a login that lands between the fence and the pause/delete commit cannot
+// install a gate, session or listener behind it.
+type AccountStopClaimer interface {
+	// BeginAccountStop closes the account's gates and fences it, and returns
+	// the release that ends the claim. The release is non-nil whenever the
+	// claim was taken, even when closing a gate failed; the caller must call
+	// it once the mutation (or its abort) is done.
+	BeginAccountStop(ctx context.Context, accountID string) (release func(), err error)
+}
+
+// stopAccountForMutation runs the pre-mutation stop for logout/delete. The
+// runtime controller's claim is preferred because it stays held until the
+// returned release runs, which is what covers the store mutation. A plain hook
+// (tests or a custom wiring) is called and returns a no-op release.
+func (s *Server) stopAccountForMutation(ctx context.Context, accountID string, hook func(context.Context, string) error) (func(), error) {
+	if claimer, ok := s.cfg.Catalog.(AccountStopClaimer); ok {
+		return claimer.BeginAccountStop(ctx, accountID)
 	}
-	return s.cfg.AccountDeleteHook(ctx, accountID)
+	if hook == nil {
+		return func() {}, nil
+	}
+	return func() {}, hook(ctx, accountID)
 }
 
 func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +247,11 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, fmt.Sprintf("account %q not found", id))
 		return
 	}
-	if err := s.runAccountLogoutHook(r.Context(), id); err != nil {
+	release, err := s.stopAccountForMutation(r.Context(), id, s.cfg.AccountLogoutHook)
+	if err != nil {
+		if release != nil {
+			release()
+		}
 		// A hook failure is a runtime failure, not a store contract error, so
 		// it answers 500 instead of the mapped store status. The detail stays
 		// in the log; the account and its nodes are untouched.
@@ -233,6 +259,7 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "internal error")
 		return
 	}
+	defer release()
 	account, err := s.store.LogoutAccount(id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -252,18 +279,6 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		"state":     string(account.State),
 	})
 	writeJSON(w, http.StatusOK, withEffectiveSlots(account))
-}
-
-// runAccountLogoutHook stops the account's runtime gates before the store
-// pauses the account and drains its nodes. Unlike the login hook its error is
-// returned: the caller aborts the logout instead of leaving a listening gate
-// behind a paused account. A nil hook keeps the store-only behaviour of a
-// daemon without AJS_ACCOUNT_LOGIN=1.
-func (s *Server) runAccountLogoutHook(ctx context.Context, accountID string) error {
-	if s.cfg.AccountLogoutHook == nil {
-		return nil
-	}
-	return s.cfg.AccountLogoutHook(ctx, accountID)
 }
 
 // reconcileAccountMutation republishes the panel after store.DeleteAccount or

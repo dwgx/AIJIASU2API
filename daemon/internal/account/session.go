@@ -229,13 +229,35 @@ func (f *Factory) Open(ctx context.Context, req SessionRequest) (FlowSession, er
 	return &flowSession{sess: sess}, nil
 }
 
-// Liveness is the optional active-liveness view of a FlowSession. Healthy is
-// passive: it only reports that the vendor issued a SID, and a closed or kicked
-// session keeps it. Liveness answers whether the session can still carry flows,
-// which is what the runtime's kick containment needs. The runtime type-asserts,
-// so a session implementation without it keeps the passive behaviour.
+// Liveness is the optional liveness view of a FlowSession. Healthy is passive:
+// it only reports that the vendor issued a SID, and a closed or kicked session
+// keeps it. Liveness answers whether the session can still carry flows, which
+// is what the runtime's kick containment needs. The runtime type-asserts, so a
+// session implementation without it keeps the passive behaviour.
+//
+// Alive is deliberately passive and cheap: the runtime reads it under its
+// controller lock. A session that keeps its SID and receives no client flow
+// still reports Alive until either a data-channel refusal marks it lost or the
+// active probe (ActiveLiveness) confirms the loss.
 type Liveness interface {
 	Alive() bool
+}
+
+// ActiveLiveness is the optional active-liveness view of a FlowSession. Alive
+// cannot see an idle session loss: the vendor keeps the SID and the control
+// connection is already half-closed by the protocol, so with no client flow
+// nothing marks the session lost. SessionLost performs one cheap vendor
+// data-channel probe and reports whether the vendor refused it as a lost
+// session.
+//
+// The runtime calls it once per liveness window per slot (30 s by default),
+// outside its controller lock. It is not called per flow and never per second.
+// Only a vendor session-loss refusal reports true: a flow-level refusal, a
+// successful connection or a transport error is inconclusive and reports
+// false, so a transient network problem never takes a healthy slot out of
+// service.
+type ActiveLiveness interface {
+	SessionLost(ctx context.Context) bool
 }
 
 // vendorKickMarker is the vendor's data-channel refusal for an account that
@@ -309,8 +331,22 @@ type flowSession struct {
 
 // Compile-time proof that the adapter satisfies the shared interfaces.
 var (
-	_ FlowSession = (*flowSession)(nil)
-	_ Liveness    = (*flowSession)(nil)
+	_ FlowSession    = (*flowSession)(nil)
+	_ Liveness       = (*flowSession)(nil)
+	_ ActiveLiveness = (*flowSession)(nil)
+)
+
+// Liveness probe destination. The vendor validates the authenticated SID
+// before it attempts the SOCKS5 destination, so a live session answers the
+// probe with a flow-level refusal (a non-zero SOCKS5 reply) and a lost session
+// with the session-loss refusal. Loopback port 1 is the cheapest fast-fail
+// destination on the vendor's own host: it refuses immediately or is refused
+// by policy, and neither outcome is a session loss. The probe is one short
+// data channel on the slot's existing SID, never a second login, so it cannot
+// trigger the vendor's one-session rule.
+const (
+	livenessProbeHost = "127.0.0.1"
+	livenessProbePort = 1
 )
 
 func (s *flowSession) SID() string {
@@ -356,6 +392,48 @@ func (s *flowSession) Alive() bool {
 		return false
 	}
 	return !s.closed.Load() && !s.lost.Load()
+}
+
+// SessionLost performs one active liveness probe and reports whether the
+// vendor refused it as a lost session. It opens one short data channel to the
+// sentinel destination and classifies the refusal with the same vocabulary as
+// a client flow. A flow-level refusal (the destination could not be reached),
+// a successful connection or a transport error is inconclusive and reports
+// false; only the vendor's session-loss refusal marks the session lost.
+//
+// The call is bounded by ctx. The carrier's own handshake deadline may outlast
+// it, so on cancellation the probe goroutine is left to finish and close its
+// connection without holding the caller; it writes only to its buffered
+// result channel and to the session's lost flag.
+func (s *flowSession) SessionLost(ctx context.Context) bool {
+	if s == nil || s.sess == nil {
+		return true
+	}
+	if s.closed.Load() || s.lost.Load() {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan bool, 1)
+	go func() {
+		conn, err := s.OpenFlow(ctx, livenessProbeHost, livenessProbePort)
+		if err != nil {
+			// OpenFlow marks the session lost only for the vendor's
+			// session-loss vocabulary; a flow-level or transport error leaves
+			// the flag alone and is inconclusive.
+			done <- s.lost.Load()
+			return
+		}
+		_ = conn.Close()
+		done <- false
+	}()
+	select {
+	case lost := <-done:
+		return lost
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *flowSession) Close() error {

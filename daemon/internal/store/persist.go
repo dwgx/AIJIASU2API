@@ -1277,46 +1277,141 @@ func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
 			map[string]string{"slot": slot.SlotKey.String(), "state": string(slot.State)})
 		repaired++
 	}
-	held := make(map[model.SlotKey]struct{}, len(snap.Leases))
+	accounts := make(map[string]model.Account, len(snap.Accounts))
+	for _, account := range snap.Accounts {
+		accounts[account.ID] = account
+	}
+	// capacityFor is the ceiling the admission path would apply after this
+	// document is installed. It is cached because every lease of an account
+	// asks the same question.
+	capacities := make(map[string]int, len(accounts))
+	capacityFor := func(accountID string) int {
+		if capacity, ok := capacities[accountID]; ok {
+			return capacity
+		}
+		account, ok := accounts[accountID]
+		if !ok {
+			capacities[accountID] = 0
+			return 0
+		}
+		capacity := snap.restoreCapacity(account, slots)
+		capacities[accountID] = capacity
+		return capacity
+	}
+	heldSlots := make(map[model.SlotKey]struct{}, len(snap.Leases))
+	heldLegacyNodes := make(map[string]struct{}, len(snap.Leases))
+	active := make(map[string]int, len(accounts))
 	kept := snap.Leases[:0]
 	for _, lease := range snap.Leases {
-		if lease.Slot <= 0 {
-			kept = append(kept, lease)
-			continue
-		}
-		key := model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}
-		slot, slotOK := slots[key]
-		node, nodeOK := nodes[lease.NodeID]
-		reason := ""
-		switch {
-		case !slotOK:
-			reason = "slot row is missing"
-		case slot.State != model.SlotLive:
-			reason = "slot is " + string(slot.State)
-		case !nodeOK:
-			reason = "node row is missing"
-		case node.State != model.NodeLive || node.GatePort <= 0 || node.GatePort != slot.GatePort:
-			reason = "no bound listener"
-		}
-		if reason != "" {
+		if _, ok := accounts[lease.AccountID]; !ok {
 			audit("lease.unbound_dropped", lease.ID,
-				"Restore dropped an active lease with no bound slot: "+reason,
+				"Restore dropped an active lease for an unknown account",
 				map[string]string{
 					"leaseId": lease.ID, "nodeId": lease.NodeID,
-					"slot": key.String(), "reason": reason,
+					"accountId": lease.AccountID, "slot": "legacy",
+					"reason": "account row is missing",
 				})
 			repaired++
 			continue
 		}
-		if _, duplicate := held[key]; duplicate {
-			audit("lease.duplicate_dropped", lease.ID,
-				"Restore dropped a duplicate active lease for slot "+key.String(),
-				map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID, "slot": key.String()})
+		key := model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}
+		slotID := "legacy"
+		if lease.Slot > 0 {
+			slotID = key.String()
+		}
+		reason := ""
+		var slot *model.AccountSlot
+		var node model.ProxyNode
+		if lease.Slot <= 0 {
+			// A legacy (Slot 0) lease has no slot row to verify. Its node
+			// must still be a LIVE, bound legacy node of the same account:
+			// otherwise the row is a claim on a dead endpoint, and a legacy
+			// lease pointed at a slot node would bypass the slot checks.
+			var ok bool
+			node, ok = nodes[lease.NodeID]
+			switch {
+			case !ok:
+				reason = "node row is missing"
+			case node.AccountID != lease.AccountID:
+				reason = "node belongs to another account"
+			case node.Slot != 0:
+				reason = "legacy lease names a slot node"
+			case node.State != model.NodeLive:
+				reason = "node is " + string(node.State)
+			case node.GatePort <= 0:
+				reason = "no bound listener"
+			}
+		} else {
+			var slotOK, nodeOK bool
+			slot, slotOK = slots[key]
+			node, nodeOK = nodes[lease.NodeID]
+			switch {
+			case !slotOK:
+				reason = "slot row is missing"
+			case slot.State != model.SlotLive:
+				reason = "slot is " + string(slot.State)
+			case !nodeOK:
+				reason = "node row is missing"
+			case node.State != model.NodeLive || node.GatePort <= 0 || node.GatePort != slot.GatePort:
+				reason = "no bound listener"
+			}
+		}
+		if reason != "" {
+			audit("lease.unbound_dropped", lease.ID,
+				"Restore dropped an active lease with no bound endpoint: "+reason,
+				map[string]string{
+					"leaseId": lease.ID, "nodeId": lease.NodeID,
+					"accountId": lease.AccountID, "slot": slotID, "reason": reason,
+				})
 			repaired++
 			continue
 		}
-		held[key] = struct{}{}
-		if lease.Generation != slot.Generation {
+		if lease.Slot <= 0 {
+			if _, duplicate := heldLegacyNodes[lease.NodeID]; duplicate {
+				audit("lease.duplicate_dropped", lease.ID,
+					"Restore dropped a duplicate active lease for node "+lease.NodeID,
+					map[string]string{
+						"leaseId": lease.ID, "nodeId": lease.NodeID,
+						"accountId": lease.AccountID, "slot": slotID,
+					})
+				repaired++
+				continue
+			}
+		} else if _, duplicate := heldSlots[key]; duplicate {
+			audit("lease.duplicate_dropped", lease.ID,
+				"Restore dropped a duplicate active lease for slot "+key.String(),
+				map[string]string{
+					"leaseId": lease.ID, "nodeId": lease.NodeID,
+					"accountId": lease.AccountID, "slot": key.String(),
+				})
+			repaired++
+			continue
+		}
+		// Capacity is a per-account ceiling: a snapshot written under a wider
+		// AJS_ACCOUNT_SLOTS (or edited by hand) may hold more active
+		// entitlements than admission would now grant. The first rows in
+		// document order keep their claim; later ones are dropped with an
+		// attributed audit row. This applies to legacy rows too.
+		capacity := capacityFor(lease.AccountID)
+		if active[lease.AccountID] >= capacity {
+			audit("lease.over_capacity_dropped", lease.ID,
+				fmt.Sprintf("Restore dropped an active lease above the account capacity %d", capacity),
+				map[string]string{
+					"leaseId": lease.ID, "nodeId": lease.NodeID,
+					"accountId": lease.AccountID, "slot": slotID,
+					"capacity": strconv.Itoa(capacity),
+					"active":   strconv.Itoa(active[lease.AccountID]),
+				})
+			repaired++
+			continue
+		}
+		if lease.Slot > 0 {
+			heldSlots[key] = struct{}{}
+		} else {
+			heldLegacyNodes[lease.NodeID] = struct{}{}
+		}
+		active[lease.AccountID]++
+		if lease.Slot > 0 && lease.Generation != slot.Generation {
 			from := lease.Generation
 			lease.Slot = slot.Index
 			lease.Generation = slot.Generation
@@ -1340,6 +1435,39 @@ func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
 	}
 	snap.Leases = kept
 	return repaired
+}
+
+// restoreCapacity is the active-lease ceiling admission would apply to one
+// restored account. It mirrors accountCapacityLocked: the vendor/operator slot
+// allowance capped by the LIVE nodes that actually bound a listener. A READY
+// node is not capacity even when it remembers a port.
+func (snap *Snapshot) restoreCapacity(account model.Account, slots map[model.SlotKey]*model.AccountSlot) int {
+	capacity := SlotCapacity(account.UseCount, configuredAccountSlots())
+	serving := 0
+	seen := make(map[int]struct{}, MaxServiceSlots)
+	for _, node := range snap.Nodes {
+		if node.AccountID != account.ID {
+			continue
+		}
+		if node.State != model.NodeLive || node.GatePort <= 0 {
+			continue
+		}
+		if node.Slot > 0 {
+			if _, duplicate := seen[node.Slot]; duplicate {
+				continue
+			}
+			slot, ok := slots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+			if !ok || slot.State != model.SlotLive || slot.GatePort != node.GatePort {
+				continue
+			}
+			seen[node.Slot] = struct{}{}
+		}
+		serving++
+	}
+	if serving < capacity {
+		capacity = serving
+	}
+	return capacity
 }
 
 // validateAccountSlots rejects a document whose slot rows cannot be loaded

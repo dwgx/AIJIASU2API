@@ -44,7 +44,21 @@ const (
 // DefaultLivenessInterval is how often the controller checks that every running
 // session is still the vendor's live session. A slot whose session is gone must
 // leave LIVE within one window, so this is the containment latency bound.
+//
+// Each scan first reads the passive Alive view, then performs one active
+// vendor probe per running slot (account.ActiveLiveness): the vendor keeps the
+// SID and half-closes the control connection after authentication, so an idle
+// session loss is invisible without a probe. The probe is one short data
+// channel on the slot's existing SID per window, not a per-second vendor call;
+// a responsive vendor loss is contained within one window, inside the 60 s
+// requirement.
 const DefaultLivenessInterval = 30 * time.Second
+
+// activeProbeTimeout bounds one session's active liveness probe. The probe
+// opens a data channel to a sentinel destination that fails fast on the vendor
+// side; a slow or unreachable vendor is inconclusive, never a loss, and the
+// scan proceeds after this bound.
+const activeProbeTimeout = 5 * time.Second
 
 // kickRetryWindow is the minimum wait before a kicked slot may reopen. The
 // vendor needs time to release the stolen session, and a quick reopen would
@@ -92,6 +106,16 @@ type SessionOpener interface {
 // passive check is never contained on a guess.
 type SessionLiveness interface {
 	Alive() bool
+}
+
+// SessionProber is the optional active-liveness view a session may expose.
+// SessionLost performs one cheap vendor data-channel probe and reports true
+// only when the vendor refused it as a lost session; a flow-level refusal or a
+// transport error is inconclusive and reports false. The production account
+// session implements it. The controller runs the probe outside its lock, once
+// per liveness window per running slot.
+type SessionProber interface {
+	SessionLost(ctx context.Context) bool
 }
 
 // sessionAlive reports whether one running session can still serve. A nil
@@ -178,6 +202,14 @@ type GateFactory func(cfg gate.Config, session gate.Session) (Gate, error)
 // reconcile step.
 type Reconciler interface {
 	Reconcile(ctx context.Context) (Topology, error)
+}
+
+// LeaseWithdrawer is the optional same-operation cleanup behind a failed
+// break-before-make switch. *ResinPanel implements it. A reconciler that does
+// not implement it (a test double or a store-only wiring) skips the external
+// lease step; the local lease revocation still runs.
+type LeaseWithdrawer interface {
+	WithdrawLease(ctx context.Context, accountID string) error
 }
 
 // NodeControllerConfig configures a NodeController. Store, Logins and Sessions
@@ -284,7 +316,10 @@ type NodeController struct {
 	switchMu    sync.Mutex
 	switching   map[model.SlotKey]chan struct{}
 	lastAttempt map[model.SlotKey]time.Time
-	accountBusy map[string]struct{}
+	// accountBusy is the account-wide mutation claim. The channel closes when
+	// the claim is released, so a stop can wait for a running sync instead of
+	// failing its caller.
+	accountBusy map[string]chan struct{}
 
 	// stopMu guards the account stop fence. It is separate from switchMu and
 	// mu because SyncAccount reads it while holding mu and StopAccount writes
@@ -401,7 +436,7 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		cooldown:    cooldown,
 		switching:   make(map[model.SlotKey]chan struct{}),
 		lastAttempt: make(map[model.SlotKey]time.Time),
-		accountBusy: make(map[string]struct{}),
+		accountBusy: make(map[string]chan struct{}),
 
 		closedAccounts: make(map[string]time.Time),
 		liveness:       liveness,
@@ -437,7 +472,24 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 // A persisted selection fixes slot 1's target and makes no other slot change
 // (DESIGN-CATALOG §3.6). A selection that no longer resolves is cleared with a
 // catalog.selection_lost audit and the default assignment is used.
+//
+// The whole sync holds the account-wide mutation claim. A concurrent sync,
+// switch or disconnect waits for it; a logout/delete claim makes the sync wait
+// and then re-check the committed state, so it cannot install a gate behind a
+// paused or deleted account.
 func (c *NodeController) SyncAccount(ctx context.Context, accountID string) error {
+	// Join the account-wide mutation exclusion. A sync opens sessions and
+	// gates, so it must not interleave with a stop (logout/delete) that is
+	// closing them, nor with a disconnect-all: the stop handler holds the claim
+	// across its store mutation, so a sync that lands between the fence and the
+	// pause waits and then refuses instead of installing a listener behind it.
+	// Concurrent syncs and switches are serialized by waiting, not refused.
+	release, err := c.beginAccountMutationWait(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1129,16 +1181,35 @@ func (c *NodeController) Stop(ctx context.Context) error {
 // it returns nil. Close failures are aggregated; a failed close still removes
 // the gate from the running set, so a retry cannot double-close it.
 func (c *NodeController) StopAccount(ctx context.Context, accountID string) error {
+	release, err := c.BeginAccountStop(ctx, accountID)
+	if release != nil {
+		defer release()
+	}
+	return err
+}
+
+// BeginAccountStop is StopAccount with the account-wide exclusion kept until
+// the returned release runs: it waits for the account's in-flight slot
+// switches and syncs, claims the account, fences it, and closes its gates.
+//
+// The API logout/delete handlers hold the claim across their store mutation and
+// call release afterwards. Until then every SyncAccount, connect and switch
+// for the account is refused, so a login that lands between the fence and the
+// pause/delete commit cannot install a gate behind the committed state. A
+// caller that does not need the window (a plain hook) uses StopAccount.
+//
+// release is non-nil whenever the claim was taken, even when closing a gate
+// failed: the caller must call it once the mutation (or its abort) is done.
+// Close failures are returned as an aggregate after the gates were removed
+// from the running set, so a retry cannot double-close them.
+func (c *NodeController) BeginAccountStop(ctx context.Context, accountID string) (func(), error) {
 	release, err := c.beginAccountStop(ctx, accountID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer release()
 	c.fenceAccount(accountID)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	var errs []error
 	for id, running := range c.running {
 		if running.accountID != accountID {
@@ -1149,7 +1220,8 @@ func (c *NodeController) StopAccount(ctx context.Context, accountID string) erro
 		delete(c.slotGates, running.slot)
 		c.logger.Info("account_gates_stopped", "account_id", accountID, "node_id", id, "server_id", running.serverID)
 	}
-	return errors.Join(errs...)
+	c.mu.Unlock()
+	return release, errors.Join(errs...)
 }
 
 // fenceAccount marks one account stopped. Every start for it refuses until a
@@ -1196,6 +1268,13 @@ func (c *NodeController) loginBeganAfter(accountID string, result account.LoginR
 // service, and a gate whose account is no longer in the store (the delete
 // cascade committed) is closed. It returns the number of gates it closed.
 //
+// The scan reads the passive Alive view, then probes every remaining session
+// that exposes SessionProber. The probes run outside the controller lock, in
+// parallel, each bounded by activeProbeTimeout: a slow vendor cannot stall a
+// mutation and one dead slot cannot delay its sibling. A probe verdict is only
+// applied to the same running gate it was taken from; a gate closed or
+// replaced while the probe ran is left alone.
+//
 // The background scan calls it once per DefaultLivenessInterval, so a vendor
 // kick leaves the slot out of LIVE within one window. It is exported so an
 // operator and the tests can force one scan.
@@ -1205,12 +1284,61 @@ func (c *NodeController) CheckLiveness() int {
 		c.mu.Unlock()
 		return 0
 	}
-	closed := 0
+	type runningProbe struct {
+		id      string
+		running *nodeGate
+	}
+	snapshot := make([]runningProbe, 0, len(c.running))
 	for id, running := range c.running {
-		if sessionAlive(running.session) {
+		snapshot = append(snapshot, runningProbe{id: id, running: running})
+	}
+	c.mu.Unlock()
+
+	// lost[i] is written by exactly one goroutine and read after the wait.
+	lost := make([]bool, len(snapshot))
+	probe := func(i int) {
+		running := snapshot[i].running
+		if !sessionAlive(running.session) {
+			lost[i] = true
+			return
+		}
+		prober, ok := running.session.(SessionProber)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.ctx, activeProbeTimeout)
+		defer cancel()
+		lost[i] = prober.SessionLost(ctx)
+	}
+	if len(snapshot) > 1 {
+		var wg sync.WaitGroup
+		for i := range snapshot {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				probe(i)
+			}(i)
+		}
+		wg.Wait()
+	} else {
+		for i := range snapshot {
+			probe(i)
+		}
+	}
+
+	c.mu.Lock()
+	closed := 0
+	for i, item := range snapshot {
+		if !lost[i] {
 			continue
 		}
-		c.containKickLocked(id, running, "vendor_kick")
+		current, ok := c.running[item.id]
+		if !ok || current != item.running {
+			// The gate was closed or replaced while the probe ran; the verdict
+			// belongs to a session that is no longer the running one.
+			continue
+		}
+		c.containKickLocked(item.id, current, "vendor_kick")
 		closed++
 	}
 	for id, running := range c.running {

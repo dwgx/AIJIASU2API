@@ -51,8 +51,8 @@ func newLeaseHTTPServer(t *testing.T, cfg Config) leaseHTTPFixture {
 			State: model.NodeLive, EgressIP: "203.0.113.12", Protocol: model.ProtocolSOCKS5, GatePort: 13001,
 		},
 		{
-			ID: "node-ready", AccountID: account.ID, Label: "cn-zj-01", Region: "cn-zj",
-			State: model.NodeReady, EgressIP: "203.0.113.13", Protocol: model.ProtocolSOCKS5, GatePort: 13002,
+			ID: "node-live-2", AccountID: account.ID, Label: "cn-zj-01", Region: "cn-zj",
+			State: model.NodeLive, EgressIP: "203.0.113.13", Protocol: model.ProtocolSOCKS5, GatePort: 13002,
 		},
 	} {
 		if _, err := st.PutNode(node); err != nil {
@@ -155,7 +155,7 @@ func TestCreateLeaseHTTPIdempotencyAndConflict(t *testing.T) {
 	}
 	if _, err := fixture.st.PutNode(model.ProxyNode{
 		ID: "node-build", AccountID: secondAccount.ID, Label: "cn-zj-02", Region: "cn-zj",
-		State: model.NodeReady, EgressIP: "203.0.113.14", Protocol: model.ProtocolSOCKS5, GatePort: 13003,
+		State: model.NodeLive, EgressIP: "203.0.113.14", Protocol: model.ProtocolSOCKS5, GatePort: 13003,
 	}); err != nil {
 		t.Fatalf("PutNode(node-build): %v", err)
 	}

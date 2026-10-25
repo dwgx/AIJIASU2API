@@ -234,6 +234,16 @@ func (c *Client) RefreshSubscription(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, path, nil, nil)
 }
 
+// FindSubscription returns the local subscription with the exact name. It is
+// the restart path of the empty-render withdrawal: the previous process's id
+// is not in memory, but Resin still persists the subscription by name.
+func (c *Client) FindSubscription(ctx context.Context, name string) (Subscription, bool, error) {
+	if strings.TrimSpace(name) == "" {
+		return Subscription{}, false, errors.New("resin: subscription name is required")
+	}
+	return c.findSubscription(ctx, name)
+}
+
 // GetSubscription returns one subscription by id.
 func (c *Client) GetSubscription(ctx context.Context, id string) (Subscription, error) {
 	var sub Subscription

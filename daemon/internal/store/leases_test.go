@@ -10,8 +10,9 @@ import (
 	"ajsaccountd/internal/model"
 )
 
-// leaseTestFixture is one empty store with an active account, two free nodes
-// and one enabled user. Tests add more users/nodes when a case needs them.
+// leaseTestFixture is one empty store with an active account, two bound LIVE
+// nodes, one unbound READY control node and one enabled user. Tests add more
+// users/nodes when a case needs them.
 type leaseTestFixture struct {
 	st      *Store
 	account model.Account
@@ -49,6 +50,14 @@ func newLeaseFixture(t *testing.T, now *time.Time, platform model.Platform, conc
 	}); err != nil {
 		t.Fatalf("PutNode(live): %v", err)
 	}
+	// A second bound node gives the fixture two serving slots without
+	// changing the READY row's role: READY is never a lease target.
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-live-2", AccountID: account.ID, Label: "cn-hk-01", Region: "cn-hk",
+		State: model.NodeLive, EgressIP: "203.0.113.14", Protocol: model.ProtocolSOCKS5, GatePort: 13003,
+	}); err != nil {
+		t.Fatalf("PutNode(live-2): %v", err)
+	}
 	user, err := st.CreateUser(model.CreateUserInput{Name: "ada.ops"})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -81,7 +90,7 @@ func addLeaseNode(t *testing.T, st *Store, accountID, id, label string) model.Pr
 	t.Helper()
 	node, err := st.PutNode(model.ProxyNode{
 		ID: id, AccountID: accountID, Label: label, Region: "cn-zj",
-		State: model.NodeReady, EgressIP: "203.0.113.20", Protocol: model.ProtocolSOCKS5, GatePort: 13020,
+		State: model.NodeLive, EgressIP: "203.0.113.20", Protocol: model.ProtocolSOCKS5, GatePort: 13020,
 	})
 	if err != nil {
 		t.Fatalf("PutNode(%q): %v", id, err)

@@ -517,8 +517,16 @@ func (s *Server) handleBulkDeleteAccounts(w http.ResponseWriter, r *http.Request
 			result.Results = append(result.Results, item)
 			continue
 		}
-		if err := s.runAccountDeleteHook(r.Context(), id); err != nil {
-			s.logger.Error("account_delete_hook_error", "account", id, "error", err)
+		// Join the account-wide stop claim, exactly like DELETE
+		// /v1/accounts/{id}: a login that lands after the fence waits for the
+		// claim, then re-checks the deleted state instead of installing a gate
+		// behind the cascade.
+		release, stopErr := s.stopAccountForMutation(r.Context(), id, s.cfg.AccountDeleteHook)
+		if stopErr != nil {
+			if release != nil {
+				release()
+			}
+			s.logger.Error("account_delete_hook_error", "account", id, "error", stopErr)
 			item.Status = "failed"
 			item.Code = new(CodeInternal)
 			item.Message = new("account delete hook failed")
@@ -530,6 +538,9 @@ func (s *Server) handleBulkDeleteAccounts(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		if err := s.store.DeleteAccount(id); err != nil {
+			if release != nil {
+				release()
+			}
 			item.Status = "failed"
 			switch {
 			case errors.Is(err, store.ErrNotFound):
@@ -556,6 +567,9 @@ func (s *Server) handleBulkDeleteAccounts(w http.ResponseWriter, r *http.Request
 		result.Counts.Deleted++
 		if s.cfg.LoginService != nil {
 			s.cfg.LoginService.Forget(id)
+		}
+		if release != nil {
+			release()
 		}
 		result.Results = append(result.Results, item)
 	}

@@ -105,9 +105,9 @@ func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, erro
 //	no_capacity           no active account of the platform has a free node
 //
 // One lease per node is enforced by excluding every node that already has an
-// active lease. LIVE nodes are preferred over READY ones because a LIVE node
-// has a bound gate; READY is the seeded/demo state that still carries the
-// node's recorded egress and port.
+// active lease. Only a LIVE node with a bound gate port is a target: READY is
+// the seeded/demo state and still carries the node's recorded egress and port,
+// but no listener, so leasing it would advertise a dead endpoint.
 func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -448,11 +448,14 @@ func leaseAccountAvailable(account model.Account, now time.Time) error {
 	return nil
 }
 
-// pickLeaseNodeLocked returns the index of the best free node of an account:
-// no active lease, state LIVE or READY, LIVE first and seed order otherwise.
-// A slot node is leasable only while its slot row is live and its listener is
-// bound, and a slot can back at most one lease: a duplicate node row for a
-// slot that already serves a lease must not widen admission.
+// pickLeaseNodeLocked returns the index of the first free LIVE node of an
+// account in seed order. READY, STARTING, DRAINING, DOWN and STALE rows carry
+// no bound listener, so they are never a lease target: a lease advertises the
+// gate port it copies from the node, and a READY row's remembered port is a
+// dead endpoint. A slot node is leasable only while its slot row is live and
+// its listener is bound, and a slot can back at most one lease: a duplicate
+// node row for a slot that already serves a lease must not widen admission.
+// A legacy node (Slot 0) follows the same bound-listener rule.
 func (s *Store) pickLeaseNodeLocked(accountID string) int {
 	used := make(map[string]struct{}, len(s.leases))
 	// A slot is owned by (account, index), never by the index alone: two
@@ -465,7 +468,7 @@ func (s *Store) pickLeaseNodeLocked(accountID string) int {
 			usedSlots[model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}] = struct{}{}
 		}
 	}
-	best, bestRank := -1, 3
+	best := -1
 	for idx, node := range s.nodes {
 		if node.AccountID != accountID {
 			continue
@@ -473,9 +476,15 @@ func (s *Store) pickLeaseNodeLocked(accountID string) int {
 		if _, taken := used[node.ID]; taken {
 			continue
 		}
+		// Only a LIVE row has a bound listener. Slot 0 (legacy) is no
+		// exception: refusing only the slot shape would leave the same dead
+		// READY port leasable on a pre-slot installation.
+		if node.State != model.NodeLive || node.GatePort <= 0 {
+			continue
+		}
 		// A slot node is leasable only while its slot row is live, has not
 		// been marked by a vendor kick, and reports the listener the row
-		// reserved; a legacy node (Slot 0) is unchanged.
+		// reserved.
 		if node.Slot > 0 {
 			key := model.SlotKey{AccountID: node.AccountID, Index: node.Slot}
 			if _, taken := usedSlots[key]; taken {
@@ -485,22 +494,12 @@ func (s *Store) pickLeaseNodeLocked(accountID string) int {
 			if !ok || slot.State != model.SlotLive || slot.Health == model.SlotHealthVendorKick {
 				continue
 			}
-			if node.GatePort <= 0 || slot.GatePort != node.GatePort {
+			if slot.GatePort != node.GatePort {
 				continue
 			}
 		}
-		rank := 3
-		switch node.State {
-		case model.NodeLive:
-			rank = 0
-		case model.NodeReady:
-			rank = 1
-		default:
-			continue
-		}
-		if rank < bestRank {
-			best, bestRank = idx, rank
-		}
+		best = idx
+		break
 	}
 	return best
 }

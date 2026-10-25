@@ -270,6 +270,22 @@ func (p *ResinPanel) ReleaseLease(ctx context.Context, leaseID string) error {
 	return p.store.ReleaseLease(leaseID)
 }
 
+// WithdrawLease deletes the external Resin lease for one account. It is the
+// same-operation cleanup of a failed break-before-make switch: the old
+// listener is gone, so Resin must not keep leasing the account to a dead port.
+// A missing lease is a no-op (DeleteLease treats 404 as success). Without a
+// known platform there is nothing Resin can lease, so the call is a no-op.
+func (p *ResinPanel) WithdrawLease(ctx context.Context, accountID string) error {
+	platformID := p.PlatformID()
+	if platformID == "" {
+		return nil
+	}
+	if err := p.client.DeleteLease(ctx, platformID, accountID); err != nil {
+		return fmt.Errorf("%w: withdraw lease for account %q: %w", store.ErrUpstream, accountID, err)
+	}
+	return nil
+}
+
 // DrainNode marks the node DRAINING in the store and republishes the
 // remaining LIVE nodes. When the publish fails the node is already DRAINING
 // and the error is returned alongside it, so the API can answer 503 without
@@ -327,6 +343,21 @@ func (p *ResinPanel) reconcileLocked(ctx context.Context) error {
 		// keep advertising its last (now dead) port either, so the subscription
 		// is withdrawn: absence is the explicit cleared marker, and the next
 		// LIVE render recreates it through EnsureSubscription.
+		//
+		// A restarted process has no in-memory subscription id, while Resin
+		// still persists the subscription from the previous run. Resolve the
+		// id by exact name before withdrawing; without this lookup the
+		// publisher's empty-id no-op leaves the dead port advertised until a
+		// login republishes.
+		if p.pub.SubscriptionID() == "" {
+			existing, found, err := p.client.FindSubscription(ctx, p.cfg.SubscriptionName)
+			if err != nil {
+				return fmt.Errorf("runtime: find subscription %q to withdraw: %w", p.cfg.SubscriptionName, err)
+			}
+			if found {
+				p.pub.SetSubscriptionID(existing.ID)
+			}
+		}
 		if err := p.pub.Withdraw(ctx); err != nil {
 			return fmt.Errorf("runtime: withdraw empty subscription: %w", err)
 		}

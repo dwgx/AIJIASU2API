@@ -656,6 +656,9 @@ func TestEmptyNodeGuard(t *testing.T) {
 
 	want := []string{
 		"PATCH /api/v1/system/config",
+		// The lookup is how a restarted process finds a subscription the
+		// previous run left behind; finding none must not write anything.
+		"GET /api/v1/subscriptions",
 		"GET /api/v1/platforms",
 		"POST /api/v1/platforms",
 		"GET /api/v1/system/info",
@@ -670,8 +673,8 @@ func TestEmptyNodeGuard(t *testing.T) {
 		}
 	}
 	for _, call := range fake.recorded() {
-		if strings.HasPrefix(call.Path, "/api/v1/subscriptions") {
-			t.Fatalf("empty pool touched the subscription: %s %s", call.Method, call.Path)
+		if strings.HasPrefix(call.Path, "/api/v1/subscriptions") && call.Method != http.MethodGet {
+			t.Fatalf("empty pool wrote to the subscription: %s %s", call.Method, call.Path)
 		}
 	}
 

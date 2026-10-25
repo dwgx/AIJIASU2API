@@ -165,6 +165,14 @@ func (p *Publisher) SetSubscriptionID(id string) {
 	p.subscription = id
 }
 
+// SubscriptionID returns the Resin subscription id the publisher will write,
+// or "" when it has not learned one yet.
+func (p *Publisher) SubscriptionID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.subscription
+}
+
 // LastGood returns the last content Resin accepted, or "" before the first
 // successful publish.
 func (p *Publisher) LastGood() string {

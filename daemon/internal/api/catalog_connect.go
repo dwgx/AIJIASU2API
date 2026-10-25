@@ -168,7 +168,7 @@ func (s *Server) handleConnectAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.cfg.Catalog.ConnectServer(r.Context(), id, body.ServerID, body.SnapshotID, "manual")
 	if err != nil {
-		s.writeCatalogError(w, err)
+		s.writeCatalogError(w, withSwitchResult(err, result))
 		return
 	}
 	s.observeConnect(result)
@@ -228,7 +228,7 @@ func (s *Server) handleReconnectAccount(w http.ResponseWriter, r *http.Request) 
 	}
 	result, err := s.cfg.Catalog.ReconnectAccount(r.Context(), id, body.SnapshotID, "reconnect")
 	if err != nil {
-		s.writeCatalogError(w, err)
+		s.writeCatalogError(w, withSwitchResult(err, result))
 		return
 	}
 	s.observeConnect(result)
@@ -267,6 +267,43 @@ func (s *Server) checkSnapshot(snapshotID string) error {
 		}
 	}
 	return nil
+}
+
+// withSwitchResult folds the failed switch's warnings and slot/generation
+// attribution into the error details. The runtime already annotates its own
+// SwitchError; this keeps a custom Catalog implementation from silently
+// dropping the same fields, because the handler discards the result on error.
+func withSwitchResult(err error, result runtime.SwitchResult) error {
+	var switchErr *runtime.SwitchError
+	if !errors.As(err, &switchErr) {
+		return err
+	}
+	if len(result.Warnings) == 0 && result.Slot == 0 && result.Generation == 0 && result.PrevNodeID == "" {
+		return err
+	}
+	details := make(map[string]string, len(switchErr.Details)+5)
+	for key, value := range switchErr.Details {
+		details[key] = value
+	}
+	if len(result.Warnings) > 0 {
+		details["warnings"] = strings.Join(result.Warnings, ",")
+	}
+	if result.Slot > 0 {
+		details["slot"] = strconv.Itoa(result.Slot)
+	}
+	if result.Generation > 0 {
+		details["generation"] = strconv.FormatUint(result.Generation, 10)
+	}
+	if result.PrevNodeID != "" {
+		details["prevNodeId"] = result.PrevNodeID
+	}
+	return &runtime.SwitchError{
+		Reason:     switchErr.Reason,
+		Message:    switchErr.Message,
+		Details:    details,
+		RetryAfter: switchErr.RetryAfter,
+		Cause:      switchErr.Cause,
+	}
 }
 
 // writeCatalogError maps the guarded-switch reasons onto the HTTP contract of

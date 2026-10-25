@@ -34,7 +34,7 @@ func newOrderFixture(t *testing.T) *orderFixture {
 	}
 	if _, err := st.PutNode(model.ProxyNode{
 		ID: "node-orders", AccountID: account.ID, Label: "orders-1", Region: "cn-zj",
-		State: model.NodeReady, EgressIP: "203.0.113.90",
+		State: model.NodeLive, EgressIP: "203.0.113.90",
 		Protocol: model.ProtocolSOCKS5, GatePort: 13090,
 	}); err != nil {
 		t.Fatalf("PutNode: %v", err)

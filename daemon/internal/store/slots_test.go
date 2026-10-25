@@ -716,6 +716,9 @@ func TestAccountSlotCapacityReduction(t *testing.T) {
 }
 
 func TestAccountSlotSnapshotRoundtrip(t *testing.T) {
+	// The demo seed carries two active leases per active account, so a
+	// byte-identical round trip needs the operator cap that admits both.
+	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
 	st := New()
 	key := model.SlotKey{AccountID: "acc-01", Index: 1}
 	slot := model.AccountSlot{

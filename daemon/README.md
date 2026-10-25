@@ -1146,7 +1146,13 @@ kept so the controlled retry reuses the same endpoint. The **third** kick
 automatic sync retries — only an operator connect may reopen it. Events:
 `slot.vendor_kick` (audit, warn; meta `slot`, `kickCount`, `state`, `reason`,
 `serverId`, `retryAfter`) plus the `slot_vendor_kick` log line, and
-`slot.orphan_closed` when a gate outlived its deleted account row.
+`slot.orphan_closed` when a gate outlived its deleted account row. The scan
+reads the passive session view and then performs one active data-channel probe
+per running slot (`account.ActiveLiveness`, sentinel target `127.0.0.1:1`), so
+an idle loss with no client flow is detected too. The probe is one short vendor
+connection per slot per window, never per flow or per second; only the vendor's
+session-loss refusal counts, while a flow-level refusal, a successful connect
+or a transport error leaves the slot serving.
 
 ## Catalog selection and connect
 

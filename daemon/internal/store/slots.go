@@ -66,17 +66,17 @@ func (s *Store) accountCapacityLocked(account model.Account, now time.Time) int 
 		if node.AccountID != account.ID {
 			continue
 		}
-		if node.State != model.NodeLive && node.State != model.NodeReady {
+		// Only a LIVE row has a bound listener. A READY/STARTING/DRAINING/
+		// DOWN/STALE row is not capacity, whether it is a slot node or a
+		// legacy (Slot 0) one: counting it would let admission mint a lease
+		// for a port no gate is listening on.
+		if node.State != model.NodeLive || node.GatePort <= 0 {
 			continue
 		}
-		// A slot node is capacity only while its slot row is live, its
-		// listener is actually bound, and the row and the node agree on the
-		// bound pair. A duplicate node row for the same slot counts once: the
-		// capacity denominator is a verified serving slot, not a row.
-		//
-		// A legacy node (Slot 0) is capacity as before. A pool-disabled
-		// installation has no slot nodes at all, so it keeps the legacy
-		// answer.
+		// A slot node is capacity only while its slot row is live and the row
+		// and the node agree on the bound pair. A duplicate node row for the
+		// same slot counts once: the capacity denominator is a verified
+		// serving slot, not a row.
 		if node.Slot > 0 {
 			if _, duplicate := seen[node.Slot]; duplicate {
 				continue

@@ -39,10 +39,11 @@ func newOrderTestServer(t *testing.T, cfg Config) (*httptest.Server, *store.Stor
 }
 
 // freeFixtureCapacity releases the seeded leases on the fixture account whose
-// verified allowance is a single slot (AJS_ACCOUNT_SLOTS defaults to one and
-// the demo seed never raises UseCount). A test about settlement mechanics calls
-// it so the order it settles can actually take that slot. A capacity-honesty
-// test must leave the seed alone: there the refusal is the behavior under test.
+// verified allowance is a single slot under the default AJS_ACCOUNT_SLOTS=1
+// (the seed's vendor UseCount is two, but the operator cap is what admission
+// applies). A test about settlement mechanics calls it so the order it settles
+// can actually take that slot. A capacity-honesty test must leave the seed
+// alone: there the refusal is the behavior under test.
 func freeFixtureCapacity(t *testing.T, st *store.Store) {
 	t.Helper()
 	released := 0

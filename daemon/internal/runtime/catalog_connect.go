@@ -44,6 +44,7 @@ const (
 	ReasonGateStart            = "gate_start_failed"
 	ReasonStoreFailed          = "store_failed"
 	ReasonReconcileFailed      = "reconcile_failed"
+	ReasonLeaseWithdrawFailed  = "lease_withdraw_failed"
 	ReasonNoTarget             = "no_target"
 )
 
@@ -286,15 +287,14 @@ func (c *NodeController) ConnectSlot(ctx context.Context, key model.SlotKey, ser
 		// stop advertising it in the same request, not on a later sync.
 		if res.Rollback == ReasonMetadataOnly {
 			if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
-				c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
-				res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+				c.recordReconcileLoss(&res, trigger, reconcileErr)
 			}
 		}
+		annotateSwitchError(err, res)
 		return res, err
 	}
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
-		c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
-		res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+		c.recordReconcileLoss(&res, trigger, reconcileErr)
 	}
 	return res, nil
 }
@@ -362,15 +362,14 @@ func (c *NodeController) ReconnectSlot(ctx context.Context, key model.SlotKey, s
 	if err != nil {
 		if res.Rollback == ReasonMetadataOnly {
 			if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
-				c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
-				res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+				c.recordReconcileLoss(&res, trigger, reconcileErr)
 			}
 		}
+		annotateSwitchError(err, res)
 		return res, err
 	}
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
-		c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
-		res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+		c.recordReconcileLoss(&res, trigger, reconcileErr)
 	}
 	return res, nil
 }
@@ -595,7 +594,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	}
 	slot, ok := c.store.Slot(key)
 	if !ok {
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonStoreFailed,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonStoreFailed,
 			"store_failed", "store", "slot row is missing", fmt.Errorf("runtime: slot %s not found", key.String()))
 	}
 	// A kicked slot may not be reopened before its retry window: the vendor
@@ -603,7 +602,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	// again. The check runs before the old session closes, so a refusal leaves
 	// a serving slot serving.
 	if wait, blocked := slotKickWindow(slot, c.now()); blocked {
-		res, err := c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonConnectCooldown,
+		res, err := c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonConnectCooldown,
 			"connect cooldown", "capacity", "the slot is waiting out its vendor-kick retry window",
 			fmt.Errorf("runtime: slot %s is not restartable yet", key.String()))
 		// failSlotSwitch is shared, so the remaining window is attached here:
@@ -617,7 +616,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	// the attempt and leaves the slot serving.
 	addrs, claimed, err := c.reserveSlotPairLocked(key, slot.GatePort)
 	if err != nil {
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonPortUnavailable,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonPortUnavailable,
 			"port_unavailable", "capacity", "the slot port pair is unavailable", err)
 	}
 	release := func() {
@@ -656,7 +655,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	if err != nil {
 		release()
 		c.markSlotDownLocked(key, acct, target, "device_material_missing")
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonSessionOpen,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionOpen,
 			"session_open_failed", "unknown", "account has no device identity", err)
 	}
 	session, err := c.sessions.Open(ctx, account.SessionRequest{
@@ -671,14 +670,14 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	if err != nil {
 		release()
 		c.markSlotDownLocked(key, acct, target, "session_open_failed")
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonSessionOpen,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionOpen,
 			"session_open_failed", classifyConnectError(err), "could not open the new session", err)
 	}
 	if session.SID() == "" {
 		_ = session.Close()
 		release()
 		c.markSlotDownLocked(key, acct, target, "session_unverified")
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonSessionUnverified,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionUnverified,
 			"session_unverified", "auth", "the vendor session has no id", errors.New("session has no SID"))
 	}
 	g, bound, err := c.startGateLocked(key, target, session, addrs)
@@ -686,7 +685,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		_ = session.Close()
 		release()
 		c.markSlotDownLocked(key, acct, target, "gate_start_failed")
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonGateStart,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonGateStart,
 			"gate_start_failed", "gate", "could not start the new gate", err)
 	}
 	running := &nodeGate{
@@ -763,7 +762,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		delete(c.running, newID)
 		release()
 		c.markSlotDownLocked(key, acct, target, "store_failed")
-		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonStoreFailed,
+		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonStoreFailed,
 			"store_failed", "store", "could not commit the switch", err)
 	}
 	c.slotGates[key] = newID
@@ -796,11 +795,12 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 // gone, so its lease and its publication are revoked here, in the same call,
 // instead of surviving as a dead endpoint until a later cleanup deletes the
 // node. That revocation is audited with the lease ids.
-func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, target serverRef, old *nodeGate, trigger string, start time.Time, reason, message, errClass, detail string, cause error) (SwitchResult, error) {
+func (c *NodeController) failSlotSwitch(ctx context.Context, acct model.Account, key model.SlotKey, target serverRef, old *nodeGate, trigger string, start time.Time, reason, message, errClass, detail string, cause error) (SwitchResult, error) {
 	duration := c.now().Sub(start).Milliseconds()
 	oldServerID := ""
 	oldNodeID := ""
 	rollback := "none"
+	warnings := []string{}
 	if old != nil {
 		oldServerID = old.serverID
 		oldNodeID = nodeID(key, old.serverID)
@@ -810,7 +810,11 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 		}
 	}
 	if old != nil && rollback == ReasonMetadataOnly {
-		c.revokeClosedSlotLocked(key, oldNodeID, oldServerID, reason)
+		warnings = c.revokeClosedSlotLocked(ctx, key, oldNodeID, oldServerID, reason)
+	}
+	generation := uint64(0)
+	if slot, ok := c.store.Slot(key); ok {
+		generation = slot.Generation
 	}
 	action := "catalog.connect"
 	switch {
@@ -827,8 +831,8 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 		"result":     "failed",
 		"rollback":   rollback,
 	}
-	if slot, ok := c.store.Slot(key); ok {
-		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
+	if generation > 0 {
+		meta["generation"] = strconv.FormatUint(generation, 10)
 	}
 	if old != nil {
 		meta["fromServerId"] = old.serverID
@@ -849,22 +853,24 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 	}
 	c.logger.Warn("catalog_connect_failed", "account_id", acct.ID, "server_id", target.id,
 		"slot", key.String(), "reason", reason, "error_class", errClass, "rollback", rollback, "error", cause)
-	return SwitchResult{
-			AccountID:    acct.ID,
-			ServerID:     target.id,
-			NodeID:       nodeID(key, target.id),
-			SwitchedFrom: oldServerID,
-			DurationMs:   duration,
-			Warnings:     []string{},
-			Rollback:     rollback,
-			Slot:         key.Index,
-			PrevNodeID:   oldNodeID,
-		}, &SwitchError{
-			Reason:  reason,
-			Message: message,
-			Details: map[string]string{"rollback": rollback},
-			Cause:   cause,
-		}
+	result := SwitchResult{
+		AccountID:    acct.ID,
+		ServerID:     target.id,
+		NodeID:       nodeID(key, target.id),
+		SwitchedFrom: oldServerID,
+		DurationMs:   duration,
+		Warnings:     warnings,
+		Rollback:     rollback,
+		Slot:         key.Index,
+		Generation:   generation,
+		PrevNodeID:   oldNodeID,
+	}
+	return result, &SwitchError{
+		Reason:  reason,
+		Message: message,
+		Details: map[string]string{"rollback": rollback},
+		Cause:   cause,
+	}
 }
 
 // revokeClosedSlotLocked is the same-step containment of a failed
@@ -872,8 +878,11 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 // it: every active lease on the closed node is revoked (one audit row per
 // lease), the node leaves service without a port or egress (a DOWN row must not
 // advertise an endpoint), and one slot.switch_failed row names the revoked
-// leases. It never touches a sibling slot.
-func (c *NodeController) revokeClosedSlotLocked(key model.SlotKey, oldNodeID, oldServerID, reason string) {
+// leases. When no sibling slot still serves the account, the external Resin
+// lease is deleted in the same call: Resin must not keep leasing an account
+// whose only local endpoint just died. It never touches a sibling slot's
+// publication or lease.
+func (c *NodeController) revokeClosedSlotLocked(ctx context.Context, key model.SlotKey, oldNodeID, oldServerID, reason string) []string {
 	revoked := c.store.InvalidateNodeLeases(oldNodeID, "switch_failed:"+reason)
 	if node, ok := c.store.Node(oldNodeID); ok {
 		node.State = model.NodeDown
@@ -884,6 +893,10 @@ func (c *NodeController) revokeClosedSlotLocked(key model.SlotKey, oldNodeID, ol
 				"node_id", oldNodeID, "error", err)
 		}
 	}
+	generation := uint64(0)
+	if slot, ok := c.store.Slot(key); ok {
+		generation = slot.Generation
+	}
 	meta := map[string]string{
 		"slot":     key.String(),
 		"nodeId":   oldNodeID,
@@ -891,8 +904,8 @@ func (c *NodeController) revokeClosedSlotLocked(key model.SlotKey, oldNodeID, ol
 		"reason":   reason,
 		"leases":   strconv.Itoa(len(revoked)),
 	}
-	if slot, ok := c.store.Slot(key); ok {
-		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
+	if generation > 0 {
+		meta["generation"] = strconv.FormatUint(generation, 10)
 	}
 	if len(revoked) > 0 {
 		ids := make([]string, 0, len(revoked))
@@ -905,6 +918,94 @@ func (c *NodeController) revokeClosedSlotLocked(key model.SlotKey, oldNodeID, ol
 		"Switch failed after the old session closed · lease revoked", meta)
 	c.logger.Warn("catalog_switch_revoked", "account_id", key.AccountID, "slot", key.String(),
 		"node_id", oldNodeID, "server_id", oldServerID, "leases", len(revoked), "reason", reason)
+
+	warnings := []string{}
+	withdrawer, ok := c.reconciler.(LeaseWithdrawer)
+	if !ok || c.accountServingLocked(key.AccountID) {
+		return warnings
+	}
+	if err := withdrawer.WithdrawLease(ctx, key.AccountID); err != nil {
+		warnings = append(warnings, ReasonLeaseWithdrawFailed)
+		c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.lease_withdraw_failed", oldNodeID,
+			"Switch failed after the old session closed · external lease withdrawal failed",
+			map[string]string{
+				"slot": key.String(), "nodeId": oldNodeID, "serverId": oldServerID,
+				"accountId": key.AccountID, "reason": reason, "errorClass": "resin",
+			})
+		c.logger.Warn("catalog_lease_withdraw_failed", "account_id", key.AccountID,
+			"slot", key.String(), "node_id", oldNodeID, "error", err)
+	}
+	return warnings
+}
+
+// accountServingLocked reports whether any running gate still serves the
+// account. Resin leases are per account, so a failed slot must not delete the
+// external lease a sibling slot is still using.
+func (c *NodeController) accountServingLocked(accountID string) bool {
+	for _, running := range c.running {
+		if running.accountID == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+// recordReconcileLoss retains a post-switch publication failure instead of
+// leaving it in the log. The audit row names the slot, its generation and the
+// closed node, so a two-slot trace can attribute the loss to the exact switch;
+// the warning is also mirrored into the result for the caller.
+func (c *NodeController) recordReconcileLoss(res *SwitchResult, trigger string, reconcileErr error) {
+	c.logger.Warn("catalog_reconcile_failed", "account_id", res.AccountID,
+		"slot", res.Slot, "generation", res.Generation, "trigger", trigger, "error", reconcileErr)
+	res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+	target := res.NodeID
+	if res.PrevNodeID != "" {
+		target = res.PrevNodeID
+	}
+	meta := map[string]string{
+		"trigger":    trigger,
+		"result":     "failed",
+		"errorClass": "reconcile",
+		"nodeId":     res.NodeID,
+		"serverId":   res.ServerID,
+	}
+	if res.Slot > 0 {
+		meta["slot"] = model.SlotKey{AccountID: res.AccountID, Index: res.Slot}.String()
+	}
+	if res.Generation > 0 {
+		meta["generation"] = strconv.FormatUint(res.Generation, 10)
+	}
+	if res.PrevNodeID != "" {
+		meta["prevNodeId"] = res.PrevNodeID
+	}
+	c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.reconcile_failed", target,
+		"Switch left the store consistent but the Resin publication failed · a dead endpoint may stay advertised", meta)
+}
+
+// annotateSwitchError copies the failed switch's warnings and slot/generation
+// attribution into the client-visible error details. Without this the API sees
+// only the reason and the caller cannot tell a clean refusal from one whose
+// publication was lost.
+func annotateSwitchError(err error, res SwitchResult) {
+	var switchErr *SwitchError
+	if !errors.As(err, &switchErr) {
+		return
+	}
+	if switchErr.Details == nil {
+		switchErr.Details = make(map[string]string, 4)
+	}
+	if len(res.Warnings) > 0 {
+		switchErr.Details["warnings"] = strings.Join(res.Warnings, ",")
+	}
+	if res.Slot > 0 {
+		switchErr.Details["slot"] = strconv.Itoa(res.Slot)
+	}
+	if res.Generation > 0 {
+		switchErr.Details["generation"] = strconv.FormatUint(res.Generation, 10)
+	}
+	if res.PrevNodeID != "" {
+		switchErr.Details["prevNodeId"] = res.PrevNodeID
+	}
 }
 
 // resolveTarget validates the account, its retained login result, the server
@@ -1026,9 +1127,12 @@ func (c *NodeController) beginSwitch(key model.SlotKey, cooldown bool) (func(), 
 }
 
 // beginAccountMutation claims the account for a mutation that spans slots
-// (disconnect-all). It refuses while any slot of the account is switching, and
-// every slot switch refuses while the account is busy, so a per-slot switch can
-// never interleave with a cascade.
+// (disconnect-all, login sync). It refuses while any slot of the account is
+// switching, and every slot switch refuses while the account is busy, so a
+// per-slot switch can never interleave with a cascade or a sync.
+//
+// The returned release closes the claim channel, which wakes a waiting
+// beginAccountStop. It must be called exactly once.
 func (c *NodeController) beginAccountMutation(accountID string) (func(), error) {
 	c.switchMu.Lock()
 	defer c.switchMu.Unlock()
@@ -1042,18 +1146,66 @@ func (c *NodeController) beginAccountMutation(accountID string) (func(), error) 
 				Message: "a slot switch is already in progress for this account"}
 		}
 	}
-	c.accountBusy[accountID] = struct{}{}
+	done := make(chan struct{})
+	c.accountBusy[accountID] = done
 	return func() {
 		c.switchMu.Lock()
-		delete(c.accountBusy, accountID)
+		if current, ok := c.accountBusy[accountID]; ok && current == done {
+			delete(c.accountBusy, accountID)
+			close(done)
+		}
 		c.switchMu.Unlock()
 	}, nil
 }
 
+// beginAccountMutationWait is beginAccountMutation for a login sync: a
+// concurrent sync, slot switch or account-wide mutation is waited out and
+// retried instead of refused. A stop claim also makes the caller wait; once the
+// stop's store mutation commits, the sync's own account-state check refuses it,
+// so the wait can never reopen a paused/deleted account.
+func (c *NodeController) beginAccountMutationWait(ctx context.Context, accountID string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		release, err := c.beginAccountMutation(accountID)
+		if err == nil {
+			return release, nil
+		}
+		var switchErr *SwitchError
+		if !errors.As(err, &switchErr) || switchErr.Reason != ReasonSwitchInProgress {
+			return nil, err
+		}
+		c.switchMu.Lock()
+		wait := make([]chan struct{}, 0, 1+len(c.switching))
+		if busy, ok := c.accountBusy[accountID]; ok {
+			wait = append(wait, busy)
+		}
+		for key, done := range c.switching {
+			if key.AccountID == accountID {
+				wait = append(wait, done)
+			}
+		}
+		c.switchMu.Unlock()
+		if len(wait) == 0 {
+			// The blocker released between the claim and the re-lock; retry.
+			continue
+		}
+		for _, done := range wait {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+}
+
 // beginAccountStop claims the account for a stop after waiting for its
-// in-flight slot switches to settle, so the caller closes a complete gate set
-// instead of one a start is still building. The wait is bounded by ctx; a
-// cancelled wait releases nothing and reports the context error.
+// in-flight slot switches and account mutations (a login sync or disconnect-all)
+// to settle, so the caller closes a complete gate set instead of one a start is
+// still building. The wait is bounded by ctx; a cancelled wait releases nothing
+// and reports the context error.
 //
 // It is the delete/logout seam and therefore waits rather than refusing: the
 // caller must not commit its store mutation while a gate is still opening.
@@ -1063,10 +1215,14 @@ func (c *NodeController) beginAccountStop(ctx context.Context, accountID string)
 	}
 	for {
 		c.switchMu.Lock()
-		if _, busy := c.accountBusy[accountID]; busy {
+		if busy, ok := c.accountBusy[accountID]; ok {
 			c.switchMu.Unlock()
-			return nil, &SwitchError{Reason: ReasonSwitchInProgress,
-				Message: "an account-wide operation is already in progress"}
+			select {
+			case <-busy:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 		pending := make([]chan struct{}, 0, len(c.switching))
 		for key, done := range c.switching {
@@ -1075,11 +1231,15 @@ func (c *NodeController) beginAccountStop(ctx context.Context, accountID string)
 			}
 		}
 		if len(pending) == 0 {
-			c.accountBusy[accountID] = struct{}{}
+			done := make(chan struct{})
+			c.accountBusy[accountID] = done
 			c.switchMu.Unlock()
 			return func() {
 				c.switchMu.Lock()
-				delete(c.accountBusy, accountID)
+				if current, ok := c.accountBusy[accountID]; ok && current == done {
+					delete(c.accountBusy, accountID)
+					close(done)
+				}
 				c.switchMu.Unlock()
 			}, nil
 		}

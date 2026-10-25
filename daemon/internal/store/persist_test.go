@@ -28,6 +28,9 @@ func accountIDs(accounts []model.Account) map[string]struct{} {
 }
 
 func TestSnapshotRoundtrip(t *testing.T) {
+	// The demo seed carries two active leases per active account, so a
+	// faithful round trip needs the operator cap that admits both.
+	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
 	sealer, _ := newSealer(t)
 	st := store.NewWithSealer(sealer)
 

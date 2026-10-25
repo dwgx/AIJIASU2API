@@ -46,7 +46,7 @@ func buildAccounts(now time.Time) []model.Account {
 	return []model.Account{
 		{
 			ID: "acc-01", Label: "Northwind Ops", Username: "demo-northwind",
-			Platform: model.PlatformAndroid, State: model.AccountActive,
+			Platform: model.PlatformAndroid, UseCount: 2, State: model.AccountActive,
 			Concurrency: 200, Regions: []string{"cn-zj", "cn-sh", "hk"},
 			NodeCount: 3, LiveNodeCount: 2, UsageBytes: 82_400_000_000,
 			ExpiresAt: iso(now.Add(18 * day)), LastLoginAt: iso(now.Add(-12 * minute)),
@@ -54,7 +54,7 @@ func buildAccounts(now time.Time) []model.Account {
 		},
 		{
 			ID: "acc-02", Label: "Field Lab", Username: "demo-fieldlab",
-			Platform: model.PlatformIOS, State: model.AccountActive,
+			Platform: model.PlatformIOS, UseCount: 2, State: model.AccountActive,
 			Concurrency: 80, Regions: []string{"jp-tyo", "sg-01"},
 			NodeCount: 2, LiveNodeCount: 2, UsageBytes: 31_700_000_000,
 			ExpiresAt: iso(now.Add(41 * day)), LastLoginAt: iso(now.Add(-3 * hour)),
@@ -62,7 +62,7 @@ func buildAccounts(now time.Time) []model.Account {
 		},
 		{
 			ID: "acc-03", Label: "Edge APAC", Username: "demo-edgeapac",
-			Platform: model.PlatformLinux, State: model.AccountActive,
+			Platform: model.PlatformLinux, UseCount: 2, State: model.AccountActive,
 			Concurrency: 120, Regions: []string{"hk", "tw-tpe", "kr-sel"},
 			NodeCount: 3, LiveNodeCount: 2, UsageBytes: 57_100_000_000,
 			ExpiresAt: iso(now.Add(9 * day)), LastLoginAt: iso(now.Add(-22 * minute)),
@@ -70,7 +70,7 @@ func buildAccounts(now time.Time) []model.Account {
 		},
 		{
 			ID: "acc-04", Label: "Partner EU", Username: "demo-partnereu",
-			Platform: model.PlatformWindows, State: model.AccountActive,
+			Platform: model.PlatformWindows, UseCount: 2, State: model.AccountActive,
 			Concurrency: 40, Regions: []string{"de-fra", "uk-lon"},
 			NodeCount: 2, LiveNodeCount: 2, UsageBytes: 12_900_000_000,
 			ExpiresAt: iso(now.Add(64 * day)), LastLoginAt: iso(now.Add(-1 * hour)),

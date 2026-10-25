@@ -184,6 +184,9 @@ type switchFixture struct {
 	gates      *switchGateFactory
 	controller *runtime.NodeController
 	clock      *switchClock
+	// reconciler is optional; a test that needs the failed-switch cleanup or
+	// a publication failure injects one through newSwitchFixtureWith.
+	reconciler runtime.Reconciler
 }
 
 func newSwitchFixture(t *testing.T) *switchFixture {
@@ -221,6 +224,7 @@ func newSwitchFixtureWith(t *testing.T, configure func(*switchFixture)) *switchF
 		Logins:     logins,
 		Sessions:   opener,
 		Gates:      gates.build,
+		Reconciler: f.reconciler,
 		MaxServers: 1,
 		Now:        clock.Now,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
