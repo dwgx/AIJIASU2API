@@ -263,6 +263,10 @@ type NodeControllerConfig struct {
 	// GateIdentity authenticates RFC 1929 credentials and evaluates the
 	// per-user allowlist and quota in userpass mode. Nil fails closed.
 	GateIdentity *GateIdentity
+	// Debug receives the real-time trace entries behind /v1/debug. Nil is a
+	// no-op recorder: the instrumentation stays in the code path, but a test
+	// controller does not need a sink.
+	Debug *DebugRecorder
 }
 
 // nodeGate is one running gate plus the session it serves.
@@ -346,6 +350,9 @@ type NodeController struct {
 	// every handshake fail closed rather than falling back to no-auth.
 	gateAuth gate.AuthMode
 	identity *GateIdentity
+
+	// debug is the optional real-time trace sink. A nil recorder is a no-op.
+	debug *DebugRecorder
 
 	// httpEnabled and httpOffset configure the HTTP CONNECT listener that runs
 	// beside every SOCKS5 gate. The offset is validated once so the port pair
@@ -445,6 +452,7 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		identity:    cfg.GateIdentity,
 		httpEnabled: cfg.GateHTTP,
 		httpOffset:  httpOffset,
+		debug:       cfg.Debug,
 	}
 	if liveness > 0 {
 		go controller.watchLiveness()
@@ -833,6 +841,7 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 		c.markSlotDownLocked(key, acct, srv, "port_unavailable")
 		return err
 	}
+	openStart := c.now()
 	session, err := c.sessions.Open(ctx, account.SessionRequest{
 		AccountID:       acct.ID,
 		Slot:            key,
@@ -847,6 +856,8 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 			_ = c.store.SetSlotPorts(key, 0, 0)
 		}
 		c.markSlotDownLocked(key, acct, srv, "session_open_failed")
+		c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+			nodeID(key, srv.id), srv.id, "open", model.DebugStateFailed, "could not open the session", classifyConnectError(err), c.now().Sub(openStart)))
 		return err
 	}
 	if session.SID() == "" { // never LIVE without a session id
@@ -855,8 +866,12 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 			_ = c.store.SetSlotPorts(key, 0, 0)
 		}
 		c.markSlotDownLocked(key, acct, srv, "session_unverified")
+		c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+			nodeID(key, srv.id), srv.id, "open", model.DebugStateFailed, "the vendor session has no id", "auth", c.now().Sub(openStart)))
 		return &SwitchError{Reason: ReasonSessionUnverified, Message: "session has no SID"}
 	}
+	c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+		nodeID(key, srv.id), srv.id, "open", model.DebugStateOpen, "", "", c.now().Sub(openStart)))
 	g, bound, err := c.startGateLocked(key, srv, session, addrs)
 	if err != nil {
 		_ = session.Close()
@@ -972,6 +987,8 @@ func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Accoun
 		return err
 	}
 	c.slotGates[key] = node.ID
+	c.debug.Record(newDebugTrace(model.DebugKindSlotState, key, running.generation, node.ID, srv.id,
+		"activate", string(model.SlotLive), "node="+string(state), "", 0))
 	return nil
 }
 
@@ -1044,6 +1061,16 @@ func (c *NodeController) markSlotDownLocked(key model.SlotKey, acct model.Accoun
 	if err := c.store.SetSlotFailure(key, srv.id, reason); err != nil {
 		c.logger.Warn("slot_state_write_failed", "slot", key.String(), "reason", reason, "error", err)
 	}
+	generation := uint64(0)
+	node := nodeID(key, srv.id)
+	if slot, ok := c.store.Slot(key); ok {
+		generation = slot.Generation
+		if srv.id == "" && slot.ServerID != "" {
+			node = nodeID(key, slot.ServerID)
+		}
+	}
+	c.debug.Record(newDebugTrace(model.DebugKindSlotState, key, generation, node, srv.id,
+		"down", string(model.SlotDown), reason, "", 0))
 	delete(c.slotGates, key)
 }
 
@@ -1421,6 +1448,12 @@ func (c *NodeController) containKickLocked(id string, running *nodeGate, detail 
 			"reason", detail, "error", err)
 	}
 	revoked := c.store.InvalidateNodeLeases(id, detail)
+	c.debug.Record(newDebugTrace(model.DebugKindSessionLost, running.slot, running.generation,
+		id, running.serverID, "liveness", model.DebugStateLost, detail, "", 0))
+	if err == nil {
+		c.debug.Record(newDebugTrace(model.DebugKindSlotState, running.slot, running.generation,
+			id, running.serverID, "kick", string(slot.State), detail, "", 0))
+	}
 	c.logger.Warn("slot_vendor_kick", "node_id", id, "account_id", running.accountID,
 		"slot", running.slot.String(), "server_id", running.serverID,
 		"generation", running.generation,
@@ -1707,6 +1740,8 @@ func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, sessi
 	for range 2 {
 		g, err := c.gates(cfg, session)
 		if err != nil {
+			c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+				"start", model.DebugStateFailed, "gate factory failed", "gate", 0))
 			return nil, gateAddresses{}, err
 		}
 		if err := g.Start(c.ctx); err != nil {
@@ -1719,6 +1754,8 @@ func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, sessi
 		if addr := g.Addr(); addr != nil {
 			if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Port > 0 && tcp.Port != addrs.socks {
 				_ = g.Close()
+				c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+					"start", model.DebugStateFailed, "listener bound a different port", "gate", 0))
 				return nil, gateAddresses{}, fmt.Errorf("runtime: gate bound %d, slot reserved %d", tcp.Port, addrs.socks)
 			}
 		}
@@ -1726,16 +1763,24 @@ func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, sessi
 			verifier, ok := g.(GateHTTPAddr)
 			if !ok {
 				_ = g.Close()
+				c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+					"start", model.DebugStateFailed, "gate cannot report its HTTP listener", "gate", 0))
 				return nil, gateAddresses{}, errors.New("runtime: gate cannot report its HTTP listener")
 			}
 			tcp, ok := verifier.HTTPAddr().(*net.TCPAddr)
 			if !ok || tcp.Port != addrs.http {
 				_ = g.Close()
+				c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+					"start", model.DebugStateFailed, "HTTP listener bound a different port", "gate", 0))
 				return nil, gateAddresses{}, fmt.Errorf("runtime: gate HTTP listener is not %d", addrs.http)
 			}
 		}
+		c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+			"start", model.DebugStateOpen, fmt.Sprintf("socks=%d http=%d", addrs.socks, addrs.http), "", 0))
 		return g, addrs, nil
 	}
+	c.debug.Record(newDebugTrace(model.DebugKindGateOpen, key, generation, id, srv.id,
+		"start", model.DebugStateFailed, "gate did not start", "gate", 0))
 	return nil, gateAddresses{}, lastErr
 }
 
@@ -1872,6 +1917,12 @@ func (c *NodeController) closeGateLocked(id string, running *nodeGate) []error {
 			errs = append(errs, fmt.Errorf("node %s: close session: %w", id, err))
 		}
 	}
+	state := model.DebugStateClosed
+	if len(errs) > 0 {
+		state = model.DebugStateFailed
+	}
+	c.debug.Record(newDebugTrace(model.DebugKindGateClose, running.slot, running.generation,
+		id, running.serverID, "close", state, "", "", 0))
 	return errs
 }
 

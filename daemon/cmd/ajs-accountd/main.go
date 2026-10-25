@@ -384,6 +384,10 @@ func run() error {
 	var controller *runtime.NodeController
 	var profile account.VersionProfile
 	nodeLimitValue := 1
+	// One bounded trace ring serves the runtime boundaries and the debug API.
+	// It is in-memory by design: a restart starts a new window at sequence 1.
+	debugRecorder := runtime.NewDebugRecorder(runtime.DebugRingCapacity)
+	defer debugRecorder.Close()
 	service, profile, err := startAccountLogin(st, logger)
 	if err != nil {
 		return err
@@ -397,7 +401,7 @@ func run() error {
 			return err
 		}
 		nodeLimitValue = limit
-		controller, err = startNodeController(st, logger, panel, service, profile, limit, gateAuth, gateHTTP, gateHTTPOffset)
+		controller, err = startNodeController(st, logger, panel, service, profile, limit, gateAuth, gateHTTP, gateHTTPOffset, debugRecorder)
 		if err != nil {
 			return err
 		}
@@ -571,6 +575,7 @@ func run() error {
 		WebhookSecrets:       webhookSecrets,
 		Events:               events,
 		EventRing:            eventRing,
+		Debug:                debugRecorder,
 		AllowPlaintextExport: os.Getenv("AJS_ALLOW_PLAINTEXT_EXPORT") == "1",
 		Persist: func() {
 			snapshots.save("account-io")
@@ -604,6 +609,7 @@ func run() error {
 	// Shutdown waits for active handlers, so close the ring first to release
 	// every open stream instead of burning the 5 s shutdown budget.
 	httpServer.RegisterOnShutdown(eventRing.Close)
+	httpServer.RegisterOnShutdown(debugRecorder.Close)
 
 	// The HTTPS listener is a second socket over the same handler, built here
 	// so an unreadable or mismatched certificate pair fails startup before
@@ -617,6 +623,7 @@ func run() error {
 			return err
 		}
 		tlsServer.RegisterOnShutdown(eventRing.Close)
+		tlsServer.RegisterOnShutdown(debugRecorder.Close)
 	}
 
 	errCh := make(chan error, 2)
@@ -2023,8 +2030,9 @@ func pinState() string {
 // starts (default 1, the vendor's one active data session per account; an
 // explicit 0 = all). auth selects the gate's SOCKS5 authentication mode; in
 // userpass mode the meter owns the identity service, so metering must be on.
-// httpEnabled adds the HTTP CONNECT listener at gatePort+httpOffset.
-func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int, auth gate.AuthMode, httpEnabled bool, httpOffset int) (*runtime.NodeController, error) {
+// httpEnabled adds the HTTP CONNECT listener at gatePort+httpOffset. debug is
+// the shared real-time trace ring; nil is a no-op recorder.
+func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int, auth gate.AuthMode, httpEnabled bool, httpOffset int, debug *runtime.DebugRecorder) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
 	if panel != nil {
@@ -2062,6 +2070,7 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 		GateIdentity:   identity,
 		GateHTTP:       httpEnabled,
 		GateHTTPOffset: httpOffset,
+		Debug:          debug,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("node controller: %w", err)

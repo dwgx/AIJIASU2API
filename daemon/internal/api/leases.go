@@ -170,8 +170,28 @@ func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
 
 // emitLeaseEvent publishes one committed lease transition. The payload is the
 // shared lease contract (ids, platform, expiry) and never carries a key or
-// secret; s.emit is a no-op when no sink is configured.
+// secret; s.emit is a no-op when no sink is configured. The same transition is
+// mirrored into the real-time debug trace, where the lease id, node, slot and
+// generation are attribution, not a credential.
 func (s *Server) emitLeaseEvent(event webhook.EventType, lease model.Lease) {
+	kind := ""
+	switch event {
+	case webhook.EventLeaseCreated:
+		kind = model.DebugKindLeaseCreate
+	case webhook.EventLeaseRevoked:
+		kind = model.DebugKindLeaseRevoke
+	}
+	if kind != "" {
+		s.cfg.Debug.Record(model.DebugTrace{
+			Kind:       kind,
+			AccountID:  lease.AccountID,
+			NodeID:     lease.NodeID,
+			Slot:       lease.Slot,
+			Generation: lease.Generation,
+			State:      string(lease.Status),
+			Detail:     "lease " + lease.ID,
+		})
+	}
 	s.emit(event, webhook.LeaseEventData(
 		lease.ID, lease.UserID, string(lease.Platform), lease.AccountID, lease.ExpiresAt))
 }

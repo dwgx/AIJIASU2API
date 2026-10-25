@@ -98,6 +98,13 @@ var routeScopes = map[string]model.Scope{
 	http.MethodGet + " /v1/events":        model.ScopeEventsRead,
 	http.MethodGet + " /v1/events/stream": model.ScopeEventsRead,
 
+	// The real-time debugger trace is a catalog read: it names the same
+	// slot/generation/node attribution the catalog uses, and it exposes no
+	// credential. Both endpoints share the grant; a key with any other scope
+	// (catalog:write included) is refused by the router.
+	http.MethodGet + " /v1/debug/trace":  model.ScopeCatalogRead,
+	http.MethodGet + " /v1/debug/stream": model.ScopeCatalogRead,
+
 	// POST /v1/backup, /v1/backup/inspect and /v1/backup/restore are
 	// deliberately absent: a scoped key must never read the sealed panel files
 	// or replace them, so those routes stay admin-only. The same holds for

@@ -174,6 +174,11 @@ type Config struct {
 	// webhook sink receives into it, so both consumers see the same stream.
 	// Nil answers 503 on both routes.
 	EventRing *events.Ring
+	// Debug is the bounded real-time trace ring behind GET /v1/debug/trace and
+	// GET /v1/debug/stream. main wires one recorder shared with the node
+	// controller, so the runtime boundaries and the API read the same ring.
+	// Nil answers 503 on both routes.
+	Debug *runtime.DebugRecorder
 	// RateLimitClock is the clock the per-scoped-key token bucket reads. Nil
 	// uses time.Now; tests inject a fake to prove refill and GC without
 	// sleeping.
@@ -461,6 +466,12 @@ func (s *Server) routes(rt *router) {
 	// that fans events out to webhooks, so the two views cannot drift.
 	rt.handle(http.MethodGet, "/v1/events", s.handleListEvents)
 	rt.handle(http.MethodGet, "/v1/events/stream", s.handleEventsStream)
+
+	// Real-time debugger trace (AJS-373). The ring is in-memory, capped at
+	// runtime.DebugRingCapacity (500) and requires catalog:read. It survives no
+	// restart; the endpoints are diagnostics, not a durable audit.
+	rt.handle(http.MethodGet, "/v1/debug/trace", s.handleDebugTrace)
+	rt.handle(http.MethodGet, "/v1/debug/stream", s.handleDebugStream)
 
 	// Panel backup routes. All three are admin-only: no scoped key may read or
 	// replace the sealed panel files, so they stay absent from routeScopes.

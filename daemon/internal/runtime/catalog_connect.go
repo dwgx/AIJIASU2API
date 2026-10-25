@@ -586,6 +586,7 @@ func (c *NodeController) disconnectSlotLocked(ctx context.Context, key model.Slo
 // it returns.
 func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Account, result account.LoginResult, target serverRef, old *nodeGate, key model.SlotKey, trigger string, start time.Time) (SwitchResult, error) {
 	newID := nodeID(key, target.id)
+	stepStart := c.now()
 	oldServerID := ""
 	oldNodeID := ""
 	if old != nil {
@@ -624,10 +625,15 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 			_ = c.store.SetSlotPorts(key, 0, 0)
 		}
 	}
+	// Debugger step: the slot row, kick window and port pair are validated.
+	// The attempted generation is the one the success path will commit.
+	c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slot.Generation+1,
+		newID, target.id, "validate", model.DebugStateOK, "", "", c.now().Sub(stepStart)))
 	// Break before make: the vendor allows one session per identity, so the old
 	// session closes before the new one opens. A failed close is reported as an
 	// orphan gate and never blocks the switch.
 	warnings := []string{}
+	drainStart := c.now()
 	if old != nil {
 		if err := c.store.SetNodeStateQuiet(oldNodeID, model.NodeDraining); err != nil {
 			c.logger.Warn("catalog_drain_store_failed", "account_id", acct.ID, "node_id", oldNodeID, "error", err)
@@ -649,12 +655,17 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		}
 		delete(c.running, oldNodeID)
 		delete(c.slotGates, key)
+		c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slot.Generation+1,
+			oldNodeID, oldServerID, "drain", model.DebugStateOK, strings.Join(warnings, ","), "", c.now().Sub(drainStart)))
 	}
 
+	openStart := c.now()
 	device, recordID, err := c.slotDevice(key)
 	if err != nil {
 		release()
 		c.markSlotDownLocked(key, acct, target, "device_material_missing")
+		c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+			newID, target.id, "device", model.DebugStateFailed, "account has no device identity", "unknown", c.now().Sub(openStart)))
 		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionOpen,
 			"session_open_failed", "unknown", "account has no device identity", err)
 	}
@@ -670,6 +681,8 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 	if err != nil {
 		release()
 		c.markSlotDownLocked(key, acct, target, "session_open_failed")
+		c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+			newID, target.id, "open", model.DebugStateFailed, "could not open the new session", classifyConnectError(err), c.now().Sub(openStart)))
 		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionOpen,
 			"session_open_failed", classifyConnectError(err), "could not open the new session", err)
 	}
@@ -677,17 +690,26 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		_ = session.Close()
 		release()
 		c.markSlotDownLocked(key, acct, target, "session_unverified")
+		c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+			newID, target.id, "open", model.DebugStateFailed, "the vendor session has no id", "auth", c.now().Sub(openStart)))
 		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonSessionUnverified,
 			"session_unverified", "auth", "the vendor session has no id", errors.New("session has no SID"))
 	}
+	c.debug.Record(newDebugTrace(model.DebugKindSessionOpen, key, slot.Generation+1,
+		newID, target.id, "open", model.DebugStateOpen, "", "", c.now().Sub(openStart)))
+	gateStart := c.now()
 	g, bound, err := c.startGateLocked(key, target, session, addrs)
 	if err != nil {
 		_ = session.Close()
 		release()
 		c.markSlotDownLocked(key, acct, target, "gate_start_failed")
+		c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slot.Generation+1,
+			newID, target.id, "start_gate", model.DebugStateFailed, "could not start the new gate", "gate", c.now().Sub(gateStart)))
 		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonGateStart,
 			"gate_start_failed", "gate", "could not start the new gate", err)
 	}
+	c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slot.Generation+1,
+		newID, target.id, "start_gate", model.DebugStateOK, "", "", c.now().Sub(gateStart)))
 	running := &nodeGate{
 		gate: g, session: session, accountID: acct.ID, serverID: target.id,
 		slot: key, generation: slot.Generation + 1,
@@ -739,6 +761,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		meta["toServerId"] = target.id
 		meta["prevNodeId"] = oldNodeID
 	}
+	commitStart := c.now()
 	committed, auditID, err := c.store.CommitSwitch(store.SwitchCommit{
 		Node:      node,
 		Slot:      key,
@@ -755,6 +778,8 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		DeviceRecordID: recordID,
 	})
 	if err != nil {
+		c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slotRow.Generation,
+			newID, target.id, "commit", model.DebugStateFailed, "could not commit the switch", "store", c.now().Sub(commitStart)))
 		c.logger.Warn("catalog_commit_failed", "account_id", acct.ID, "node_id", newID, "error", err)
 		if errs := c.closeGateLocked(newID, running); len(errs) > 0 {
 			c.logger.Warn("catalog_rollback_close_failed", "account_id", acct.ID, "node_id", newID, "error", errors.Join(errs...))
@@ -765,6 +790,10 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		return c.failSlotSwitch(ctx, acct, key, target, old, trigger, start, ReasonStoreFailed,
 			"store_failed", "store", "could not commit the switch", err)
 	}
+	c.debug.Record(newDebugTrace(model.DebugKindSwitchStep, key, slotRow.Generation,
+		newID, target.id, "commit", model.DebugStateOK, "", "", c.now().Sub(commitStart)))
+	c.debug.Record(newDebugTrace(model.DebugKindSwitch, key, slotRow.Generation,
+		newID, target.id, trigger, model.DebugStateOK, "", "", time.Duration(duration)*time.Millisecond))
 	c.slotGates[key] = newID
 	c.logger.Info("catalog_switch_succeeded", "account_id", acct.ID, "node_id", newID,
 		"server_id", target.id, "from_server_id", oldServerID, "slot", key.String(),
@@ -853,6 +882,9 @@ func (c *NodeController) failSlotSwitch(ctx context.Context, acct model.Account,
 	}
 	c.logger.Warn("catalog_connect_failed", "account_id", acct.ID, "server_id", target.id,
 		"slot", key.String(), "reason", reason, "error_class", errClass, "rollback", rollback, "error", cause)
+	c.debug.Record(newDebugTrace(model.DebugKindSwitch, key, generation,
+		nodeID(key, target.id), target.id, trigger, model.DebugStateFailed,
+		reason+": "+message, errClass, time.Duration(duration)*time.Millisecond))
 	result := SwitchResult{
 		AccountID:    acct.ID,
 		ServerID:     target.id,

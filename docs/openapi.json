@@ -108,6 +108,10 @@
       "description": "Customer-visible event replay and the server-sent event stream."
     },
     {
+      "name": "Debug",
+      "description": "Real-time runtime trace (switch steps with timings, gate/session/lease/slot transitions) and its SSE stream. The ring is in-memory, capped at 500 entries and survives no restart."
+    },
+    {
       "name": "Operations",
       "description": "Durable async transitions (select-node, list/get/cancel). Terminal records survive a restart; an in-flight record is restored as failed/OPERATION_UNKNOWN."
     },
@@ -4695,6 +4699,103 @@
         ]
       }
     },
+    "/v1/debug/trace": {
+      "get": {
+        "operationId": "getDebugTrace",
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Read the bounded, redacted runtime trace ring.",
+        "description": "Returns up to limit retained trace entries, oldest first, optionally filtered by account. The ring is in-memory and capped at 500 entries: it survives no restart, and a restarted daemon starts at sequence 1 with an empty window. Each entry carries a monotonic sequence, account/node/server attribution, the slot and generation, and the timing of one runtime boundary (switch steps, gate open/close, session open/lose, lease create/revoke, slot state). Secrets are redacted before storage; there is no field for a SID, cookie, token or device identity. A scoped key needs catalog:read; a key restricted by accountIds/regions sees only its accounts and an ?account= outside the grant is 403.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "One bounded window of redacted trace entries and the cursor to resume from.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugTracePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DebugAccount"
+          },
+          {
+            "$ref": "#/components/parameters/DebugLimit"
+          }
+        ]
+      }
+    },
+    "/v1/debug/stream": {
+      "get": {
+        "operationId": "streamDebugTrace",
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Stream retained and live trace entries as server-sent events.",
+        "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every frame is one id:/event:/data: frame whose id is the sequence and whose data is the DebugTrace JSON object. Retained entries after the cursor are replayed first, then live entries follow; a duplicate that appears in both windows is sent once. A stale cursor (evicted, or from a previous process) restarts from the oldest retained entry and sets X-Debug-Restarted: true instead of failing. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. The stream closes when the client disconnects or the daemon shuts down.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "SSE frames; the response never ends on its own while the daemon runs.",
+            "headers": {
+              "X-Debug-Restarted": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "true when the requested cursor was stale and the stream restarted from the oldest retained entry."
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DebugAccount"
+          },
+          {
+            "$ref": "#/components/parameters/DebugSince"
+          },
+          {
+            "$ref": "#/components/parameters/EventLastEventID"
+          }
+        ]
+      }
+    },
     "/v1/backup": {
       "post": {
         "operationId": "createBackup",
@@ -6940,6 +7041,36 @@
         },
         "description": "Cursor sent by an SSE client on reconnect; wins over since."
       },
+      "DebugAccount": {
+        "name": "account",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Only entries attributed to this account id. A scoped key restricted to other accounts is refused 403."
+      },
+      "DebugLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500,
+          "default": 200
+        },
+        "description": "Newest window size; 0 returns every retained entry and a larger value is clamped to 500."
+      },
+      "DebugSince": {
+        "name": "since",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Resume after this sequence, as a bare number (42) or an SSE id (evt-000042). A stale cursor restarts from the oldest retained entry and sets X-Debug-Restarted: true."
+      },
       "AccountIdFilter": {
         "name": "account_id",
         "in": "query",
@@ -7114,6 +7245,137 @@
           "nextCursor",
           "oldestCursor",
           "dropped"
+        ]
+      },
+      "DebugTrace": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Monotonic ring sequence. Stable for the life of the process and not durable: a restart starts at 1."
+          },
+          "at": {
+            "type": "string",
+            "description": "RFC 3339 recording time, UTC."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "switch.step",
+              "switch",
+              "gate.open",
+              "gate.close",
+              "session.open",
+              "session.lost",
+              "lease.create",
+              "lease.revoke",
+              "slot.state"
+            ],
+            "description": "Runtime boundary that emitted the entry."
+          },
+          "accountId": {
+            "type": "string",
+            "description": "Account the event is attributed to; empty for an unattributed event."
+          },
+          "nodeId": {
+            "type": "string",
+            "description": "Node the event is attributed to."
+          },
+          "serverId": {
+            "type": "string",
+            "description": "Vendor server the node addressed."
+          },
+          "slot": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "One-based account slot; omitted when the event predates multi-slot."
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Session generation of the slot; an event from an older generation is stale."
+          },
+          "step": {
+            "type": "string",
+            "description": "Stable switch step name (validate, drain, start_gate, commit) or the trigger of a terminal switch entry. The session open step is its own session.open entry."
+          },
+          "state": {
+            "type": "string",
+            "description": "Outcome of the boundary: ok, failed, open, closed, lost or a slot state such as live/down/quarantined."
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Wall time of the step or boundary in milliseconds; omitted when zero."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Short operator-facing context, scrubbed before storage: credential-shaped values (password, token, secret, SID, cookie, device identity) are [REDACTED]."
+          },
+          "errorClass": {
+            "type": "string",
+            "description": "Stable failure class; never a vendor response body."
+          }
+        },
+        "required": [
+          "seq",
+          "at",
+          "kind"
+        ]
+      },
+      "DebugTracePage": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "True when a trace ring is wired."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the trace is disabled; absent when enabled."
+          },
+          "capacity": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Fixed ring size (500)."
+          },
+          "retained": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Entries matching the account filter in the returned window."
+          },
+          "evicted": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Entries overwritten by the ring since process start."
+          },
+          "oldestSeq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Oldest retained sequence; omitted when the ring is empty."
+          },
+          "nextSeq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Newest retained sequence, the cursor to resume from."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DebugTrace"
+            },
+            "description": "Retained entries after the filters, oldest first. Never null."
+          }
+        },
+        "required": [
+          "enabled",
+          "capacity",
+          "retained",
+          "evicted",
+          "nextSeq",
+          "entries"
         ]
       },
       "ErrorDetail": {

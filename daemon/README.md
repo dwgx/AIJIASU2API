@@ -129,6 +129,9 @@ internal/api/portal_orders.go  portal plan list and own-order create/get/cancel 
 internal/api/admin_orders.go  admin plan CRUD, order settle/refund/chargeback/cancel, Stripe webhook
 internal/api/admin_tenants.go  tenant administration: list, approve, suspend, resume
 internal/api/events.go       event replay page and server-sent event stream handlers
+internal/api/debug.go        real-time debugger trace page and SSE stream handlers
+internal/model/debug.go      DebugTrace/DebugTracePage wire contract (allowlist, no SID/token field)
+internal/runtime/debug.go    bounded (500) redacted trace ring over internal/events, debugger scrub
 internal/api/backup.go       panel backup, inspect and restore handlers (admin-only)
 internal/store/scoped_keys.go  scoped-key hashes, prefixes, expiry and revocation
 internal/store/tenants.go    tenant signup/auth, Argon2id hashes, cookie sessions, CSRF, tenant keys
@@ -1679,6 +1682,36 @@ need `events:read`; a scoped key restricted by `accountIds`/`regions` is
 refused 403 because the ring is global and a per-account filter would be
 guesswork.
 
+**Real-time debugger trace (AJS-373).** `internal/runtime/debug.go` wraps the
+same `internal/events` ring (one ring implementation, one cursor grammar, one
+fan-out) with a typed, stricter trace. The ring is in-memory and capped at
+`runtime.DebugRingCapacity` (500 entries): it survives no restart, and a
+restarted daemon starts at sequence 1 with an empty window. The node controller
+records the switch steps with timings (`validate`, `drain`, `start_gate`,
+`commit`) plus the timed `session.open`, the terminal `switch`, `gate.open`,
+`gate.close`, `session.lost` and `slot.state`; the lease
+handlers record `lease.create`/`lease.revoke`. Every entry carries a monotonic
+`seq`, `at` and `kind`, plus the attribution the boundary has: `accountId`,
+`nodeId`, `serverId`, `slot`, `generation`, `step`, `state`, `durationMs`,
+`detail` and `errorClass`. There is deliberately **no field** for a SID, cookie, token,
+password or device identity; `detail`/`errorClass` are scrubbed twice before
+storage (the shared `events.Scrub` patterns, then a debugger pattern for
+SID/cookie/device assignments), and the scrub test asserts the wire body
+contains none of them.
+
+`GET /v1/debug/trace?account=&limit=` answers
+`{enabled,capacity,retained,evicted,oldestSeq,nextSeq,entries}`, oldest first
+inside the returned window. `limit` defaults to 200, `0` returns every retained
+entry and a larger value is clamped to 500. `GET /v1/debug/stream` is
+`text/event-stream`: it replays after `since` (bare `42` or `evt-000042`) or
+`Last-Event-ID` (the header wins), then streams live entries once each; a stale
+cursor restarts from the oldest retained entry and sets `X-Debug-Restarted:
+true`; a `: keepalive` comment every 15 s keeps proxies open and the response
+clears the server `WriteTimeout`. Both routes need `catalog:read`; a key
+restricted by `accountIds`/`regions` sees only its accounts, and an
+`?account=` outside the grant is 403. There is no durable trace, no on-disk
+copy and no credential in any entry.
+
 **Panel backup and restore.** `internal/backup` owns the envelope and
 `internal/api/backup.go` only the HTTP contract. A backup carries `state.json`
 plus whichever of `secrets.json`/`device-secrets.json` exist, so it contains
@@ -1787,7 +1820,7 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 |---|---|
 | `accounts:read` | `GET /v1/accounts`, `GET /v1/accounts/{id}`, `GET /v1/accounts/{id}/device`, `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/export` |
 | `accounts:write` | `POST /v1/accounts`, `PATCH`/`DELETE /v1/accounts/{id}`, login/logout, `POST /v1/accounts/import`, `POST /v1/accounts/bulk-delete` |
-| `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology`, `GET /v1/operations`, `GET /v1/operations/{id}` |
+| `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology`, `GET /v1/operations`, `GET /v1/operations/{id}`, `GET /v1/debug/trace`, `GET /v1/debug/stream` |
 | `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, select-node, `DELETE /v1/operations/{id}`, node drain/undrain/probe |
 | `leases:read` | `GET /v1/leases` |
 | `leases:write` | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
