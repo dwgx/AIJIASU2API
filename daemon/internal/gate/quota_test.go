@@ -98,9 +98,12 @@ func (quotaSinkSession) OpenFlow(ctx context.Context, host string, port int) (ne
 	return client, nil
 }
 
-// TestMeterProgressClosesTunnel pins the SOCKS5 in-flight path: progress is
-// called once per ProgressChunk, the chunk that crosses the budget is accounted
-// and then closes the tunnel, and the finished flow records quota_exceeded.
+// TestMeterProgressClosesTunnel pins the SOCKS5 in-flight path: the relay
+// reports bytes to the meter, the report that crosses the budget closes the
+// tunnel, and the finished flow records quota_exceeded. TCP reads are unaligned,
+// so the first report can already cross the budget and be refused; the test
+// requires at least one report and that the reported bytes equal the recorded
+// ingress bytes, proving the refused flow is charged exactly once.
 func TestMeterProgressClosesTunnel(t *testing.T) {
 	var calls, total atomic.Int64
 	srv := startServer(t, Config{
@@ -143,8 +146,11 @@ func TestMeterProgressClosesTunnel(t *testing.T) {
 	if record.BytesIn < int64(ProgressChunk) {
 		t.Fatalf("ingress bytes = %d, want at least one chunk (%d)", record.BytesIn, ProgressChunk)
 	}
-	if got := calls.Load(); got < 2 {
-		t.Fatalf("progress calls = %d, want at least 2", got)
+	if got := calls.Load(); got < 1 {
+		t.Fatalf("progress calls = %d, want calls >= 1", got)
+	}
+	if got, in := total.Load(), record.BytesIn; got != in {
+		t.Fatalf("meter charged %d bytes, record.BytesIn = %d, want equal (each byte charged once)", got, in)
 	}
 }
 
