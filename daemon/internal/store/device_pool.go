@@ -190,6 +190,12 @@ type DeviceEvent struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// DeviceBindingKey identifies the account slot a device record is bound to.
+// Step 1 declares the type only: the pool still uses the account id as its map
+// key and slot 1 remains the compatibility projection until the per-slot
+// binding step.
+type DeviceBindingKey = model.SlotKey
+
 // DeviceRecord is the non-secret index entry. Raw identity fields are not
 // here; they live in the sealed material file keyed by ID.
 type DeviceRecord struct {

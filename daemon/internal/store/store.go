@@ -140,6 +140,13 @@ type Store struct {
 	// pool and the sealed material file are the source of truth.
 	devices map[string]DeviceIdentity
 
+	// accountSlots is the persisted per-account slot contract
+	// (MULTISLOT-PLAN step 1). It is keyed by the stable SlotKey so no map
+	// iteration order or pointer can become part of an identity. Slot 1 is
+	// the legacy account-level binding; higher indices are materialised only
+	// when the operator raises capacity.
+	accountSlots map[model.SlotKey]model.AccountSlot
+
 	// deviceSealer seals raw device material; nil disables the pool. deviceMu
 	// serialises material I/O so a seal never blocks API reads, and pool
 	// mutations so two first logins cannot bind two records.
@@ -289,6 +296,7 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		sealer:            sealer,
 		secrets:           make(map[string][]byte),
 		devices:           make(map[string]DeviceIdentity),
+		accountSlots:      make(map[model.SlotKey]model.AccountSlot),
 		deviceCfg:         defaultDevicePoolConfig(),
 		devicePool:        make(map[string]*DeviceRecord),
 		deviceBindings:    make(map[string]string),
@@ -318,6 +326,9 @@ func newWithClock(now func() time.Time, sealer Sealer) *Store {
 	nodes := buildNodes(stamp)
 	s := newEmptyWithClock(now, sealer)
 	s.accounts = buildAccounts(stamp)
+	for _, account := range s.accounts {
+		s.ensureAccountSlotRowLocked(account.ID)
+	}
 	s.nodes = nodes
 	s.leases = buildLeases(stamp)
 	s.users = users
@@ -858,6 +869,7 @@ func (s *Store) insertAccountLocked(id, label, username string, platform model.P
 		s.secrets[id] = sealed
 	}
 	s.accounts = append([]model.Account{account}, s.accounts...)
+	s.ensureAccountSlotRowLocked(id)
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.create", label,
 		fmt.Sprintf("platform %s · concurrency %d", platform, concurrency))
 	return account
@@ -1073,6 +1085,11 @@ func (s *Store) DeleteAccount(id string) error {
 		delete(s.deviceBindings, id)
 	}
 	delete(s.devices, id)
+	for key := range s.accountSlots {
+		if key.AccountID == id {
+			delete(s.accountSlots, key)
+		}
+	}
 	// The selection and attempt counters describe a target that no longer
 	// exists; catalog events/audit history stay for the retention window.
 	delete(s.selections, id)
@@ -1348,6 +1365,7 @@ func cloneAccount(account model.Account) model.Account {
 	// API and the lease guard cannot disagree about an old account.
 	account.UseCount = normalizeAccountUseCount(account.UseCount)
 	account.EffectiveSlots = 0
+	account.Slots = nil
 	return account
 }
 

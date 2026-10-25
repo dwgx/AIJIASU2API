@@ -107,14 +107,19 @@ type Account struct {
 	// Zero in an older snapshot means 1. It is a vendor entitlement, not the
 	// operator's lease cap.
 	UseCount int `json:"useCount"`
-	// EffectiveSlots is derived for API responses from UseCount and
-	// AJS_ACCOUNT_SLOTS (min of the two, default 1). It is never persisted and
-	// stays zero on store rows.
-	EffectiveSlots int      `json:"effectiveSlots,omitempty"`
-	Regions        []string `json:"regions"`
-	NodeCount      int      `json:"nodeCount"`
-	LiveNodeCount  int      `json:"liveNodeCount"`
-	UsageBytes     int64    `json:"usageBytes"`
+	// EffectiveSlots is the display capacity derived for API responses from
+	// UseCount, AJS_ACCOUNT_SLOTS and MaxServiceSlots (min, default 1). It is
+	// never persisted and stays zero on store rows; lease admission is
+	// hard-capped at one until the multi-slot runtime exists.
+	EffectiveSlots int `json:"effectiveSlots,omitempty"`
+	// Slots is the derived per-account slot view for API responses. It is
+	// never persisted; cloneAccount clears it so a state snapshot cannot
+	// duplicate the accountSlots collection.
+	Slots         []AccountSlot `json:"slots,omitempty"`
+	Regions       []string      `json:"regions"`
+	NodeCount     int           `json:"nodeCount"`
+	LiveNodeCount int           `json:"liveNodeCount"`
+	UsageBytes    int64         `json:"usageBytes"`
 	// TrafficBudgetBytes is the monthly gate-enforced traffic budget. Nil
 	// means unlimited; zero is a real budget that refuses every byte.
 	TrafficBudgetBytes *int64 `json:"trafficBudgetBytes"`
@@ -145,6 +150,9 @@ type ProxyNode struct {
 	// the seeded skeleton nodes and set by the runtime node controller, which
 	// keys the gate on (account, server).
 	ServerID string `json:"serverId,omitempty"`
+	// Slot is the one-based account slot that owns this node. Zero marks a
+	// legacy/seeded row that predates multi-slot; the runtime sets 1..8.
+	Slot int `json:"slot,omitempty"`
 }
 
 // LeaseStatus is the lifecycle state of one lease. Only active leases are

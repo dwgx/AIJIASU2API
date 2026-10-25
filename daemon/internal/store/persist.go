@@ -69,6 +69,13 @@ type Snapshot struct {
 	DeviceBindings map[string]string `json:"deviceBindings,omitempty"`
 	DevicePool     []DeviceRecord    `json:"devicePool,omitempty"`
 
+	// AccountSlots is the per-account slot contract (MULTISLOT-PLAN step 1).
+	// It is additive and omitempty: a pre-slot document restores with slot 1
+	// derived from DeviceBindings, and an older build ignores the field. Slot
+	// 1's DeviceID is the same record id as DeviceBindings[accountID]; it is
+	// a reference, never a regenerated identity.
+	AccountSlots []model.AccountSlot `json:"accountSlots,omitempty"`
+
 	// Selections and ServerStats are the P1 catalog state (DESIGN-CATALOG
 	// §3.8). Both are additive and omitempty, so an older v1 document restores
 	// with empty maps and an older build ignores them.
@@ -193,6 +200,14 @@ func (s *Store) Snapshot() ([]byte, error) {
 		snap.DeviceBindings[accountID] = deviceID
 	}
 	snap.DevicePool = s.devicePoolLocked()
+	snap.AccountSlots = make([]model.AccountSlot, 0, len(s.accountSlots))
+	for _, slot := range s.accountSlots {
+		// Slot 1 is the compatibility projection of the account-level device
+		// binding. The binding may predate the slot row (existing installs),
+		// so fill it on save without changing the record id.
+		snap.AccountSlots = append(snap.AccountSlots, s.slotWithBindingLocked(slot))
+	}
+	sortAccountSlots(snap.AccountSlots)
 	snap.Selections = make(map[string]model.Selection, len(s.selections))
 	for id, selection := range s.selections {
 		snap.Selections[id] = selection
@@ -291,6 +306,10 @@ func (s *Store) Restore(data []byte) error {
 			return err
 		}
 	}
+	// Pre-slot snapshots have no accountSlots: derive slot 1 from the
+	// account-level device binding before validation. This copies the record
+	// id and never generates or reseals an identity.
+	snap.migrateAccountSlots()
 	if err := snap.validate(); err != nil {
 		return err
 	}
@@ -321,6 +340,10 @@ func (s *Store) Restore(data []byte) error {
 		s.devices = make(map[string]DeviceIdentity)
 	}
 	s.deviceBindings = snap.DeviceBindings
+	s.accountSlots = make(map[model.SlotKey]model.AccountSlot, len(snap.AccountSlots))
+	for _, slot := range snap.AccountSlots {
+		s.accountSlots[slot.SlotKey] = slot
+	}
 	s.devicePool = make(map[string]*DeviceRecord, len(snap.DevicePool))
 	for i := range snap.DevicePool {
 		rec := snap.DevicePool[i]
@@ -600,6 +623,9 @@ func (snap *Snapshot) validate() error {
 		}
 	}
 	if err := snap.validateDevicePool(accounts); err != nil {
+		return err
+	}
+	if err := snap.validateAccountSlots(accounts); err != nil {
 		return err
 	}
 	for id, selection := range snap.Selections {
@@ -893,6 +919,129 @@ func (snap *Snapshot) validateDevicePool(accounts map[string]struct{}) error {
 	return nil
 }
 
+// migrateAccountSlots derives the slot table from a pre-slot snapshot. Every
+// account gets its mandatory slot 1; when the account has an account-level
+// device binding, the slot references that exact record id. The function only
+// copies strings: it never calls a generator, BindForLogin or the sealer, so a
+// restored identity cannot change.
+func (snap *Snapshot) migrateAccountSlots() {
+	if snap.AccountSlots == nil {
+		snap.AccountSlots = []model.AccountSlot{}
+	}
+	byKey := make(map[model.SlotKey]int, len(snap.AccountSlots))
+	rowsPerAccount := make(map[string]int, len(snap.Accounts))
+	for i := range snap.AccountSlots {
+		byKey[snap.AccountSlots[i].SlotKey] = i
+		rowsPerAccount[snap.AccountSlots[i].AccountID]++
+	}
+	for _, account := range snap.Accounts {
+		key := model.SlotKey{AccountID: account.ID, Index: 1}
+		binding := snap.DeviceBindings[account.ID]
+		if binding == "" {
+			// A version-1 snapshot without a device pool keeps its identities
+			// in the plaintext Devices map. There is no DeviceRecord id in that
+			// mode, so the stable UID is the only durable reference available.
+			if device, ok := snap.Devices[account.ID]; ok {
+				binding = device.UID
+			}
+		}
+		if index, ok := byKey[key]; ok {
+			if snap.AccountSlots[index].DeviceID == "" && binding != "" {
+				snap.AccountSlots[index].DeviceID = binding
+			}
+			continue
+		}
+		if rowsPerAccount[account.ID] != 0 {
+			// A hand-edited document with higher indices but no slot 1 is
+			// left for validation to reject; migration only fills the gap for
+			// accounts that predate the slot table entirely.
+			continue
+		}
+		snap.AccountSlots = append(snap.AccountSlots, model.AccountSlot{
+			SlotKey:  key,
+			DeviceID: binding,
+			State:    model.SlotProvisioning,
+			Health:   model.SlotHealthUnknown,
+		})
+		byKey[key] = len(snap.AccountSlots) - 1
+		rowsPerAccount[account.ID]++
+	}
+}
+
+// validateAccountSlots rejects a document whose slot rows cannot be loaded
+// as-is. A duplicate (account,index), an index outside 1..8, an unknown state,
+// a device id or gate port used twice, and a slot-1/binding mismatch are hard
+// errors: silently dropping a slot would change capacity or identity.
+func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
+	seen := make(map[model.SlotKey]struct{}, len(snap.AccountSlots))
+	deviceOwners := make(map[string]model.SlotKey, len(snap.AccountSlots))
+	portOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
+	httpPortOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
+	slotOne := make(map[string]model.AccountSlot, len(accounts))
+	for _, slot := range snap.AccountSlots {
+		if err := slot.Validate(); err != nil {
+			return fmt.Errorf("state snapshot %v", err)
+		}
+		if _, ok := accounts[slot.AccountID]; !ok {
+			return fmt.Errorf("state snapshot has a slot for unknown account %q", slot.AccountID)
+		}
+		if _, duplicate := seen[slot.SlotKey]; duplicate {
+			return fmt.Errorf("state snapshot has duplicate slot %s", slot.SlotKey.String())
+		}
+		seen[slot.SlotKey] = struct{}{}
+		if slot.DeviceID != "" {
+			if other, used := deviceOwners[slot.DeviceID]; used {
+				return fmt.Errorf("state snapshot slots %s and %s share device %q",
+					other.String(), slot.SlotKey.String(), slot.DeviceID)
+			}
+			deviceOwners[slot.DeviceID] = slot.SlotKey
+		}
+		if slot.GatePort != 0 {
+			if other, used := portOwners[slot.GatePort]; used {
+				return fmt.Errorf("state snapshot slots %s and %s share gate port %d",
+					other.String(), slot.SlotKey.String(), slot.GatePort)
+			}
+			portOwners[slot.GatePort] = slot.SlotKey
+		}
+		if slot.HTTPPort != 0 {
+			if other, used := httpPortOwners[slot.HTTPPort]; used {
+				return fmt.Errorf("state snapshot slots %s and %s share http port %d",
+					other.String(), slot.SlotKey.String(), slot.HTTPPort)
+			}
+			httpPortOwners[slot.HTTPPort] = slot.SlotKey
+		}
+		if slot.Index == 1 {
+			slotOne[slot.AccountID] = slot
+		}
+	}
+	for accountID, deviceID := range snap.DeviceBindings {
+		slot, ok := slotOne[accountID]
+		if !ok {
+			return fmt.Errorf("state snapshot account %q has a device binding but no slot 1", accountID)
+		}
+		if slot.DeviceID != deviceID {
+			return fmt.Errorf("state snapshot slot 1 of account %q references device %q, binding is %q",
+				accountID, slot.DeviceID, deviceID)
+		}
+	}
+	return nil
+}
+
+// normalizeAccountSlots makes the persisted slice deterministic. The slice is
+// always sorted by (account id, index) so two snapshots of the same state are
+// byte-identical regardless of map iteration order.
+func (snap *Snapshot) normalizeAccountSlots() {
+	if snap.AccountSlots == nil {
+		snap.AccountSlots = []model.AccountSlot{}
+	}
+	for i := range snap.AccountSlots {
+		if snap.AccountSlots[i].State == "" {
+			snap.AccountSlots[i].State = model.SlotProvisioning
+		}
+	}
+	sortAccountSlots(snap.AccountSlots)
+}
+
 // normalize fills absent maps and raises every counter to at least the highest
 // identifier already present. A snapshot written by an older build, or one
 // whose counters were lost, therefore cannot hand out a colliding id.
@@ -918,6 +1067,7 @@ func (snap *Snapshot) normalize() {
 	if snap.DevicePool == nil {
 		snap.DevicePool = []DeviceRecord{}
 	}
+	snap.normalizeAccountSlots()
 	if snap.Selections == nil {
 		snap.Selections = make(map[string]model.Selection)
 	}

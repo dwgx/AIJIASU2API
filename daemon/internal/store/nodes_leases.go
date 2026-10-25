@@ -109,6 +109,9 @@ func normalizeNode(node model.ProxyNode) (model.ProxyNode, error) {
 	if node.GatePort < 0 || node.GatePort > 65535 {
 		return model.ProxyNode{}, invalidf("node %q gate port must be between 0 and 65535", id)
 	}
+	if node.Slot < 0 || node.Slot > model.MaxSlotIndex {
+		return model.ProxyNode{}, invalidf("node %q slot must be between 0 and %d", id, model.MaxSlotIndex)
+	}
 	if !validNodeState(node.State) {
 		return model.ProxyNode{}, invalidf("node %q state %q is not supported", id, node.State)
 	}
