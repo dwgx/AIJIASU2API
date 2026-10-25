@@ -2297,7 +2297,12 @@ export const api = {
   async setNodeState(id: string, state: NodeState): Promise<ProxyNode> {
     if (!USE_MOCK) {
       const action = state === 'DRAINING' ? 'drain' : 'undrain'
-      return http<ProxyNode>(`/v1/nodes/${id}/actions/${action}`, { method: 'POST' })
+      // Node ids are slot-scoped ("acc-07#1:vvn-…"); an unencoded '#' would
+      // start a URL fragment and truncate the path before it reaches the
+      // daemon, so every id segment is percent-encoded at this layer.
+      return http<ProxyNode>(`/v1/nodes/${encodeURIComponent(id)}/actions/${action}`, {
+        method: 'POST',
+      })
     }
     await wait()
     const db = getDb()
@@ -2310,7 +2315,11 @@ export const api = {
   },
 
   async probeNode(id: string): Promise<ProxyNode> {
-    if (!USE_MOCK) return http<ProxyNode>(`/v1/nodes/${id}/actions/probe`, { method: 'POST' })
+    if (!USE_MOCK) {
+      return http<ProxyNode>(`/v1/nodes/${encodeURIComponent(id)}/actions/probe`, {
+        method: 'POST',
+      })
+    }
     await wait()
     const node = getDb().nodes.find((item) => item.id === id)
     if (!node) throw new Error('Node not found')
