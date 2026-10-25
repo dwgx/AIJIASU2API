@@ -7,7 +7,7 @@ import {
   mockListPlans,
   resetOrderMock,
 } from './order-mock'
-import type { ApiKey, Lease, Order, Plan, UsageBucket, UsageQuery, UsageSummary } from './types'
+import type { ApiKey, AuditEvent, Lease, Order, Plan, UsageBucket, UsageQuery, UsageSummary } from './types'
 
 /* --------------------------------------------------------------------------
  * Customer portal client (DESIGN-TENANT.md)
@@ -74,6 +74,16 @@ export interface PortalKeyCreated {
 
 /** Query for the tenant usage view; the daemon ignores owner filters. */
 export type PortalUsageQuery = Pick<UsageQuery, 'from' | 'to'>
+
+/**
+ * Cursor query for the tenant audit view. `before` is the id of the last row
+ * already rendered, never an index: the daemon ring drops old rows, and a
+ * numeric offset would then repeat or skip activity.
+ */
+export interface PortalAuditQuery {
+  limit?: number
+  before?: string | null
+}
 
 export class PortalError extends ApiError {
   readonly retryAfterSec: number | null
@@ -594,6 +604,103 @@ function mockRevokeKey(id: string): void {
   if (shared) shared.revokedAt = key.revokedAt
 }
 
+/**
+ * Own-only audit stream for the mock. It mirrors the daemon's attribution:
+ * admin-seeded rows that name the linked user, plus the customer actions the
+ * mock itself can observe (keys, orders, leases, the current session). Rows
+ * for another tenant or another user never enter the list.
+ */
+function mockAudit(query: PortalAuditQuery = {}): AuditEvent[] {
+  const tenant = mockActiveTenant()
+  const userID = tenant.userId ?? ''
+  const userName = mockUserView(userID)?.name ?? ''
+  const state = mockStateValue()
+  const events: AuditEvent[] = []
+
+  for (const event of getDb().audit) {
+    if (event.target === userName || event.target === userID) events.push(clone(event))
+  }
+
+  for (const key of state.keys) {
+    if (key.userId !== userID) continue
+    events.push({
+      id: `portal-${key.id}-create`,
+      ts: key.createdAt,
+      severity: 'info',
+      actor: 'operator',
+      action: 'key.create',
+      target: userName,
+      detail: `Key prefix ${key.prefix}`,
+    })
+    if (key.revokedAt) {
+      events.push({
+        id: `portal-${key.id}-revoke`,
+        ts: key.revokedAt,
+        severity: 'info',
+        actor: 'portal',
+        action: 'key.revoke',
+        target: userName,
+        detail: `Key prefix ${key.prefix} revoked`,
+      })
+    }
+  }
+
+  for (const order of mockListOrders(tenant.id, userID)) {
+    events.push({
+      id: `portal-${order.id}-created`,
+      ts: order.createdAt,
+      severity: 'info',
+      actor: `tenant:${tenant.id}`,
+      action: 'order.created',
+      target: order.id,
+      detail: `${order.plan.name} · ${order.state}`,
+    })
+    if (order.cancelledAt) {
+      events.push({
+        id: `portal-${order.id}-cancelled`,
+        ts: order.cancelledAt,
+        severity: 'info',
+        actor: `tenant:${tenant.id}`,
+        action: 'order.cancelled',
+        target: order.id,
+        detail: 'awaiting payment cancelled',
+      })
+    }
+  }
+
+  for (const lease of getDb().leases) {
+    if (lease.userId !== userID) continue
+    events.push({
+      id: `portal-${lease.id}-create`,
+      ts: lease.createdAt,
+      severity: 'info',
+      actor: 'operator',
+      action: 'lease.create',
+      target: userName,
+      detail: `${lease.platform} · ${lease.accountLabel} · node ${lease.nodeLabel}`,
+    })
+  }
+
+  events.push({
+    id: `portal-${tenant.id}-session`,
+    ts: mockRFC3339(Date.now()),
+    severity: 'info',
+    actor: `tenant:${tenant.id}`,
+    action: 'session.login',
+    target: userName,
+    detail: 'Portal session started',
+  })
+
+  const unique = new Map(events.map((event) => [event.id, event]))
+  const ordered = [...unique.values()].sort(
+    (left, right) => Date.parse(right.ts) - Date.parse(left.ts) || right.id.localeCompare(left.id),
+  )
+  const found = query.before ? ordered.findIndex((event) => event.id === query.before) : -1
+  const start = found >= 0 ? found + 1 : 0
+  const limit = query.limit && query.limit > 0 ? query.limit : 50
+  return ordered.slice(start, start + limit)
+}
+
 /* --------------------------------------------------------------------------
  * Public client
  * ------------------------------------------------------------------------ */
@@ -673,6 +780,22 @@ export const portalApi = {
       return mockKeys()
     }
     return request<ApiKey[]>('/v1/portal/keys')
+  },
+
+  /**
+   * GET /v1/portal/audit — the session owner's own audit rows, newest first.
+   * Pass the last rendered id as `before` to fetch the next page.
+   */
+  async audit(query: PortalAuditQuery = {}): Promise<AuditEvent[]> {
+    if (mockEnabled()) {
+      await wait()
+      return mockAudit(query)
+    }
+    const params = new URLSearchParams()
+    if (query.limit !== undefined) params.set('limit', String(query.limit))
+    if (query.before) params.set('before', query.before)
+    const search = params.toString()
+    return request<AuditEvent[]>(`/v1/portal/audit${search ? `?${search}` : ''}`)
   },
 
   async issueKey(label: string): Promise<PortalKeyCreated> {

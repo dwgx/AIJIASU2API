@@ -4888,6 +4888,71 @@
         }
       }
     },
+    "/v1/portal/audit": {
+      "get": {
+        "operationId": "portalAudit",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "List only the audit rows attributable to the signed-in tenant, newest first.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 200,
+              "default": 50
+            },
+            "description": "Page size. 0 means the 200-row cap; larger values are clamped to it."
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque cursor: the id of the last row already seen. Only older rows are returned."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's own audit rows, newest first: the linked user, its leases, orders and keys, and tenant lifecycle rows. Other tenants, unrelated admin work and the meta block are never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEvent"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
     "/v1/portal/keys": {
       "get": {
         "operationId": "portalListKeys",

@@ -2441,6 +2441,7 @@ const EN = {
 
   'portal.dashboard.plansTab': 'Plans',
   'portal.dashboard.ordersTab': 'Orders',
+  'portal.dashboard.activityTab': 'Activity',
   'portal.plans.title': 'Plans',
   'portal.plans.subtitle':
     'Request a plan here; payment is settled offline by an administrator.',
@@ -2492,6 +2493,18 @@ const EN = {
   'portal.orders.empty': 'No orders yet',
   'portal.orders.emptyHint': 'Create an order from the Plans tab.',
   'portal.orders.loadFailed': 'Could not load your orders.',
+
+  'portal.activity.title': 'Your activity',
+  'portal.activity.subtitle': 'Leases, orders, keys and sessions on your account.',
+  'portal.activity.caption': 'Your activity',
+  'portal.activity.time': 'Time',
+  'portal.activity.action': 'Action',
+  'portal.activity.target': 'Target',
+  'portal.activity.detail': 'Detail',
+  'portal.activity.empty': 'No activity yet',
+  'portal.activity.emptyHint': 'Lease, order and key events will appear here.',
+  'portal.activity.loadMore': 'Load more',
+  'portal.activity.loadingMore': 'Loading…',
 
   'orders.title': 'Orders',
   'orders.subtitle': 'Offline settlement, cancellation and entitlement reversals.',
@@ -4880,6 +4893,7 @@ const ZH: Record<string, string> = {
 
   'portal.dashboard.plansTab': '套餐',
   'portal.dashboard.ordersTab': '订单',
+  'portal.dashboard.activityTab': '活动',
   'portal.plans.title': '套餐',
   'portal.plans.subtitle': '在此选择套餐；款项由管理员线下确认。',
   'portal.plans.caption': '可用套餐',
@@ -4924,6 +4938,18 @@ const ZH: Record<string, string> = {
   'portal.orders.empty': '暂无订单',
   'portal.orders.emptyHint': '请从“套餐”标签创建订单。',
   'portal.orders.loadFailed': '无法加载您的订单。',
+
+  'portal.activity.title': '我的活动',
+  'portal.activity.subtitle': '您账户的租约、订单、密钥与会话记录。',
+  'portal.activity.caption': '我的活动',
+  'portal.activity.time': '时间',
+  'portal.activity.action': '操作',
+  'portal.activity.target': '对象',
+  'portal.activity.detail': '详情',
+  'portal.activity.empty': '暂无活动',
+  'portal.activity.emptyHint': '租约、订单和密钥事件会显示在这里。',
+  'portal.activity.loadMore': '加载更多',
+  'portal.activity.loadingMore': '正在加载…',
 
   'orders.title': '订单',
   'orders.subtitle': '线下结算、取消与权益回收。',

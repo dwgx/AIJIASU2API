@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(104)
-    expect(entries).toHaveLength(128)
+    expect(Object.keys(doc.paths)).toHaveLength(105)
+    expect(entries).toHaveLength(129)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -280,6 +280,7 @@ describe('docs/openapi.json', () => {
       '/v1/portal/logout': true,
       '/v1/portal/leases': true,
       '/v1/portal/usage': true,
+      '/v1/portal/audit': true,
       '/v1/portal/keys': true,
       '/v1/portal/keys/{id}': true,
       '/v1/portal/plans': true,
@@ -312,6 +313,7 @@ describe('docs/openapi.json', () => {
       ['post', '/v1/portal/logout'],
       ['get', '/v1/portal/leases'],
       ['get', '/v1/portal/usage'],
+      ['get', '/v1/portal/audit'],
       ['get', '/v1/portal/keys'],
       ['post', '/v1/portal/keys'],
       ['delete', '/v1/portal/keys/{id}'],
@@ -320,6 +322,19 @@ describe('docs/openapi.json', () => {
         { portalCookie: [] },
       ])
     }
+
+    // The customer audit read is cursor-paged, cookie-authenticated and
+    // returns the shared AuditEvent row shape without a meta block.
+    const audit = doc.paths['/v1/portal/audit']?.get
+    expect(audit).toBeDefined()
+    expect(audit?.['x-implementation-phase']).toBe('P0')
+    expect(parameterNames(audit!)).toEqual(
+      expect.arrayContaining(['query:limit', 'query:before']),
+    )
+    expect(responseSchema(audit!, '200')).toMatchObject({
+      type: 'array',
+      items: { $ref: '#/components/schemas/AuditEvent' },
+    })
 
     // Unsafe portal methods require the per-session header.
     for (const [method, path] of [

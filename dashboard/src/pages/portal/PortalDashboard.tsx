@@ -5,6 +5,7 @@ import { Button, Skeleton, Tabs } from '../../components/primitives'
 import { useI18n } from '../../lib/i18n'
 import { PortalError, portalApi } from '../../lib/portal-api'
 import type { PortalSession } from '../../lib/portal-api'
+import PortalActivity from './PortalActivity'
 import PortalKeys from './PortalKeys'
 import PortalLeases from './PortalLeases'
 import PortalOrders from './PortalOrders'
@@ -12,7 +13,18 @@ import PortalPlans from './PortalPlans'
 import PortalUsage from './PortalUsage'
 import { PortalFrame } from './PortalFrame'
 
-type PortalTab = 'leases' | 'usage' | 'keys' | 'plans' | 'orders'
+type PortalTab = 'leases' | 'usage' | 'keys' | 'plans' | 'orders' | 'activity'
+
+/** Tab order and copy keys live together so the panel label cannot drift. */
+const PORTAL_TAB_KEYS: Record<PortalTab, string> = {
+  leases: 'portal.dashboard.leasesTab',
+  usage: 'portal.dashboard.usageTab',
+  keys: 'portal.dashboard.keysTab',
+  plans: 'portal.dashboard.plansTab',
+  orders: 'portal.dashboard.ordersTab',
+  activity: 'portal.dashboard.activityTab',
+}
+const PORTAL_TAB_ORDER: PortalTab[] = ['leases', 'usage', 'keys', 'plans', 'orders', 'activity']
 
 function failureMessage(error: unknown, t: (key: string) => string): string {
   const status = error instanceof PortalError ? error.status : 0
@@ -122,36 +134,21 @@ export default function PortalDashboard() {
     >
       <Tabs
         label={t('portal.dashboard.tabs')}
-        options={[
-          { value: 'leases', label: t('portal.dashboard.leasesTab') },
-          { value: 'usage', label: t('portal.dashboard.usageTab') },
-          { value: 'keys', label: t('portal.dashboard.keysTab') },
-          { value: 'plans', label: t('portal.dashboard.plansTab') },
-          { value: 'orders', label: t('portal.dashboard.ordersTab') },
-        ]}
+        options={PORTAL_TAB_ORDER.map((value) => ({ value, label: t(PORTAL_TAB_KEYS[value]) }))}
         value={tab}
         onChange={setTab}
       />
       <div
         className="portal-tabpanel"
         role="tabpanel"
-        aria-label={t(
-          tab === 'leases'
-            ? 'portal.dashboard.leasesTab'
-            : tab === 'usage'
-              ? 'portal.dashboard.usageTab'
-              : tab === 'keys'
-                ? 'portal.dashboard.keysTab'
-                : tab === 'plans'
-                  ? 'portal.dashboard.plansTab'
-                  : 'portal.dashboard.ordersTab',
-        )}
+        aria-label={t(PORTAL_TAB_KEYS[tab])}
       >
         {tab === 'leases' ? <PortalLeases /> : null}
         {tab === 'usage' ? <PortalUsage /> : null}
         {tab === 'keys' ? <PortalKeys /> : null}
         {tab === 'plans' ? <PortalPlans onCreated={() => setTab('orders')} /> : null}
         {tab === 'orders' ? <PortalOrders /> : null}
+        {tab === 'activity' ? <PortalActivity /> : null}
       </div>
     </PortalFrame>
   )

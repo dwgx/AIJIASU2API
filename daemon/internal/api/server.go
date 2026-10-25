@@ -492,6 +492,7 @@ func (s *Server) routes(rt *router) {
 		rt.handle(http.MethodPost, "/v1/portal/logout", s.handlePortalLogout)
 		rt.handle(http.MethodGet, "/v1/portal/leases", s.handlePortalLeases)
 		rt.handle(http.MethodGet, "/v1/portal/usage", s.handlePortalUsage)
+		rt.handle(http.MethodGet, "/v1/portal/audit", s.handlePortalAudit)
 		rt.handle(http.MethodGet, "/v1/portal/keys", s.handlePortalListKeys)
 		rt.handle(http.MethodPost, "/v1/portal/keys", s.handlePortalCreateKey)
 		rt.handle(http.MethodDelete, "/v1/portal/keys/{id}", s.handlePortalRevokeKey)
