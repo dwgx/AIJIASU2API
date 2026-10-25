@@ -197,6 +197,7 @@ func TestEpayNotifySettlesIdempotentlyAndRejectsSpoofs(t *testing.T) {
 	ts, st, _ := newEpayAPITestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-notify@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-notify-key")
 	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
 	requireStatus(t, resp, http.StatusOK)
@@ -271,6 +272,75 @@ func TestEpayNotifySettlesIdempotentlyAndRejectsSpoofs(t *testing.T) {
 
 }
 
+// TestEpaySettlementAtCapacityStaysPaidWithoutGrant is the honesty half of the
+// capacity rule: the demo fixture already holds every account's single verified
+// slot, so a valid epay callback must still record the money, acknowledge the
+// provider, and leave the order paid without an entitlement. The refusal is
+// typed in the retry audit row instead of being papered over with a lease.
+func TestEpaySettlementAtCapacityStaysPaidWithoutGrant(t *testing.T) {
+	ts, st, _ := newEpayAPITestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-capacity@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-capacity")
+	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+	requireStatus(t, resp, http.StatusOK)
+	leasesBefore := len(st.Leases())
+
+	valid := epayNotifyForm(t, epayAPITestKey, order, "trade-capacity", "30.00")
+	resp, body := epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "success" {
+		t.Fatalf("capacity notify response = %d %q", resp.StatusCode, body)
+	}
+
+	settled, ok := st.Order(order.ID)
+	if !ok || settled.State != model.OrderPaid || settled.Grant != nil ||
+		settled.PaidAt == nil || settled.ActivatedAt != nil {
+		t.Fatalf("over-capacity settlement = %+v, ok=%t, want paid without a grant", settled, ok)
+	}
+	if settled.ProviderRef == nil || *settled.ProviderRef != "trade-capacity" {
+		t.Fatalf("settlement reference = %v", settled.ProviderRef)
+	}
+	if len(st.Leases()) != leasesBefore {
+		t.Fatalf("capacity refusal minted a lease: %d -> %d", leasesBefore, len(st.Leases()))
+	}
+
+	// The customer surface is honest too: paid, not active, no entitlement.
+	resp, body = portalOrderCall(t, ts, http.MethodGet, "/v1/portal/orders/"+order.ID, nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	if shown := decodeBody[model.Order](t, body); shown.State != model.OrderPaid || shown.Grant != nil {
+		t.Fatalf("portal order = %+v, want paid without a grant", shown)
+	}
+
+	// The blocker is a typed reason, not only prose.
+	refusals := 0
+	for _, event := range st.Audit(100) {
+		if event.Action != "payment.activation_retry" || event.Target != order.ID {
+			continue
+		}
+		refusals++
+		if event.Meta["reason"] != "no_capacity" {
+			t.Fatalf("activation retry reason = %q, want no_capacity", event.Meta["reason"])
+		}
+	}
+	if refusals == 0 {
+		t.Fatalf("missing payment.activation_retry audit for %s", order.ID)
+	}
+
+	// A replay retries activation, still refuses capacity, and never records a
+	// second settlement fact.
+	resp, body = epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "success" {
+		t.Fatalf("replay response = %d %q", resp.StatusCode, body)
+	}
+	replayed, _ := st.Order(order.ID)
+	if replayed.State != model.OrderPaid || replayed.Grant != nil || len(st.Leases()) != leasesBefore {
+		t.Fatalf("replay = %+v, leases=%d", replayed, len(st.Leases()))
+	}
+	if got := len(st.PaymentEvents()); got != 1 {
+		t.Fatalf("payment events = %d, want one settlement fact", got)
+	}
+}
+
 func TestEpayNotifyAcceptsGETAndPOSTQueryParams(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
@@ -278,6 +348,7 @@ func TestEpayNotifyAcceptsGETAndPOSTQueryParams(t *testing.T) {
 			plan := createOrderPlan(t, ts, true, 3000)
 			email := "epay-query-" + strings.ToLower(method) + "@example.com"
 			_, cookie, csrf := activePortalTenant(t, ts, st, email, "u-01")
+			freeFixtureCapacity(t, st)
 			order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-query-"+method)
 			resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
 			requireStatus(t, resp, http.StatusOK)
@@ -401,6 +472,7 @@ func TestEpayQueryReconciliationSettlesRealOrder(t *testing.T) {
 	ts, st, _ := newEpayAPITestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-reconcile@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-reconcile")
 	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
 	requireStatus(t, resp, http.StatusOK)

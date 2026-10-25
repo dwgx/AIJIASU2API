@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -745,38 +746,38 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 			}
 			return true
 		}
-		s.retryBlockedLocked(order, actor, "entitlement was already revoked")
+		s.retryBlockedLocked(order, actor, "grant_revoked", "entitlement was already revoked")
 		return false
 	}
 
 	tenantIdx := s.tenantIndexLocked(order.TenantID)
 	if tenantIdx < 0 {
-		s.retryBlockedLocked(order, actor, "tenant not found")
+		s.retryBlockedLocked(order, actor, "tenant_not_found", "tenant not found")
 		return false
 	}
 	tenant := &s.tenants[tenantIdx]
 	if tenant.Status != model.TenantActive {
-		s.retryBlockedLocked(order, actor, "tenant is not active")
+		s.retryBlockedLocked(order, actor, "tenant_inactive", "tenant is not active")
 		return false
 	}
 	if tenant.UserID == nil || *tenant.UserID != order.UserID {
-		s.retryBlockedLocked(order, actor, "tenant is not linked to this user")
+		s.retryBlockedLocked(order, actor, "tenant_user_mismatch", "tenant is not linked to this user")
 		return false
 	}
 	userIdx := s.userIndexLocked(order.UserID)
 	if userIdx < 0 {
-		s.retryBlockedLocked(order, actor, "user not found")
+		s.retryBlockedLocked(order, actor, "user_not_found", "user not found")
 		return false
 	}
 	user := &s.users[userIdx]
 	if !user.Enabled {
-		s.retryBlockedLocked(order, actor, "user is suspended")
+		s.retryBlockedLocked(order, actor, "user_suspended", "user is suspended")
 		return false
 	}
 
 	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(*user, now)
 	if err != nil {
-		s.retryBlockedLocked(order, actor, err.Error())
+		s.retryBlockedLocked(order, actor, activationBlockedCode(err), err.Error())
 		return false
 	}
 	account := s.accounts[accountIdx]
@@ -858,16 +859,30 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 
 // retryBlockedLocked records why activation could not proceed. The order stays
 // paid; the admin or the next settlement retry can grant it once the blocker is
-// cleared.
-func (s *Store) retryBlockedLocked(order *model.Order, actor, reason string) {
+// cleared. code is the stable refusal reason (the lease error's Reason, or one
+// of the fixed blockers below) so an operator can tell a capacity refusal from
+// a tenant/user blocker without parsing prose.
+func (s *Store) retryBlockedLocked(order *model.Order, actor, code, detail string) {
 	s.addAuditLocked(model.SeverityWarn, actor, "payment.activation_retry", order.ID,
-		"activation blocked: "+clientMessage(reason),
+		"activation blocked: "+clientMessage(detail),
 		map[string]string{
 			"orderId":  order.ID,
 			"tenantId": order.TenantID,
 			"userId":   order.UserID,
 			"state":    string(order.State),
+			"reason":   code,
 		})
+}
+
+// activationBlockedCode returns the typed reason a target picker refused with.
+// The lease path names its own refusal (no_capacity, account_unavailable, …);
+// anything else is recorded as the generic blocker instead of losing the code.
+func activationBlockedCode(err error) string {
+	var leaseErr *LeaseError
+	if errors.As(err, &leaseErr) && leaseErr.Reason != "" {
+		return leaseErr.Reason
+	}
+	return "activation_blocked"
 }
 
 // revokeGrantLocked releases the order's lease and restores the quota the
@@ -898,7 +913,14 @@ func (s *Store) revokeGrantLocked(idx int, actor string) bool {
 		s.leases = append(s.leases[:leaseIdx], s.leases[leaseIdx+1:]...)
 		s.addAuditLocked(model.SeverityInfo, actor, "lease.revoke", lease.UserName,
 			fmt.Sprintf("Lease on %s revoked by order reversal", lease.NodeLabel),
-			map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID, "orderId": order.ID})
+			map[string]string{
+				"leaseId":    lease.ID,
+				"accountId":  lease.AccountID,
+				"nodeId":     lease.NodeID,
+				"slot":       strconv.Itoa(lease.Slot),
+				"generation": strconv.FormatUint(lease.Generation, 10),
+				"orderId":    order.ID,
+			})
 	}
 	if userIdx := s.userIndexLocked(order.UserID); userIdx >= 0 {
 		// Restore only when this grant still owns the quota. An expired older
@@ -941,11 +963,11 @@ func (s *Store) pickOrderLeaseTargetLocked(user model.PanelUser, now time.Time) 
 		if s.accountLeaseCountLocked(account.ID) >= account.Concurrency {
 			continue
 		}
-		// The fallback is not an entitlement shortcut: an account that serves
-		// slot nodes must respect its slot capacity exactly like the primary
-		// path. A legacy-only account (no slot nodes: the pre-multislot demo
-		// shape) keeps its historical concurrency-based admission, which is
-		// also what slot-1 compatibility requires.
+		// The fallback is not an entitlement shortcut: every account is held
+		// to the same verified capacity as the primary path, legacy rows
+		// included. A legacy-only account (no slot nodes) is capped by
+		// UseCount/AJS_ACCOUNT_SLOTS and its serving nodes just like a
+		// slot-bearing one.
 		if !s.orderFallbackSlotCapacityLocked(account, now) {
 			continue
 		}
@@ -960,22 +982,14 @@ func (s *Store) pickOrderLeaseTargetLocked(user model.PanelUser, now time.Time) 
 }
 
 // orderFallbackSlotCapacityLocked reports whether an account can take one more
-// order lease without exceeding its verified slot capacity. An account that
-// serves no slot nodes is exempt: it is the legacy demo shape, and its
-// admission stays the account concurrency. An account with at least one slot
-// node is held to the same denominator as the primary lease path, so a paid
-// order cannot exceed AJS_ACCOUNT_SLOTS or UseCount.
+// order lease without exceeding its verified slot capacity. The fallback is
+// held to exactly the same denominator as the primary lease path, including a
+// legacy account whose nodes carry no slot index: otherwise a paid order could
+// mint a second lease on the same account after ordinary admission had already
+// spent the account's single allowance. accountCapacityLocked caps the
+// allowance by the nodes that can actually serve, so an empty account admits
+// nothing.
 func (s *Store) orderFallbackSlotCapacityLocked(account model.Account, now time.Time) bool {
-	hasSlotNode := false
-	for _, node := range s.nodes {
-		if node.AccountID == account.ID && node.Slot > 0 {
-			hasSlotNode = true
-			break
-		}
-	}
-	if !hasSlotNode {
-		return true
-	}
 	capacity := s.accountCapacityLocked(account, now)
 	if capacity <= 0 {
 		return false

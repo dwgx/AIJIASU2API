@@ -126,6 +126,7 @@ func TestAdminPlanAndOrderRoutesIgnorePortalMode(t *testing.T) {
 	// directly and drive every admin order route.
 	tenantA, userA := seedOrderTenant(t, st, "portal-off-a@example.com", "Portal Off A")
 	tenantB, userB := seedOrderTenant(t, st, "portal-off-b@example.com", "Portal Off B")
+	freeFixtureCapacity(t, st)
 	order, _, err := st.CreateOrder(tenantA.ID, userA.ID, plan.ID, "", "operator")
 	if err != nil {
 		t.Fatalf("seed order: %v", err)

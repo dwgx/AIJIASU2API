@@ -38,6 +38,28 @@ func newOrderTestServer(t *testing.T, cfg Config) (*httptest.Server, *store.Stor
 	return ts, st, sink
 }
 
+// freeFixtureCapacity releases the seeded leases on the fixture account whose
+// verified allowance is a single slot (AJS_ACCOUNT_SLOTS defaults to one and
+// the demo seed never raises UseCount). A test about settlement mechanics calls
+// it so the order it settles can actually take that slot. A capacity-honesty
+// test must leave the seed alone: there the refusal is the behavior under test.
+func freeFixtureCapacity(t *testing.T, st *store.Store) {
+	t.Helper()
+	released := 0
+	for _, lease := range st.Leases() {
+		if lease.AccountID != "acc-01" {
+			continue
+		}
+		if err := st.ReleaseLease(lease.ID); err != nil {
+			t.Fatalf("release fixture lease %s: %v", lease.ID, err)
+		}
+		released++
+	}
+	if released == 0 {
+		t.Fatal("fixture account acc-01 holds no seeded lease to release")
+	}
+}
+
 func createOrderPlan(t *testing.T, ts *httptest.Server, active bool, amountMinor int64) model.Plan {
 	t.Helper()
 	in := model.PlanInput{
@@ -313,6 +335,7 @@ func TestManualSettleActivatesAndReplaysOnce(t *testing.T) {
 	ts, st, sink := newOrderTestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-e@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	leasesBefore := len(st.Leases())
 	quotaBefore := *mustUser(t, st, "u-01").QuotaBytesMonth
@@ -359,6 +382,7 @@ func TestSettleWhileSuspendedThenResume(t *testing.T) {
 	ts, st, _ := newOrderTestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-f@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	leasesBefore := len(st.Leases())
 
@@ -405,6 +429,7 @@ func TestStripeWebhookDisabledUnsignedStaleAndMismatch(t *testing.T) {
 	})
 	plan = createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf = activePortalTenant(t, ts, st, "orders-h@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ = createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	leasesBefore := len(st.Leases())
 
@@ -455,6 +480,7 @@ func TestStripeWebhookConcurrentSettlementRecordsOneEvent(t *testing.T) {
 	})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-i@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	leasesBefore := len(st.Leases())
 	body := stripeCheckoutPayload("evt_concurrent", order.ID, 3000)
@@ -525,6 +551,7 @@ func TestRefundAndChargebackRevokeThroughAPI(t *testing.T) {
 	ts, st, sink := newOrderTestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-j@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	quotaBefore := *mustUser(t, st, "u-01").QuotaBytesMonth
 	leasesBefore := len(st.Leases())
@@ -573,6 +600,7 @@ func TestPartialRefundThroughWebhookStaysActive(t *testing.T) {
 	})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-k@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	resp, _ := settleOrderAPI(t, ts, order.ID, "receipt-partial", true)
 	requireStatus(t, resp, http.StatusOK)
@@ -594,6 +622,7 @@ func TestAdminPlansCRUDAndDeactivationScope(t *testing.T) {
 	ts, st, _ := newOrderTestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)
 	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-l@example.com", "u-01")
+	freeFixtureCapacity(t, st)
 	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
 	resp, _ := settleOrderAPI(t, ts, order.ID, "receipt-plan", true)
 	requireStatus(t, resp, http.StatusOK)
