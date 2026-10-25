@@ -31,6 +31,9 @@ const (
 	EventAccountLogout     EventType = "account.logout"
 	EventAccountExpired    EventType = "account.expired"
 	EventAccountRenewalDue EventType = "account.renewal_due"
+	EventLeaseCreated      EventType = "lease.created"
+	EventLeaseRevoked      EventType = "lease.revoked"
+	EventLeaseExpired      EventType = "lease.expired"
 	EventNodeConnected     EventType = "node.connected"
 	EventNodeDisconnected  EventType = "node.disconnected"
 	EventNodeSwitched      EventType = "node.switched"
@@ -47,6 +50,9 @@ func (e EventType) Valid() bool {
 		EventAccountLogout,
 		EventAccountExpired,
 		EventAccountRenewalDue,
+		EventLeaseCreated,
+		EventLeaseRevoked,
+		EventLeaseExpired,
 		EventNodeConnected,
 		EventNodeDisconnected,
 		EventNodeSwitched,

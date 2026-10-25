@@ -91,6 +91,13 @@ type Store struct {
 	// enqueues. The hook is not part of the snapshot.
 	auditHook func(model.AuditEvent)
 
+	// leaseExpiryHook receives every lease the expiry sweep releases, after
+	// the row is marked expired and its node freed. It is set once during
+	// startup (SetLeaseExpiryHook) and invoked with s.mu held, so it must
+	// neither block nor call back into the Store; the webhook sink only
+	// enqueues. The hook is not part of the snapshot.
+	leaseExpiryHook func(model.Lease)
+
 	// scopedKeys are the least-privilege keys; scopedKeyHashes maps their id to
 	// the SHA-256 of the secret, never the secret itself.
 	scopedKeys      []model.ScopedKey

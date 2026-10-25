@@ -46,6 +46,20 @@ describe('webhook settings section', () => {
     expect(within(row).getByRole('button', { name: 'Delete Ops relay' })).toBeInTheDocument()
   })
 
+  it('offers the lease lifecycle events in the subscription list', async () => {
+    const user = userEvent.setup()
+    await openWebhooks()
+
+    await user.click(screen.getByRole('button', { name: 'New webhook' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New webhook' })
+    await user.click(within(dialog).getByRole('button', { name: 'Events' }))
+    const listbox = await screen.findByRole('listbox', { name: 'Events' })
+
+    for (const event of ['lease.created', 'lease.revoked', 'lease.expired']) {
+      expect(within(listbox).getByRole('option', { name: event })).toBeInTheDocument()
+    }
+  })
+
   it('creates a receiver and shows the signing secret exactly once', async () => {
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)

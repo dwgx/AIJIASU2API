@@ -388,7 +388,9 @@ func leaseExpiry(value string) (time.Time, bool) {
 }
 
 // sweepExpiredLocked releases every lease whose ExpiresAt is at or before now.
-// It writes one lease.expired audit row per lease and returns the count.
+// It writes one lease.expired audit row per lease, calls the expiry hook for
+// each released row and returns the count. A released row leaves s.leases, so
+// a later sweep cannot see it again: the hook fires at most once per lease.
 func (s *Store) sweepExpiredLocked(now time.Time) int {
 	if len(s.leases) == 0 {
 		return 0
@@ -409,9 +411,25 @@ func (s *Store) sweepExpiredLocked(now time.Time) int {
 		s.addAuditLocked(model.SeverityInfo, "system", "lease.expired", lease.UserName,
 			fmt.Sprintf("Lease on %s expired", lease.NodeLabel),
 			map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID})
+		// Normalize before the hook so a seed row that predates Platform
+		// still reports the account's platform on the event.
+		s.normalizeLeaseLocked(&lease)
+		if s.leaseExpiryHook != nil {
+			s.leaseExpiryHook(lease)
+		}
 	}
 	s.leases = kept
 	return closed
+}
+
+// SetLeaseExpiryHook installs the sink for leases the expiry sweep releases.
+// It is meant to be called once during startup, before requests are served.
+// The hook runs with the store lock held and must not block or call back into
+// the Store; the webhook sink only enqueues. Passing nil removes the hook.
+func (s *Store) SetLeaseExpiryHook(hook func(model.Lease)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leaseExpiryHook = hook
 }
 
 // normalizeLeaseLocked fills the fields an older snapshot or seed row predates,

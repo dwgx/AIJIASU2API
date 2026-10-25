@@ -8,6 +8,7 @@ import (
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 // LeaseAction identifies the committed lease mutation passed to
@@ -87,6 +88,11 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := leaseCreateResult{Lease: lease, Replayed: replayed}
+	// A replay returned an existing lease; the original create already
+	// emitted lease.created, so a retry must not fan out a second event.
+	if !replayed {
+		s.emitLeaseEvent(webhook.EventLeaseCreated, lease)
+	}
 	if warning := s.runLeasePublishHook(r, LeaseActionCreated, lease); warning != "" {
 		result.Warning = warning
 	}
@@ -133,11 +139,20 @@ func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if revoked.ID != "" {
+		s.emitLeaseEvent(webhook.EventLeaseRevoked, revoked)
 		if warning := s.runLeasePublishHook(r, LeaseActionRevoked, revoked); warning != "" {
 			w.Header().Set("Warning", warningHeaderValue(warning))
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// emitLeaseEvent publishes one committed lease transition. The payload is the
+// shared lease contract (ids, platform, expiry) and never carries a key or
+// secret; s.emit is a no-op when no sink is configured.
+func (s *Server) emitLeaseEvent(event webhook.EventType, lease model.Lease) {
+	s.emit(event, webhook.LeaseEventData(
+		lease.ID, lease.UserID, string(lease.Platform), lease.AccountID, lease.ExpiresAt))
 }
 
 // runLeasePublishHook calls the optional hook and returns a warning string.

@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 // leaseHTTPFixture is an empty store with one active account and two free
@@ -380,4 +382,81 @@ func TestLeaseScopes(t *testing.T) {
 	resp, _ = scopedCall(t, ts, writeKey.Secret, http.MethodDelete,
 		"/v1/leases/"+created.Lease.ID, map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
+}
+
+// recordedEvents copies the sink's events under its lock; the handlers emit
+// synchronously, but -race still sees a helper that never races.
+func recordedEvents(sink *recordingSink) []recordedEvent {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	return append([]recordedEvent(nil), sink.events...)
+}
+
+// TestLeaseLifecycleEmitsWebhookEvents pins the emission matrix: a committed
+// create emits lease.created once even when the same Idempotency-Key replays,
+// a refused create emits nothing, a confirmed revoke emits lease.revoked once
+// and a repeated revoke (404) emits nothing. Every payload carries the five
+// contract fields and survives the scrubber unchanged.
+func TestLeaseLifecycleEmitsWebhookEvents(t *testing.T) {
+	sink := &recordingSink{}
+	fixture := newLeaseHTTPServer(t, Config{Events: sink})
+	ts := fixture.ts
+
+	resp, body := createLeaseCall(t, ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android", "idempotencyKey": "emit-1",
+	}, "")
+	requireStatus(t, resp, http.StatusCreated)
+	created := decodeBody[leaseCreateResult](t, body)
+
+	resp, body = createLeaseCall(t, ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android", "idempotencyKey": "emit-1",
+	}, "")
+	requireStatus(t, resp, http.StatusCreated)
+	if !decodeBody[leaseCreateResult](t, body).Replayed {
+		t.Fatal("the second create with the same Idempotency-Key did not replay")
+	}
+
+	wantData := map[string]any{
+		"leaseId":   created.Lease.ID,
+		"userId":    fixture.user.ID,
+		"platform":  string(model.PlatformAndroid),
+		"accountId": fixture.account.ID,
+		"expiresAt": created.Lease.ExpiresAt,
+	}
+	events := recordedEvents(sink)
+	if len(events) != 1 || events[0].event != webhook.EventLeaseCreated {
+		t.Fatalf("events after create+replay = %+v, want exactly one lease.created", events)
+	}
+	if !reflect.DeepEqual(events[0].data, wantData) {
+		t.Fatalf("lease.created payload = %#v, want %#v", events[0].data, wantData)
+	}
+	if scrubbed := webhook.Scrub(events[0].data); !reflect.DeepEqual(scrubbed, wantData) {
+		t.Fatalf("lease.created payload was redacted: %#v", scrubbed)
+	}
+
+	// A second active lease for the same user and platform is a 409 refusal;
+	// the failed create must not fan out an event.
+	resp, body = createLeaseCall(t, ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android",
+	}, "")
+	requireStatus(t, resp, http.StatusConflict)
+	requireLeaseReason(t, body, "lease_conflict")
+	if got := len(recordedEvents(sink)); got != 1 {
+		t.Fatalf("a refused create emitted an event: %d events", got)
+	}
+
+	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/"+created.Lease.ID,
+		map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/"+created.Lease.ID,
+		map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNotFound)
+
+	events = recordedEvents(sink)
+	if len(events) != 2 || events[1].event != webhook.EventLeaseRevoked {
+		t.Fatalf("events after revoke = %+v, want one lease.revoked", events)
+	}
+	if !reflect.DeepEqual(events[1].data, wantData) {
+		t.Fatalf("lease.revoked payload = %#v, want %#v", events[1].data, wantData)
+	}
 }

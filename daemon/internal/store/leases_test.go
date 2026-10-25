@@ -350,3 +350,69 @@ func TestCreatedLeaseSurvivesSnapshot(t *testing.T) {
 		t.Fatalf("replay after restore = %+v replayed=%v err=%v", replay, replayed, err)
 	}
 }
+
+// TestLeaseExpiryHookFiresOncePerLease proves the sweep reports each expired
+// lease exactly once with the event contract fields, and never reports a
+// lease that was revoked before its TTL passed.
+func TestLeaseExpiryHookFiresOncePerLease(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 4)
+	st := fixture.st
+
+	var expired []model.Lease
+	st.SetLeaseExpiryHook(func(lease model.Lease) {
+		expired = append(expired, lease)
+	})
+
+	first, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid, TTLSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(first): %v", err)
+	}
+	grace := addLeaseUser(t, st, "grace.ops", nil)
+	revoked, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: grace.ID, Platform: model.PlatformAndroid, TTLSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(grace): %v", err)
+	}
+	if _, err := st.RevokeLease(revoked.ID); err != nil {
+		t.Fatalf("RevokeLease: %v", err)
+	}
+
+	now = now.Add(61 * time.Second)
+	if leases := st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after expiry = %+v, want none", leases)
+	}
+	// A second read sweeps again; the released row is gone, so the hook must
+	// not fire a duplicate.
+	if leases := st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after second sweep = %+v, want none", leases)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expiry hook fired %d times (%+v), want once for %s", len(expired), expired, first.ID)
+	}
+	got := expired[0]
+	if got.ID != first.ID || got.UserID != fixture.user.ID ||
+		got.AccountID != fixture.account.ID || got.Platform != model.PlatformAndroid ||
+		got.ExpiresAt != first.ExpiresAt || got.Status != model.LeaseExpired {
+		t.Fatalf("expiry hook lease = %+v, want the expired %s", got, first.ID)
+	}
+
+	// Removing the hook keeps the sweep working without a callback.
+	st.SetLeaseExpiryHook(nil)
+	if _, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid, TTLSeconds: 60,
+	}); err != nil {
+		t.Fatalf("CreateLease(after hook removal): %v", err)
+	}
+	now = now.Add(61 * time.Second)
+	if leases := st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after hook removal sweep = %+v, want none", leases)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("removed hook fired again: %+v", expired)
+	}
+}

@@ -329,6 +329,13 @@ func run() error {
 			"target":  ev.Target,
 		})
 	})
+	// lease.created and lease.revoked are emitted by the API handlers that
+	// commit them; expiry has no handler, so the store sweep reports each
+	// released row here. The row leaves the active slice, so a lease expires
+	// into exactly one event.
+	st.SetLeaseExpiryHook(func(lease model.Lease) {
+		emitLeaseExpiry(events, lease)
+	})
 
 	panel, err := startResinPanel(ctx, st, logger, resinOptions{
 		url:              *resinURL,
@@ -1232,6 +1239,18 @@ func renewalEventData(reminder schedule.ReminderEvent) map[string]any {
 		"daysLeft":  reminder.DaysLeft,
 		"threshold": reminder.Threshold,
 	}
+}
+
+// emitLeaseExpiry maps one lease released by the store expiry sweep onto
+// lease.expired. The sweep removes the row, so the hook fires once per lease;
+// a nil sink is a daemon without webhooks. The payload is the shared lease
+// contract (ids, platform, expiry) and never carries a credential.
+func emitLeaseExpiry(events api.EventSink, lease model.Lease) {
+	if events == nil {
+		return
+	}
+	events.Emit(webhook.EventLeaseExpired, webhook.LeaseEventData(
+		lease.ID, lease.UserID, string(lease.Platform), lease.AccountID, lease.ExpiresAt))
 }
 
 func envOr(key, fallback string) string {
