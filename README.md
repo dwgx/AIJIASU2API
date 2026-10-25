@@ -58,6 +58,9 @@ As of 2026-10-25:
 - `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
   live calls and holds no credentials.
+- `sdk/` — dependency-free Go and TypeScript clients for the admin API (accounts, select-node
+  operations, leases, usage, events) with typed errors and retry/backoff; see
+  [`sdk/README.md`](sdk/README.md).
 - `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
   Vite 6, TypeScript, 15 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Orders,
   Device Pool, Users, Requests, Logs, Schedules, Settings, Backup, Lab) in a graphite-and-mint
