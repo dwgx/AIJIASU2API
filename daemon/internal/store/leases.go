@@ -266,6 +266,76 @@ func (s *Store) ReleaseLease(id string) error {
 	return err
 }
 
+// NodeLeases returns the active leases that point at nodeID, in store order.
+// The cleanup and audit paths read it so a node that still carries a customer
+// entitlement is never deleted or closed silently.
+func (s *Store) NodeLeases(nodeID string) []model.Lease {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []model.Lease
+	for _, lease := range s.leases {
+		if lease.NodeID != nodeID {
+			continue
+		}
+		s.normalizeLeaseLocked(&lease)
+		out = append(out, lease)
+	}
+	return out
+}
+
+// InvalidateNodeLeases revokes every active lease that points at nodeID and
+// returns the revoked rows. It is the containment path for a node that can no
+// longer serve (a vendor kick): the customer's endpoint must stop being
+// advertised now, with an explicit audit row, instead of disappearing silently
+// on a later cascade.
+//
+// The hook installed by SetLeaseExpiryHook is deliberately not called: this is
+// a revocation, not an expiry, and the lease.expired event would mislabel it.
+func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	detail := clientMessage(reason)
+	if detail == "" {
+		detail = "node_unavailable"
+	}
+	kept := s.leases[:0]
+	var revoked []model.Lease
+	for _, lease := range s.leases {
+		if lease.NodeID != nodeID {
+			kept = append(kept, lease)
+			continue
+		}
+		lease.Status = model.LeaseRevoked
+		s.normalizeLeaseLocked(&lease)
+		revoked = append(revoked, lease)
+		s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
+			fmt.Sprintf("Lease on %s revoked · %s", lease.NodeLabel, detail),
+			map[string]string{"leaseId": lease.ID, "nodeId": lease.NodeID, "reason": detail})
+	}
+	s.leases = kept
+	// InUse is derived from the active rows, so it cannot drift after a partial
+	// removal: recount the leases that still point at the node.
+	inUse := 0
+	for _, lease := range s.leases {
+		if lease.NodeID == nodeID {
+			inUse++
+		}
+	}
+	if idx := s.nodeIndexLocked(nodeID); idx >= 0 {
+		s.nodes[idx].InUse = inUse
+	}
+	return revoked
+}
+
 // pickLeaseTargetLocked resolves the account and node for a new lease. A
 // pinned account is validated strictly; without a pin the first active account
 // of the platform with spare concurrency and a free node wins. Account

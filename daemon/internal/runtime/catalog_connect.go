@@ -538,6 +538,21 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		return c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonStoreFailed,
 			"store_failed", "store", "slot row is missing", fmt.Errorf("runtime: slot %s not found", key.String()))
 	}
+	// A kicked slot may not be reopened before its retry window: the vendor
+	// still holds the stolen session, so an early attempt would be kicked
+	// again. The check runs before the old session closes, so a refusal leaves
+	// a serving slot serving.
+	if wait, blocked := slotKickWindow(slot, c.now()); blocked {
+		res, err := c.failSlotSwitch(acct, key, target, old, trigger, start, ReasonConnectCooldown,
+			"connect cooldown", "capacity", "the slot is waiting out its vendor-kick retry window",
+			fmt.Errorf("runtime: slot %s is not restartable yet", key.String()))
+		// failSlotSwitch is shared, so the remaining window is attached here:
+		// the API turns it into the Retry-After header of the 429 answer.
+		if switchErr, ok := err.(*SwitchError); ok {
+			switchErr.RetryAfter = wait
+		}
+		return res, err
+	}
 	// Validate the pair before touching the old session: a missing pair fails
 	// the attempt and leaves the slot serving.
 	addrs, claimed, err := c.reserveSlotPairLocked(key, slot.GatePort)
@@ -577,7 +592,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		delete(c.slotGates, key)
 	}
 
-	device, err := c.slotDevice(key)
+	device, recordID, err := c.slotDevice(key)
 	if err != nil {
 		release()
 		c.markSlotDownLocked(key, acct, target, "device_material_missing")
@@ -675,6 +690,9 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		Meta:      meta,
 		Selection: selection,
 		Stat:      &model.ServerStat{AccountID: acct.ID, ServerID: target.id},
+		// The release that landed while the new session was opening must fail
+		// the commit instead of publishing an unowned identity.
+		DeviceRecordID: recordID,
 	})
 	if err != nil {
 		c.logger.Warn("catalog_commit_failed", "account_id", acct.ID, "node_id", newID, "error", err)
@@ -852,14 +870,23 @@ func (c *NodeController) slotGateLocked(key model.SlotKey) (*nodeGate, error) {
 }
 
 // beginSwitch claims the per-slot switch marker and enforces the per-slot
-// cooldown. It refuses while an account-wide mutation holds the account. The
-// returned release must be called once the attempt is finished.
+// cooldown. It refuses while an account-wide mutation holds the account or
+// while the account is fenced by a stop, so a delete/logout cannot race a start
+// into an orphan gate. The returned release must be called once the attempt is
+// finished.
 func (c *NodeController) beginSwitch(key model.SlotKey, cooldown bool) (func(), error) {
 	c.switchMu.Lock()
 	defer c.switchMu.Unlock()
 	if _, busy := c.accountBusy[key.AccountID]; busy {
 		return nil, &SwitchError{
 			Reason: ReasonSwitchInProgress, Message: "an account-wide operation is already in progress",
+		}
+	}
+	if since, fenced := c.accountStopped(key.AccountID); fenced {
+		return nil, &SwitchError{
+			Reason:  ReasonAccountState,
+			Message: "account is stopped; log in again",
+			Details: map[string]string{"stoppedSince": since.UTC().Format(time.RFC3339)},
 		}
 	}
 	if _, busy := c.switching[key]; busy {
@@ -877,18 +904,22 @@ func (c *NodeController) beginSwitch(key model.SlotKey, cooldown bool) (func(), 
 			}
 		}
 	}
-	c.switching[key] = struct{}{}
+	done := make(chan struct{})
+	c.switching[key] = done
 	return func() {
 		c.switchMu.Lock()
-		delete(c.switching, key)
+		if current, ok := c.switching[key]; ok && current == done {
+			delete(c.switching, key)
+			close(done)
+		}
 		c.switchMu.Unlock()
 	}, nil
 }
 
 // beginAccountMutation claims the account for a mutation that spans slots
-// (disconnect-all, stop, delete). It refuses while any slot of the account is
-// switching, and every slot switch refuses while the account is busy, so a
-// per-slot switch can never interleave with a cascade.
+// (disconnect-all). It refuses while any slot of the account is switching, and
+// every slot switch refuses while the account is busy, so a per-slot switch can
+// never interleave with a cascade.
 func (c *NodeController) beginAccountMutation(accountID string) (func(), error) {
 	c.switchMu.Lock()
 	defer c.switchMu.Unlock()
@@ -908,6 +939,50 @@ func (c *NodeController) beginAccountMutation(accountID string) (func(), error) 
 		delete(c.accountBusy, accountID)
 		c.switchMu.Unlock()
 	}, nil
+}
+
+// beginAccountStop claims the account for a stop after waiting for its
+// in-flight slot switches to settle, so the caller closes a complete gate set
+// instead of one a start is still building. The wait is bounded by ctx; a
+// cancelled wait releases nothing and reports the context error.
+//
+// It is the delete/logout seam and therefore waits rather than refusing: the
+// caller must not commit its store mutation while a gate is still opening.
+func (c *NodeController) beginAccountStop(ctx context.Context, accountID string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		c.switchMu.Lock()
+		if _, busy := c.accountBusy[accountID]; busy {
+			c.switchMu.Unlock()
+			return nil, &SwitchError{Reason: ReasonSwitchInProgress,
+				Message: "an account-wide operation is already in progress"}
+		}
+		pending := make([]chan struct{}, 0, len(c.switching))
+		for key, done := range c.switching {
+			if key.AccountID == accountID {
+				pending = append(pending, done)
+			}
+		}
+		if len(pending) == 0 {
+			c.accountBusy[accountID] = struct{}{}
+			c.switchMu.Unlock()
+			return func() {
+				c.switchMu.Lock()
+				delete(c.accountBusy, accountID)
+				c.switchMu.Unlock()
+			}, nil
+		}
+		c.switchMu.Unlock()
+		for _, done := range pending {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
 }
 
 // noteAttempt records the cooldown start for one slot. It is called only after

@@ -93,6 +93,46 @@ func (s *Store) slotBindingLocked(key model.SlotKey) (string, bool) {
 	return "", false
 }
 
+// SlotDeviceRecordID returns the device record the slot really owns. It is the
+// identity a start opened its session with; the LIVE commit re-checks it so a
+// release cannot slip between the material read and the write. Only a real
+// binding counts, never a slot row's display copy.
+func (s *Store) SlotDeviceRecordID(key model.SlotKey) (string, bool) {
+	if !key.Valid() {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.boundRecordIDLocked(key)
+}
+
+// requireSlotDeviceLocked verifies that the slot still owns exactly the device
+// record the caller opened its session with. It runs inside a commit's write
+// lock, so the release it guards against cannot interleave with the LIVE write.
+//
+// An empty recordID is the pool-disabled legacy mode: no binding may exist,
+// otherwise the caller opened its session with an identity the slot no longer
+// owns. The caller holds the write lock.
+func (s *Store) requireSlotDeviceLocked(key model.SlotKey, recordID string) error {
+	boundID, bound := s.boundRecordIDLocked(key)
+	if recordID == "" {
+		if bound {
+			return conflictf("slot %s is bound to device %q but the session used no device record",
+				key.String(), boundID)
+		}
+		return nil
+	}
+	if !bound || boundID != recordID {
+		return conflictf("device %q is no longer assigned to slot %s", recordID, key.String())
+	}
+	rec := s.deviceRecordLocked(recordID)
+	if rec == nil || rec.State != DeviceAssigned || rec.AssignedAccountID != key.AccountID ||
+		rec.AssignedSlotKey == nil || *rec.AssignedSlotKey != key {
+		return conflictf("device %q is no longer assigned to slot %s", recordID, key.String())
+	}
+	return nil
+}
+
 // ensureSlotRowLocked materialises a provisioning row for a valid slot key.
 func (s *Store) ensureSlotRowLocked(key model.SlotKey) {
 	if s.accountSlots == nil {

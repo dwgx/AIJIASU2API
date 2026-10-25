@@ -229,14 +229,40 @@ func (f *Factory) Open(ctx context.Context, req SessionRequest) (FlowSession, er
 	return &flowSession{sess: sess}, nil
 }
 
+// Liveness is the optional active-liveness view of a FlowSession. Healthy is
+// passive: it only reports that the vendor issued a SID, and a closed or kicked
+// session keeps it. Liveness answers whether the session can still carry flows,
+// which is what the runtime's kick containment needs. The runtime type-asserts,
+// so a session implementation without it keeps the passive behaviour.
+type Liveness interface {
+	Alive() bool
+}
+
+// vendorKickMarker is the vendor's data-channel refusal for an account that
+// another connection took over: "fv: data channel rejected ... fm=disconnected
+// by another connection" (README §AJS_NODE_LIMIT, live 2026-10-23). It is a
+// session loss, not a per-flow failure: the vendor no longer keeps this
+// identity, so every later flow of the same session fails the same way.
+const vendorKickMarker = "disconnected by another connection"
+
+// isVendorKick reports whether one data-channel error is the vendor telling us
+// that another connection owns the account.
+func isVendorKick(err error) bool {
+	return err != nil && strings.Contains(err.Error(), vendorKickMarker)
+}
+
 // flowSession adapts *fvfacade.Session to FlowSession.
 type flowSession struct {
 	sess   *fvfacade.Session
 	closed atomic.Bool
+	kicked atomic.Bool
 }
 
-// Compile-time proof that the adapter satisfies the shared interface.
-var _ FlowSession = (*flowSession)(nil)
+// Compile-time proof that the adapter satisfies the shared interfaces.
+var (
+	_ FlowSession = (*flowSession)(nil)
+	_ Liveness    = (*flowSession)(nil)
+)
 
 func (s *flowSession) SID() string {
 	if s == nil || s.sess == nil {
@@ -259,12 +285,28 @@ func (s *flowSession) OpenFlow(ctx context.Context, host string, port int) (net.
 	if s.closed.Load() {
 		return nil, errors.New("account: flow session is closed")
 	}
-	return s.sess.OpenStreamContext(ctx, host, port)
+	conn, err := s.sess.OpenStreamContext(ctx, host, port)
+	if isVendorKick(err) {
+		s.kicked.Store(true)
+	}
+	return conn, err
 }
 
 // Healthy reports whether the session carries a SID. It is a passive check
 // with no I/O; a closed session keeps its SID.
 func (s *flowSession) Healthy() bool { return s.SID() != "" }
+
+// Alive reports whether the session can still carry flows. It is a passive
+// check with no I/O: it turns false once the session is closed or the vendor
+// refused a data channel because another connection took the account. The
+// runtime polls it, so a vendor kick leaves the slot out of service within one
+// liveness window even though the SID and the local listener survive.
+func (s *flowSession) Alive() bool {
+	if s == nil || s.sess == nil {
+		return false
+	}
+	return !s.closed.Load() && !s.kicked.Load()
+}
 
 func (s *flowSession) Close() error {
 	if s == nil || s.sess == nil {

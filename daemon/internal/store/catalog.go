@@ -37,6 +37,11 @@ type SwitchCommit struct {
 	Selection *model.Selection
 	// Stat is the per-server counter to bump on success.
 	Stat *model.ServerStat
+	// DeviceRecordID is the device record the new session was opened with. The
+	// commit re-checks it under the write lock, so a release that lands during
+	// a slow reopen cannot commit LIVE without an owned identity. Empty means
+	// "no record", which is the pool-disabled legacy mode.
+	DeviceRecordID string
 }
 
 // AttemptRecord is one failed switch attempt: it updates the server stat and
@@ -194,6 +199,11 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 		return model.ProxyNode{}, "", invalidf(
 			"switch commit slot %q does not match node %q (slot %d)",
 			slotKey.String(), node.ID, node.Slot)
+	}
+	// The old node and its lease must survive a device release that landed
+	// while the new session was opening, so this runs before any mutation.
+	if err := s.requireSlotDeviceLocked(slotKey, commit.DeviceRecordID); err != nil {
+		return model.ProxyNode{}, "", err
 	}
 	var slotRow *model.AccountSlot
 	if commit.SlotState != nil {

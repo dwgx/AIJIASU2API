@@ -41,6 +41,16 @@ const (
 	maxGatePort = 65535
 )
 
+// DefaultLivenessInterval is how often the controller checks that every running
+// session is still the vendor's live session. A slot whose session is gone must
+// leave LIVE within one window, so this is the containment latency bound.
+const DefaultLivenessInterval = 30 * time.Second
+
+// kickRetryWindow is the minimum wait before a kicked slot may reopen. The
+// vendor needs time to release the stolen session, and a quick reopen would
+// kick the other connection back (DESIGN-MULTISLOT §2).
+const kickRetryWindow = 5 * time.Minute
+
 // errSlotPortUnavailable marks a slot whose reserved listener pair cannot be
 // used. The pair is immutable while the slot row owns it, so the slot fails
 // down instead of moving to another port: a lease stores the gate port.
@@ -65,6 +75,28 @@ type LoginResults interface {
 // *account.Factory implements it.
 type SessionOpener interface {
 	Open(ctx context.Context, req account.SessionRequest) (account.FlowSession, error)
+}
+
+// SessionLiveness is the optional active-liveness view a session may expose.
+// Healthy only reports that a SID was issued, and a closed or kicked vendor
+// session keeps its SID; Alive answers whether the session can still carry
+// flows. The controller type-asserts, so an opener that only implements the
+// passive check is never contained on a guess.
+type SessionLiveness interface {
+	Alive() bool
+}
+
+// sessionAlive reports whether one running session can still serve. A nil
+// session is dead; a session without the optional view keeps the passive SID
+// check.
+func sessionAlive(session account.FlowSession) bool {
+	if session == nil {
+		return false
+	}
+	if liveness, ok := session.(SessionLiveness); ok {
+		return liveness.Alive()
+	}
+	return session.Healthy()
 }
 
 // Gate is one node's SOCKS5 listener. *gate.Server implements it.
@@ -175,6 +207,11 @@ type NodeControllerConfig struct {
 	// Now overrides the clock used for the connect cooldown and result
 	// durations. Nil uses time.Now; tests pin it.
 	Now func() time.Time
+	// LivenessInterval is how often the controller verifies that every running
+	// session is still the vendor's live session. Zero selects
+	// DefaultLivenessInterval; a negative value disables the background scan,
+	// which only tests do (CheckLiveness still works).
+	LivenessInterval time.Duration
 	// ConnectCooldown is the minimum interval between two switch attempts for
 	// one account. Zero selects DefaultConnectCooldown; a negative value
 	// disables the cooldown (tests only).
@@ -237,9 +274,20 @@ type NodeController struct {
 	// for the same slot gets 409 switch_in_progress instead of blocking behind
 	// the first one.
 	switchMu    sync.Mutex
-	switching   map[model.SlotKey]struct{}
+	switching   map[model.SlotKey]chan struct{}
 	lastAttempt map[model.SlotKey]time.Time
 	accountBusy map[string]struct{}
+
+	// stopMu guards the account stop fence. It is separate from switchMu and
+	// mu because SyncAccount reads it while holding mu and StopAccount writes
+	// it before taking mu; a single mutex would deadlock those two orders.
+	stopMu sync.Mutex
+	// closedAccounts fences one account after its stop hook ran. Every later
+	// start refuses until a login result fetched after the fence arrives, so a
+	// delete/logout cannot leave an orphan gate behind a committed mutation.
+	closedAccounts map[string]time.Time
+	// liveness is the background scan interval; zero means disabled.
+	liveness time.Duration
 
 	mu      sync.Mutex
 	running map[string]*nodeGate
@@ -319,7 +367,14 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		return nil, fmt.Errorf("runtime: gate HTTP offset %d is outside 1..%d", cfg.GateHTTPOffset, maxGatePort-1)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &NodeController{
+	liveness := cfg.LivenessInterval
+	switch {
+	case liveness == 0:
+		liveness = DefaultLivenessInterval
+	case liveness < 0:
+		liveness = 0
+	}
+	controller := &NodeController{
 		store:       cfg.Store,
 		logins:      cfg.Logins,
 		sessions:    cfg.Sessions,
@@ -336,14 +391,22 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		maxServers:  cfg.MaxServers,
 		now:         now,
 		cooldown:    cooldown,
-		switching:   make(map[model.SlotKey]struct{}),
+		switching:   make(map[model.SlotKey]chan struct{}),
 		lastAttempt: make(map[model.SlotKey]time.Time),
 		accountBusy: make(map[string]struct{}),
+
+		closedAccounts: make(map[string]time.Time),
+		liveness:       liveness,
+
 		gateAuth:    gateAuth,
 		identity:    cfg.GateIdentity,
 		httpEnabled: cfg.GateHTTP,
 		httpOffset:  httpOffset,
-	}, nil
+	}
+	if liveness > 0 {
+		go controller.watchLiveness()
+	}
+	return controller, nil
 }
 
 // SyncAccount opens or reuses one gate per enabled account slot, writes each
@@ -376,6 +439,20 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	result, ok := c.logins.Result(accountID)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNoLoginResult, accountID)
+	}
+	if since, fenced := c.accountStopped(accountID); fenced {
+		// A login that completed after the stop is the operator reopening the
+		// account; a retained result from before it is the late sync that must
+		// not reopen a slot the delete/logout already closed.
+		if result.FetchedAt.IsZero() || result.FetchedAt.After(since) {
+			c.clearAccountStopped(accountID)
+		} else {
+			return &SwitchError{
+				Reason:  ReasonAccountState,
+				Message: "account is stopped; log in again",
+				Details: map[string]string{"stoppedSince": since.UTC().Format(time.RFC3339)},
+			}
+		}
 	}
 	acct, ok := c.store.Account(accountID)
 	if !ok {
@@ -466,7 +543,10 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 			delete(c.slotGates, plan.key)
 		}
 		if running, ok := c.running[id]; ok { // reuse: never a second session
-			if err := c.activateSlotLocked(plan.key, acct, plan.srv, running); err != nil {
+			// The binding is re-read for the commit: a release between the
+			// start and this reuse must not re-commit the slot as LIVE.
+			recordID, _ := c.store.SlotDeviceRecordID(plan.key)
+			if err := c.activateSlotLocked(plan.key, acct, plan.srv, running, recordID); err != nil {
 				failures = append(failures, fmt.Errorf("node %s: %w", id, err))
 				c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", accountID, "state", string(model.NodeLive), "error", err)
 				continue
@@ -577,6 +657,26 @@ func (c *NodeController) planSlotsLocked(accountID string, slots []model.Account
 // it, so a pre-existing pair survives a failed attempt.
 func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account, result account.LoginResult, plan slotPlan) error {
 	key, srv := plan.key, plan.srv
+	slot, ok := c.store.Slot(key)
+	if !ok {
+		return fmt.Errorf("runtime: slot %s not found", key.String())
+	}
+	// A kicked slot stays closed for its retry window, and a quarantined one
+	// waits for an operator: reopening sooner would steal the session back and
+	// start a kick loop. The row keeps its kick marker; no state is written.
+	if wait, blocked := slotRetryBlocked(slot, c.now()); blocked {
+		message := "slot is waiting out its vendor-kick retry window"
+		if slot.State == model.SlotQuarantined {
+			message = "slot is quarantined after repeated vendor kicks; connect it manually"
+		}
+		return &SwitchError{
+			Reason:     ReasonConnectCooldown,
+			Message:    message,
+			Details:    map[string]string{"slot": key.String()},
+			RetryAfter: wait,
+			Cause:      fmt.Errorf("runtime: slot %s is not restartable yet", key.String()),
+		}
+	}
 	if !c.store.SlotDeviceBound(key) {
 		if !c.store.DevicePoolEnabled() {
 			// Without a pool only slot 1 has the legacy in-memory identity.
@@ -589,14 +689,10 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 			return err
 		}
 	}
-	device, err := c.slotDevice(key)
+	device, recordID, err := c.slotDevice(key)
 	if err != nil {
 		c.markSlotDownLocked(key, acct, srv, "device_material_missing")
 		return err
-	}
-	slot, ok := c.store.Slot(key)
-	if !ok {
-		return fmt.Errorf("runtime: slot %s not found", key.String())
 	}
 	addrs, claimed, err := c.reserveSlotPairLocked(key, slot.GatePort)
 	if err != nil {
@@ -644,13 +740,19 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 	}
 	id := nodeID(key, srv.id)
 	c.running[id] = running
-	if err := c.activateSlotLocked(key, acct, srv, running); err != nil {
+	if err := c.activateSlotLocked(key, acct, srv, running, recordID); err != nil {
 		errs := c.closeGateLocked(id, running)
 		delete(c.running, id)
 		if claimed {
 			_ = c.store.SetSlotPorts(key, 0, 0)
 		}
-		c.markSlotDownLocked(key, acct, srv, "store_failed")
+		// A conflict here is the device release that landed while the session
+		// was opening: the identity is gone, so the start fails closed.
+		reason := "store_failed"
+		if errors.Is(err, store.ErrConflict) {
+			reason = "device_released"
+		}
+		c.markSlotDownLocked(key, acct, srv, reason)
 		return errors.Join(append(errs, err)...)
 	}
 	c.slotGates[key] = id
@@ -659,22 +761,35 @@ func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account
 	return nil
 }
 
-// slotDevice returns the identity a slot must present. With the pool enabled
-// it is the slot's own sealed material; without a pool only slot 1 exists and
-// the account-level in-memory identity is the same record. It never generates.
-func (c *NodeController) slotDevice(key model.SlotKey) (apifacade.Device, error) {
+// slotDevice returns the identity a slot must present plus the device record
+// it came from. With the pool enabled it is the slot's own sealed material;
+// without a pool only slot 1 exists and the account-level in-memory identity is
+// the same record, so there is no record id. It never generates.
+//
+// The record id travels to the LIVE commit, which re-checks the binding under
+// the store lock: a release between this read and the commit fails the start.
+func (c *NodeController) slotDevice(key model.SlotKey) (apifacade.Device, string, error) {
 	material, materialErr := c.store.AccountDeviceMaterialSlot(key)
 	if materialErr == nil {
-		return account.DeviceForIdentity(material.Identity)
+		device, err := account.DeviceForIdentity(material.Identity)
+		if err != nil {
+			return apifacade.Device{}, "", err
+		}
+		recordID, _ := c.store.SlotDeviceRecordID(key)
+		return device, recordID, nil
 	}
 	if c.store.DevicePoolEnabled() {
-		return apifacade.Device{}, materialErr
+		return apifacade.Device{}, "", materialErr
 	}
 	identity, ok := c.store.AccountDeviceSlot(key)
 	if !ok {
-		return apifacade.Device{}, materialErr
+		return apifacade.Device{}, "", materialErr
 	}
-	return account.DeviceForIdentity(identity)
+	device, err := account.DeviceForIdentity(identity)
+	if err != nil {
+		return apifacade.Device{}, "", err
+	}
+	return device, "", nil
 }
 
 // baseUserName is the vendor tunnel name every slot derives from: the login
@@ -688,8 +803,10 @@ func baseUserName(result account.LoginResult, acct model.Account) string {
 
 // activateSlotLocked writes a running slot as LIVE and its slot row atomically.
 // An operator drain survives a login refresh, and a reused gate keeps its
-// generation instead of bumping it.
-func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Account, srv serverRef, running *nodeGate) error {
+// generation instead of bumping it. deviceRecordID is the identity the session
+// was opened with; the commit re-checks it, so a reused gate whose binding was
+// released in the meantime cannot be re-committed as LIVE.
+func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Account, srv serverRef, running *nodeGate, deviceRecordID string) error {
 	id := nodeID(key, srv.id)
 	state := model.NodeLive
 	if existing, ok := c.store.Node(id); ok && existing.State == model.NodeDraining {
@@ -708,9 +825,14 @@ func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Accoun
 			GatePort: running.port, HTTPPort: running.httpPort,
 			State: model.SlotLive, Health: model.SlotHealthHealthy,
 			Generation: running.generation, // set at start, never bumped on reuse
+			// The kick counter is history, not state: an automatic restart must
+			// not forget it, or a repeat offender would never quarantine. A
+			// manual reconnect (CommitSwitch) clears it instead.
+			KickCount: slot.KickCount,
 		},
 		Node: applyServerToNode(model.ProxyNode{ID: id, Capacity: gateFlowLimit},
 			acct, key, srv, state, running.port, running.egressIP),
+		DeviceRecordID: deviceRecordID,
 	})
 	if err != nil {
 		return err
@@ -865,6 +987,13 @@ func (c *NodeController) Stop(ctx context.Context) error {
 // Gates of other accounts are untouched, and the store nodes are deliberately
 // left to the caller (store.DeleteAccount owns them).
 //
+// It first waits for the account's in-flight slot switches to settle and then
+// fences the account: the API calls this hook before it mutates the store, so a
+// start that begins after this returns would otherwise commit a gate behind a
+// deleted or paused account. Every later start refuses until a login result
+// fetched after the fence arrives (SyncAccount). A switch already past the
+// marker is not cancelled; it finishes and this call closes what it committed.
+//
 // It does not reconcile the panel. At this point the account's nodes are still
 // LIVE in the store, so a reconcile here would republish the gates that were
 // just closed; the API handler reconciles after the store mutation instead.
@@ -872,7 +1001,14 @@ func (c *NodeController) Stop(ctx context.Context) error {
 // It is idempotent: with no running gate for the account nothing changed, so
 // it returns nil. Close failures are aggregated; a failed close still removes
 // the gate from the running set, so a retry cannot double-close it.
-func (c *NodeController) StopAccount(_ context.Context, accountID string) error {
+func (c *NodeController) StopAccount(ctx context.Context, accountID string) error {
+	release, err := c.beginAccountStop(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	c.fenceAccount(accountID)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -887,6 +1023,181 @@ func (c *NodeController) StopAccount(_ context.Context, accountID string) error 
 		c.logger.Info("account_gates_stopped", "account_id", accountID, "node_id", id, "server_id", running.serverID)
 	}
 	return errors.Join(errs...)
+}
+
+// fenceAccount marks one account stopped. Every start for it refuses until a
+// login result fetched after this instant arrives; the instant is the fence the
+// late-start check compares against.
+func (c *NodeController) fenceAccount(accountID string) {
+	c.stopMu.Lock()
+	c.closedAccounts[accountID] = c.now()
+	c.stopMu.Unlock()
+}
+
+// accountStopped reports whether the account is fenced and when.
+func (c *NodeController) accountStopped(accountID string) (time.Time, bool) {
+	c.stopMu.Lock()
+	defer c.stopMu.Unlock()
+	since, fenced := c.closedAccounts[accountID]
+	return since, fenced
+}
+
+// clearAccountStopped removes the fence: a login completed after the stop, so
+// the operator reopened the account.
+func (c *NodeController) clearAccountStopped(accountID string) {
+	c.stopMu.Lock()
+	delete(c.closedAccounts, accountID)
+	c.stopMu.Unlock()
+}
+
+// CheckLiveness scans every running gate once and contains the ones that can no
+// longer serve: a session whose vendor connection is gone is kicked out of
+// service, and a gate whose account is no longer in the store (the delete
+// cascade committed) is closed. It returns the number of gates it closed.
+//
+// The background scan calls it once per DefaultLivenessInterval, so a vendor
+// kick leaves the slot out of LIVE within one window. It is exported so an
+// operator and the tests can force one scan.
+func (c *NodeController) CheckLiveness() int {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return 0
+	}
+	closed := 0
+	for id, running := range c.running {
+		if sessionAlive(running.session) {
+			continue
+		}
+		c.containKickLocked(id, running, "vendor_kick")
+		closed++
+	}
+	for id, running := range c.running {
+		if _, ok := c.store.Account(running.accountID); ok {
+			continue
+		}
+		// The account was deleted while this gate was starting. No session may
+		// outlive the account row it was opened for.
+		c.closeOrphanLocked(id, running)
+		closed++
+	}
+	c.mu.Unlock()
+
+	if closed > 0 {
+		if err := c.reconcileLocked(c.ctx); err != nil {
+			c.logger.Warn("liveness_reconcile_failed", "error", err)
+		}
+	}
+	return closed
+}
+
+// watchLiveness runs CheckLiveness on the configured interval until Stop
+// cancels the controller context.
+func (c *NodeController) watchLiveness() {
+	ticker := time.NewTicker(c.liveness)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.CheckLiveness()
+		}
+	}
+}
+
+// containKickLocked takes one dead session out of service. The gate closes
+// before the session so no flow outlives the connection it relays through; the
+// node goes DOWN without a port, the slot row records the kick with its retry
+// window (and quarantines a repeat offender), and every lease on the node is
+// revoked so no customer keeps a dead endpoint.
+func (c *NodeController) containKickLocked(id string, running *nodeGate, detail string) {
+	if errs := c.closeGateLocked(id, running); len(errs) > 0 {
+		c.logger.Warn("slot_kick_close_failed", "node_id", id, "slot", running.slot.String(),
+			"error", errors.Join(errs...))
+	}
+	delete(c.running, id)
+	if current, ok := c.slotGates[running.slot]; ok && current == id {
+		delete(c.slotGates, running.slot)
+	}
+	if node, ok := c.store.Node(id); ok {
+		node.State = model.NodeDown
+		node.GatePort = 0
+		if _, err := c.store.PutNode(node); err != nil {
+			c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", running.accountID,
+				"state", string(model.NodeDown), "error", err)
+		}
+	}
+	slot, err := c.store.RecordSlotKick(store.SlotKick{
+		Key:        running.slot,
+		ServerID:   running.serverID,
+		Detail:     detail,
+		RetryAfter: c.now().Add(kickRetryWindow),
+	})
+	if err != nil {
+		c.logger.Warn("slot_state_write_failed", "slot", running.slot.String(),
+			"reason", detail, "error", err)
+	}
+	revoked := c.store.InvalidateNodeLeases(id, detail)
+	c.logger.Warn("slot_vendor_kick", "node_id", id, "account_id", running.accountID,
+		"slot", running.slot.String(), "server_id", running.serverID,
+		"kick_count", slot.KickCount, "state", string(slot.State),
+		"retry_after", slot.RetryAfter, "leases_revoked", len(revoked))
+}
+
+// closeOrphanLocked closes a gate whose account row is gone. The node rows went
+// with the account, so only the listener and the session remain to be released.
+func (c *NodeController) closeOrphanLocked(id string, running *nodeGate) {
+	if errs := c.closeGateLocked(id, running); len(errs) > 0 {
+		c.logger.Warn("orphan_gate_close_failed", "node_id", id, "account_id", running.accountID,
+			"error", errors.Join(errs...))
+	}
+	delete(c.running, id)
+	if current, ok := c.slotGates[running.slot]; ok && current == id {
+		delete(c.slotGates, running.slot)
+	}
+	c.store.WriteAudit(model.SeverityWarn, "system", "slot.orphan_closed", id,
+		"Gate closed · account row is gone", map[string]string{
+			"nodeId":    id,
+			"accountId": running.accountID,
+			"slot":      running.slot.String(),
+		})
+	c.logger.Warn("orphan_gate_closed", "node_id", id, "account_id", running.accountID,
+		"slot", running.slot.String(), "server_id", running.serverID)
+}
+
+// slotRetryBlocked reports whether a slot must stay closed: a quarantined slot
+// waits for an operator, and a kicked slot waits out its retry window. The
+// duration is the remaining wait; a quarantined slot reports zero because no
+// automatic retry is allowed at all.
+func slotRetryBlocked(slot model.AccountSlot, now time.Time) (time.Duration, bool) {
+	if slot.State == model.SlotQuarantined {
+		return 0, true
+	}
+	window, blocked := slotKickWindow(slot, now)
+	if blocked {
+		return window, true
+	}
+	return 0, false
+}
+
+// slotKickWindow reports whether a kicked slot is still inside its retry
+// window. It is the manual-reconnect check: an operator may reopen a
+// quarantined slot, but never before the window the vendor needs.
+func slotKickWindow(slot model.AccountSlot, now time.Time) (time.Duration, bool) {
+	if slot.Health != model.SlotHealthVendorKick || slot.RetryAfter == "" {
+		return 0, false
+	}
+	retry, err := time.Parse(time.RFC3339, slot.RetryAfter)
+	if err != nil {
+		// The snapshot validator rejects a malformed timestamp, so this is a
+		// programming error: fail closed rather than reopen a kicked slot.
+		return 0, true
+	}
+	if retry.After(now) {
+		return retry.Sub(now), true
+	}
+	return 0, false
 }
 
 // Snapshot returns a copy of the running nodes for the read-only Lab view.

@@ -170,9 +170,13 @@ func (f *fakeLoginResults) Result(accountID string) (account.LoginResult, bool) 
 }
 
 // fakeFlowSession is a FlowSession whose flows are in-memory pipes that echo.
+// killed models a vendor kick: the SID and the local session object survive,
+// but the session can no longer carry flows, which is exactly what Alive
+// reports and Healthy does not.
 type fakeFlowSession struct {
 	fields map[string]string
 	closed atomic.Bool
+	killed atomic.Bool
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -183,6 +187,13 @@ func (s *fakeFlowSession) SID() string { return "fake-sid" }
 func (s *fakeFlowSession) Fields() map[string]string { return s.fields }
 
 func (s *fakeFlowSession) Healthy() bool { return !s.closed.Load() }
+
+// Alive implements the runtime's optional liveness view.
+func (s *fakeFlowSession) Alive() bool { return !s.closed.Load() && !s.killed.Load() }
+
+// kill marks the session as taken over by another connection, the way a vendor
+// kick leaves a closed session holding its SID.
+func (s *fakeFlowSession) kill() { s.killed.Store(true) }
 
 func (s *fakeFlowSession) isClosed() bool { return s.closed.Load() }
 

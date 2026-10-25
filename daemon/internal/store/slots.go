@@ -2,6 +2,8 @@ package store
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"ajsaccountd/internal/model"
@@ -243,9 +245,15 @@ func (s *Store) SlotDeviceBound(key model.SlotKey) bool {
 // SlotStartCommit writes one started slot and its node under a single lock.
 // Slot.Generation must be >= the stored generation (monotonic); Slot.State must
 // be SlotLive; Slot.SlotKey must equal Node.Slot and Node.AccountID.
+//
+// DeviceRecordID is the device record the session was opened with. The commit
+// re-checks it under the write lock, so a release that lands while a slow start
+// is in flight cannot commit LIVE without an owned identity. Empty means "no
+// record", which is the pool-disabled legacy mode.
 type SlotStartCommit struct {
-	Slot model.AccountSlot
-	Node model.ProxyNode
+	Slot           model.AccountSlot
+	Node           model.ProxyNode
+	DeviceRecordID string
 }
 
 // CommitSlotStart writes one started slot and its node under a single lock, so
@@ -282,6 +290,11 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 	account := s.accounts[accountIdx]
 	node.AccountID = account.ID
 	node.AccountLabel = account.Label
+	// A device released while the session was opening must fail the commit, not
+	// become a LIVE node with an unowned identity.
+	if err := s.requireSlotDeviceLocked(slot.SlotKey, commit.DeviceRecordID); err != nil {
+		return model.ProxyNode{}, err
+	}
 
 	idx := s.nodeIndexLocked(node.ID)
 	if idx >= 0 && s.nodes[idx].AccountID != node.AccountID {
@@ -317,6 +330,76 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 	}
 	s.syncAccountCountsLocked()
 	return node, nil
+}
+
+// SlotKickQuarantineThreshold is the number of recorded vendor kicks after
+// which a slot stops retrying on its own: a repeatedly kicked identity is
+// evidence the vendor no longer honours this slot, so only an operator (a
+// manual connect) may reopen it.
+const SlotKickQuarantineThreshold = 3
+
+// SlotKick is one recorded vendor session loss for a slot: the server the
+// session was opened against, the bounded reason and the instant before which
+// the slot must not reopen.
+type SlotKick struct {
+	Key        model.SlotKey
+	ServerID   string
+	Detail     string
+	RetryAfter time.Time
+}
+
+// RecordSlotKick records one vendor kick: the slot leaves LIVE, its health
+// becomes vendor_kick, the kick counter advances and RetryAfter blocks an
+// automatic reopen. A slot that reaches SlotKickQuarantineThreshold moves to
+// SlotQuarantined instead of down. The device binding and the reserved port
+// pair are kept, so a controlled reconnect reuses the same endpoint.
+//
+// The node and its leases are the caller's job: the runtime closes the gate,
+// marks the node DOWN and revokes its leases in the same containment step.
+func (s *Store) RecordSlotKick(kick SlotKick) (model.AccountSlot, error) {
+	if !kick.Key.Valid() {
+		return model.AccountSlot{}, invalidf("slot key %q is invalid", kick.Key.String())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot, ok := s.accountSlots[kick.Key]
+	if !ok {
+		return model.AccountSlot{}, notFoundf("slot %s not found", kick.Key.String())
+	}
+	slot.KickCount++
+	slot.Health = model.SlotHealthVendorKick
+	slot.State = model.SlotDown
+	if slot.KickCount >= SlotKickQuarantineThreshold {
+		slot.State = model.SlotQuarantined
+	}
+	if serverID := strings.TrimSpace(kick.ServerID); serverID != "" {
+		slot.ServerID = serverID
+	}
+	detail := clientMessage(kick.Detail)
+	if detail == "" {
+		detail = "vendor_kick"
+	}
+	slot.LastAttemptAt = iso(s.now())
+	slot.LastError = detail
+	if !kick.RetryAfter.IsZero() {
+		slot.RetryAfter = kick.RetryAfter.UTC().Format(time.RFC3339)
+	}
+	s.accountSlots[kick.Key] = slot
+	meta := map[string]string{
+		"slot":      kick.Key.String(),
+		"kickCount": strconv.Itoa(slot.KickCount),
+		"state":     string(slot.State),
+		"reason":    detail,
+	}
+	if slot.ServerID != "" {
+		meta["serverId"] = slot.ServerID
+	}
+	if slot.RetryAfter != "" {
+		meta["retryAfter"] = slot.RetryAfter
+	}
+	s.addAuditLocked(model.SeverityWarn, "system", "slot.vendor_kick", kick.Key.String(),
+		"Slot session lost · "+detail, meta)
+	return s.slotWithBindingLocked(slot), nil
 }
 
 // SetSlotFailure marks one slot down with a bounded reason and records the
