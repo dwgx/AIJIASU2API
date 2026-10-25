@@ -72,13 +72,38 @@ func TestEffectiveSlots(t *testing.T) {
 		{name: "operator cap below use count wins", useCount: 8, configured: 2, want: 2},
 		{name: "use count below operator cap wins", useCount: 1, configured: 8, want: 1},
 		{name: "both equal", useCount: 4, configured: 4, want: 4},
-		{name: "use count clamps at 2000", useCount: 5000, configured: 5000, want: 2000},
+		{name: "use count clamps at 2000 then service cap wins", useCount: 5000, configured: 5000, want: 8},
 		{name: "negative values normalize", useCount: -3, configured: -2, want: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := EffectiveSlots(tc.useCount, tc.configured); got != tc.want {
 				t.Fatalf("EffectiveSlots(%d, %d) = %d, want %d",
+					tc.useCount, tc.configured, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlotCapacity(t *testing.T) {
+	cases := []struct {
+		name       string
+		useCount   int
+		configured int
+		want       int
+	}{
+		{name: "absent inputs default to one", useCount: 0, configured: 0, want: 1},
+		{name: "operator cap wins", useCount: 8, configured: 2, want: 2},
+		{name: "use count wins", useCount: 1, configured: 8, want: 1},
+		{name: "eight is allowed", useCount: 8, configured: 8, want: 8},
+		{name: "service cap wins over vendor and operator", useCount: 2000, configured: 2000, want: MaxServiceSlots},
+		{name: "large values clamp to eight", useCount: 100000, configured: 100000, want: 8},
+		{name: "negative values normalize", useCount: -1, configured: -1, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SlotCapacity(tc.useCount, tc.configured); got != tc.want {
+				t.Fatalf("SlotCapacity(%d, %d) = %d, want %d",
 					tc.useCount, tc.configured, got, tc.want)
 			}
 		})

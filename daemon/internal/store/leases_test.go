@@ -55,6 +55,18 @@ func newLeaseFixture(t *testing.T, now *time.Time, platform model.Platform, conc
 	return leaseTestFixture{st: st, account: account, user: user}
 }
 
+func addLeaseAccount(t *testing.T, st *Store, label, username string) model.Account {
+	t.Helper()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: label, Username: username, Password: "local-placeholder",
+		Platform: model.PlatformAndroid, Concurrency: 4,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(%q): %v", label, err)
+	}
+	return account
+}
+
 func addLeaseUser(t *testing.T, st *Store, name string, quota *int64) model.PanelUser {
 	t.Helper()
 	user, err := st.CreateUser(model.CreateUserInput{Name: name, QuotaBytesMonth: quota})
@@ -234,17 +246,17 @@ func TestCreateLeaseNoCapacityAndSuspendedUser(t *testing.T) {
 		t.Fatalf("suspended create = %v, want user_disabled", err)
 	}
 
-	// Take both nodes, then a third user of the same platform has no capacity.
-	for _, user := range []model.PanelUser{
-		addLeaseUser(t, st, "holder-1", nil),
-		addLeaseUser(t, st, "holder-2", nil),
-	} {
-		if _, _, err := st.CreateLease(model.CreateLeaseInput{
-			UserID: user.ID, Platform: model.PlatformAndroid,
-		}); err != nil {
-			t.Fatalf("holder create: %v", err)
-		}
+	// Fill the node-bearing account (admission is one per account), then add
+	// an active account with no node. The next user sees no_capacity rather
+	// than a slot refusal because every account is either admission-full or
+	// node-less.
+	holder := addLeaseUser(t, st, "holder-1", nil)
+	if _, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: holder.ID, Platform: model.PlatformAndroid,
+	}); err != nil {
+		t.Fatalf("holder create: %v", err)
 	}
+	addLeaseAccount(t, st, "Empty Ops", "empty-ops")
 	third := addLeaseUser(t, st, "third-bot", nil)
 	_, _, err = st.CreateLease(model.CreateLeaseInput{
 		UserID: third.ID, Platform: model.PlatformAndroid,
@@ -376,6 +388,8 @@ func TestLeaseExpiryHookFiresOncePerLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateLease(first): %v", err)
 	}
+	secondAccount := addLeaseAccount(t, st, "Grace Ops", "grace-ops")
+	addLeaseNode(t, st, secondAccount.ID, "node-grace", "grace-01")
 	grace := addLeaseUser(t, st, "grace.ops", nil)
 	revoked, _, err := st.CreateLease(model.CreateLeaseInput{
 		UserID: grace.ID, Platform: model.PlatformAndroid, TTLSeconds: 60,

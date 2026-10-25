@@ -27,8 +27,9 @@ export interface Account {
    */
   useCount?: number
   /**
-   * Lease capacity this daemon actually serves, derived as
-   * `min(useCount, AJS_ACCOUNT_SLOTS)`. Absent on older daemons; default 1.
+   * Display capacity for the account, derived as
+   * `min(useCount, AJS_ACCOUNT_SLOTS, 8)`. Absent on older daemons; default 1.
+   * Lease admission is hard-capped at one until multi-slot support lands.
    */
   effectiveSlots?: number
   regions: string[]

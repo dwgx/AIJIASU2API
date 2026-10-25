@@ -14,9 +14,10 @@ import (
 	"ajsaccountd/internal/webhook"
 )
 
-// withEffectiveSlots fills the derived lease capacity of one account for a
+// withEffectiveSlots fills the derived display capacity of one account for a
 // response. UseCount is persisted; EffectiveSlots is recomputed on every read
-// so an AJS_ACCOUNT_SLOTS change applies without a new login.
+// so an AJS_ACCOUNT_SLOTS change applies without a new login. Lease admission
+// is hard-capped at one separately and is not represented by this field.
 func withEffectiveSlots(acct model.Account) model.Account {
 	acct.EffectiveSlots = account.EffectiveSlots(acct.UseCount, account.ConfiguredAccountSlots())
 	return acct

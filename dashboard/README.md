@@ -1247,10 +1247,12 @@ render as `<article role="listitem">` inside
 | Foot | `Expires` label, expiry date + relative time, test login, pause/resume, delete (same labels and handlers as the table) |
 
 The 同时连接数 metric is the vendor's purchased `useCount`, not an APC setting. The daemon
-enforces `effectiveSlots = min(useCount, AJS_ACCOUNT_SLOTS)` with `AJS_ACCOUNT_SLOTS` defaulting
-to `1`; a card above one shows the `Multi-slot pending` note because APC still serves only one FV
-session per account. A second lease at the default cap is refused as 429
-`account_slots_exhausted`, and raising the cap returns `warning: multi_session_unimplemented`.
+reports `effectiveSlots = min(useCount, AJS_ACCOUNT_SLOTS, 8)` as display capacity, with
+`AJS_ACCOUNT_SLOTS` defaulting to `1`; a card above one shows the `Multi-slot pending` note
+because APC still serves only one FV session per account. Lease admission is hard-capped at one
+until the multi-slot runtime lands, so a second lease on the same account is refused as 429
+`account_slots_exhausted` even when display capacity is above one, and the first lease returns
+`warning: multi_session_unimplemented`.
 
 The grid is `repeat(auto-fill, minmax(280px, 1fr))` with a 12 px gap and collapses to one column
 below 760 px; card actions wrap and the card body never forces horizontal scroll. Selected cards get

@@ -118,6 +118,98 @@ func TestAccountSlotValidate(t *testing.T) {
 	}
 }
 
+func TestSlotCapacity(t *testing.T) {
+	cases := []struct {
+		name       string
+		useCount   int
+		accountCap int
+		want       int
+	}{
+		{name: "absent inputs mean one", useCount: 0, accountCap: 0, want: 1},
+		{name: "operator cap wins", useCount: 8, accountCap: 2, want: 2},
+		{name: "use count wins", useCount: 1, accountCap: 8, want: 1},
+		{name: "eight is allowed", useCount: 8, accountCap: 8, want: 8},
+		{name: "service cap wins over 2000", useCount: 2000, accountCap: 2000, want: 8},
+		{name: "above vendor maximum", useCount: 100000, accountCap: 100000, want: 8},
+		{name: "negative values normalize", useCount: -3, accountCap: -2, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SlotCapacity(tc.useCount, tc.accountCap); got != tc.want {
+				t.Fatalf("SlotCapacity(%d, %d) = %d, want %d", tc.useCount, tc.accountCap, got, tc.want)
+			}
+			if got := slotCapacity(tc.useCount, tc.accountCap); got != tc.want {
+				t.Fatalf("slotCapacity(%d, %d) = %d, want %d", tc.useCount, tc.accountCap, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdmissionSlots pins the pre-runtime split: SlotCapacity remains the
+// display capacity (up to eight), while AdmissionSlots is always one until
+// the multi-slot runtime can open one gate per slot. No environment value may
+// widen the admission cap.
+func TestAdmissionSlots(t *testing.T) {
+	cases := []struct {
+		name       string
+		useCount   int
+		accountCap int
+		display    int
+	}{
+		{name: "absent inputs mean one", useCount: 0, accountCap: 0, display: 1},
+		{name: "operator cap wins for display", useCount: 8, accountCap: 2, display: 2},
+		{name: "use count wins for display", useCount: 1, accountCap: 8, display: 1},
+		{name: "eight is allowed for display", useCount: 8, accountCap: 8, display: 8},
+		{name: "service cap wins over 2000", useCount: 2000, accountCap: 2000, display: 8},
+		{name: "negative values normalize", useCount: -3, accountCap: -2, display: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SlotCapacity(tc.useCount, tc.accountCap); got != tc.display {
+				t.Fatalf("display SlotCapacity(%d, %d) = %d, want %d",
+					tc.useCount, tc.accountCap, got, tc.display)
+			}
+			if got := AdmissionSlots(tc.useCount, tc.accountCap); got != MaxAdmissionSlots {
+				t.Fatalf("AdmissionSlots(%d, %d) = %d, want %d",
+					tc.useCount, tc.accountCap, got, MaxAdmissionSlots)
+			}
+			if got := admissionSlotCapacity(tc.useCount, tc.accountCap); got != MaxAdmissionSlots {
+				t.Fatalf("admissionSlotCapacity(%d, %d) = %d, want %d",
+					tc.useCount, tc.accountCap, got, MaxAdmissionSlots)
+			}
+		})
+	}
+
+	envCases := []struct {
+		configured string
+		display    int
+	}{
+		{configured: "1", display: 1},
+		{configured: "2", display: 2},
+		{configured: "8", display: 8},
+		{configured: "2000", display: MaxServiceSlots},
+		{configured: "not-a-number", display: 1},
+		{configured: "", display: 1},
+	}
+	for _, tc := range envCases {
+		t.Run("env="+tc.configured, func(t *testing.T) {
+			t.Setenv("AJS_ACCOUNT_SLOTS", tc.configured)
+			if got := ConfiguredSlotCapacity(2000); got != tc.display {
+				t.Fatalf("display ConfiguredSlotCapacity(%q) = %d, want %d",
+					tc.configured, got, tc.display)
+			}
+			if got := ConfiguredAdmissionSlots(2000); got != MaxAdmissionSlots {
+				t.Fatalf("ConfiguredAdmissionSlots(%q) = %d, want %d",
+					tc.configured, got, MaxAdmissionSlots)
+			}
+			if got := effectiveAccountSlots(model.Account{UseCount: 2000}); got != MaxAdmissionSlots {
+				t.Fatalf("effectiveAccountSlots(%q) = %d, want %d",
+					tc.configured, got, MaxAdmissionSlots)
+			}
+		})
+	}
+}
+
 func TestAccountSlotCRUD(t *testing.T) {
 	st := New()
 	key := model.SlotKey{AccountID: "acc-01", Index: 1}

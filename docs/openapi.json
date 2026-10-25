@@ -6419,7 +6419,7 @@
         }
       },
       "RateLimited": {
-        "description": "RATE_LIMITED or QUOTA_EXCEEDED: retry later. A lease create carries reason account_slots_exhausted when the account has reached its effective slot cap (min(useCount, AJS_ACCOUNT_SLOTS), default 1).",
+        "description": "RATE_LIMITED or QUOTA_EXCEEDED: retry later. A lease create carries reason account_slots_exhausted when the account already holds its one admission slot (lease admission is hard-capped at one until the multi-slot runtime exists; display capacity may be higher).",
         "content": {
           "application/json": {
             "schema": {
@@ -6821,7 +6821,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 2000,
-            "description": "Lease slots this daemon enforces: min(useCount, AJS_ACCOUNT_SLOTS, default 1). Above 1 a lease create also returns the multi_session_unimplemented warning because only one FV session per account can be served."
+            "description": "Display capacity for the account: min(useCount, AJS_ACCOUNT_SLOTS, 8, default 1). Lease admission is hard-capped at one until the multi-slot runtime exists; above 1 a lease create also returns the multi_session_unimplemented warning because only one FV session per account can be served."
           },
           "regions": {
             "type": "array",
@@ -7183,7 +7183,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "Set when the lease committed but the optional publish hook failed, or to multi_session_unimplemented when effectiveSlots > 1 (only one FV session per account can actually be served)."
+            "description": "Set when the lease committed but the optional publish hook failed, or to multi_session_unimplemented when display capacity effectiveSlots > 1 (only one FV session per account can actually be served)."
           },
           "replayed": {
             "type": "boolean",

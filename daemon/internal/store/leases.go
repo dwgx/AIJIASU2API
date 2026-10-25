@@ -55,15 +55,13 @@ func configuredAccountSlots() int {
 	return slots
 }
 
-// effectiveAccountSlots is the lease cap actually enforced for one account:
-// min(vendor UseCount, AJS_ACCOUNT_SLOTS), both normalized to 1..2000.
+// effectiveAccountSlots is the lease-admission cap actually enforced for one
+// account. It is hard-capped at MaxAdmissionSlots (one) until the multi-slot
+// runtime exists: vendor UseCount and AJS_ACCOUNT_SLOTS only raise the display
+// capacity reported by SlotCapacity/ConfiguredSlotCapacity, never the number
+// of leases the store admits.
 func effectiveAccountSlots(account model.Account) int {
-	useCount := normalizeAccountUseCount(account.UseCount)
-	slots := configuredAccountSlots()
-	if useCount < slots {
-		return useCount
-	}
-	return slots
+	return ConfiguredAdmissionSlots(account.UseCount)
 }
 
 // LeaseError is a create/revoke refusal carrying the machine-readable reason
@@ -111,8 +109,8 @@ func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, erro
 //	account_unavailable   the pinned account is paused, failed or expired
 //	quota_exceeded        the user's monthly quota is exhausted
 //	concurrency_exceeded  the account already runs its concurrency limit
-//	account_slots_exhausted the account already holds its effective slot count
-//	                      (min(UseCount, AJS_ACCOUNT_SLOTS), default one)
+//	account_slots_exhausted the account already holds its one admission slot
+//	                      (hard-capped at one until multi-slot runtime lands)
 //	no_capacity           no active account of the platform has a free node
 //
 // One lease per node is enforced by excluding every node that already has an
@@ -295,7 +293,7 @@ func (s *Store) pickLeaseTargetLocked(accountID string, platform model.Platform,
 		}
 		if slots := effectiveAccountSlots(account); active >= slots {
 			return 0, 0, leaseErrorf(ErrQuota, "account_slots_exhausted",
-				"account %q has no free lease slot (effectiveSlots %d)",
+				"account %q has no free lease slot (admission slots %d)",
 				account.Label, slots)
 		}
 		nodeIdx := s.pickLeaseNodeLocked(account.ID)

@@ -26,6 +26,10 @@ const (
 	// The lease is real, but only the first FV session can be served until
 	// per-slot device identities and multiple sessions are implemented.
 	MultiSessionWarning = "multi_session_unimplemented"
+	// MaxServiceSlots is the hard ceiling on independently operated slots per
+	// account. Vendor UseCount can reach 2000, but the daemon serves at most
+	// eight concurrent FV sessions for one account (DESIGN-MULTISLOT).
+	MaxServiceSlots = 8
 )
 
 // NormalizeUseCount converts the vendor's UseCount into the persisted range.
@@ -82,16 +86,27 @@ func ConfiguredAccountSlots() int {
 	return slots
 }
 
-// EffectiveSlots is the lease capacity this daemon will actually enforce:
-// min(vendor UseCount, operator AJS_ACCOUNT_SLOTS). Both inputs are
-// normalized, so an absent UseCount and an unset cap both mean one.
-func EffectiveSlots(useCount, accountSlots int) int {
-	use := NormalizeUseCount(useCount)
-	slots := NormalizeAccountSlots(accountSlots)
-	if use < slots {
-		return use
+// SlotCapacity is the display capacity shown for one account:
+// min(vendor UseCount, operator AJS_ACCOUNT_SLOTS, MaxServiceSlots). Both
+// inputs are normalized, so an absent UseCount and an unset cap both mean one.
+// The lease guard deliberately admits only one lease until the multi-slot
+// runtime exists; this helper describes the purchased/display allowance only.
+func SlotCapacity(useCount, accountSlots int) int {
+	capacity := NormalizeUseCount(useCount)
+	if limit := NormalizeAccountSlots(accountSlots); limit < capacity {
+		capacity = limit
 	}
-	return slots
+	if capacity > MaxServiceSlots {
+		capacity = MaxServiceSlots
+	}
+	return capacity
+}
+
+// EffectiveSlots is the legacy name for SlotCapacity. It returns the same
+// min(UseCount, AJS_ACCOUNT_SLOTS, 8) display capacity exposed to the panel;
+// the store's lease guard is hard-capped at one independently.
+func EffectiveSlots(useCount, accountSlots int) int {
+	return SlotCapacity(useCount, accountSlots)
 }
 
 // MultiSessionWarningFor returns MultiSessionWarning when effectiveSlots is

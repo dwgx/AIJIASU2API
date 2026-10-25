@@ -144,7 +144,21 @@ func TestCreateLeaseHTTPIdempotencyAndConflict(t *testing.T) {
 	requireLeaseReason(t, body, "lease_conflict")
 
 	// The header is the documented retry channel; a second user exercises it
-	// without colliding with the first user's platform lease.
+	// without colliding with the first user's platform lease. Admission is
+	// one lease per account, so the second user needs a second account.
+	secondAccount, err := fixture.st.CreateAccount(model.CreateAccountInput{
+		Label: "Build Ops", Username: "build-ops", Password: "local-placeholder",
+		Platform: model.PlatformAndroid, Concurrency: 4,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(build): %v", err)
+	}
+	if _, err := fixture.st.PutNode(model.ProxyNode{
+		ID: "node-build", AccountID: secondAccount.ID, Label: "cn-zj-02", Region: "cn-zj",
+		State: model.NodeReady, EgressIP: "203.0.113.14", Protocol: model.ProtocolSOCKS5, GatePort: 13003,
+	}); err != nil {
+		t.Fatalf("PutNode(node-build): %v", err)
+	}
 	second := fixture.addUser(t, "build-bot", nil)
 	resp, body = createLeaseCall(t, ts, map[string]any{
 		"userId": second.ID, "platform": "android",

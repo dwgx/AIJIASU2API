@@ -49,10 +49,10 @@ type leaseRevokeRequest struct {
 	Confirm bool `json:"confirm"`
 }
 
-// leaseSlotWarning returns the honest capacity warning for a lease on an
-// account whose effective slot cap is above one. The store has already
-// enforced the cap; this only tells the caller that only the first FV session
-// can actually be served until multi-session is implemented.
+// leaseSlotWarning returns the honest display-capacity warning for a lease on
+// an account whose effective slot capacity is above one. The store admits
+// exactly one lease; this only tells the caller that only the first FV
+// session can actually be served until multi-session is implemented.
 func (s *Server) leaseSlotWarning(accountID string) string {
 	acct, ok := s.store.Account(accountID)
 	if !ok {

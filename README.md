@@ -166,10 +166,11 @@ As of 2026-10-25:
   and TTL; an `Idempotency-Key` replays the original lease, a second active lease for the same user
   and platform is a 409, and quota/concurrency/capacity refusals are 429 — revoke needs
   `confirm:true` and, with a Resin panel, deletes the panel lease before the store row). Each
-  account reports the vendor's 同时连接数 (`useCount`) and an `effectiveSlots =
-  min(useCount, AJS_ACCOUNT_SLOTS)` cap; a second lease beyond the default cap of 1 is 429
-  `account_slots_exhausted`, and a cap above 1 still carries `warning:
-  multi_session_unimplemented` because only one FV session per account is served.
+  account reports the vendor's 同时连接数 (`useCount`) and a display capacity `effectiveSlots =
+  min(useCount, AJS_ACCOUNT_SLOTS, 8)`; lease admission stays hard-capped at one until the
+  multi-slot runtime lands, so a second lease on the same account is 429
+  `account_slots_exhausted` even when display capacity is above 1, and that first lease carries
+  `warning: multi_session_unimplemented` because only one FV session per account is served.
   `/v1/device-pool` (list, generate, assign/release/retire/quarantine/purge with
   confirm tokens, passphrase export/import), `/v1/scoped-keys` (`ajs_sk_` least-privilege keys
   with a per-route scope table, account/region read restrictions and `usage:read`/`renewal:read`/

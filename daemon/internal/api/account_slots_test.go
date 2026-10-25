@@ -91,17 +91,33 @@ func TestCreateLeaseRefusesSecondLeaseWhenSlotsExhausted(t *testing.T) {
 	requireLeaseReason(t, body, "account_slots_exhausted")
 }
 
-// TestCreateLeaseMultiSlotWarning proves a raised operator cap allows the
-// configured number of leases while every create carries the honest
-// multi_session_unimplemented warning.
-func TestCreateLeaseMultiSlotWarning(t *testing.T) {
+// TestCreateLeaseMultiSlotWarningStillAdmitsOne proves the display/admission
+// split over HTTP: AJS_ACCOUNT_SLOTS=8 and UseCount=8 keep effectiveSlots=8
+// for the UI, the first lease carries the honest multi_session_unimplemented
+// warning, and the second lease is still refused with account_slots_exhausted
+// because only one FV session per account can be served.
+func TestCreateLeaseMultiSlotWarningStillAdmitsOne(t *testing.T) {
 	fixture := newLeaseHTTPServer(t, Config{})
-	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
-	if _, err := fixture.st.SetAccountUseCount(fixture.account.ID, 5); err != nil {
+	t.Setenv("AJS_ACCOUNT_SLOTS", "8")
+	if _, err := fixture.st.SetAccountUseCount(fixture.account.ID, 8); err != nil {
 		t.Fatalf("SetAccountUseCount: %v", err)
 	}
 
-	resp, body := createLeaseCall(t, fixture.ts, map[string]any{
+	resp, body := apiCall(t, fixture.ts, http.MethodGet, "/v1/accounts/"+fixture.account.ID, nil)
+	requireStatus(t, resp, http.StatusOK)
+	var accountRow struct {
+		UseCount       int `json:"useCount"`
+		EffectiveSlots int `json:"effectiveSlots"`
+	}
+	if err := json.Unmarshal(body, &accountRow); err != nil {
+		t.Fatalf("decode account: %v", err)
+	}
+	if accountRow.UseCount != 8 || accountRow.EffectiveSlots != 8 {
+		t.Fatalf("display capacity = useCount %d effectiveSlots %d, want 8/8",
+			accountRow.UseCount, accountRow.EffectiveSlots)
+	}
+
+	resp, body = createLeaseCall(t, fixture.ts, map[string]any{
 		"userId": fixture.user.ID, "platform": "android",
 	}, "")
 	requireStatus(t, resp, http.StatusCreated)
@@ -117,15 +133,9 @@ func TestCreateLeaseMultiSlotWarning(t *testing.T) {
 	resp, body = createLeaseCall(t, fixture.ts, map[string]any{
 		"userId": second.ID, "platform": "android",
 	}, "")
-	requireStatus(t, resp, http.StatusCreated)
-	if warning := decodeBody[leaseCreateResult](t, body).Warning; warning != "multi_session_unimplemented" {
-		t.Fatalf("second warning = %q, want multi_session_unimplemented", warning)
-	}
-
-	third := fixture.addUser(t, "third-bot", nil)
-	resp, body = createLeaseCall(t, fixture.ts, map[string]any{
-		"userId": third.ID, "platform": "android",
-	}, "")
 	requireStatus(t, resp, http.StatusTooManyRequests)
 	requireLeaseReason(t, body, "account_slots_exhausted")
+	if got := len(fixture.st.Leases()); got != 1 {
+		t.Fatalf("leases after refusal = %d, want 1", got)
+	}
 }

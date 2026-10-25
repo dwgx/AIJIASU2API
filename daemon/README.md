@@ -1140,13 +1140,15 @@ answers 201 with `{lease, replayed?, warning?}`.
   409 `lease_conflict`; unknown pinned account → 404 `account_not_found`; a pin of another platform
   → 400 `invalid_lease`; a pinned account that is paused, failed or expired → 409
   `account_unavailable`; the account already at its concurrency → 429 `concurrency_exceeded`; the
-  account already holds its effective slot count → 429 `account_slots_exhausted`; no account of
+  account already holds its one admission slot → 429 `account_slots_exhausted`; no account of
   that platform can take another lease → 429 `concurrency_exceeded` or `no_capacity`, depending on
-  which guard blocked it. **Effective slots** are `min(account.useCount, AJS_ACCOUNT_SLOTS)`, with
-  `useCount` the vendor's purchased 同时连接数 (1–2000, default 1) and `AJS_ACCOUNT_SLOTS` defaulting
-  to `1`. Above one, a successful create also returns `warning: multi_session_unimplemented`: the
-  lease row is real, but this daemon still serves only one FV session per account until per-slot
-  device identities and multiple sessions are implemented.
+  which guard blocked it. **Effective slots** are the display capacity
+  `min(account.useCount, AJS_ACCOUNT_SLOTS, 8)`, with `useCount` the vendor's purchased 同时连接数
+  (1–2000, default 1) and `AJS_ACCOUNT_SLOTS` defaulting to `1`. Lease **admission** is hard-capped
+  at one until the multi-slot runtime lands, so a second lease on the same account is refused even
+  when display capacity is above one. Above one, a successful create also returns
+  `warning: multi_session_unimplemented`: the lease row is real, but this daemon still serves only
+  one FV session per account until per-slot device identities and multiple sessions are implemented.
 - **TTL.** `ttlSeconds: 0` uses the user's sticky TTL, then the panel lease TTL; an explicit value
   must be 60 s – 7 days. An unsupported platform, a malformed body or an out-of-range TTL is 400
   (`invalid_lease` / `INVALID_ARGUMENT`).
@@ -1316,7 +1318,7 @@ test binary as the child.
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
-| `AJS_ACCOUNT_SLOTS` | — | `1` | per-account lease slot cap, 1–2000. Effective slots = `min(vendor UseCount, this value)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Keep the default `1` for live use: multi-session is not implemented, and any value above 1 makes lease creates carry `warning: multi_session_unimplemented`. An invalid value falls back to `1` |
+| `AJS_ACCOUNT_SLOTS` | — | `1` | per-account display capacity cap, 1–2000. Effective slots = `min(vendor UseCount, this value, 8)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Lease admission is hard-capped at one until multi-session is implemented, so any value above 1 only raises the display capacity and makes the first lease carry `warning: multi_session_unimplemented`. An invalid value falls back to `1` |
 | `AJS_AUTO_LOGIN` | — | `0` | `1` runs the startup auto-login after the snapshot is loaded: at most one vendor `Login` per account per process start for accounts with a sealed password and a current node or selection (`paused`/`expired` skipped), serialized in store order, followed by the normal `SyncAccount` gate sync and one `account.login` event. A failure pauses a jittered 60s (`48–72s`) before the next account and is never retried. Requires `AJS_ACCOUNT_LOGIN=1`; otherwise startup logs `auto_login_disabled`. Off by default, so a boot contacts no vendor host |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile: `linux-4.2.3.0` (default, live-tested) or `linux-4.3.0.1` (static analysis only; unsigned live acceptance unverified); an unknown value fails startup when login is enabled |
@@ -2347,7 +2349,7 @@ objects.
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
 | POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
 | GET | `/v1/leases` | list; filter `user_id` |
-| POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`account_slots_exhausted`/`no_capacity`; `warning: multi_session_unimplemented` when effectiveSlots > 1 |
+| POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`account_slots_exhausted`/`no_capacity`; `warning: multi_session_unimplemented` when display capacity effectiveSlots > 1 |
 | POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17 |
 | DELETE | `/v1/leases/{id}` | body `{confirm:true}` → 204; panel: delete Resin lease (404 idempotent), then store row; fallback: store release; decrement node `inUse`; a missing confirm → 400 |
 | GET | `/v1/users` | list |
