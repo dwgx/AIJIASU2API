@@ -77,7 +77,11 @@ type LoginResult struct {
 	MembershipStatus string
 	ExpireTime       int64
 	Expired          bool
-	Servers          map[string]apifacade.Server
+	// UseCount is the vendor's purchased simultaneous-connection allowance
+	// (同时连接数), normalized to 1..2000. A response that omits the field
+	// defaults to one.
+	UseCount int
+	Servers  map[string]apifacade.Server
 	// FetchedAt is when this result was retained. The Lab catalog uses it as
 	// the snapshot timestamp; it is not a credential.
 	FetchedAt time.Time
@@ -156,6 +160,7 @@ func convertLogin(result *apifacade.LoginResult) LoginResult {
 		MembershipStatus: result.MembershipStatus,
 		ExpireTime:       result.ExpireTime,
 		Expired:          result.Expired,
+		UseCount:         NormalizeUseCount(result.UseCount),
 	}
 }
 
@@ -164,6 +169,7 @@ func (c *Control) snapshot(servers map[string]apifacade.Server) LoginResult {
 		Token:           Secret(c.client.LoginToken),
 		UserName:        c.client.UserName,
 		ConnectPassword: Secret(c.client.ConnectPassword),
+		UseCount:        NormalizeUseCount(0),
 		Servers:         servers,
 	}
 }

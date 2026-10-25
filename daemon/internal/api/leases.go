@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/store"
 	"ajsaccountd/internal/webhook"
@@ -46,6 +47,18 @@ type leaseCreateResult struct {
 // required so a bare DELETE cannot free a customer's node by accident.
 type leaseRevokeRequest struct {
 	Confirm bool `json:"confirm"`
+}
+
+// leaseSlotWarning returns the honest capacity warning for a lease on an
+// account whose effective slot cap is above one. The store has already
+// enforced the cap; this only tells the caller that only the first FV session
+// can actually be served until multi-session is implemented.
+func (s *Server) leaseSlotWarning(accountID string) string {
+	acct, ok := s.store.Account(accountID)
+	if !ok {
+		return ""
+	}
+	return account.MultiSessionWarningFor(account.EffectiveSlots(acct.UseCount, account.ConfiguredAccountSlots()))
 }
 
 // handleCreateLease allocates a free node to a user. The Idempotency-Key
@@ -93,8 +106,16 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	if !replayed {
 		s.emitLeaseEvent(webhook.EventLeaseCreated, lease)
 	}
+	result.Warning = s.leaseSlotWarning(lease.AccountID)
 	if warning := s.runLeasePublishHook(r, LeaseActionCreated, lease); warning != "" {
-		result.Warning = warning
+		if result.Warning != "" {
+			result.Warning += "; " + warning
+		} else {
+			result.Warning = warning
+		}
+	}
+	if result.Warning != "" {
+		w.Header().Set("Warning", warningHeaderValue(result.Warning))
 	}
 	if replayed {
 		w.Header().Set("Idempotency-Replayed", "true")

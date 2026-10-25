@@ -535,3 +535,32 @@ func TestSecretRedaction(t *testing.T) {
 		t.Fatalf("slog has no redaction marker: %s", log.String())
 	}
 }
+
+// TestConvertLoginUseCount pins the vendor capacity mapping: UseCount is the
+// purchased simultaneous-connection allowance, absent means one, and values
+// outside the published 1..2000 range are normalized rather than trusted.
+func TestConvertLoginUseCount(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{name: "absent defaults to one", raw: `{"AuthResult":"OK"}`, want: 1},
+		{name: "one stays one", raw: `{"AuthResult":"OK","UseCount":1}`, want: 1},
+		{name: "purchased value is preserved", raw: `{"AuthResult":"OK","UseCount":37}`, want: 37},
+		{name: "above maximum clamps", raw: `{"AuthResult":"OK","UseCount":5000}`, want: 2000},
+		{name: "negative defaults to one", raw: `{"AuthResult":"OK","UseCount":-3}`, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var vendor apifacade.LoginResult
+			if err := json.Unmarshal([]byte(tc.raw), &vendor); err != nil {
+				t.Fatalf("unmarshal vendor login: %v", err)
+			}
+			got := convertLogin(&vendor)
+			if got.UseCount != tc.want {
+				t.Fatalf("convertLogin().UseCount = %d, want %d", got.UseCount, tc.want)
+			}
+		})
+	}
+}

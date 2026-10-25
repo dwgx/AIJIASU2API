@@ -197,7 +197,7 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 		return model.Account{}, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
 
-	updated, err := s.store.MarkLogin(accountID, result.UserName, result.MembershipStatus, result.Expired)
+	updated, err := s.store.MarkLogin(accountID, result.UserName, result.MembershipStatus, result.Expired, result.UseCount)
 	if err != nil {
 		control.Close()
 		return model.Account{}, fmt.Errorf("account: record login for %q: %w", accountID, err)

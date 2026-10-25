@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,53 @@ const (
 	DefaultLeaseTTLSeconds = 8 * 3600
 	maxIdempotencyKeyLen   = 128
 )
+
+// Account slot bounds. The vendor sells UseCount between 1 and 2000; the
+// operator cap AJS_ACCOUNT_SLOTS uses the same range and defaults to one.
+const (
+	defaultAccountSlots = 1
+	maxAccountSlots     = 2000
+	accountSlotsEnv     = "AJS_ACCOUNT_SLOTS"
+)
+
+// normalizeAccountUseCount keeps the vendor's UseCount in its documented
+// range. A missing field (zero) means one simultaneous connection.
+func normalizeAccountUseCount(useCount int) int {
+	if useCount < 1 {
+		return defaultAccountSlots
+	}
+	if useCount > maxAccountSlots {
+		return maxAccountSlots
+	}
+	return useCount
+}
+
+// configuredAccountSlots reads AJS_ACCOUNT_SLOTS. This package cannot import
+// internal/account (that package imports store), so the small parse lives
+// here; invalid or out-of-range values fall back to the safe default of one
+// rather than widening the cap.
+func configuredAccountSlots() int {
+	raw := strings.TrimSpace(os.Getenv(accountSlotsEnv))
+	if raw == "" {
+		return defaultAccountSlots
+	}
+	slots, err := strconv.Atoi(raw)
+	if err != nil || slots < 1 || slots > maxAccountSlots {
+		return defaultAccountSlots
+	}
+	return slots
+}
+
+// effectiveAccountSlots is the lease cap actually enforced for one account:
+// min(vendor UseCount, AJS_ACCOUNT_SLOTS), both normalized to 1..2000.
+func effectiveAccountSlots(account model.Account) int {
+	useCount := normalizeAccountUseCount(account.UseCount)
+	slots := configuredAccountSlots()
+	if useCount < slots {
+		return useCount
+	}
+	return slots
+}
 
 // LeaseError is a create/revoke refusal carrying the machine-readable reason
 // the API copies into the error envelope. Kind is one of ErrInvalid,
@@ -35,6 +83,23 @@ func leaseErrorf(kind error, reason, format string, args ...any) error {
 	return &LeaseError{Kind: kind, Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
+// SetAccountUseCount records the vendor's purchased simultaneous-connection
+// allowance (UseCount) for one account. It is a login-result field, not an
+// operator setting: zero or negative means the vendor omitted it and is stored
+// as one, and values above 2000 are clamped. The value persists with the next
+// state snapshot.
+func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.accountIndexLocked(id)
+	if idx < 0 {
+		return model.Account{}, notFoundf("account %q not found", id)
+	}
+	s.accounts[idx].UseCount = normalizeAccountUseCount(useCount)
+	return cloneAccount(s.accounts[idx]), nil
+}
+
 // CreateLease allocates one free node to a user. The bool reports an
 // idempotent replay: the same IdempotencyKey already produced the returned
 // lease, so nothing was allocated a second time.
@@ -46,6 +111,8 @@ func leaseErrorf(kind error, reason, format string, args ...any) error {
 //	account_unavailable   the pinned account is paused, failed or expired
 //	quota_exceeded        the user's monthly quota is exhausted
 //	concurrency_exceeded  the account already runs its concurrency limit
+//	account_slots_exhausted the account already holds its effective slot count
+//	                      (min(UseCount, AJS_ACCOUNT_SLOTS), default one)
 //	no_capacity           no active account of the platform has a free node
 //
 // One lease per node is enforced by excluding every node that already has an
@@ -220,10 +287,16 @@ func (s *Store) pickLeaseTargetLocked(accountID string, platform model.Platform,
 		if err := leaseAccountAvailable(account, now); err != nil {
 			return 0, 0, err
 		}
-		if s.accountLeaseCountLocked(account.ID) >= account.Concurrency {
+		active := s.accountLeaseCountLocked(account.ID)
+		if active >= account.Concurrency {
 			return 0, 0, leaseErrorf(ErrQuota, "concurrency_exceeded",
 				"account %q reached its concurrency of %d active leases",
 				account.Label, account.Concurrency)
+		}
+		if slots := effectiveAccountSlots(account); active >= slots {
+			return 0, 0, leaseErrorf(ErrQuota, "account_slots_exhausted",
+				"account %q has no free lease slot (effectiveSlots %d)",
+				account.Label, slots)
 		}
 		nodeIdx := s.pickLeaseNodeLocked(account.ID)
 		if nodeIdx < 0 {
@@ -234,6 +307,7 @@ func (s *Store) pickLeaseTargetLocked(accountID string, platform model.Platform,
 	}
 
 	blockedByConcurrency := false
+	blockedBySlots := false
 	blockedByNode := false
 	for idx, account := range s.accounts {
 		if account.Platform != platform {
@@ -242,14 +316,23 @@ func (s *Store) pickLeaseTargetLocked(accountID string, platform model.Platform,
 		if leaseAccountAvailable(account, now) != nil {
 			continue
 		}
-		if s.accountLeaseCountLocked(account.ID) >= account.Concurrency {
+		active := s.accountLeaseCountLocked(account.ID)
+		if active >= account.Concurrency {
 			blockedByConcurrency = true
+			continue
+		}
+		if slots := effectiveAccountSlots(account); active >= slots {
+			blockedBySlots = true
 			continue
 		}
 		if nodeIdx := s.pickLeaseNodeLocked(account.ID); nodeIdx >= 0 {
 			return idx, nodeIdx, nil
 		}
 		blockedByNode = true
+	}
+	if blockedBySlots && !blockedByNode {
+		return 0, 0, leaseErrorf(ErrQuota, "account_slots_exhausted",
+			"every active %s account has reached its lease slot cap", platform)
 	}
 	if blockedByConcurrency && !blockedByNode {
 		return 0, 0, leaseErrorf(ErrQuota, "concurrency_exceeded",

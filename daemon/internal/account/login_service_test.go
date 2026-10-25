@@ -583,3 +583,47 @@ func TestLoginServiceForget(t *testing.T) {
 	}
 	service.Forget(account.ID) // idempotent
 }
+
+// TestLoginServicePersistsUseCount proves the vendor's purchased
+// simultaneous-connection allowance travels from the Login response through
+// MarkLogin into the stored account, and survives a state snapshot.
+func TestLoginServicePersistsUseCount(t *testing.T) {
+	st := store.NewWithSealer(plainSealer{})
+	account := newLoginAccount(t, st)
+	reply := `{"Login":{"AuthResult":"OK","LoginToken":"tok-1|user","UserName":"user",` +
+		`"ConnectPassword":"cp-1","MembershipStatus":"vip","ExpireTime":1767225600000,` +
+		`"Expired":false,"UseCount":4}}`
+	server, _ := newFake(t, func(capturedRequest) (int, string) {
+		return http.StatusOK, reply
+	})
+	service := newTestLoginService(t, st, server.URL, nil)
+
+	updated, err := service.Login(context.Background(), account.ID)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if updated.UseCount != 4 {
+		t.Fatalf("updated.UseCount = %d, want 4", updated.UseCount)
+	}
+	stored, ok := st.Account(account.ID)
+	if !ok || stored.UseCount != 4 {
+		t.Fatalf("stored account UseCount = %d (ok=%v), want 4", stored.UseCount, ok)
+	}
+	result, ok := service.Result(account.ID)
+	if !ok || result.UseCount != 4 {
+		t.Fatalf("retained LoginResult UseCount = %d (ok=%v), want 4", result.UseCount, ok)
+	}
+
+	snapshot, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	fresh := store.NewEmpty()
+	if err := fresh.Restore(snapshot); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	restored, ok := fresh.Account(account.ID)
+	if !ok || restored.UseCount != 4 {
+		t.Fatalf("restored UseCount = %d (ok=%v), want 4", restored.UseCount, ok)
+	}
+}

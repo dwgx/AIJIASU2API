@@ -19,6 +19,9 @@ type leaseTestFixture struct {
 
 func newLeaseFixture(t *testing.T, now *time.Time, platform model.Platform, concurrency int) leaseTestFixture {
 	t.Helper()
+	// The shared fixture exercises allocation, not the default one-slot
+	// guard; individual slot tests set AJS_ACCOUNT_SLOTS after construction.
+	t.Setenv("AJS_ACCOUNT_SLOTS", "8")
 	st := newEmptyWithClock(func() time.Time { return *now }, nil)
 	account, err := st.CreateAccount(model.CreateAccountInput{
 		Label:       "Northwind Ops",
@@ -29,6 +32,9 @@ func newLeaseFixture(t *testing.T, now *time.Time, platform model.Platform, conc
 	})
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
+	}
+	if _, err := st.SetAccountUseCount(account.ID, 8); err != nil {
+		t.Fatalf("SetAccountUseCount: %v", err)
 	}
 	if _, err := st.PutNode(model.ProxyNode{
 		ID: "node-ready", AccountID: account.ID, Label: "cn-zj-01", Region: "cn-zj",

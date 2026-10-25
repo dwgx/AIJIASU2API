@@ -847,6 +847,7 @@ func (s *Store) insertAccountLocked(id, label, username string, platform model.P
 		Platform:    platform,
 		State:       model.AccountActive,
 		Concurrency: concurrency,
+		UseCount:    1,
 		Regions:     regions,
 		UsageBytes:  0,
 		ExpiresAt:   iso(now.Add(30 * 24 * time.Hour)),
@@ -1123,9 +1124,11 @@ func (s *Store) LoginAccount(id string) (model.Account, error) {
 // MarkLogin records a successful vendor login. The state becomes active, or
 // expired when the vendor reports an expired membership; LastLoginAt is now,
 // the vendor's canonical user name replaces the stored one when non-empty, and
-// an account.login audit event records the membership. It never stores a token
-// or connect password.
-func (s *Store) MarkLogin(id, userName, membership string, expired bool) (model.Account, error) {
+// an account.login audit event records the membership. The optional useCount
+// is the vendor's purchased simultaneous-connection allowance and is stored
+// normalized to 1..2000; when it is omitted the stored value is left alone.
+// It never stores a token or connect password.
+func (s *Store) MarkLogin(id, userName, membership string, expired bool, useCount ...int) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1135,6 +1138,9 @@ func (s *Store) MarkLogin(id, userName, membership string, expired bool) (model.
 	}
 	account := &s.accounts[idx]
 	account.LastLoginAt = iso(s.now())
+	if len(useCount) > 0 {
+		account.UseCount = normalizeAccountUseCount(useCount[0])
+	}
 	if userName = clientMessage(userName); userName != "" {
 		account.Username = userName
 	}
@@ -1337,6 +1343,11 @@ func clientMessage(value string) string {
 func cloneAccount(account model.Account) model.Account {
 	account.Regions = append([]string{}, account.Regions...)
 	account.TrafficBudgetBytes = copyInt64(account.TrafficBudgetBytes)
+	// A pre-UseCount snapshot has no field and decodes as zero; the vendor
+	// default is one simultaneous connection. Normalize on every read so the
+	// API and the lease guard cannot disagree about an old account.
+	account.UseCount = normalizeAccountUseCount(account.UseCount)
+	account.EffectiveSlots = 0
 	return account
 }
 

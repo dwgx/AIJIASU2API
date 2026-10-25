@@ -96,16 +96,25 @@ const (
 
 // Account mirrors the dashboard Account interface.
 type Account struct {
-	ID            string       `json:"id"`
-	Label         string       `json:"label"`
-	Username      string       `json:"username"`
-	Platform      Platform     `json:"platform"`
-	State         AccountState `json:"state"`
-	Concurrency   int          `json:"concurrency"`
-	Regions       []string     `json:"regions"`
-	NodeCount     int          `json:"nodeCount"`
-	LiveNodeCount int          `json:"liveNodeCount"`
-	UsageBytes    int64        `json:"usageBytes"`
+	ID          string       `json:"id"`
+	Label       string       `json:"label"`
+	Username    string       `json:"username"`
+	Platform    Platform     `json:"platform"`
+	State       AccountState `json:"state"`
+	Concurrency int          `json:"concurrency"`
+	// UseCount is the vendor's purchased simultaneous-connection allowance
+	// (同时连接数) from the last successful login, normalized to 1..2000.
+	// Zero in an older snapshot means 1. It is a vendor entitlement, not the
+	// operator's lease cap.
+	UseCount int `json:"useCount"`
+	// EffectiveSlots is derived for API responses from UseCount and
+	// AJS_ACCOUNT_SLOTS (min of the two, default 1). It is never persisted and
+	// stays zero on store rows.
+	EffectiveSlots int      `json:"effectiveSlots,omitempty"`
+	Regions        []string `json:"regions"`
+	NodeCount      int      `json:"nodeCount"`
+	LiveNodeCount  int      `json:"liveNodeCount"`
+	UsageBytes     int64    `json:"usageBytes"`
 	// TrafficBudgetBytes is the monthly gate-enforced traffic budget. Nil
 	// means unlimited; zero is a real budget that refuses every byte.
 	TrafficBudgetBytes *int64 `json:"trafficBudgetBytes"`

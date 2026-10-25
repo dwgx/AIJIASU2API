@@ -14,6 +14,14 @@ import (
 	"ajsaccountd/internal/webhook"
 )
 
+// withEffectiveSlots fills the derived lease capacity of one account for a
+// response. UseCount is persisted; EffectiveSlots is recomputed on every read
+// so an AJS_ACCOUNT_SLOTS change applies without a new login.
+func withEffectiveSlots(acct model.Account) model.Account {
+	acct.EffectiveSlots = account.EffectiveSlots(acct.UseCount, account.ConfiguredAccountSlots())
+	return acct
+}
+
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	accounts := s.filterAccountsForRequest(r, s.store.Accounts())
@@ -22,7 +30,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		if state != "" && string(account.State) != state {
 			continue
 		}
-		filtered = append(filtered, account)
+		filtered = append(filtered, withEffectiveSlots(account))
 	}
 	start, end, ok := paginate(w, r, len(filtered))
 	if !ok {
@@ -37,7 +45,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, account)
+	writeJSON(w, http.StatusOK, withEffectiveSlots(account))
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +58,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, account)
+	writeJSON(w, http.StatusCreated, withEffectiveSlots(account))
 }
 
 func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +103,7 @@ func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, account)
+	writeJSON(w, http.StatusOK, withEffectiveSlots(account))
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +164,7 @@ func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 			"label":     updated.Label,
 			"state":     string(updated.State),
 		})
-		writeJSON(w, http.StatusOK, updated)
+		writeJSON(w, http.StatusOK, withEffectiveSlots(updated))
 		return
 	}
 	updated, err := s.cfg.LoginService.Login(r.Context(), id)
@@ -173,7 +181,7 @@ func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 		"label":     updated.Label,
 		"state":     string(updated.State),
 	})
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, withEffectiveSlots(updated))
 }
 
 // runLoginHook hands a successful login to the node controller. The login is
@@ -242,7 +250,7 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		"label":     account.Label,
 		"state":     string(account.State),
 	})
-	writeJSON(w, http.StatusOK, account)
+	writeJSON(w, http.StatusOK, withEffectiveSlots(account))
 }
 
 // runAccountLogoutHook stops the account's runtime gates before the store
