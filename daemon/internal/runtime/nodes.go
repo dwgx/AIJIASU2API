@@ -515,6 +515,14 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	started := 0
 	for _, plan := range plans {
 		if plan.srv.id == "" {
+			// A slot that still carries an active lease keeps serving: a plan
+			// with no target is not a reason to close a customer's endpoint or
+			// delete its node. The lease must be revoked explicitly first.
+			if c.slotLeasedLocked(plan.key) {
+				failures = append(failures, fmt.Errorf("slot %s: kept, an active lease still pins it", plan.key.String()))
+				c.logger.Warn("slot_removal_blocked_by_lease", "account_id", accountID, "slot", plan.key.String())
+				continue
+			}
 			if errs := c.closeSlotLocked(plan.key); len(errs) > 0 {
 				failures = append(failures, fmt.Errorf("slot %s: %w", plan.key.String(), errors.Join(errs...)))
 			}
@@ -597,18 +605,59 @@ type slotPlan struct {
 }
 
 // planSlotsLocked assigns at most one server per slot. A server is never
-// reused across slots in this step, and the persisted selection only fixes
-// slot 1's target.
+// reused across slots: every slot's persisted and currently running server is
+// reserved before the first fallback is chosen, including slots above the
+// capacity that still serve a lease. Without that pre-reservation slot N's
+// fallback can pick slot M's server, which either kicks M's vendor session or
+// closes it when M's own plan then finds its server taken.
+//
+// The persisted selection only fixes slot 1's target. A target another slot
+// owns is refused (empty plan) instead of stolen.
 func (c *NodeController) planSlotsLocked(accountID string, slots []model.AccountSlot, servers []serverRef, result account.LoginResult) []slotPlan {
 	plans := make([]slotPlan, len(slots))
+	owners := make(map[string]map[model.SlotKey]struct{})
+	own := func(serverID string, key model.SlotKey) {
+		if serverID == "" {
+			return
+		}
+		set := owners[serverID]
+		if set == nil {
+			set = make(map[model.SlotKey]struct{}, 1)
+			owners[serverID] = set
+		}
+		set[key] = struct{}{}
+	}
+	for _, slot := range c.store.Slots(accountID) {
+		own(slot.ServerID, slot.SlotKey)
+	}
+	for _, running := range c.running {
+		if running.accountID != accountID {
+			continue
+		}
+		own(running.serverID, running.slot)
+	}
 	used := make(map[string]struct{}, len(slots))
 	take := func(id string) { used[id] = struct{}{} }
-	nextUnused := func() serverRef {
+	// freeFor reports whether srv may serve key in this pass: the slot owns
+	// it, or no slot owns it and no earlier slot took it.
+	freeFor := func(srv serverRef, key model.SlotKey) bool {
+		if srv.id == "" {
+			return false
+		}
+		if _, taken := used[srv.id]; taken {
+			return false
+		}
+		if set, owned := owners[srv.id]; owned {
+			_, mine := set[key]
+			return mine
+		}
+		return true
+	}
+	nextUnused := func(key model.SlotKey) serverRef {
 		for _, srv := range servers {
-			if _, taken := used[srv.id]; taken {
-				continue
+			if freeFor(srv, key) {
+				return srv
 			}
-			return srv
 		}
 		return serverRef{}
 	}
@@ -618,9 +667,7 @@ func (c *NodeController) planSlotsLocked(accountID string, slots []model.Account
 		var target serverRef
 		if slot.Index == 1 && hasSelection {
 			selected, found := findServer(result.Servers, selection.ServerID)
-			if found && selected.server.OK() {
-				target = selected
-			} else {
+			if !found || !selected.server.OK() {
 				reason := "server_missing"
 				if found {
 					reason = "server_ineligible"
@@ -631,17 +678,25 @@ func (c *NodeController) planSlotsLocked(accountID string, slots []model.Account
 				c.logger.Info("catalog_selection_lost", "account_id", accountID,
 					"server_id", selection.ServerID, "reason", reason)
 				hasSelection = false
+			} else if freeFor(selected, key) {
+				target = selected
+			} else {
+				// Another slot owns the selected server: keep the selection
+				// (the sibling may move later) and fail this slot down rather
+				// than stealing the session.
+				c.logger.Warn("catalog_selection_conflict", "account_id", accountID,
+					"server_id", selected.id, "slot", key.String())
 			}
 		}
 		if target.id == "" && slot.ServerID != "" {
 			if previous, found := findServer(result.Servers, slot.ServerID); found && previous.server.OK() {
-				if _, taken := used[previous.id]; !taken {
+				if freeFor(previous, key) {
 					target = previous
 				}
 			}
 		}
 		if target.id == "" {
-			target = nextUnused()
+			target = nextUnused(key)
 		}
 		if target.id != "" {
 			take(target.id)
@@ -852,6 +907,9 @@ func (c *NodeController) markSlotDownLocked(key model.SlotKey, acct model.Accoun
 			if node, ok := c.store.Node(id); ok {
 				node.State = model.NodeDown
 				node.GatePort = 0
+				// A DOWN node has no listener, so it must not keep
+				// advertising an egress address either.
+				node.EgressIP = ""
 				if _, err := c.store.PutNode(node); err != nil {
 					c.logger.Warn("node_state_write_failed", "node_id", id,
 						"account_id", acct.ID, "state", string(model.NodeDown), "error", err)
@@ -1276,8 +1334,32 @@ func applyServerToNode(node model.ProxyNode, acct model.Account, key model.SlotK
 	return node
 }
 
+// slotLeasedLocked reports whether any node the slot currently serves (its
+// running gate or a persisted node row) carries an active lease. Cleanup and
+// target-loss paths read it so a customer entitlement is never closed or
+// deleted silently.
+func (c *NodeController) slotLeasedLocked(key model.SlotKey) bool {
+	if id, ok := c.slotGates[key]; ok {
+		if len(c.store.NodeLeases(id)) > 0 {
+			return true
+		}
+	}
+	for _, node := range c.store.Nodes() {
+		if node.AccountID != key.AccountID || node.Slot != key.Index {
+			continue
+		}
+		if len(c.store.NodeLeases(node.ID)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // removeUndesiredLocked closes the gates of servers the login no longer lists
-// and deletes their nodes, including nodes this controller never owned.
+// and deletes their nodes, including nodes this controller never owned. A node
+// that still carries an active lease is kept: cleanup may not silently revoke a
+// customer entitlement, so the lease must be revoked explicitly (a failed
+// switch, a kick or an operator disconnect) before the row can go.
 func (c *NodeController) removeUndesiredLocked(accountID string, desired map[string]struct{}) []error {
 	var failures []error
 	for id, running := range c.running {
@@ -1285,6 +1367,12 @@ func (c *NodeController) removeUndesiredLocked(accountID string, desired map[str
 			continue
 		}
 		if _, keep := desired[id]; keep {
+			continue
+		}
+		if leases := c.store.NodeLeases(id); len(leases) > 0 {
+			failures = append(failures, fmt.Errorf("node %s: kept, %d active lease(s) still pin it", id, len(leases)))
+			c.logger.Warn("node_removal_blocked_by_lease", "node_id", id, "account_id", accountID,
+				"server_id", running.serverID, "leases", len(leases))
 			continue
 		}
 		failures = append(failures, c.closeGateLocked(id, running)...)
@@ -1306,8 +1394,15 @@ func (c *NodeController) removeUndesiredLocked(accountID string, desired map[str
 		if _, owned := c.running[node.ID]; owned {
 			continue
 		}
-		if err := c.store.DeleteNode(node.ID); err != nil {
+		removed, err := c.store.DeleteNodeUnleased(node.ID)
+		if err != nil {
 			failures = append(failures, fmt.Errorf("node %s: delete: %w", node.ID, err))
+			continue
+		}
+		if !removed {
+			failures = append(failures, fmt.Errorf("node %s: kept, an active lease still pins it", node.ID))
+			c.logger.Warn("node_removal_blocked_by_lease", "node_id", node.ID, "account_id", accountID,
+				"server_id", node.ServerID)
 			continue
 		}
 		c.logger.Info("node_removed", "node_id", node.ID, "account_id", accountID, "server_id", node.ServerID)
@@ -1330,13 +1425,22 @@ type gateAddresses struct {
 // (a lease stores GatePort, so there is no fallback port).
 func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, session account.FlowSession, addrs gateAddresses) (Gate, gateAddresses, error) {
 	id := nodeID(key, srv.id)
+	// The gate stamps the generation its flows belong to. Both callers open a
+	// session for slot.Generation+1 and hold the controller lock, so the row
+	// read here is the same generation the commit will write.
+	generation := uint64(1)
+	if slot, ok := c.store.Slot(key); ok {
+		generation = slot.Generation + 1
+	}
 	cfg := gate.Config{
-		NodeID:    id,
-		AccountID: key.AccountID,
-		Listen:    net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.socks)),
-		Limit:     gateFlowLimit,
-		Logger:    c.logger,
-		AuthMode:  c.gateAuth,
+		NodeID:     id,
+		AccountID:  key.AccountID,
+		Slot:       key.Index,
+		Generation: generation,
+		Listen:     net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.socks)),
+		Limit:      gateFlowLimit,
+		Logger:     c.logger,
+		AuthMode:   c.gateAuth,
 	}
 	if addrs.http > 0 {
 		cfg.HTTPListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.http))

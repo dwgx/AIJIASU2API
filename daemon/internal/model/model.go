@@ -351,20 +351,25 @@ type WebhookDelivery struct {
 // gate listener that carried the flow ("socks5" or "http"); it is empty for
 // rows written by another source (the mutation lab or seeded demo traffic).
 type RequestLog struct {
-	ID           string        `json:"id"`
-	TS           string        `json:"ts"`
-	UserID       string        `json:"userId"`
-	UserName     string        `json:"userName"`
-	AccountLabel string        `json:"accountLabel"`
-	NodeLabel    string        `json:"nodeLabel"`
-	Region       string        `json:"region"`
-	Method       string        `json:"method"`
-	Protocol     string        `json:"protocol,omitempty"`
-	Target       string        `json:"target"`
-	Status       int           `json:"status"`
-	Bytes        int64         `json:"bytes"`
-	LatencyMs    int           `json:"latencyMs"`
-	Source       RequestSource `json:"source"`
+	ID           string `json:"id"`
+	TS           string `json:"ts"`
+	UserID       string `json:"userId"`
+	UserName     string `json:"userName"`
+	AccountLabel string `json:"accountLabel"`
+	NodeLabel    string `json:"nodeLabel"`
+	Region       string `json:"region"`
+	// Slot and Generation attribute a gate row to the account slot and the
+	// session generation that served it. Zero means the row predates
+	// multi-slot attribution (or came from a legacy standalone gate).
+	Slot       int           `json:"slot,omitempty"`
+	Generation uint64        `json:"generation,omitempty"`
+	Method     string        `json:"method"`
+	Protocol   string        `json:"protocol,omitempty"`
+	Target     string        `json:"target"`
+	Status     int           `json:"status"`
+	Bytes      int64         `json:"bytes"`
+	LatencyMs  int           `json:"latencyMs"`
+	Source     RequestSource `json:"source"`
 	// MeteredLive marks a gate row whose bytes already advanced the durable
 	// monthly counters while the flow was relaying. AppendRequest still stores
 	// the row for the usage log but must not count it a second time. It is

@@ -58,6 +58,10 @@ type FlowRecord struct {
 	DurationMs int64     `json:"durationMs"`
 	NodeID     string    `json:"nodeId,omitempty"`
 	AccountID  string    `json:"accountId,omitempty"`
+	// Slot and Generation identify the account slot and session generation
+	// that served the flow. They are attribution only and never a credential.
+	Slot       int    `json:"slot,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
 	// UserID and UserName attribute an authenticated flow to a panel user.
 	// They are empty in loopback mode and are attribution only: no key id,
 	// key prefix, username/password frame or authenticator input ever
@@ -163,6 +167,10 @@ func (s *Server) durationMs(started time.Time) int64 {
 func (s *Server) recordFlow(record FlowRecord) {
 	record.ID = s.nextFlowID()
 	record.DurationMs = s.durationMs(record.StartedAt)
+	// The gate is the authority for which slot/generation served the flow, so
+	// a record cannot disagree with the listener that admitted it.
+	record.Slot = s.cfg.Slot
+	record.Generation = s.cfg.Generation
 	s.flowRing.add(record)
 	if s.cfg.OnFlow != nil {
 		s.cfg.OnFlow(record)

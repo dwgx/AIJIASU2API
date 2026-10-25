@@ -282,6 +282,14 @@ func (c *NodeController) ConnectSlot(ctx context.Context, key model.SlotKey, ser
 	c.noteAttempt(key)
 	res, err := c.switchSlotLocked(ctx, acct, result, target, old, key, trigger, start)
 	if err != nil {
+		// A break-before-make failure revoked the old endpoint; the panel must
+		// stop advertising it in the same request, not on a later sync.
+		if res.Rollback == ReasonMetadataOnly {
+			if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
+				c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
+				res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+			}
+		}
 		return res, err
 	}
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
@@ -352,6 +360,12 @@ func (c *NodeController) ReconnectSlot(ctx context.Context, key model.SlotKey, s
 	c.noteAttempt(key)
 	res, err := c.switchSlotLocked(ctx, acct, result, target, old, key, trigger, start)
 	if err != nil {
+		if res.Rollback == ReasonMetadataOnly {
+			if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
+				c.logger.Warn("catalog_reconcile_failed", "account_id", key.AccountID, "trigger", trigger, "error", reconcileErr)
+				res.Warnings = append(res.Warnings, ReasonReconcileFailed)
+			}
+		}
 		return res, err
 	}
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
@@ -400,6 +414,13 @@ func (c *NodeController) DisconnectSlot(ctx context.Context, key model.SlotKey) 
 		result.DurationMs = c.now().Sub(start).Milliseconds()
 		return result, nil
 	}
+	// Capture the entitlement and generation before the node row goes away:
+	// the audit must name what the disconnect released.
+	leases := c.store.NodeLeases(nodeID(key, running.serverID))
+	generation := uint64(0)
+	if slot, ok := c.store.Slot(key); ok {
+		generation = slot.Generation
+	}
 	entry := c.disconnectSlotLocked(ctx, key, running)
 	result.Slot = entry.Slot
 	result.ServerID = entry.ServerID
@@ -407,15 +428,25 @@ func (c *NodeController) DisconnectSlot(ctx context.Context, key model.SlotKey) 
 	result.Forced = entry.Forced
 	result.ActiveFlows = entry.ActiveFlows
 	result.DurationMs = c.now().Sub(start).Milliseconds()
+	meta := map[string]string{
+		"nodeId":      entry.NodeID,
+		"serverId":    entry.ServerID,
+		"slot":        key.String(),
+		"generation":  strconv.FormatUint(generation, 10),
+		"forced":      strconv.FormatBool(entry.Forced),
+		"activeFlows": strconv.Itoa(entry.ActiveFlows),
+		"durationMs":  strconv.FormatInt(result.DurationMs, 10),
+	}
+	if len(leases) > 0 {
+		ids := make([]string, 0, len(leases))
+		for _, lease := range leases {
+			ids = append(ids, lease.ID)
+		}
+		meta["leases"] = strconv.Itoa(len(leases))
+		meta["leaseIds"] = strings.Join(ids, ",")
+	}
 	result.AuditID = c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
-		entry.NodeID, "Session disconnected · target kept", map[string]string{
-			"nodeId":      entry.NodeID,
-			"serverId":    entry.ServerID,
-			"slot":        key.String(),
-			"forced":      strconv.FormatBool(entry.Forced),
-			"activeFlows": strconv.Itoa(entry.ActiveFlows),
-			"durationMs":  strconv.FormatInt(result.DurationMs, 10),
-		})
+		entry.NodeID, "Session disconnected · target kept", meta)
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
 		c.logger.Warn("catalog_reconcile_failed", "account_id", acct.ID, "action", "disconnect", "error", reconcileErr)
 		result.Warnings = append(result.Warnings, ReasonReconcileFailed)
@@ -443,7 +474,13 @@ func (c *NodeController) DisconnectAccount(ctx context.Context, accountID string
 		return DisconnectResult{}, &store.Error{Kind: store.ErrNotFound, Message: fmt.Sprintf("account %q not found", accountID)}
 	}
 	result := DisconnectResult{AccountID: accountID, Warnings: []string{}}
+	type slotAudit struct {
+		entry      SlotDisconnectResult
+		generation uint64
+		leaseIDs   []string
+	}
 	slots := c.store.Slots(accountID)
+	audits := make([]slotAudit, 0, len(slots))
 	for i := len(slots) - 1; i >= 0; i-- {
 		key := slots[i].SlotKey
 		running, err := c.slotGateLocked(key)
@@ -453,10 +490,23 @@ func (c *NodeController) DisconnectAccount(ctx context.Context, accountID string
 		if running == nil {
 			continue
 		}
+		// Capture generation and entitlement before the node row is deleted:
+		// the aggregate audit must identify every affected slot, node and
+		// lease, or a cascade cannot be reconstructed later.
+		generation := uint64(0)
+		if slot, ok := c.store.Slot(key); ok {
+			generation = slot.Generation
+		}
+		leases := c.store.NodeLeases(nodeID(key, running.serverID))
+		leaseIDs := make([]string, 0, len(leases))
+		for _, lease := range leases {
+			leaseIDs = append(leaseIDs, lease.ID)
+		}
 		entry := c.disconnectSlotLocked(ctx, key, running)
 		result.Slots = append(result.Slots, entry)
 		result.Forced = result.Forced || entry.Forced
 		result.ActiveFlows += entry.ActiveFlows
+		audits = append(audits, slotAudit{entry: entry, generation: generation, leaseIDs: leaseIDs})
 	}
 	if len(result.Slots) == 0 {
 		result.AlreadyDisconnected = true
@@ -473,15 +523,25 @@ func (c *NodeController) DisconnectAccount(ctx context.Context, accountID string
 	if auditTarget == "" {
 		auditTarget = accountID
 	}
+	meta := map[string]string{
+		"nodeId":      result.NodeID,
+		"serverId":    result.ServerID,
+		"slots":       strconv.Itoa(len(result.Slots)),
+		"forced":      strconv.FormatBool(result.Forced),
+		"activeFlows": strconv.Itoa(result.ActiveFlows),
+		"durationMs":  strconv.FormatInt(result.DurationMs, 10),
+	}
+	for _, audit := range audits {
+		prefix := "slot." + strconv.Itoa(audit.entry.Slot) + "."
+		meta[prefix+"nodeId"] = audit.entry.NodeID
+		meta[prefix+"serverId"] = audit.entry.ServerID
+		meta[prefix+"generation"] = strconv.FormatUint(audit.generation, 10)
+		if len(audit.leaseIDs) > 0 {
+			meta[prefix+"leaseIds"] = strings.Join(audit.leaseIDs, ",")
+		}
+	}
 	result.AuditID = c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
-		auditTarget, "Session disconnected · target kept", map[string]string{
-			"nodeId":      result.NodeID,
-			"serverId":    result.ServerID,
-			"slots":       strconv.Itoa(len(result.Slots)),
-			"forced":      strconv.FormatBool(result.Forced),
-			"activeFlows": strconv.Itoa(result.ActiveFlows),
-			"durationMs":  strconv.FormatInt(result.DurationMs, 10),
-		})
+		auditTarget, "Session disconnected · target kept", meta)
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
 		c.logger.Warn("catalog_reconcile_failed", "account_id", accountID, "action", "disconnect", "error", reconcileErr)
 		result.Warnings = append(result.Warnings, ReasonReconcileFailed)
@@ -669,6 +729,7 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		"serverId":   target.id,
 		"nodeId":     newID,
 		"slot":       key.String(),
+		"generation": strconv.FormatUint(slotRow.Generation, 10),
 		"gatePort":   strconv.Itoa(bound.socks),
 		"durationMs": strconv.FormatInt(duration, 10),
 		"trigger":    trigger,
@@ -730,6 +791,11 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 // The rollback string is "restored" only while the old gate is still serving;
 // after the break-before-make close it is metadata_only, because the old
 // session cannot be reopened without risking a vendor kick.
+//
+// A metadata_only failure is also the containment step: the old listener is
+// gone, so its lease and its publication are revoked here, in the same call,
+// instead of surviving as a dead endpoint until a later cleanup deletes the
+// node. That revocation is audited with the lease ids.
 func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, target serverRef, old *nodeGate, trigger string, start time.Time, reason, message, errClass, detail string, cause error) (SwitchResult, error) {
 	duration := c.now().Sub(start).Milliseconds()
 	oldServerID := ""
@@ -742,6 +808,9 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 		if _, live := c.running[oldNodeID]; live {
 			rollback = "restored"
 		}
+	}
+	if old != nil && rollback == ReasonMetadataOnly {
+		c.revokeClosedSlotLocked(key, oldNodeID, oldServerID, reason)
 	}
 	action := "catalog.connect"
 	switch {
@@ -796,6 +865,46 @@ func (c *NodeController) failSlotSwitch(acct model.Account, key model.SlotKey, t
 			Details: map[string]string{"rollback": rollback},
 			Cause:   cause,
 		}
+}
+
+// revokeClosedSlotLocked is the same-step containment of a failed
+// break-before-make switch. The old listener is gone, so its lease must go with
+// it: every active lease on the closed node is revoked (one audit row per
+// lease), the node leaves service without a port or egress (a DOWN row must not
+// advertise an endpoint), and one slot.switch_failed row names the revoked
+// leases. It never touches a sibling slot.
+func (c *NodeController) revokeClosedSlotLocked(key model.SlotKey, oldNodeID, oldServerID, reason string) {
+	revoked := c.store.InvalidateNodeLeases(oldNodeID, "switch_failed:"+reason)
+	if node, ok := c.store.Node(oldNodeID); ok {
+		node.State = model.NodeDown
+		node.GatePort = 0
+		node.EgressIP = ""
+		if _, err := c.store.PutNode(node); err != nil {
+			c.logger.Warn("catalog_revoke_node_failed", "account_id", key.AccountID,
+				"node_id", oldNodeID, "error", err)
+		}
+	}
+	meta := map[string]string{
+		"slot":     key.String(),
+		"nodeId":   oldNodeID,
+		"serverId": oldServerID,
+		"reason":   reason,
+		"leases":   strconv.Itoa(len(revoked)),
+	}
+	if slot, ok := c.store.Slot(key); ok {
+		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
+	}
+	if len(revoked) > 0 {
+		ids := make([]string, 0, len(revoked))
+		for _, lease := range revoked {
+			ids = append(ids, lease.ID)
+		}
+		meta["leaseIds"] = strings.Join(ids, ",")
+	}
+	c.store.WriteAudit(model.SeverityWarn, "operator", "slot.switch_failed", oldNodeID,
+		"Switch failed after the old session closed · lease revoked", meta)
+	c.logger.Warn("catalog_switch_revoked", "account_id", key.AccountID, "slot", key.String(),
+		"node_id", oldNodeID, "server_id", oldServerID, "leases", len(revoked), "reason", reason)
 }
 
 // resolveTarget validates the account, its retained login result, the server

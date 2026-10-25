@@ -269,8 +269,10 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 	// Everything below this line is infallible.
 	s.nodes = kept
 	// A lease on the replaced same-slot node is rebound, not deleted: a switch
-	// inside one slot must not revoke a customer's access. The generation comes
-	// from the slot row, never from a node field.
+	// inside one slot must not revoke a customer's access. A same-server
+	// reconnect keeps the node id, so its lease is refreshed in place too: the
+	// serving generation and the mirrored endpoint must advance with the node.
+	// The generation comes from the slot row, never from a node field.
 	slotGen := uint64(0)
 	if slotRow != nil {
 		slotGen = slotRow.Generation
@@ -278,7 +280,8 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 		slotGen = current.Generation
 	}
 	for i := range s.leases {
-		if _, drop := removed[s.leases[i].NodeID]; !drop {
+		_, drop := removed[s.leases[i].NodeID]
+		if !drop && s.leases[i].NodeID != node.ID {
 			continue
 		}
 		s.leases[i].NodeID = node.ID

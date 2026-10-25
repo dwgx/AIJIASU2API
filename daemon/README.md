@@ -1077,6 +1077,77 @@ Optional auto-login (`AJS_AUTO_LOGIN=1`, default off, requires
   closed leases, one audit row per node, unchanged `READY`/`DOWN` rows, and
   the `STALE` value in `GET /v1/nodes`).
 
+### Multi-slot containment (AJS-350)
+
+The slot rows, lease admission, slot planning and audit trail share four
+invariants. Each is enforced in code, not just documented:
+
+- **A slot is capacity only while it can actually serve.** Admission and lease
+  selection require the slot row to be `LIVE`, the node to be `LIVE`/`READY`,
+  the node's `gatePort` to be non-zero and equal to the slot's reserved
+  `gatePort`, and the slot to back at most one lease. Duplicate node rows for
+  one slot count once, so a `READY` row left by an undrain or a stale duplicate
+  cannot mint a lease for an endpoint with no listener. A legacy node (`slot:
+  0`, pre-multi-slot) keeps the historical answer.
+- **Restart recovery demotes the slot with its node.** `store.DemoteNode` moves
+  the matching slot row to `DOWN`/`degraded` (`lastError:
+  gate_not_bound_after_restart`) in the same write as the
+  `node.recovered_stale` audit, so a later undrain (`READY`, still no listener)
+  cannot satisfy admission. The audit meta gains `slot` and `slotState`.
+- **One port namespace for both listeners.** A slot owns a SOCKS5/HTTP pair;
+  `UpsertSlot`, `SetSlotPorts` and snapshot load reject all four cross-slot
+  collisions (gate/gate, http/http, gate/http, http/gate), matching the
+  runtime reservation set that already treats them as one namespace.
+- **A server belongs to at most one slot.** `planSlotsLocked` pre-reserves
+  every slot's persisted and currently running server, including slots above
+  the capacity that still serve a lease, before choosing any fallback. A target
+  another slot owns is refused (empty plan, `catalog_selection_conflict` log)
+  instead of stolen, so slot N's fallback can no longer open a second vendor
+  session against slot M's server or close M.
+
+Failure and audit rules that follow from those invariants:
+
+- **A failed break-before-make switch contains itself.** Once the old session
+  has closed, a failed open/commit revokes every lease on the old node
+  (`lease.revoke`, reason `switch_failed:<reason>`), marks the old node `DOWN`
+  without `gatePort`/`egressIp`, writes one `slot.switch_failed` audit row
+  (meta `slot`, `nodeId`, `serverId`, `reason`, `leases`, `leaseIds`,
+  `generation`) and reconciles the panel before answering, so the dead endpoint
+  leaves the publication in the same request. A refusal *before* the close
+  (`port_unavailable`, kick window) leaves the slot serving (`rollback:
+  restored`).
+- **Cleanup never silently drops a lease.** `removeUndesiredLocked`,
+  `DeleteNodeUnleased` and a sync whose plan resolves no server keep a node,
+  gate and lease that are still pinned by an active lease, and report
+  `slot_removal_blocked_by_lease` / a failure instead of deleting the
+  entitlement. A lease is only removed by an explicit revocation (failed
+  switch, vendor kick, order reversal or operator disconnect).
+- **A same-server reconnect advances the lease.** The slot generation bumps,
+  the node id and reserved pair stay, and `CommitSwitch` refreshes the lease's
+  `generation`, `egressIp` and `gatePort` in place.
+- **Slot/generation attribution.** An initial start writes one `slot.start`
+  audit row (meta `slot`, `nodeId`, `serverId`, `generation`, `gatePort`); a
+  re-commit of an already `LIVE` gate is a refresh and writes none. Successful
+  connect/switch/reconnect audit meta carries `generation`; a disconnect-all
+  row names every affected slot (`slot.<n>.nodeId`, `slot.<n>.serverId`,
+  `slot.<n>.generation`, `slot.<n>.leaseIds`); gate `FlowRecord`s and the
+  metered request rows carry `slot` and `generation` (the gate stamps them from
+  its config, so a stale flow cannot claim a newer generation).
+
+**Vendor-kick retry window.** A lost vendor session (detected by the liveness
+scan, default every 30 s) closes the gate and session, marks the node `DOWN`
+and calls `store.RecordSlotKick`: the slot leaves `LIVE`, `health` becomes
+`vendor_kick`, `kickCount` increments and `retryAfter` is set to now + **5
+minutes** (`kickRetryWindow`). While the window is open, an automatic start and
+a manual connect/reconnect both refuse with 429 `connect_cooldown` and a
+`Retry-After` for the remaining wait; the device binding and reserved pair are
+kept so the controlled retry reuses the same endpoint. The **third** kick
+(`SlotKickQuarantineThreshold`) moves the slot to `quarantined`, which no
+automatic sync retries — only an operator connect may reopen it. Events:
+`slot.vendor_kick` (audit, warn; meta `slot`, `kickCount`, `state`, `reason`,
+`serverId`, `retryAfter`) plus the `slot_vendor_kick` log line, and
+`slot.orphan_closed` when a gate outlived its deleted account row.
+
 ## Catalog selection and connect
 
 `internal/runtime/catalog_connect.go` is the guarded switch path behind the selection and
@@ -1144,11 +1215,11 @@ answers 201 with `{lease, replayed?, warning?}`.
   that platform can take another lease → 429 `concurrency_exceeded` or `no_capacity`, depending on
   which guard blocked it. **Effective slots** are the display capacity
   `min(account.useCount, AJS_ACCOUNT_SLOTS, 8)`, with `useCount` the vendor's purchased 同时连接数
-  (1–2000, default 1) and `AJS_ACCOUNT_SLOTS` defaulting to `1`. Lease **admission** is hard-capped
-  at one until the multi-slot runtime lands, so a second lease on the same account is refused even
-  when display capacity is above one. Above one, a successful create also returns
-  `warning: multi_session_unimplemented`: the lease row is real, but this daemon still serves only
-  one FV session per account until per-slot device identities and multiple sessions are implemented.
+  (1–2000, default 1) and `AJS_ACCOUNT_SLOTS` defaulting to `1`. Lease **admission** uses the
+  verified-slot denominator described in “Multi-slot containment”: a slot counts only while its row
+  is `LIVE` and its listener is bound, and one slot backs at most one lease. The response still
+  carries `warning: multi_session_unimplemented` whenever display capacity is above one; the warning
+  is retained for compatibility with the current API schema.
 - **TTL.** `ttlSeconds: 0` uses the user's sticky TTL, then the panel lease TTL; an explicit value
   must be 60 s – 7 days. An unsupported platform, a malformed body or an out-of-range TTL is 400
   (`invalid_lease` / `INVALID_ARGUMENT`).
@@ -1318,7 +1389,7 @@ test binary as the child.
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
-| `AJS_ACCOUNT_SLOTS` | — | `1` | per-account display capacity cap, 1–2000. Effective slots = `min(vendor UseCount, this value, 8)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Lease admission is hard-capped at one until multi-session is implemented, so any value above 1 only raises the display capacity and makes the first lease carry `warning: multi_session_unimplemented`. An invalid value falls back to `1` |
+| `AJS_ACCOUNT_SLOTS` | — | `1` | per-account display capacity cap, 1–2000. Effective slots = `min(vendor UseCount, this value, 8)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Lease admission counts verified serving slots (see “Multi-slot containment”), so a value above 1 raises capacity only as far as live, listener-bound slots exist; lease creates on a display capacity above 1 also carry `warning: multi_session_unimplemented` for API compatibility. An invalid value falls back to `1` |
 | `AJS_AUTO_LOGIN` | — | `0` | `1` runs the startup auto-login after the snapshot is loaded: at most one vendor `Login` per account per process start for accounts with a sealed password and a current node or selection (`paused`/`expired` skipped), serialized in store order, followed by the normal `SyncAccount` gate sync and one `account.login` event. A failure pauses a jittered 60s (`48–72s`) before the next account and is never retried. Requires `AJS_ACCOUNT_LOGIN=1`; otherwise startup logs `auto_login_disabled`. Off by default, so a boot contacts no vendor host |
 | `AJS_API_HOSTS` | — | `https://login.ajs-app.com,https://login.mmegg.com,https://login.mmegg.com:4443,https://login.mbclubsh.com` | comma-separated control API base URLs, tried in order; a scheme other than `https` fails startup unless `AJS_ALLOW_PLAINTEXT=1` |
 | `AJS_ACCOUNT_PROFILE` | — | `linux-4.2.3.0` | version profile: `linux-4.2.3.0` (default, live-tested) or `linux-4.3.0.1` (static analysis only; unsigned live acceptance unverified); an unknown value fails startup when login is enabled |

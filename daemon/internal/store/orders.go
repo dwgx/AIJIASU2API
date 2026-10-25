@@ -811,6 +811,11 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 		Sticky:       true,
 		Status:       model.LeaseActive,
 		CreatedAt:    iso(now),
+		// An order lease is a normal entitlement lease: it carries the exact
+		// slot and the generation it was issued under, so slot/generation
+		// cleanup and audit can attribute it.
+		Slot:       node.Slot,
+		Generation: s.slotGenerationLocked(node),
 	}
 	s.leases = append(s.leases, lease)
 	s.nodes[nodeIdx].InUse++
@@ -830,11 +835,13 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 		fmt.Sprintf("%s · %s · node %s · ttl %s · order %s", platform, account.Label,
 			node.Label, (time.Duration(order.Plan.LeaseTTLSeconds)*time.Second).String(), order.ID),
 		map[string]string{
-			"leaseId":   lease.ID,
-			"accountId": account.ID,
-			"nodeId":    node.ID,
-			"platform":  string(platform),
-			"orderId":   order.ID,
+			"leaseId":    lease.ID,
+			"accountId":  account.ID,
+			"nodeId":     node.ID,
+			"platform":   string(platform),
+			"orderId":    order.ID,
+			"slot":       fmt.Sprintf("%d", node.Slot),
+			"generation": fmt.Sprintf("%d", lease.Generation),
 		})
 	s.addAuditLocked(model.SeverityInfo, actor, "entitlement.granted", order.ID,
 		fmt.Sprintf("lease %s · quota %d bytes · expires %s", lease.ID, order.Plan.QuotaBytes, lease.ExpiresAt),
@@ -934,6 +941,14 @@ func (s *Store) pickOrderLeaseTargetLocked(user model.PanelUser, now time.Time) 
 		if s.accountLeaseCountLocked(account.ID) >= account.Concurrency {
 			continue
 		}
+		// The fallback is not an entitlement shortcut: an account that serves
+		// slot nodes must respect its slot capacity exactly like the primary
+		// path. A legacy-only account (no slot nodes: the pre-multislot demo
+		// shape) keeps its historical concurrency-based admission, which is
+		// also what slot-1 compatibility requires.
+		if !s.orderFallbackSlotCapacityLocked(account, now) {
+			continue
+		}
 		nodeIdx := s.pickLeaseNodeLocked(account.ID)
 		if nodeIdx < 0 {
 			continue
@@ -942,6 +957,30 @@ func (s *Store) pickOrderLeaseTargetLocked(user model.PanelUser, now time.Time) 
 	}
 	return 0, 0, "", leaseErrorf(ErrQuota, "no_capacity",
 		"no account has a free node for activation")
+}
+
+// orderFallbackSlotCapacityLocked reports whether an account can take one more
+// order lease without exceeding its verified slot capacity. An account that
+// serves no slot nodes is exempt: it is the legacy demo shape, and its
+// admission stays the account concurrency. An account with at least one slot
+// node is held to the same denominator as the primary lease path, so a paid
+// order cannot exceed AJS_ACCOUNT_SLOTS or UseCount.
+func (s *Store) orderFallbackSlotCapacityLocked(account model.Account, now time.Time) bool {
+	hasSlotNode := false
+	for _, node := range s.nodes {
+		if node.AccountID == account.ID && node.Slot > 0 {
+			hasSlotNode = true
+			break
+		}
+	}
+	if !hasSlotNode {
+		return true
+	}
+	capacity := s.accountCapacityLocked(account, now)
+	if capacity <= 0 {
+		return false
+	}
+	return s.accountLeaseCountLocked(account.ID) < capacity
 }
 
 // validateOrders checks the order state after tenants/users are validated. A

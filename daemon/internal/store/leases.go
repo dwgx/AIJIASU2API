@@ -186,12 +186,7 @@ func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error
 	node := s.nodes[nodeIdx]
 	// The slot generation is read from the slot row, never from the node (a
 	// node has no generation). A legacy node (Slot 0) stamps zero.
-	generation := uint64(0)
-	if node.Slot > 0 {
-		if slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]; ok {
-			generation = slot.Generation
-		}
-	}
+	generation := s.slotGenerationLocked(node)
 
 	ttl := in.TTLSeconds
 	if ttl == 0 {
@@ -226,10 +221,12 @@ func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error
 		fmt.Sprintf("%s · %s · node %s · ttl %s", platform, account.Label, node.Label,
 			(time.Duration(ttl)*time.Second).String()),
 		map[string]string{
-			"leaseId":   lease.ID,
-			"accountId": account.ID,
-			"nodeId":    node.ID,
-			"platform":  string(platform),
+			"leaseId":    lease.ID,
+			"accountId":  account.ID,
+			"nodeId":     node.ID,
+			"platform":   string(platform),
+			"slot":       strconv.Itoa(lease.Slot),
+			"generation": strconv.FormatUint(lease.Generation, 10),
 		})
 	return lease, false, nil
 }
@@ -336,6 +333,20 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
 	return revoked
 }
 
+// slotGenerationLocked is the serving generation a lease must stamp: the slot
+// row's generation for a slot node, zero for a legacy node. A node has no
+// generation field, so it is never inferred from the node.
+func (s *Store) slotGenerationLocked(node model.ProxyNode) uint64 {
+	if node.Slot <= 0 {
+		return 0
+	}
+	slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+	if !ok {
+		return 0
+	}
+	return slot.Generation
+}
+
 // pickLeaseTargetLocked resolves the account and node for a new lease. A
 // pinned account is validated strictly; without a pin the first active account
 // of the platform with spare concurrency and a free node wins. Account
@@ -426,10 +437,17 @@ func leaseAccountAvailable(account model.Account, now time.Time) error {
 
 // pickLeaseNodeLocked returns the index of the best free node of an account:
 // no active lease, state LIVE or READY, LIVE first and seed order otherwise.
+// A slot node is leasable only while its slot row is live and its listener is
+// bound, and a slot can back at most one lease: a duplicate node row for a
+// slot that already serves a lease must not widen admission.
 func (s *Store) pickLeaseNodeLocked(accountID string) int {
 	used := make(map[string]struct{}, len(s.leases))
+	usedSlots := make(map[int]struct{}, len(s.leases))
 	for _, lease := range s.leases {
 		used[lease.NodeID] = struct{}{}
+		if lease.Slot > 0 {
+			usedSlots[lease.Slot] = struct{}{}
+		}
 	}
 	best, bestRank := -1, 3
 	for idx, node := range s.nodes {
@@ -439,11 +457,18 @@ func (s *Store) pickLeaseNodeLocked(accountID string) int {
 		if _, taken := used[node.ID]; taken {
 			continue
 		}
-		// A slot node is leasable only while its slot row is live and has not
-		// been marked by a vendor kick; a legacy node (Slot 0) is unchanged.
+		// A slot node is leasable only while its slot row is live, has not
+		// been marked by a vendor kick, and reports the listener the row
+		// reserved; a legacy node (Slot 0) is unchanged.
 		if node.Slot > 0 {
+			if _, taken := usedSlots[node.Slot]; taken {
+				continue
+			}
 			slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
 			if !ok || slot.State != model.SlotLive || slot.Health == model.SlotHealthVendorKick {
+				continue
+			}
+			if node.GatePort <= 0 || slot.GatePort != node.GatePort {
 				continue
 			}
 		}

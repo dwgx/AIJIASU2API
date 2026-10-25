@@ -61,6 +61,7 @@ func (s *Store) accountCapacityLocked(account model.Account, now time.Time) int 
 	}
 	capacity := SlotCapacity(account.UseCount, configuredAccountSlots())
 	serving := 0
+	seen := make(map[int]struct{}, MaxServiceSlots)
 	for _, node := range s.nodes {
 		if node.AccountID != account.ID {
 			continue
@@ -68,14 +69,23 @@ func (s *Store) accountCapacityLocked(account model.Account, now time.Time) int 
 		if node.State != model.NodeLive && node.State != model.NodeReady {
 			continue
 		}
-		// A slot node is capacity only while its slot row is live; a legacy
-		// node (Slot 0) is capacity as before. A pool-disabled installation has
-		// no slot nodes at all, so it keeps the legacy answer.
+		// A slot node is capacity only while its slot row is live, its
+		// listener is actually bound, and the row and the node agree on the
+		// bound pair. A duplicate node row for the same slot counts once: the
+		// capacity denominator is a verified serving slot, not a row.
+		//
+		// A legacy node (Slot 0) is capacity as before. A pool-disabled
+		// installation has no slot nodes at all, so it keeps the legacy
+		// answer.
 		if node.Slot > 0 {
-			slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
-			if !ok || slot.State != model.SlotLive {
+			if _, duplicate := seen[node.Slot]; duplicate {
 				continue
 			}
+			slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+			if !ok || slot.State != model.SlotLive || node.GatePort <= 0 || slot.GatePort != node.GatePort {
+				continue
+			}
+			seen[node.Slot] = struct{}{}
 		}
 		serving++
 	}
@@ -219,11 +229,14 @@ func (s *Store) upsertSlotLocked(slot model.AccountSlot) error {
 		if slot.DeviceID != "" && other.DeviceID == slot.DeviceID {
 			return conflictf("device %q is already used by slot %s", slot.DeviceID, key.String())
 		}
-		if slot.GatePort != 0 && other.GatePort == slot.GatePort {
-			return conflictf("gate port %d is already used by slot %s", slot.GatePort, key.String())
+		// A slot owns a pair, so the two listener kinds share one namespace:
+		// a SOCKS port may not collide with another slot's HTTP port (or the
+		// reverse), or the runtime reservation would refuse the pair forever.
+		if slot.GatePort != 0 && (other.GatePort == slot.GatePort || other.HTTPPort == slot.GatePort) {
+			return conflictf("port %d is already used by slot %s", slot.GatePort, key.String())
 		}
-		if slot.HTTPPort != 0 && other.HTTPPort == slot.HTTPPort {
-			return conflictf("http port %d is already used by slot %s", slot.HTTPPort, key.String())
+		if slot.HTTPPort != 0 && (other.GatePort == slot.HTTPPort || other.HTTPPort == slot.HTTPPort) {
+			return conflictf("port %d is already used by slot %s", slot.HTTPPort, key.String())
 		}
 	}
 	s.accountSlots[slot.SlotKey] = slot
@@ -310,6 +323,10 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 	if err := s.upsertSlotLocked(slot); err != nil {
 		return model.ProxyNode{}, err
 	}
+	// A start is the lifecycle event a later audit needs to pair with a switch
+	// or disconnect. Re-committing an already LIVE gate is a refresh, not a
+	// start, so it writes nothing.
+	started := idx < 0 || s.nodes[idx].State != model.NodeLive
 	if idx >= 0 {
 		existing := s.nodes[idx]
 		if node.InUse == 0 {
@@ -327,6 +344,17 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 			node.LastProbeAt = iso(s.now())
 		}
 		s.nodes = append(s.nodes, node)
+	}
+	if started {
+		s.addAuditLocked(model.SeverityInfo, "system", "slot.start", slot.SlotKey.String(),
+			"Slot started · one session live",
+			map[string]string{
+				"slot":       slot.SlotKey.String(),
+				"nodeId":     node.ID,
+				"serverId":   node.ServerID,
+				"generation": strconv.FormatUint(slot.Generation, 10),
+				"gatePort":   strconv.Itoa(node.GatePort),
+			})
 	}
 	s.syncAccountCountsLocked()
 	return node, nil
@@ -402,6 +430,28 @@ func (s *Store) RecordSlotKick(kick SlotKick) (model.AccountSlot, error) {
 	return s.slotWithBindingLocked(slot), nil
 }
 
+// demoteSlotForNodeLocked records that restart recovery demoted a node whose
+// gate no longer exists. The slot row must not stay LIVE: admission and lease
+// selection read the slot row, so a LIVE row over a STALE node would keep
+// admitting leases for an endpoint that was never reopened. The device
+// binding, target, port pair and generation are kept for the next login.
+func (s *Store) demoteSlotForNodeLocked(node model.ProxyNode) (model.AccountSlot, bool) {
+	if node.Slot <= 0 {
+		return model.AccountSlot{}, false
+	}
+	key := model.SlotKey{AccountID: node.AccountID, Index: node.Slot}
+	slot, ok := s.accountSlots[key]
+	if !ok || slot.State != model.SlotLive {
+		return model.AccountSlot{}, false
+	}
+	slot.State = model.SlotDown
+	slot.Health = model.SlotHealthDegraded
+	slot.LastAttemptAt = iso(s.now())
+	slot.LastError = "gate_not_bound_after_restart"
+	s.accountSlots[key] = slot
+	return slot, true
+}
+
 // SetSlotFailure marks one slot down with a bounded reason and records the
 // server the attempt targeted. DeviceID, ports and generation are preserved.
 func (s *Store) SetSlotFailure(key model.SlotKey, serverID, reason string) error {
@@ -445,12 +495,21 @@ func (s *Store) DisableSlot(key model.SlotKey) error {
 	if !ok {
 		return notFoundf("slot %s not found", key.String())
 	}
+	// Every node row of the slot pins it, not just the persisted target: a
+	// failed target change leaves the old server's node behind, and a capacity
+	// reduction must not delete that node's lease as collateral.
+	slotNodes := make(map[string]struct{}, 2)
+	for _, node := range s.nodes {
+		if node.AccountID == key.AccountID && node.Slot == key.Index {
+			slotNodes[node.ID] = struct{}{}
+		}
+	}
 	if slot.ServerID != "" {
-		nodeID := key.NodeID(slot.ServerID)
-		for _, lease := range s.leases {
-			if lease.NodeID == nodeID {
-				return conflictf("slot_has_lease: slot %s still has an active lease", key.String())
-			}
+		slotNodes[key.NodeID(slot.ServerID)] = struct{}{}
+	}
+	for _, lease := range s.leases {
+		if _, pinned := slotNodes[lease.NodeID]; pinned {
+			return conflictf("slot_has_lease: slot %s still has an active lease", key.String())
 		}
 	}
 	slot.State = model.SlotDown
@@ -517,11 +576,12 @@ func (s *Store) SetSlotPorts(key model.SlotKey, socks, httpPort int) error {
 		if otherKey == key {
 			continue
 		}
-		if socks != 0 && other.GatePort == socks {
-			return conflictf("gate port %d is already used by slot %s", socks, otherKey.String())
+		// One namespace for both listener kinds: see upsertSlotLocked.
+		if socks != 0 && (other.GatePort == socks || other.HTTPPort == socks) {
+			return conflictf("port %d is already used by slot %s", socks, otherKey.String())
 		}
-		if httpPort != 0 && other.HTTPPort == httpPort {
-			return conflictf("http port %d is already used by slot %s", httpPort, otherKey.String())
+		if httpPort != 0 && (other.GatePort == httpPort || other.HTTPPort == httpPort) {
+			return conflictf("port %d is already used by slot %s", httpPort, otherKey.String())
 		}
 	}
 	slot.GatePort = socks

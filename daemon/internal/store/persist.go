@@ -1154,8 +1154,10 @@ func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
 	seen := make(map[model.SlotKey]struct{}, len(snap.AccountSlots))
 	slotsByKey := make(map[model.SlotKey]model.AccountSlot, len(snap.AccountSlots))
 	deviceOwners := make(map[string]model.SlotKey, len(snap.AccountSlots))
-	portOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
-	httpPortOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
+	// Both listener kinds share one port namespace: a slot's SOCKS port may
+	// not equal another slot's HTTP port (or the reverse), or runtime
+	// reservation would refuse the pair forever.
+	portOwners := make(map[int]model.SlotKey, len(snap.AccountSlots)*2)
 	slotOne := make(map[string]model.AccountSlot, len(accounts))
 	for _, slot := range snap.AccountSlots {
 		if err := slot.Validate(); err != nil {
@@ -1178,17 +1180,17 @@ func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
 		}
 		if slot.GatePort != 0 {
 			if other, used := portOwners[slot.GatePort]; used {
-				return fmt.Errorf("state snapshot slots %s and %s share gate port %d",
+				return fmt.Errorf("state snapshot slots %s and %s share port %d",
 					other.String(), slot.SlotKey.String(), slot.GatePort)
 			}
 			portOwners[slot.GatePort] = slot.SlotKey
 		}
 		if slot.HTTPPort != 0 {
-			if other, used := httpPortOwners[slot.HTTPPort]; used {
-				return fmt.Errorf("state snapshot slots %s and %s share http port %d",
+			if other, used := portOwners[slot.HTTPPort]; used {
+				return fmt.Errorf("state snapshot slots %s and %s share port %d",
 					other.String(), slot.SlotKey.String(), slot.HTTPPort)
 			}
-			httpPortOwners[slot.HTTPPort] = slot.SlotKey
+			portOwners[slot.HTTPPort] = slot.SlotKey
 		}
 		if slot.Index == 1 {
 			slotOne[slot.AccountID] = slot

@@ -171,13 +171,17 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		AccountLabel: accountLabel,
 		NodeLabel:    nodeLabel,
 		Region:       region,
-		Method:       record.Method,
-		Protocol:     record.Protocol,
-		Target:       flowTarget(record.TargetHost, record.TargetPort),
-		Status:       acceptedStatus,
-		Bytes:        record.BytesIn + record.BytesOut,
-		LatencyMs:    int(record.DurationMs),
-		Source:       model.SourceGate,
+		// The gate's own attribution is authoritative: a reconnect bumps the
+		// generation and a stale flow must not claim the new one.
+		Slot:       record.Slot,
+		Generation: record.Generation,
+		Method:     record.Method,
+		Protocol:   record.Protocol,
+		Target:     flowTarget(record.TargetHost, record.TargetPort),
+		Status:     acceptedStatus,
+		Bytes:      record.BytesIn + record.BytesOut,
+		LatencyMs:  int(record.DurationMs),
+		Source:     model.SourceGate,
 		// The relay advanced the durable counters every 256 KiB, so this row is
 		// a log entry only and must not be counted again.
 		MeteredLive: true,

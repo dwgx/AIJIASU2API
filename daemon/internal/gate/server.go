@@ -111,6 +111,11 @@ type Config struct {
 	// routing.
 	NodeID    string
 	AccountID string
+	// Slot and Generation attribute every flow record to the account slot and
+	// the session generation that served it. Zero is the legacy standalone
+	// gate; the runtime always sets both.
+	Slot       int
+	Generation uint64
 	// Listen is the TCP listen address. Default 127.0.0.1:0 (ephemeral
 	// loopback port); the operator may widen it explicitly.
 	Listen string

@@ -158,6 +158,32 @@ func (s *Store) DeleteNode(id string) error {
 	return nil
 }
 
+// DeleteNodeUnleased removes a node only while no active lease points at it.
+// The undesired-node cleanup uses it: a node that still carries a customer
+// lease must stay visible (DOWN) until the lease is revoked explicitly, so a
+// cleanup pass cannot silently drop a live entitlement. The bool reports
+// whether the node was removed; false means it was kept because it is leased.
+func (s *Store) DeleteNodeUnleased(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.nodeIndexLocked(id)
+	if idx < 0 {
+		return false, notFoundf("node %q not found", id)
+	}
+	for _, lease := range s.leases {
+		if lease.NodeID == id {
+			return false, nil
+		}
+	}
+	node := s.nodes[idx]
+	s.nodes = append(s.nodes[:idx], s.nodes[idx+1:]...)
+	s.syncAccountCountsLocked()
+	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
+		fmt.Sprintf("Node removed · account %s", node.AccountID))
+	return true, nil
+}
+
 // validNodeLabel reports whether label is a lowercase Resin tag. It enforces
 // the same shape as publisher.ValidTag; the store keeps its own copy so the
 // state package stays free of the publisher's Resin dependency.
@@ -227,10 +253,17 @@ func (s *Store) DemoteNode(id string) (model.ProxyNode, bool, error) {
 		kept = append(kept, lease)
 	}
 	s.leases = kept
+	// A LIVE slot row over a gate-less node would keep satisfying admission,
+	// so the matching slot leaves LIVE in the same step as the node.
+	meta := map[string]string{"previousState": string(previous), "leasesClosed": strconv.Itoa(closed)}
+	if slot, changed := s.demoteSlotForNodeLocked(*node); changed {
+		meta["slot"] = slot.SlotKey.String()
+		meta["slotState"] = string(slot.State)
+	}
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityWarn, "system", "node.recovered_stale", node.Label,
 		fmt.Sprintf("Restart recovery · no gate bound · %s → STALE · %d leases closed", previous, closed),
-		map[string]string{"previousState": string(previous), "leasesClosed": strconv.Itoa(closed)})
+		meta)
 	return *node, true, nil
 }
 
