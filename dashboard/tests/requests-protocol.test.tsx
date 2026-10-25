@@ -49,6 +49,23 @@ describe('requests protocol and user attribution', () => {
     expect(within(table).getAllByText('ada.ops').length).toBeGreaterThan(0)
   })
 
+  it('attributes a gate flow row from the flow protocol and user', async () => {
+    vi.spyOn(api, 'getLabFlows').mockResolvedValue({
+      enabled: true,
+      dropped: 0,
+      flows: [{ ...BARE_FLOW, protocol: 'http', userId: 'u-7', userName: 'ada.ops' }],
+    })
+    vi.spyOn(api, 'listRequests').mockResolvedValue([])
+
+    const table = await openRequests()
+    const row = within(table).getAllByRole('row')[1]
+    expect(within(row).getByText('gate flow')).toBeInTheDocument()
+    expect(within(row).getByText('ada.ops')).toBeInTheDocument()
+    expect(within(row).getByText('http')).toBeInTheDocument()
+    // The row shows the display name; the id stays in the title attribute.
+    expect(within(row).queryByText('u-7')).not.toBeInTheDocument()
+  })
+
   it('filters rows by protocol and restores them', async () => {
     const user = userEvent.setup()
     const table = await openRequests()

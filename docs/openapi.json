@@ -6281,6 +6281,14 @@
             "type": "string",
             "description": "Redacted to first4...(len)."
           },
+          "userId": {
+            "type": "string",
+            "description": "Panel user the gate authenticated; absent for an anonymous or loopback flow."
+          },
+          "userName": {
+            "type": "string",
+            "description": "Display name of the authenticated panel user; absent when unknown."
+          },
           "startedAt": {
             "type": "string",
             "description": "RFC 3339 timestamp; empty when unset."
@@ -6291,6 +6299,9 @@
           },
           "method": {
             "type": "string"
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/ProxyProtocol"
           },
           "targetHost": {
             "type": "string"

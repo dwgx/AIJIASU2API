@@ -313,9 +313,11 @@ const labFlowMaxLimit = 500
 
 // Flows serves GET /v1/lab/flows: the newest finished flows across every
 // running gate, joined with the node and account identity. The session SID is
-// redacted, and a record never carries a URL, header or credential. The second
-// return value is the disabled reason; a non-empty reason means the caller
-// must answer enabled:false.
+// redacted, and a record never carries a URL, header or credential. Protocol
+// and the panel user that the gate authenticated pass through unchanged; both
+// stay empty for an anonymous or loopback flow. The second return value is the
+// disabled reason; a non-empty reason means the caller must answer
+// enabled:false.
 func (v *LabView) Flows(limit int) (model.FlowsView, string) {
 	if v.cfg.Controller == nil {
 		return model.FlowsView{}, reasonLoginDisabled
@@ -363,9 +365,12 @@ func (v *LabView) Flows(limit int) (model.FlowsView, string) {
 			NodeID:     row.nodeID,
 			AccountID:  row.accountID,
 			SID:        row.sid,
+			UserID:     record.UserID,
+			UserName:   record.UserName,
 			StartedAt:  formatTime(record.StartedAt),
 			DurationMs: record.DurationMs,
 			Method:     record.Method,
+			Protocol:   record.Protocol,
 			TargetHost: record.TargetHost,
 			TargetPort: record.TargetPort,
 			Status:     record.Status,

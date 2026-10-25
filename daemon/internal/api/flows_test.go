@@ -42,9 +42,12 @@ func TestFlowRingAPIHandler(t *testing.T) {
 			NodeID:     "acc-01:s1",
 			AccountID:  "acc-01",
 			SID:        "fake…(8)",
+			UserID:     "user-7",
+			UserName:   "ada.ops",
 			StartedAt:  "2026-10-24T12:00:00Z",
 			DurationMs: 12,
 			Method:     "CONNECT",
+			Protocol:   "socks5",
 			TargetHost: "example.com",
 			TargetPort: 443,
 			Status:     "ok",
@@ -75,13 +78,19 @@ func TestFlowRingAPIHandler(t *testing.T) {
 	}
 	flow := view.Flows[0]
 	if flow.ID != "acc-01:s1#7" || flow.NodeID != "acc-01:s1" || flow.AccountID != "acc-01" ||
-		flow.SID != "fake…(8)" || flow.StartedAt != "2026-10-24T12:00:00Z" ||
-		flow.DurationMs != 12 || flow.Method != "CONNECT" ||
+		flow.SID != "fake…(8)" || flow.UserID != "user-7" || flow.UserName != "ada.ops" ||
+		flow.StartedAt != "2026-10-24T12:00:00Z" ||
+		flow.DurationMs != 12 || flow.Method != "CONNECT" || flow.Protocol != "socks5" ||
 		flow.TargetHost != "example.com" || flow.TargetPort != 443 ||
 		flow.Status != "ok" || flow.BytesIn != 10 || flow.BytesOut != 20 || flow.ErrorClass != "" {
 		t.Fatalf("flow = %+v", flow)
 	}
 	raw := string(body)
+	for _, want := range []string{`"userId":"user-7"`, `"userName":"ada.ops"`, `"protocol":"socks5"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("flows body is missing %s: %s", want, raw)
+		}
+	}
 	if strings.Contains(raw, "fake-sid") {
 		t.Fatalf("flows leaked the full session id: %s", raw)
 	}

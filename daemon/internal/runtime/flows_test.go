@@ -36,7 +36,7 @@ func (g *flowGate) Flows(limit int) []gate.FlowRecord {
 
 func (g *flowGate) Dropped() uint64 { return g.dropped }
 
-func TestLabViewFlowsJoinOrderAndRedaction(t *testing.T) {
+func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
 	st := newNodeTestStore(t)
 	acct := newNodeTestAccount(t, st, "lab-flows")
 	logins := newFakeLoginResults()
@@ -59,6 +59,9 @@ func TestLabViewFlowsJoinOrderAndRedaction(t *testing.T) {
 				{
 					ID: "stale#1", NodeID: "stale-node", AccountID: "stale-account",
 					StartedAt: started.Add(3 * time.Second), DurationMs: 5, Method: "CONNECT",
+					Protocol:   gate.FlowProtocolSOCKS5,
+					UserID:     "user-7",
+					UserName:   "ada.ops",
 					TargetHost: "example.com", TargetPort: 443, Status: gate.FlowStatusOK,
 					BytesIn: 10, BytesOut: 20,
 				},
@@ -75,7 +78,9 @@ func TestLabViewFlowsJoinOrderAndRedaction(t *testing.T) {
 			records: []gate.FlowRecord{
 				{
 					ID: "stale#3", StartedAt: started.Add(2 * time.Second), DurationMs: 2,
-					Method: "CONNECT", TargetHost: "198.51.100.4", TargetPort: 8080,
+					Method: "CONNECT", Protocol: gate.FlowProtocolHTTP,
+					UserID:     "user-9",
+					TargetHost: "198.51.100.4", TargetPort: 8080,
 					Status: gate.FlowStatusOK, BytesIn: 1, BytesOut: 2,
 				},
 				{
@@ -128,6 +133,21 @@ func TestLabViewFlowsJoinOrderAndRedaction(t *testing.T) {
 	if flows.Flows[0].Status != gate.FlowStatusOK || flows.Flows[0].BytesIn != 10 || flows.Flows[0].BytesOut != 20 {
 		t.Fatalf("flow[0] = %+v", flows.Flows[0])
 	}
+	// The gate's protocol and authenticated user pass through unchanged.
+	if got := flows.Flows[0]; got.Protocol != gate.FlowProtocolSOCKS5 ||
+		got.UserID != "user-7" || got.UserName != "ada.ops" {
+		t.Fatalf("flow[0] attribution = %+v, want socks5/user-7/ada.ops", got)
+	}
+	// A record that carries an id but no name keeps the id and leaves the name
+	// empty; omitempty drops the empty key instead of inventing one.
+	if got := flows.Flows[1]; got.Protocol != gate.FlowProtocolHTTP ||
+		got.UserID != "user-9" || got.UserName != "" {
+		t.Fatalf("flow[1] attribution = %+v, want http/user-9 with no name", got)
+	}
+	// stale#2 is an anonymous flow: no protocol, no user.
+	if got := flows.Flows[3]; got.Protocol != "" || got.UserID != "" || got.UserName != "" {
+		t.Fatalf("anonymous flow gained attribution: %+v", got)
+	}
 	if flows.Flows[2].ErrorClass != gate.FlowErrorOpenFlow {
 		t.Fatalf("flow[2] = %+v, want the open_flow reject", flows.Flows[2])
 	}
@@ -162,6 +182,30 @@ func TestLabViewFlowsJoinOrderAndRedaction(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("flows leaked %q: %s", forbidden, body)
 		}
+	}
+	// Attribution reaches the wire, and an empty attribution stays off it.
+	for _, want := range []string{
+		`"protocol":"socks5"`, `"userId":"user-7"`, `"userName":"ada.ops"`, `"userId":"user-9"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("flows body is missing %s: %s", want, body)
+		}
+	}
+	anonymous, err := json.Marshal(flows.Flows[3])
+	if err != nil {
+		t.Fatalf("marshal anonymous flow: %v", err)
+	}
+	for _, absent := range []string{"protocol", "userId", "userName"} {
+		if strings.Contains(string(anonymous), `"`+absent+`"`) {
+			t.Fatalf("anonymous flow serialized %s: %s", absent, anonymous)
+		}
+	}
+	idOnly, err := json.Marshal(flows.Flows[1])
+	if err != nil {
+		t.Fatalf("marshal id-only flow: %v", err)
+	}
+	if strings.Contains(string(idOnly), `"userName"`) {
+		t.Fatalf("id-only flow serialized an empty userName: %s", idOnly)
 	}
 
 	limited, reason := view.Flows(2)
@@ -333,6 +377,14 @@ func TestLabViewFlowsFromRealGate(t *testing.T) {
 	}
 	if flow.TargetHost != "example.com" || flow.TargetPort != 443 || flow.Method != "CONNECT" {
 		t.Fatalf("target = %s:%d method=%q, want CONNECT example.com:443", flow.TargetHost, flow.TargetPort, flow.Method)
+	}
+	// The real SOCKS5 listener names its protocol; the no-auth client is not
+	// attributed to a panel user.
+	if flow.Protocol != gate.FlowProtocolSOCKS5 {
+		t.Fatalf("protocol = %q, want %q", flow.Protocol, gate.FlowProtocolSOCKS5)
+	}
+	if flow.UserID != "" || flow.UserName != "" {
+		t.Fatalf("unauthenticated gate flow gained a user: %+v", flow)
 	}
 	if flow.BytesIn != 4 || flow.BytesOut != 4 || flow.DurationMs < 0 || flow.StartedAt == "" {
 		t.Fatalf("flow counters = %+v", flow)

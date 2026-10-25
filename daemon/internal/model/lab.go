@@ -76,14 +76,23 @@ type GateView struct {
 // FlowView is one finished gate flow joined to its node. TargetHost and
 // TargetPort are the only target fields: the gate records no URL, headers or
 // credentials, and SID is redacted to "first4…(len)".
+//
+// Protocol, UserID and UserName are attribution only. The gate records the
+// listener protocol that carried the flow and, for an authenticated flow, the
+// panel user whose key was presented; a loopback or anonymous flow leaves them
+// empty and omitempty keeps them off the wire. No key id, key prefix,
+// username/password frame or authenticator input reaches this type.
 type FlowView struct {
 	ID         string `json:"id"`
 	NodeID     string `json:"nodeId"`
 	AccountID  string `json:"accountId"`
 	SID        string `json:"sid,omitempty"`
+	UserID     string `json:"userId,omitempty"`
+	UserName   string `json:"userName,omitempty"`
 	StartedAt  string `json:"startedAt"`
 	DurationMs int64  `json:"durationMs"`
 	Method     string `json:"method"`
+	Protocol   string `json:"protocol,omitempty"`
 	TargetHost string `json:"targetHost"`
 	TargetPort int    `json:"targetPort"`
 	Status     string `json:"status"`

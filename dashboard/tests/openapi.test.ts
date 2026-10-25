@@ -339,6 +339,22 @@ describe('docs/openapi.json', () => {
     expect(schema('CreateAccountInput').properties?.password?.writeOnly).toBe(true)
   })
 
+  it('attributes flows to a protocol and, when known, a user', () => {
+    const flow = schema('FlowView')
+    // Both gate listeners report their protocol, so the dashboard can filter
+    // on the same vocabulary the lease surfaces use.
+    expect(flow.properties?.protocol).toEqual({ $ref: '#/components/schemas/ProxyProtocol' })
+    expect(flow.properties?.userId).toMatchObject({ type: 'string' })
+    expect(flow.properties?.userName).toMatchObject({ type: 'string' })
+    // Attribution is optional on the wire: a loopback or anonymous flow omits
+    // it instead of sending an empty string.
+    const required = flow.required ?? []
+    for (const name of ['protocol', 'userId', 'userName']) {
+      expect(required, name).not.toContain(name)
+    }
+    expect(schema('ProxyProtocol').enum).toEqual(['socks5', 'http'])
+  })
+
   it('keeps the node state vocabulary in sync with the daemon', () => {
     // Startup recovery demotes a persisted node whose gate did not survive
     // the last process; the console needs STALE in the same enum the daemon
