@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -228,5 +229,54 @@ func TestQuotaProgressConcurrent(t *testing.T) {
 	}
 	if ok, used, _ := meter.Quota().Check(account.ID); ok || used < budget {
 		t.Fatalf("account check = %v/%d, want refusal at or above %d", ok, used, budget)
+	}
+}
+
+// TestQuotaRefusedFlowChargesRelayedBytes is finding F1 from ACCEPTANCE-DRILL2
+// at runtime level: a flow cut off by the in-flight meter must advance the
+// durable monthly counters by exactly the bytes the relay moved. The refused
+// chunk crossed the tunnel once, so usageDelta must equal the finished flow's
+// BytesIn+BytesOut instead of charging that chunk a second time from flush.
+func TestQuotaRefusedFlowChargesRelayedBytes(t *testing.T) {
+	budget := int64(300 << 10)
+	f := newIdentityFixture(t, []string{"127.0.0.1/32"}, &budget)
+	accountBefore := f.store.MonthlyUsage(f.account.ID)
+	userBefore := f.store.UserMonthlyUsage(f.user.ID)
+
+	conn := f.dial(t)
+	if status := authenticate(t, conn, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("auth status = %#x, want 0x00", status)
+	}
+	if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+		t.Fatalf("CONNECT reply = %#x, want success", rep)
+	}
+	// Drain the echo like a real client: an unread loopback echo fills the
+	// client socket buffer and stalls both directions before the second chunk
+	// can cross the budget.
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	// Relay past the budget. The gate closes the tunnel once the meter refuses,
+	// so the client write may fail part-way; that failure is the refusal.
+	_, _ = conn.Write(make([]byte, 1<<20))
+	record := waitFlowClass(t, f.server, gate.FlowErrorQuota)
+	<-readDone
+	if record.Status != gate.FlowStatusOK {
+		t.Fatalf("quota record status = %q, want accepted (the flow reached relay)", record.Status)
+	}
+	relayed := record.BytesIn + record.BytesOut
+	if relayed < budget {
+		t.Fatalf("relayed bytes = %d, want at least the %d budget so a chunk was refused in flight", relayed, budget)
+	}
+
+	accountDelta := f.store.MonthlyUsage(f.account.ID) - accountBefore
+	if accountDelta != relayed {
+		t.Fatalf("account usage delta = %d, want %d (relayed bytes charged exactly once)", accountDelta, relayed)
+	}
+	userDelta := f.store.UserMonthlyUsage(f.user.ID) - userBefore
+	if userDelta != relayed {
+		t.Fatalf("user usage delta = %d, want %d (relayed bytes charged exactly once)", userDelta, relayed)
 	}
 }

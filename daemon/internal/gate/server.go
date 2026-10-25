@@ -1315,23 +1315,29 @@ func (m *meteredWriter) Write(p []byte) (int, error) {
 		m.pending += int64(n)
 	}
 	if m.progress != nil && m.pending >= ProgressChunk {
-		if !m.progress(m.pending) {
+		// Clear pending before reporting: the refused chunk must reach the
+		// meter exactly once. Leaving it set lets flush report the same bytes
+		// again when io.Copy stops on errQuotaStopped.
+		pending := m.pending
+		m.pending = 0
+		if !m.progress(pending) {
 			m.refused = true
 			return n, errQuotaStopped
 		}
-		m.pending = 0
 	}
 	return n, err
 }
 
 // flush reports the trailing bytes below one chunk and returns true when the
-// meter refused the flow.
+// meter refused the flow. Pending is cleared before the callback so a refused
+// remainder is never reported twice.
 func (m *meteredWriter) flush() bool {
 	if m.progress != nil && m.pending > 0 {
-		if !m.progress(m.pending) {
+		pending := m.pending
+		m.pending = 0
+		if !m.progress(pending) {
 			m.refused = true
 		}
-		m.pending = 0
 	}
 	return m.refused
 }
