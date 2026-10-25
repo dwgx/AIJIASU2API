@@ -287,17 +287,20 @@ As of 2026-10-25:
   one daemon, Resin + gate live publish, B2 signed requests, B5 beyond one account, and hot
   update (dynamic API host refresh) are `[UNVERIFIED]`.
 - **Release and update pipeline is `[UNVERIFIED]`.** `deploy/compose.release.yml`,
-  `deploy/update.sh` and `.github/workflows/release.yml` (which builds and pushes GHCR images
-  on a `v*` tag) are written but never exercised: this repository has **no git remote and no
-  tags**, so the workflow has never fired, no image has been pushed, and `./update.sh --tag` has
-  nothing to pull. Treat `ghcr.io/<owner>/ajs-*:<tag>` as a placeholder until a remote exists.
+  `deploy/update.sh`, `.github/workflows/release.yml` (which builds and pushes GHCR images on a
+  `v*` tag) and `.github/workflows/package.yml` (which builds the three platform binaries and
+  the dashboard bundle on the same tag) are written but never exercised: this repository has
+  **no git remote and no tags**, so neither workflow has fired, no image has been pushed, and
+  `./update.sh --tag` has nothing to pull. Treat `ghcr.io/<owner>/ajs-*:<tag>` as a placeholder
+  until a remote exists.
 - **SQLite / the full schema.** The daemon persists a versioned JSON snapshot (`AJS_STATE_FILE`,
   every 30s + shutdown) including sealed secrets, but it is not the SQLite schema in
   `docs/PANEL.md`; the snapshot is a v0.1 stopgap.
 - **Packaged deployment beyond the control plane.** `deploy/compose.yml` builds and runs
   `ajs-accountd` + the dashboard (Resin optional), but the supervisor node lifecycle is still
-  absent and the stack has not run the live login path, so it proxies no traffic; there is no
-  macOS or Windows build.
+  absent and the stack has not run the live login path, so it proxies no traffic. `deploy/package.sh`
+  produces standalone `linux-amd64`, `windows-amd64` and `darwin-arm64` binaries plus the
+  dashboard bundle, but there is no Windows service, launchd unit or systemd unit.
 - **Continuous reconciler is off by default.** With `AJS_RESIN_RECONCILE=1` the daemon keeps the
   Resin view converged: each tick hashes the desired state and publishes only on a change, a failed
   publish backs off `1m→2m→4m→8m→15m`, and only transitions are audited
@@ -461,6 +464,32 @@ All three suites run offline. The last recorded dashboard and daemon runs are on
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
 [`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
+
+## Packaging (Windows, macOS, Linux)
+
+`deploy/package.sh` builds the release artifacts without Docker and without CGO:
+
+```bash
+bash deploy/package.sh --version 0.1.0 --out dist
+(cd dist && sha256sum -c SHA256SUMS)
+```
+
+It writes `ajs-accountd-linux-amd64`, `ajs-accountd-windows-amd64.exe`,
+`ajs-accountd-darwin-arm64`, `dashboard-dist.tar.gz`, `MANIFEST.txt` and `SHA256SUMS` into
+`dist/`. The three binaries are built with `CGO_ENABLED=0` (the Linux output is statically
+linked) and `-trimpath -buildvcs=false -mod=readonly -ldflags="-s -w -buildid="`;
+`MANIFEST.txt` records the version, commit, Go toolchain, per-target flags and artifact hashes.
+`dashboard/dist` must exist or be supplied with `--dashboard-dist`; `--build-dashboard` rebuilds
+it in mock mode unless `VITE_USE_MOCK=false` is exported.
+
+The same script runs in [`.github/workflows/package.yml`](.github/workflows/package.yml) on a
+`v*` tag and attaches the six files to the GitHub Release. The image workflow
+([`release.yml`](.github/workflows/release.yml)) attaches no assets, so the checksum file always
+describes the complete set. The artifacts are standalone binaries and a static bundle, not
+service wrappers: there is no Windows service, launchd unit or systemd unit in the tree. Build
+flags, checksum verification, the `MANIFEST.txt` fields, and daemon plus dashboard startup from
+an unpacked artifact (state directory, token, TLS, CORS) are documented in
+[`deploy/packaging.md`](deploy/packaging.md).
 
 ## Layout
 

@@ -1,6 +1,5 @@
-# Release pipeline: on a pushed v* tag, build both images, push them to
-# GHCR, and attach the accountd binary plus the dashboard bundle to a
-# GitHub Release. No owner/repo is hard-coded: everything derives from
+# Release pipeline: on a pushed v* tag, build both images and push them to
+# GHCR. No owner/repo is hard-coded: everything derives from
 # github.repository_owner / github.repository so the workflow works
 # unchanged on any fork.
 #
@@ -10,9 +9,9 @@
 #   ghcr.io/<owner>/ajs-accountd:<tag>   and :latest
 #   ghcr.io/<owner>/ajs-dashboard:<tag>  and :latest
 #
-# Release assets:
-#   ajs-accountd-linux-amd64   (static CGO_ENABLED=0 binary)
-#   dashboard-dist.tar.gz      (the Vite build output, mock mode default)
+# Platform binaries and the dashboard bundle are built and attached by
+# package.yml on the same tag. This workflow attaches no release assets, so
+# that workflow's SHA256SUMS always describes the complete asset set.
 
 name: release
 
@@ -40,31 +39,6 @@ jobs:
       - name: Lowercase GHCR owner
         id: owner
         run: echo "lower=${GHCR_OWNER,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Build dashboard bundle
-        working-directory: dashboard
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-
-      - name: Package dashboard bundle
-        run: tar -czf dashboard-dist.tar.gz -C dashboard/dist .
-
-      - name: Build accountd binary (linux-amd64)
-        run: |
-          cd daemon
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-            -o ../ajs-accountd-linux-amd64 ./cmd/ajs-accountd
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -114,6 +88,12 @@ jobs:
             echo '```'
             echo ''
             echo 'Roll back with `./update.sh --rollback`.'
+            echo ''
+            echo '## Platform artifacts'
+            echo ''
+            echo 'The package workflow attaches `ajs-accountd-linux-amd64`,'
+            echo '`ajs-accountd-windows-amd64.exe`, `ajs-accountd-darwin-arm64`,'
+            echo '`dashboard-dist.tar.gz`, `MANIFEST.txt` and `SHA256SUMS` to this release.'
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -121,8 +101,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.body }}
-          files: |
-            ajs-accountd-linux-amd64
-            dashboard-dist.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

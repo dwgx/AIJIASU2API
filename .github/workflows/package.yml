@@ -1,0 +1,106 @@
+# Packaging workflow: build the three cross-compiled daemon binaries and the
+# dashboard bundle, checksum them, and attach the six files to the GitHub
+# Release for the tag. This workflow pushes no images; release.yml owns the
+# GHCR images and the update path, and attaches no assets of its own so these
+# six files (and their SHA256SUMS) stay the complete, consistent set.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The same set is uploaded as a workflow artifact on every run, including
+# workflow_dispatch runs that are not tags.
+#
+# Artifacts:
+#   ajs-accountd-linux-amd64
+#   ajs-accountd-windows-amd64.exe
+#   ajs-accountd-darwin-arm64
+#   dashboard-dist.tar.gz
+#   MANIFEST.txt
+#   SHA256SUMS
+
+name: package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: dashboard/package.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm install --no-audit --no-fund
+
+      - name: Build dashboard bundle
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        run: |
+          bash deploy/package.sh \
+            --version "${{ steps.version.outputs.value }}" \
+            --out dist \
+            --dashboard-dist dashboard/dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ajs-package-${{ steps.version.outputs.value }}
+          if-no-files-found: error
+          path: |
+            dist/ajs-accountd-linux-amd64
+            dist/ajs-accountd-windows-amd64.exe
+            dist/ajs-accountd-darwin-arm64
+            dist/dashboard-dist.tar.gz
+            dist/MANIFEST.txt
+            dist/SHA256SUMS
+
+      - name: Attach artifacts to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/ajs-accountd-linux-amd64
+            dist/ajs-accountd-windows-amd64.exe
+            dist/ajs-accountd-darwin-arm64
+            dist/dashboard-dist.tar.gz
+            dist/MANIFEST.txt
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

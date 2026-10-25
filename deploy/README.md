@@ -82,9 +82,12 @@ credentials belong in either file in version control.
 
 ## Release flow (GHCR)
 
-Pushing a `v*` tag to GitHub runs [`.github/workflows/release.yml`](../.github/workflows/release.yml):
-it builds both images, pushes them to GHCR, and attaches the `ajs-accountd-linux-amd64` binary
-and `dashboard-dist.tar.gz` to a GitHub Release. Nothing is hard-coded — the images land at
+Pushing a `v*` tag to GitHub runs two workflows. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+builds both images and pushes them to GHCR; [`.github/workflows/package.yml`](../.github/workflows/package.yml)
+builds `ajs-accountd-linux-amd64`, `ajs-accountd-windows-amd64.exe`, `ajs-accountd-darwin-arm64`
+and `dashboard-dist.tar.gz`, checksums them, and attaches the six files (`MANIFEST.txt` and
+`SHA256SUMS` included) to the GitHub Release. `release.yml` attaches no assets, so the checksum
+file always covers the complete set. Nothing is hard-coded — the images land at
 `ghcr.io/<repository_owner>/ajs-accountd:<tag>` and `ghcr.io/<repository_owner>/ajs-dashboard:<tag>`
 (plus `:latest`), and the release body lists the image tags and the update command.
 
@@ -369,7 +372,10 @@ running ruleset and never reloads nftables.
   cannot be scheduled across hosts as-is.
 - **Resin is pinned** to `ghcr.io/resinat/resin:1.3.0`, the version measured in
   [`../research/77-m1-spike/REPORT.md`](../research/77-m1-spike/REPORT.md). Newer tags are untested.
-- **No macOS/Windows packaging.** Only Linux containers are provided.
+- **No macOS/Windows containers or service wrappers.** This compose stack is Linux containers
+  only. [`package.sh`](package.sh) produces standalone Linux, Windows and macOS binaries plus
+  the dashboard bundle, but there is no Windows service, launchd unit or systemd unit; see
+  [`packaging.md`](packaging.md).
 - The dashboard's live mode is a build-time choice; changing `VITE_*` in `.env` requires
   `docker compose build dashboard`.
 
