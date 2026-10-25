@@ -312,6 +312,9 @@ func (s *Server) writePaymentError(w http.ResponseWriter, err error) {
 	case errors.Is(err, payment.ErrInvalidReference):
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument,
 			"a nonempty receipt reference is required")
+	case errors.Is(err, payment.ErrUnsupportedCurrency):
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument,
+			"epay checkout requires a CNY plan")
 	case errors.Is(err, payment.ErrInvalidEvent):
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "invalid payment event")
 	default:

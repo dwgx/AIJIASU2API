@@ -195,7 +195,7 @@ describe('docs/openapi.json', () => {
 
   it('keeps the expected path and operation counts', () => {
     expect(Object.keys(doc.paths)).toHaveLength(107)
-    expect(entries).toHaveLength(131)
+    expect(entries).toHaveLength(132)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -459,6 +459,23 @@ describe('docs/openapi.json', () => {
     expect(epay?.responses['503']).toEqual({
       $ref: '#/components/responses/ServiceUnavailable',
     })
+
+    // Standard 易支付 notify is a GET with query parameters; the same
+    // signature/verification contract applies as the POST form variant.
+    const epayGet = doc.paths['/v1/payments/epay/notify']?.get
+    expect(epayGet).toBeDefined()
+    expect(epayGet?.security).toEqual([])
+    expect(epayGet?.['x-implementation-phase']).toBe('P0')
+    expect(parameterNames(epayGet!)).toEqual(
+      expect.arrayContaining([
+        'query:pid',
+        'query:trade_no',
+        'query:out_trade_no',
+        'query:money',
+        'query:trade_status',
+        'query:sign',
+      ]),
+    )
     expect(schema('OrderCheckoutRequest').properties?.type).toMatchObject({
       enum: ['alipay', 'wxpay'],
     })

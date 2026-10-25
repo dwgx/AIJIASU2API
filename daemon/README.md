@@ -1307,7 +1307,7 @@ test binary as the child.
 | `AJS_TENANT_ORIGIN` | `-tenant-origin` | — | exact browser origin allowed on signup, login and every unsafe portal request, for example `https://panel.example.com`. Required when `AJS_TENANT_PORTAL=1`; a path/query/userinfo fails startup. A non-`https` origin is accepted with a warning (the cookie is `Secure`, so browsers will not send it over plain HTTP) |
 | `AJS_TRUSTED_PROXIES` | `-trusted-proxies` | — | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed for portal rate limiting; empty trusts no forwarding header and uses the socket peer. A malformed entry fails startup |
 | `AJS_STRIPE_WEBHOOK_SECRET` | `-stripe-webhook-secret` | — | signing secret for the Stripe-compatible webhook (`POST /v1/payments/stripe`). Empty leaves the adapter disabled: the route answers 503 and never falls back to manual settlement. Set it only when a real provider is configured; the value is never logged |
-| `AJS_EPAY_GATEWAY` | `-epay-gateway` | — | 易支付 gateway base URL, for example `https://pay.example.com/`; `submit.php` and `api.php` are resolved below it. Empty leaves epay disabled |
+| `AJS_EPAY_GATEWAY` | `-epay-gateway` | — | 易支付 gateway base URL, for example `https://pay.example.com/`; must be https (plain http is allowed only for a loopback development gateway). `submit.php` and `api.php` are resolved below it. Empty leaves epay disabled |
 | `AJS_EPAY_PID` | `-epay-pid` | — | 易支付 merchant id sent as `pid` on checkout and notify. Required together with the gateway and key |
 | `AJS_EPAY_KEY` | `-epay-key` | — | 易支付 merchant key used for MD5 signing and order queries. Never logged, never persisted; empty disables epay |
 | `AJS_EPAY_SIGN_TYPE` | `-epay-sign-type` | `MD5` | signature algorithm; must be `MD5` (case-insensitive) when epay is configured. Any other value disables the adapter instead of signing with a different algorithm |
@@ -1818,16 +1818,17 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   signed with `md5(canonical-sorted-querystring + KEY)`. A checkout records provider intent only;
   it never settles. Two deployment modes share the adapter: **public callback** sets
   `AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL` (or derives them from `AJS_TENANT_ORIGIN`) so the
-  gateway can POST the signed notify, while **poll-only** leaves both empty, checkout signs
+  gateway can send the signed notify (GET query parameters or a POST form), while **poll-only** leaves both empty, checkout signs
   without them, and the 60-second query reconciler settles pending orders. The second
-  unauthenticated route, `POST /v1/payments/epay/notify`, verifies the MD5 signature, `pid`,
+  unauthenticated route, `GET`/`POST /v1/payments/epay/notify`, verifies the MD5 signature, `pid`,
   `trade_status=TRADE_SUCCESS` and `money ==` the immutable snapshot before
   applying the same store settlement path, keyed by `trade_no` for idempotency. It answers the
   plain-text protocol (`success` only for accepted/duplicate, otherwise `fail`). A 60-second,
   ±10%-jittered poller queries `api.php?act=order` for pending epay orders, settles
-  `TRADE_SUCCESS` rows and audits `epay.reconcile`; it is bounded to 50 orders per pass and starts
+  `status=1` (or `TRADE_SUCCESS`) rows and audits `epay.reconcile`; it is bounded to 50 orders per pass and starts
   only when `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID` and `AJS_EPAY_KEY` are all set. The merchant key,
-  signature and `payUrl` query are never logged; amounts come from the order snapshot.
+  signature and `payUrl` query are never logged; amounts come from the order snapshot. Only CNY
+  plans can be checked out: epay `money` has no currency field, so a non-CNY plan is refused with 400.
 - **Persistence and audit.** `Snapshot` gains additive `plans`, `orders` and `paymentEvents` rows
   plus their sequence counters. An order row stores only SHA-256 idempotency/request hashes, never
   the raw key. A malformed restored row is failed closed into `cancelled` + `reviewRequired` with
@@ -2418,7 +2419,7 @@ objects.
 | POST | `/v1/admin/orders/{id}/chargeback` | `{reference,reason?}` → 200 `Order`; records external dispute evidence, revokes the grant and flags review |
 | POST | `/v1/admin/orders/{id}/cancel` | cancels `awaiting_payment` → 200; a repeat is 200 unchanged, any other state 409 |
 | POST | `/v1/payments/stripe` | no bearer: verifies `Stripe-Signature` over the raw body (HMAC-SHA256, five-minute tolerance), maps checkout-completion/refund/dispute events and acknowledges duplicates. A bad signature/stale timestamp → 400, an unknown type → 200 `ignored`, no secret configured → 503 |
-| POST | `/v1/payments/epay/notify` | no bearer: form-encoded 易支付 callback. Verifies MD5 sign, `pid`, `trade_status=TRADE_SUCCESS` and `money` against the order snapshot, then settles idempotently by `trade_no`. Answers `success` only for accepted/duplicate, otherwise `fail`; disabled epay → 503 `fail` |
+| GET, POST | `/v1/payments/epay/notify` | no bearer: 易支付 callback via GET query parameters or form-encoded POST body. Verifies MD5 sign, `pid`, `trade_status=TRADE_SUCCESS` and `money` against the order snapshot, then settles idempotently by `trade_no`. Answers `success` only for accepted/duplicate, otherwise `fail`; disabled epay → 503 `fail` |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |
 | POST | `/v1/backup/inspect` | `{envelope,passphrase?}` → `{version,supported,app,createdAt,envelopeBytes,manifest?}`; `envelope` is the JSON document itself, not a base64 string; header-only without a passphrase, no blob and no state-directory access (admin-only) |
 | POST | `/v1/backup/restore` | `{envelope,passphrase,dryRun?,confirm?}` → `{dryRun,applied,restartRequired,exitRecommended,manifest,diff,files?,warning?}`; `envelope` is the JSON document itself; `dryRun` defaults to true, an apply needs `confirm:"RESTORE"`, 409 `BACKUP_LIVE_NODE` while a node is `LIVE`, 409 `BACKUP_DAEMON_RUNNING` without `AJS_BACKUP_ALLOW_RESTORE=1`; after an apply the process refuses further `state.json` saves and answers `exitRecommended:true` (admin-only) |
@@ -2465,7 +2466,7 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (107 paths, 131 operations,
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (107 paths, 132 operations,
   176 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is

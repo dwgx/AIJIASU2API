@@ -251,13 +251,16 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 		writeEpayAck(w, http.StatusTooManyRequests, "fail")
 		return
 	}
+	// Standard 易支付 notify is a GET with query parameters; some
+	// deployments POST a form body. ParseForm merges the query string and an
+	// urlencoded body, so one verification path serves both transports.
 	if err := r.ParseForm(); err != nil {
 		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
 			"malformed form body")
 		writeEpayAck(w, http.StatusOK, "fail")
 		return
 	}
-	form := r.PostForm
+	form := r.Form
 	orderID := strings.TrimSpace(form.Get("out_trade_no"))
 	order, ok := s.store.Order(orderID)
 	if !ok {
@@ -274,6 +277,10 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 			reason = "invalid signature"
 		case errors.Is(err, payment.ErrUnsupportedEvent):
 			reason = "unsupported trade status"
+		case errors.Is(err, payment.ErrProviderMismatch):
+			reason = "order provider mismatch"
+		case errors.Is(err, payment.ErrUnsupportedCurrency):
+			reason = "unsupported currency"
 		case errors.Is(err, payment.ErrInvalidEvent):
 			reason = "invalid event"
 		case errors.Is(err, payment.ErrDisabled):

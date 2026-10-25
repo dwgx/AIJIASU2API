@@ -52,6 +52,18 @@ func epayNotifyCall(t *testing.T, ts *httptest.Server, form url.Values) (*http.R
 	return doRequest(t, ts, req)
 }
 
+func epayNotifyQueryCall(t *testing.T, ts *httptest.Server, method string, form url.Values) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+epayNotifyPath+"?"+form.Encode(), nil)
+	if err != nil {
+		t.Fatalf("new query notify request: %v", err)
+	}
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	return doRequest(t, ts, req)
+}
+
 func epayNotifyForm(t *testing.T, key string, order model.Order, tradeNo, money string) url.Values {
 	t.Helper()
 	form := url.Values{
@@ -257,6 +269,73 @@ func TestEpayNotifySettlesIdempotentlyAndRejectsSpoofs(t *testing.T) {
 			settled.Grant, replayed.Grant, leases, len(st.Leases()))
 	}
 
+}
+
+func TestEpayNotifyAcceptsGETAndPOSTQueryParams(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			ts, st, _ := newEpayAPITestServer(t, Config{})
+			plan := createOrderPlan(t, ts, true, 3000)
+			email := "epay-query-" + strings.ToLower(method) + "@example.com"
+			_, cookie, csrf := activePortalTenant(t, ts, st, email, "u-01")
+			order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-query-"+method)
+			resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+			requireStatus(t, resp, http.StatusOK)
+
+			form := epayNotifyForm(t, epayAPITestKey, order, "trade-query-"+method, "30.00")
+			resp, body := epayNotifyQueryCall(t, ts, method, form)
+			if resp.StatusCode != http.StatusOK || string(body) != "success" {
+				t.Fatalf("%s query notify = %d %q", method, resp.StatusCode, body)
+			}
+			settled, ok := st.Order(order.ID)
+			if !ok || settled.State != model.OrderActive || settled.Provider != model.ProviderEpay {
+				t.Fatalf("%s notify order = %+v, ok=%t", method, settled, ok)
+			}
+		})
+	}
+}
+
+func TestEpayNotifyRejectsNeverCheckedOutOrder(t *testing.T) {
+	ts, st, _ := newEpayAPITestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-never-checkout@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-never-checkout")
+	if order.Provider != model.ProviderManual || order.State != model.OrderAwaitingPayment {
+		t.Fatalf("new order = %+v, want manual/awaiting", order)
+	}
+
+	form := epayNotifyForm(t, epayAPITestKey, order, "trade-never-checkout", "30.00")
+	resp, body := epayNotifyCall(t, ts, form)
+	if resp.StatusCode != http.StatusOK || string(body) != "fail" {
+		t.Fatalf("notify for never-checked-out order = %d %q", resp.StatusCode, body)
+	}
+	current, _ := st.Order(order.ID)
+	if current.State != model.OrderAwaitingPayment || current.Provider != model.ProviderManual {
+		t.Fatalf("notify changed a manual order: %+v", current)
+	}
+}
+
+func TestEpayCheckoutRejectsNonCNYPlan(t *testing.T) {
+	ts, st, _ := newEpayAPITestServer(t, Config{})
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/admin/plans", model.PlanInput{
+		Name: "USD monthly", AmountMinor: 3000, Currency: "USD",
+		LeaseTTLSeconds: 3600, QuotaBytes: 5 << 30,
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	plan := decodeBody[model.Plan](t, body)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-usd-plan@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-usd-plan")
+
+	resp, body = epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+	if !strings.Contains(string(body), "CNY") {
+		t.Fatalf("non-CNY checkout body = %s", body)
+	}
+	current, _ := st.Order(order.ID)
+	if current.State != model.OrderAwaitingPayment || current.Provider != model.ProviderManual {
+		t.Fatalf("rejected checkout changed the order: %+v", current)
+	}
 }
 
 func TestEpayNotifyDisabledPath(t *testing.T) {

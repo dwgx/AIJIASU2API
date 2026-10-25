@@ -5511,7 +5511,7 @@
           "Portal"
         ],
         "summary": "Return the 易支付 hosted checkout URL for one own awaiting_payment order.",
-        "description": "Builds the signed redirect URL with pid, out_trade_no, money, notify_url, return_url and sign_type=MD5. A checkout is not a payment: the order remains awaiting_payment and the provider is recorded only as intent.",
+        "description": "Builds the signed redirect URL with pid, out_trade_no, money, notify_url, return_url and sign_type=MD5. Only CNY plans are supported because epay money carries no currency. A checkout is not a payment: the order remains awaiting_payment and the provider is recorded only as intent.",
         "x-implementation-phase": "P0",
         "security": [
           {
@@ -6242,13 +6242,138 @@
       }
     },
     "/v1/payments/epay/notify": {
+      "get": {
+        "operationId": "epayNotifyGet",
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Verify a 易支付 GET query callback and record its settlement event.",
+        "description": "No bearer token: the MD5 signature over the query string is the credential. This is the standard 易支付 notify transport. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Answers success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
+        "x-implementation-phase": "P0",
+        "security": [],
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "query",
+            "required": true,
+            "description": "Merchant id; must match AJS_EPAY_PID.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trade_no",
+            "in": "query",
+            "required": true,
+            "description": "Gateway transaction id; the idempotency key of the settlement event.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "out_trade_no",
+            "in": "query",
+            "required": true,
+            "description": "The order id issued at checkout.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Gateway payment channel.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "alipay",
+                "wxpay"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Plan name echoed by the gateway.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "money",
+            "in": "query",
+            "required": true,
+            "description": "Decimal amount with two places; must equal the immutable order snapshot.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trade_status",
+            "in": "query",
+            "required": true,
+            "description": "Only a completed trade settles.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "TRADE_SUCCESS"
+              ]
+            }
+          },
+          {
+            "name": "sign",
+            "in": "query",
+            "required": true,
+            "description": "Lowercase hex MD5 of the canonical sorted parameters plus the merchant key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sign_type",
+            "in": "query",
+            "required": false,
+            "description": "Signature algorithm; only MD5 is supported.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "MD5"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plain-text acknowledgement: success for an accepted or duplicate event, fail for every rejection.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "success",
+                    "fail"
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
       "post": {
         "operationId": "epayNotify",
         "tags": [
           "Payments"
         ],
-        "summary": "Verify a 易支付 form callback and record its settlement event.",
-        "description": "No bearer token: the MD5 signature over the form body is the credential. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Answers the plain-text protocol: success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
+        "summary": "Verify a 易支付 notify (GET query or POST form) and record its settlement event.",
+        "description": "No bearer token: the MD5 signature over the query string/form body is the credential. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Standard 易支付 sends GET query parameters; a POST form body is also accepted. Answers the plain-text protocol: success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
         "x-implementation-phase": "P0",
         "security": [],
         "requestBody": {

@@ -23,6 +23,13 @@ import (
 var (
 	ErrOrderNotFound = errors.New("epay order not found")
 	ErrQueryFailed   = errors.New("epay order query failed")
+	// ErrQueryAuth is a merchant credential/configuration rejection. It wraps
+	// ErrQueryFailed so callers that only know the transport error still see
+	// a query failure, while the reconciler can name the actual cause.
+	ErrQueryAuth = fmt.Errorf("%w: authentication rejected", ErrQueryFailed)
+	// ErrQueryTransient is a retryable gateway failure (busy, rate limit,
+	// unknown non-1 code, 5xx). It is audited and retried on the next pass.
+	ErrQueryTransient = fmt.Errorf("%w: transient gateway failure", ErrQueryFailed)
 )
 
 const (
@@ -44,10 +51,18 @@ type EpayOrderStatus struct {
 	Name        string
 	Money       string
 	TradeStatus string
+	// Status is the standard order-query integer: 0 unpaid, 1 paid,
+	// 2 refunded. Some forks return trade_status instead; Paid accepts both.
+	Status int
 }
 
-// Paid reports whether the gateway says the order is settled.
+// Paid reports whether the gateway says the order is settled. The standard
+// 易支付 query API returns status=1 and no trade_status field, while some
+// forks keep the notify-style TRADE_SUCCESS value; either is authoritative.
 func (s EpayOrderStatus) Paid() bool {
+	if s.Status != 0 {
+		return s.Status == 1
+	}
 	return strings.EqualFold(strings.TrimSpace(s.TradeStatus), "TRADE_SUCCESS")
 }
 
@@ -103,8 +118,8 @@ func (p *Epay) QueryOrder(ctx context.Context, outTradeNo string) (EpayOrderStat
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return EpayOrderStatus{}, fmt.Errorf("%w: malformed response", ErrQueryFailed)
 	}
-	if payload.code() != 1 {
-		return EpayOrderStatus{}, ErrOrderNotFound
+	if code := payload.code(); code != 1 {
+		return EpayOrderStatus{}, epayQueryError(code, payload.Msg)
 	}
 	status := payload.status()
 	if strings.TrimSpace(status.OutTradeNo) == "" {
@@ -124,29 +139,66 @@ type epayQueryResponse struct {
 	Name        string          `json:"name"`
 	Money       string          `json:"money"`
 	TradeStatus string          `json:"trade_status"`
+	Status      json.RawMessage `json:"status"`
 	Data        *epayQueryData  `json:"data"`
 }
 
 type epayQueryData struct {
-	TradeNo     string `json:"trade_no"`
-	OutTradeNo  string `json:"out_trade_no"`
-	Type        string `json:"type"`
-	Name        string `json:"name"`
-	Money       string `json:"money"`
-	TradeStatus string `json:"trade_status"`
+	TradeNo     string          `json:"trade_no"`
+	OutTradeNo  string          `json:"out_trade_no"`
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Money       string          `json:"money"`
+	TradeStatus string          `json:"trade_status"`
+	Status      json.RawMessage `json:"status"`
 }
 
-func (r epayQueryResponse) code() int {
-	raw := strings.TrimSpace(string(r.Code))
-	if raw == "" || raw == "null" {
+func (r epayQueryResponse) code() int { return gatewayInt(r.Code) }
+
+// gatewayInt accepts the number and quoted-number shapes seen across 易支付
+// deployments; an absent or malformed value reads as zero.
+func gatewayInt(raw json.RawMessage) int {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
 		return 0
 	}
-	raw = strings.Trim(raw, `"`)
-	value, err := strconv.Atoi(raw)
+	text = strings.Trim(text, `"`)
+	value, err := strconv.Atoi(text)
 	if err != nil {
 		return 0
 	}
 	return value
+}
+
+// epayQueryError maps the gateway's non-success code to a typed error. The
+// documented meanings are -1 = order not found and -3 = merchant key error;
+// other codes are transient. A few deployments use 0 plus a not-found or
+// signature message, so the message is consulted only as a fallback.
+func epayQueryError(code int, msg string) error {
+	text := strings.TrimSpace(msg)
+	lower := strings.ToLower(text)
+	notFound := strings.Contains(text, "不存在") || strings.Contains(text, "未找到") ||
+		strings.Contains(lower, "not found") || strings.Contains(lower, "no such order")
+	auth := strings.Contains(text, "密钥") || strings.Contains(text, "签名") ||
+		strings.Contains(lower, "merchant key") || strings.Contains(lower, "signature") ||
+		strings.Contains(lower, "auth")
+	switch {
+	case code == -3:
+		return fmt.Errorf("%w: gateway code %d", ErrQueryAuth, code)
+	case code == -1:
+		// -1 is the documented not-found code; a few gateways use it for a
+		// signature failure instead, which the message disambiguates.
+		if auth {
+			return fmt.Errorf("%w: gateway code %d", ErrQueryAuth, code)
+		}
+		return ErrOrderNotFound
+	case notFound:
+		return ErrOrderNotFound
+	case auth:
+		return fmt.Errorf("%w: gateway code %d", ErrQueryAuth, code)
+	default:
+		return fmt.Errorf("%w: gateway code %d", ErrQueryTransient, code)
+	}
 }
 
 func (r epayQueryResponse) status() EpayOrderStatus {
@@ -157,6 +209,7 @@ func (r epayQueryResponse) status() EpayOrderStatus {
 		Name:        strings.TrimSpace(r.Name),
 		Money:       strings.TrimSpace(r.Money),
 		TradeStatus: strings.TrimSpace(r.TradeStatus),
+		Status:      gatewayInt(r.Status),
 	}
 	if r.Data != nil {
 		if status.TradeNo == "" {
@@ -176,6 +229,9 @@ func (r epayQueryResponse) status() EpayOrderStatus {
 		}
 		if status.TradeStatus == "" {
 			status.TradeStatus = strings.TrimSpace(r.Data.TradeStatus)
+		}
+		if status.Status == 0 && len(r.Data.Status) > 0 {
+			status.Status = gatewayInt(r.Data.Status)
 		}
 	}
 	return status
@@ -212,6 +268,10 @@ type EpayReconciler struct {
 	maxOrders int
 	now       func() time.Time
 	jitter    func(time.Duration) time.Duration
+	// next rotates the start of a full batch. Without it a backlog larger
+	// than maxOrders would re-query the same oldest rows forever and never
+	// reach a paid order behind them.
+	next int
 }
 
 // NewEpayReconciler builds the poller. It returns nil when the provider or
@@ -308,7 +368,18 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		maxOrders = defaultEpayReconcileBatch
 	}
 	if len(orders) > maxOrders {
-		orders = orders[:maxOrders]
+		total := len(orders)
+		start := r.next % total
+		if start < 0 {
+			start = 0
+		}
+		rotated := make([]model.Order, 0, total)
+		rotated = append(rotated, orders[start:]...)
+		rotated = append(rotated, orders[:start]...)
+		orders = rotated[:maxOrders]
+		r.next = (start + maxOrders) % total
+	} else {
+		r.next = 0
 	}
 	for _, order := range orders {
 		if err := ctx.Err(); err != nil {
@@ -320,14 +391,36 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrOrderNotFound):
+			// A normal "not paid yet / not created" answer; nothing to do.
+			continue
+		case errors.Is(err, ErrQueryAuth):
+			// A wrong PID/key stops every query, so make it visible instead
+			// of silently skipping the whole queue.
+			logger.Error("epay_reconcile_auth_failed", "order_id", order.ID, "error", err)
+			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway rejected the merchant credentials; check AJS_EPAY_PID/AJS_EPAY_KEY")
+			continue
+		case errors.Is(err, ErrQueryTransient), errors.Is(err, ErrQueryFailed):
+			logger.Warn("epay_reconcile_query_failed", "order_id", order.ID, "error", err)
+			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway query failed; will retry")
 			continue
 		case errors.Is(err, ErrDisabled):
 			return ErrDisabled
 		default:
 			logger.Warn("epay_reconcile_query_failed", "order_id", order.ID, "error", err)
+			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway query failed; will retry")
 			continue
 		}
 		if !status.Paid() {
+			continue
+		}
+		// Epay money has no currency; a non-CNY snapshot must never be
+		// settled as if it were CNY.
+		if !strings.EqualFold(strings.TrimSpace(order.Plan.Currency), "CNY") {
+			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"order currency is not CNY; epay settlement skipped")
 			continue
 		}
 		if status.OutTradeNo != "" && status.OutTradeNo != order.ID {

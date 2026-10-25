@@ -35,7 +35,7 @@ func testEpayOrder() model.Order {
 			AmountMinor: 3000,
 			Currency:    "CNY",
 		},
-		Provider: model.ProviderManual,
+		Provider: model.ProviderEpay,
 		State:    model.OrderAwaitingPayment,
 	}
 }
@@ -233,6 +233,60 @@ func TestEpayCheckoutOptionalCallbackURLs(t *testing.T) {
 	query = parsed.Query()
 	if query.Get("notify_url") == "" || query.Has("return_url") {
 		t.Fatalf("notify-only callbacks = %v", query)
+	}
+}
+
+func TestEpayCheckoutRejectsNonCNY(t *testing.T) {
+	order := testEpayOrder()
+	order.Plan.Currency = "USD"
+	_, err := newTestEpay().Checkout(order, "alipay", "", "")
+	if !errors.Is(err, ErrUnsupportedCurrency) || !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("non-CNY checkout error = %v, want ErrUnsupportedCurrency/ErrInvalidEvent", err)
+	}
+}
+
+func TestEpayGatewayRequiresHTTPS(t *testing.T) {
+	cases := []struct {
+		name    string
+		gateway string
+		want    bool
+	}{
+		{"plaintext hostname", "http://pay.example.test/", false},
+		{"plaintext public ip", "http://192.0.2.10/", false},
+		{"lookalike localhost", "http://localhost.example.test/", false},
+		{"loopback ipv4", "http://127.0.0.1:18080/", true},
+		{"loopback ipv6", "http://[::1]:18080/", true},
+		{"localhost", "http://localhost:18080/", true},
+		{"https", "https://pay.example.test/", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := NewEpay(EpayConfig{Gateway: tc.gateway, PID: "1001", Key: epayTestKey})
+			if got := provider.Enabled(); got != tc.want {
+				t.Fatalf("Enabled() = %t, want %t (reason %q)", got, tc.want, provider.DisabledReason())
+			}
+			if !tc.want && !strings.Contains(provider.DisabledReason(), "https") {
+				t.Fatalf("disabled reason = %q, want an https explanation", provider.DisabledReason())
+			}
+		})
+	}
+}
+
+func TestEpayNotifyRejectsProviderMismatchAndNonCNY(t *testing.T) {
+	provider := newTestEpay()
+	order := testEpayOrder()
+	form := signedEpayNotify(t, epayTestKey, order, "trade-policy", "30.00")
+
+	manual := order
+	manual.Provider = model.ProviderManual
+	if _, err := provider.VerifyNotify(context.Background(), form, manual); !errors.Is(err, ErrProviderMismatch) {
+		t.Fatalf("manual order notify error = %v, want ErrProviderMismatch", err)
+	}
+
+	usd := order
+	usd.Plan.Currency = "USD"
+	if _, err := provider.VerifyNotify(context.Background(), form, usd); !errors.Is(err, ErrUnsupportedCurrency) {
+		t.Fatalf("USD order notify error = %v, want ErrUnsupportedCurrency", err)
 	}
 }
 

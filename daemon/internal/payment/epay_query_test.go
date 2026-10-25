@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -87,7 +88,8 @@ func epayQueryServer(t *testing.T, payload string, status int, requests *int) *h
 }
 
 func TestEpayQueryOrderParsesStatusAndNestedData(t *testing.T) {
-	payload := `{"code":1,"msg":"ok","trade_no":"trade-1","out_trade_no":"ord-001","type":"alipay","name":"Monthly","money":"30.00","trade_status":"TRADE_SUCCESS"}`
+	// Standard 易支付 order query: status=1 means paid, with no trade_status.
+	payload := `{"code":1,"msg":"ok","trade_no":"trade-1","out_trade_no":"ord-001","type":"alipay","name":"Monthly","money":"30.00","status":1}`
 	server := epayQueryServer(t, payload, http.StatusOK, nil)
 	defer server.Close()
 	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
@@ -96,16 +98,27 @@ func TestEpayQueryOrderParsesStatusAndNestedData(t *testing.T) {
 		t.Fatalf("QueryOrder: %v", err)
 	}
 	if status.TradeNo != "trade-1" || status.OutTradeNo != "ord-001" ||
-		status.Money != "30.00" || !status.Paid() {
+		status.Money != "30.00" || status.Status != 1 || !status.Paid() {
 		t.Fatalf("status = %+v", status)
 	}
 
-	nested := `{"code":"1","data":{"trade_no":"trade-2","out_trade_no":"ord-002","money":"0.01","trade_status":"TRADE_SUCCESS"}}`
+	// A string status is accepted by several forks.
+	quoted := `{"code":1,"trade_no":"trade-3","out_trade_no":"ord-003","money":"30.00","status":"1"}`
+	server3 := epayQueryServer(t, quoted, http.StatusOK, nil)
+	defer server3.Close()
+	provider3 := NewEpay(EpayConfig{Gateway: server3.URL, PID: "1001", Key: epayTestKey})
+	status, err = provider3.QueryOrder(context.Background(), "ord-003")
+	if err != nil || status.Status != 1 || !status.Paid() {
+		t.Fatalf("quoted status = %+v, %v", status, err)
+	}
+
+	nested := `{"code":"1","data":{"trade_no":"trade-2","out_trade_no":"ord-002","money":"0.01","trade_status":"TRADE_SUCCESS","status":1}}`
 	server2 := epayQueryServer(t, nested, http.StatusOK, nil)
 	defer server2.Close()
 	provider2 := NewEpay(EpayConfig{Gateway: server2.URL, PID: "1001", Key: epayTestKey})
 	status, err = provider2.QueryOrder(context.Background(), "ord-002")
-	if err != nil || status.TradeNo != "trade-2" || status.OutTradeNo != "ord-002" {
+	if err != nil || status.TradeNo != "trade-2" || status.OutTradeNo != "ord-002" ||
+		status.Status != 1 {
 		t.Fatalf("nested status = %+v, %v", status, err)
 	}
 }
@@ -134,6 +147,134 @@ func TestEpayQueryOrderErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), epayTestKey) || strings.Contains(err.Error(), "key=") {
 		t.Fatalf("query error leaks the key: %q", err)
+	}
+}
+
+func TestEpayQueryErrorClassification(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    error
+	}{
+		{"order not found", `{"code":-1,"msg":"订单号不存在"}`, ErrOrderNotFound},
+		{"merchant key error", `{"code":-3,"msg":"商户密钥错误"}`, ErrQueryAuth},
+		{"signature error", `{"code":-1,"msg":"签名错误"}`, ErrQueryAuth},
+		{"gateway busy", `{"code":-2,"msg":"系统繁忙"}`, ErrQueryTransient},
+		{"unknown zero code", `{"code":0,"msg":"unexpected"}`, ErrQueryTransient},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := epayQueryServer(t, tc.payload, http.StatusOK, nil)
+			defer server.Close()
+			provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+			_, err := provider.QueryOrder(context.Background(), "ord-001")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if tc.want != ErrOrderNotFound && !errors.Is(err, ErrQueryFailed) {
+				t.Fatalf("typed error %v does not wrap ErrQueryFailed", err)
+			}
+		})
+	}
+}
+
+func TestEpayQueryDoesNotFollowRedirects(t *testing.T) {
+	followed := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":1,"out_trade_no":"ord-001","money":"30.00","status":1}`)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	provider := NewEpay(EpayConfig{Gateway: redirect.URL, PID: "1001", Key: epayTestKey})
+	_, err := provider.QueryOrder(context.Background(), "ord-001")
+	if !errors.Is(err, ErrQueryFailed) {
+		t.Fatalf("redirect query error = %v, want ErrQueryFailed", err)
+	}
+	if followed {
+		t.Fatalf("query followed a redirect to another host")
+	}
+}
+
+func TestEpayReconcileAuditsTransientErrors(t *testing.T) {
+	server := epayQueryServer(t, `{"code":-2,"msg":"系统繁忙"}`, http.StatusOK, nil)
+	defer server.Close()
+	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+	store := &fakeEpayStore{pending: []model.Order{testEpayOrder()}}
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: store,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	applied, audits := store.snapshot()
+	if len(applied) != 0 {
+		t.Fatalf("transient error applied %d events", len(applied))
+	}
+	if len(audits) != 1 || audits[0].severity != model.SeverityWarn ||
+		audits[0].action != "epay.reconcile" ||
+		!strings.Contains(audits[0].detail, "retry") {
+		t.Fatalf("transient audit = %+v", audits)
+	}
+}
+
+func TestEpayReconcileRotatesFullBatch(t *testing.T) {
+	seen := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Query().Get("out_trade_no")]++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":1,"out_trade_no":"`+r.URL.Query().Get("out_trade_no")+`","money":"30.00","status":0}`)
+	}))
+	defer server.Close()
+	orders := make([]model.Order, 5)
+	for i := range orders {
+		orders[i] = testEpayOrder()
+		orders[i].ID = fmt.Sprintf("ord-%03d", i+1)
+	}
+	store := &fakeEpayStore{pending: orders}
+	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: store,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxOrders: 3,
+	})
+	for range 2 {
+		if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+			t.Fatalf("ReconcileOnce: %v", err)
+		}
+	}
+	if seen["ord-004"] == 0 || seen["ord-005"] == 0 {
+		t.Fatalf("full-batch rotation never reached newest orders: %v", seen)
+	}
+}
+
+func TestEpayReconcileSkipsNonCNYOrder(t *testing.T) {
+	server := epayQueryServer(t, `{"code":1,"trade_no":"trade-usd","out_trade_no":"ord-usd","money":"30.00","status":1}`, http.StatusOK, nil)
+	defer server.Close()
+	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+	order := testEpayOrder()
+	order.ID = "ord-usd"
+	order.Plan.Currency = "USD"
+	store := &fakeEpayStore{pending: []model.Order{order}}
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: store,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	applied, audits := store.snapshot()
+	if len(applied) != 0 {
+		t.Fatalf("non-CNY order settled: %+v", applied)
+	}
+	if len(audits) != 1 || !strings.Contains(audits[0].detail, "not CNY") {
+		t.Fatalf("non-CNY audit = %+v", audits)
 	}
 }
 

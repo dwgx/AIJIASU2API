@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -14,6 +15,14 @@ import (
 	"time"
 
 	"ajsaccountd/internal/model"
+)
+
+// Epay policy failures. Both wrap ErrInvalidEvent so callers that only know
+// the generic payment error still answer 400, while the API can name the
+// specific reason without echoing any gateway value.
+var (
+	ErrUnsupportedCurrency = fmt.Errorf("%w: epay requires a CNY plan", ErrInvalidEvent)
+	ErrProviderMismatch    = fmt.Errorf("%w: order was not checked out with epay", ErrInvalidEvent)
 )
 
 // EpaySignTypeMD5 is the only signature algorithm 易支付 defines for the
@@ -72,6 +81,16 @@ func NewEpay(cfg EpayConfig) *Epay {
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
+	} else {
+		cloned := *client
+		client = &cloned
+	}
+	// A payment gateway must never bounce the query (which carries the
+	// merchant key) to another host. ErrUseLastResponse returns the redirect
+	// response itself, so QueryOrder sees a non-200 status without ever
+	// following the Location or putting the URL into an error string.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	p := &Epay{
 		pid:       strings.TrimSpace(cfg.PID),
@@ -103,9 +122,17 @@ func NewEpay(cfg EpayConfig) *Epay {
 		return p
 	}
 	parsed, err := url.Parse(gateway)
-	if err != nil || parsed.Host == "" ||
-		(strings.ToLower(parsed.Scheme) != "http" && strings.ToLower(parsed.Scheme) != "https") {
-		p.problem = "AJS_EPAY_GATEWAY must be an absolute http(s) URL"
+	if err != nil || parsed.Host == "" {
+		p.problem = "AJS_EPAY_GATEWAY must be an absolute https URL"
+		return p
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && !(scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+		// Plain http is allowed only for a loopback development/test
+		// gateway; production gateways must be TLS. The query path sends
+		// the merchant key in the URL, so cleartext is not acceptable on a
+		// network.
+		p.problem = "AJS_EPAY_GATEWAY must be an absolute https URL (plain http is allowed only for loopback)"
 		return p
 	}
 	if parsed.User != nil {
@@ -228,6 +255,12 @@ func (p *Epay) Checkout(order model.Order, kind, notifyURL, returnURL string) (s
 	}
 	orderID := strings.TrimSpace(order.ID)
 	name := strings.TrimSpace(order.Plan.Name)
+	// Epay's money field carries no currency, so only a CNY plan can be
+	// represented faithfully. Anything else would be charged as if it were
+	// CNY and later credited with the plan's currency.
+	if !strings.EqualFold(strings.TrimSpace(order.Plan.Currency), "CNY") {
+		return "", ErrUnsupportedCurrency
+	}
 	// The gateway signs raw key=value pairs without escaping, so a separator
 	// inside a value would make the canonical string ambiguous.
 	if orderID == "" || name == "" || order.Plan.AmountMinor <= 0 ||
@@ -319,6 +352,15 @@ func (p *Epay) VerifyNotify(ctx context.Context, form url.Values, order model.Or
 	outTradeNo := strings.TrimSpace(form.Get("out_trade_no"))
 	if outTradeNo == "" || outTradeNo != order.ID {
 		return model.PaymentEvent{}, ErrInvalidEvent
+	}
+	// A callback may only settle an order that actually selected epay. An
+	// empty provider is tolerated for a hand-built event/unit fixture, but a
+	// real order always carries at least "manual".
+	if order.Provider != "" && order.Provider != model.ProviderEpay {
+		return model.PaymentEvent{}, ErrProviderMismatch
+	}
+	if !strings.EqualFold(strings.TrimSpace(order.Plan.Currency), "CNY") {
+		return model.PaymentEvent{}, ErrUnsupportedCurrency
 	}
 	tradeNo := strings.TrimSpace(form.Get("trade_no"))
 	if tradeNo == "" || len(tradeNo) > 128 || strings.ContainsAny(tradeNo, "\r\n\t") {
@@ -428,4 +470,16 @@ func validHTTPURL(raw string) bool {
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	return scheme == "http" || scheme == "https"
+}
+
+// isLoopbackHost reports whether host names the local machine. Plain http is
+// permitted only there so httptest servers work without weakening a real
+// deployment; a hostname such as localhost.example.test is not loopback.
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }

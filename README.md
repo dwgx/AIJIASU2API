@@ -200,11 +200,11 @@ As of 2026-10-25:
   (易支付 `{payUrl}`), `/v1/admin/orders*` (filter, get, settle, refund, chargeback, cancel),
   the unauthenticated `/v1/payments/stripe` route behind `AJS_STRIPE_WEBHOOK_SECRET`
   (HMAC-SHA256 over the raw body with a five-minute tolerance; unset leaves it answering 503)
-  and the unauthenticated `/v1/payments/epay/notify` callback (MD5 form signature; disabled
+  and the unauthenticated `GET`/`POST /v1/payments/epay/notify` callback (MD5 query/form signature; disabled
   without `AJS_EPAY_GATEWAY`/`AJS_EPAY_PID`/`AJS_EPAY_KEY`, with optional
   `AJS_EPAY_SIGN_TYPE`/`AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL`). A 60-second, ±10%-jittered
-  reconciler queries `api.php?act=order` for pending epay orders and settles `TRADE_SUCCESS`
-  rows, bounded to 50 orders per pass. Manual settlement is an admin attestation of offline
+  reconciler queries `api.php?act=order` for pending epay orders and settles `status=1` /
+  `TRADE_SUCCESS` rows, bounded to 50 orders per pass. Manual settlement is an admin attestation of offline
   funds; an epay notify or reconciliation records the gateway-confirmed payment through the same
   store path. Activation is a separate idempotent grant keyed by order id, and a refund or
   chargeback revokes that grant and restores the previous quota. The state machine is
@@ -359,7 +359,7 @@ for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT
 candidate analysis behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (107 paths, 131 operations, 176 schemas at the last sync): every route registered in
+surface (107 paths, 132 operations, 176 schemas at the last sync): every route registered in
 `daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
 schedules, scoped keys, the platform views (renewal, usage, health, webhooks), plans and orders,
 the Stripe-compatible and 易支付 payment callbacks, the customer tenant portal and tenant

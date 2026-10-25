@@ -468,7 +468,9 @@ func (s *Server) routes(rt *router) {
 
 	// 易支付 notify callback. Like the Stripe route it is a provider callback,
 	// not a customer route: it is registered regardless of AJS_TENANT_PORTAL
-	// and authenticates the MD5 signature over the form body, never a bearer.
+	// and authenticates the MD5 signature over the query string/form body,
+	// never a bearer. Standard 易支付 sends GET; some deployments POST.
+	rt.handle(http.MethodGet, "/v1/payments/epay/notify", s.handleEpayNotify)
 	rt.handle(http.MethodPost, "/v1/payments/epay/notify", s.handleEpayNotify)
 
 	// Order administration (DESIGN-ORDERS). Plans and orders are operator

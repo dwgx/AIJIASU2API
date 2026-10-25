@@ -149,9 +149,9 @@ func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor stri
 		return model.Order{}, false, err
 	}
 
-	s.orderSeq++
+	nextSeq := s.orderSeq + 1
 	order := model.Order{
-		ID:        fmt.Sprintf("%s%03d", orderIDPrefix, s.orderSeq),
+		ID:        fmt.Sprintf("%s%03d", orderIDPrefix, nextSeq),
 		TenantID:  tenant.ID,
 		UserID:    userID,
 		PlanID:    plan.ID,
@@ -160,11 +160,17 @@ func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor stri
 		State:     model.OrderAwaitingPayment,
 		CreatedAt: iso(now),
 	}
-	s.orders = prependCapped(s.orders, orderRecord{
+	var inserted bool
+	s.orders, inserted = prependOrderCapped(s.orders, orderRecord{
 		Order:              order,
 		IdempotencyKeyHash: keyHash,
 		RequestHash:        requestHash,
 	}, MaxOrders)
+	if !inserted {
+		return model.Order{}, false, conflictf(
+			"order store is full of pending epay orders; settle or cancel one first")
+	}
+	s.orderSeq = nextSeq
 	s.addAuditLocked(model.SeverityInfo, actor, "order.created", order.ID,
 		fmt.Sprintf("%s · %s · %s", plan.Name, formatMinor(plan.AmountMinor, plan.Currency), order.State),
 		map[string]string{
@@ -176,6 +182,33 @@ func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor stri
 			"currency": plan.Currency,
 		})
 	return cloneOrder(order), false, nil
+}
+
+// prependOrderCapped inserts one order at the head of the newest-first slice.
+// At MaxOrders it evicts the oldest evictable row, but never an
+// awaiting_payment epay order: that row is the only record of money the
+// gateway may still report, and dropping it would turn a later valid notify
+// into "unknown order". If every row is protected, insertion fails and the
+// caller answers a conflict instead of silently losing a pending payment.
+func prependOrderCapped(items []orderRecord, item orderRecord, limit int) ([]orderRecord, bool) {
+	if limit <= 0 {
+		return items, true
+	}
+	for len(items) >= limit {
+		evict := -1
+		for i := len(items) - 1; i >= 0; i-- {
+			if items[i].State == model.OrderAwaitingPayment && items[i].Provider == model.ProviderEpay {
+				continue
+			}
+			evict = i
+			break
+		}
+		if evict < 0 {
+			return items, false
+		}
+		items = append(items[:evict], items[evict+1:]...)
+	}
+	return prependCapped(items, item, limit), true
 }
 
 // checkOpenOrderLocked enforces one open order per user. An active order whose
@@ -459,6 +492,16 @@ func (s *Store) applyEventLocked(idx int, event model.PaymentEvent, reason, acto
 			return cloneOrder(*order), nil
 		}
 		return cloneOrder(*order), nil
+	}
+
+	// An epay callback may only settle an order that selected epay. A manual
+	// attestation remains the operator's override for an epay checkout that
+	// was actually paid offline, but an epay callback must never turn a
+	// never-checked-out manual order into a payment. (Stripe keeps its
+	// existing webhook path: its tests and contract do not carry a checkout
+	// intent marker.)
+	if event.Provider == model.ProviderEpay && order.Provider != model.ProviderEpay {
+		return model.Order{}, conflictf("order %q was not checked out with epay", order.ID)
 	}
 
 	if event.OccurredAt == "" {
