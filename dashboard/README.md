@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 393 tests in 43 files.
+- Tests: Vitest + React Testing Library + jsdom, 400 tests in 44 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -74,7 +74,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 393 tests in 43 files
+npm test           # Vitest, 400 tests in 44 files
 npm run typecheck  # tsc -b
 ```
 
@@ -106,7 +106,9 @@ npx vite preview --host 127.0.0.1 --port 18082
 Open `http://127.0.0.1:18082`. `vite preview` defaults to port 4173 in `vite.config.ts`;
 `--port 18082` overrides it for this deployment. The preview server does not proxy: the browser
 calls the daemon directly, so the daemon must allow the preview origin in `AJS_CORS_ORIGINS` (the
-verified run used `http://127.0.0.1:18082,http://127.0.0.1:18081`).
+verified run used `http://127.0.0.1:18082,http://127.0.0.1:18081`). A daemon started with the
+optional HTTPS listener (`AJS_TLS_CERT`/`AJS_TLS_KEY`) takes an `https://` base instead; the
+console only needs the URL, and that listener sends HSTS on every response.
 
 **Token:** `AJS_ALLOW_INSECURE=1` is a loopback-only lab switch (startup refuses it on any other
 bind) and leaves the daemon without bearer auth. For a real token, generate one with
@@ -400,16 +402,29 @@ daemon's 30 s cadence), pause while the tab is hidden, and stop polling when the
 - **Source.** `GET /v1/lab/flows?limit=200` every 5 s; node labels come from `/v1/nodes` every
   15 s and the mutation-lab history from `/v1/requests` every 10 s. Rows from the two sources share
   one table and a `source` filter (`Gate flows` / `Mutation lab`).
-- **Columns.** Time, account/node, method, target (`host:port` only), status (`ok` / `rejected`
-  for gate flows; HTTP status for mutation rows), bytes in/out, duration, source and error class.
-  The daemon records only host and port — never a URL, headers or a credential — and the SID is
-  already redacted server-side. A row opens a detail drawer with the same fields.
+- **Columns.** Time, account/node, user, method, protocol, target (`host:port` only), status
+  (`ok` / `rejected` for gate flows; HTTP status for mutation rows), bytes in/out, duration,
+  source and error class. The daemon records only host and port — never a URL, headers or a
+  credential — and the SID is already redacted server-side. A row opens a detail drawer with the
+  same fields, including the protocol badge and the attributed user.
+- **Protocol.** A badge names the listener that admitted the flow: `socks5` in the info tone and
+  `http` (HTTP CONNECT) in the neutral tone. An empty value renders `—`, so a row from a daemon
+  that does not report the listener is never labelled as one of them.
+- **User.** The cell shows the operator's name with the exact id as its `title` and falls back to
+  the id alone; an unattributed flow (loopback gate mode, or a daemon that reports no
+  attribution) renders `—`. `protocol`, `userId` and `userName` are optional on the wire:
+  `/v1/requests` rows carry all three, while `/v1/lab/flows` carries them only once the daemon
+  exposes them — the current flow view does not, so gate-flow rows show `—` and mutation-lab rows
+  show the request-log value. The mock seeds both protocols and named operators, so the default
+  build shows real badges and names.
 - **Summary.** Five tiles (flows, accepted, rejected, p95 duration, bytes) computed over the
   filtered rows, plus the `{shown} of {total} rows · {dropped} dropped` hint from the bounded
   500-entry per-gate rings.
-- **Filters.** Search (host, account, node, method, id), time range (15 m / 1 h / 24 h / all),
-  status, method, account/node, source and error class. The source filter isolates gate flows from
-  mutation-lab rows.
+- **Filters.** Search (host, account, node, user, method, protocol, id), time range (15 m / 1 h /
+  24 h / all), status, method, protocol, account/node, user, source and error class. The protocol
+  filter offers `socks5` and `http`; the user filter is built from the rows and only appears once
+  at least one row names an operator, so a loopback-only ring does not show a dead control. The
+  source filter isolates gate flows from mutation-lab rows.
 - **States.** An empty ring explains that no gate flow has finished yet; an `{enabled:false}`
   body renders the daemon's reason instead of an empty table; a failed poll keeps the last good
   rows with the stale marker (see [Polling and stale data](#polling-and-stale-data)).
@@ -835,7 +850,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 393 Vitest tests in 43 files (65 at the 2026-10-23 record; see
+- 400 Vitest tests in 44 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -920,6 +935,13 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   status/source and host-search/time-range filters with clear-all, the detail drawer (id,
   redacted SID, host-only target), the empty-ring explanation, the disabled reason, error with
   retry, and that no full URL or credential reaches the table.
+  `tests/requests-protocol.test.tsx` covers the protocol and attribution columns: the mock ring
+  reports both `socks5` and `http` flows and named operators, the table renders a `Protocol`
+  badge and a `User` cell, the protocol filter narrows to one listener and restores, the user
+  filter narrows to one operator, a bare flow from an older daemon (no `protocol`, no
+  `userId`/`userName`) renders `—` and hides the user filter instead of inventing a value, an id
+  without a name still renders and filters, the detail drawer repeats protocol and user, and the
+  Chinese UI labels both columns and filters.
   `tests/ui-quickfix.test.tsx` pins the shell quick fixes: the 248→56 px sidebar collapse with
   `localStorage["ajs.sidebar"]` persistence, the APC branding (no workspace switcher or operator
   avatar), and the centered add-account modal with concurrency fixed at one and the vendor note.
@@ -982,7 +1004,7 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, create dialog (user, platform, optional account pin, TTL, per-dialog idempotency key), rotate, release confirm, TTL |
 | `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor (the daemon's gate enforces it, with the monthly quota, only under `AJS_GATE_AUTH=userpass`) |
-| `/requests` | Requests | gate-flow table with search/time/status/method/account-node/source filters, shared pagination footer, row detail drawer, mutation lab drawer |
+| `/requests` | Requests | gate-flow table with search/time/status/method/protocol/account-node/user/source filters, user and protocol columns, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, CSV export of `/v1/audit/export.csv` with the active severity filter and an `X-Truncated` warning |
 | `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
@@ -1030,12 +1052,14 @@ src/
   pages/                  Overview, Usage, Accounts, Nodes, Leases, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
+  a11y-mobile.test.tsx    icon-only names, skip link, scroll regions, 390 px row cards, touch targets
   lab.test.tsx            Lab tabs, redaction, disabled telemetry, honesty fixes
   i18n.test.tsx           dictionary parity, zh/en switching, browser default, ajs.lang, document.lang
   token-gate.test.tsx     401 → runtime token dialog → sessionStorage token + retry
   update-card.test.tsx    Settings Updates card states and deploy command
   settings-sections.test.tsx  nine-section rail, active state, stored-only controls, save/reset, zh rail
   access-backup.test.tsx  scoped-key create/secret/revoke, audit CSV, backup inspect/dry-run, live bearer header
+  events-feed.test.tsx    replay + cursor, newest-first append, 100-row cap, hidden pause, mock stream, zh
   accounts-view.test.tsx  Accounts table/cards switch, persistence, card actions, mobile grid
   account-io.test.tsx     export/import dialogs, plaintext gate, bulk delete, mock IO contract
   renewal-card.test.tsx   countdown, public price catalogue, official link, no payment call
@@ -1048,12 +1072,14 @@ tests/
   leases-create.test.tsx  create dialog, per-dialog idempotency key, duplicate user+platform refusal, TTL/platform/account picker
   device-pool.test.tsx    hash-only list, count chips, filters, generate, assign, typed-token lifecycle, export/import, disabled pool
   nodes-catalog.test.tsx  catalog grouping, filters, selection, stale/failed/disabled callouts
+  nodes-connected.test.tsx Connected state filter, STALE ordering, localized option
   china-map.test.tsx      map totals, province selection, city filter, Other, reduced motion, i18n
   geo.test.ts             offline title→province resolution and map aggregation
   catalog-snapshot.test.ts  full-catalog paging and snapshot cache
   nodes-drawer.test.tsx   drawer region, not-measured, clock skew, egress claim/verify, zh copy
   select.test.tsx         combobox ARIA/keys/search/multi/groups/portal/flip/motion
   requests.test.tsx       gate-flow rows, filters, detail, empty/error, host-only targets
+  requests-protocol.test.tsx protocol/user columns and filters, bare-flow fallback
   pagination.test.tsx     footer range/size/jump, filter reset, compact layout, page integrations
   overview-telemetry.test.tsx no-telemetry empty state, no synthetic chart or zeroed KPI
   regions.test.ts          regionName(): ISO/city names, case, unknown fallback

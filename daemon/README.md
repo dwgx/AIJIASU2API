@@ -23,13 +23,14 @@ shutdown, so the store survives a restart. Vendor login is wired but default-off
 control API; without it the handler only refreshes the store, and no vendor
 host is contacted. With the same switch the node controller follows a
 successful login with `loginSync`, opens one authenticated FV session and one
-loopback SOCKS5 gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
+loopback gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
 (default `1`, the vendor's one active data session per account;
-`127.0.0.1:13000` upward), writes the node, and reconciles Resin. Every gate
-defaults to the no-auth loopback method; `AJS_GATE_AUTH=userpass` makes it
-require RFC 1929 (username = `PanelUser.ID`, password = an active API-key
-secret) and enforce that user's allowlist and monthly quota before admitting a
-flow. It also makes
+`127.0.0.1:13000` upward, HTTP CONNECT on `+1000`), writes the node, and
+reconciles Resin. Every gate defaults to the no-auth loopback method;
+`AJS_GATE_AUTH=userpass` makes it require RFC 1929 (username =
+`PanelUser.ID`, password = an active API-key secret) and enforce that user's
+allowlist and monthly quota before admitting a flow. The HTTP CONNECT listener
+reuses that same policy. It also makes
 `POST .../drain|undrain` call the controller before the store, so a running gate
 stops admitting (or reopens) before the node state changes; without the
 switch the handlers keep the store/Resin behavior. A Lab telemetry view
@@ -125,7 +126,10 @@ internal/account/            FV protocol seam + account control client (Secret, 
 internal/account/login_service.go  store-backed login path (default-off via AJS_ACCOUNT_LOGIN)
 internal/account/tls.go         opt-in control-API certificate pin (PinnedHTTPClient)
 internal/account/tls_test.go    pin match/mismatch/malformed/default-reject coverage
-internal/gate/                per-node SOCKS5 gate (admission, byte counters, bounded flow ring, drain)
+internal/gate/                per-node SOCKS5 + HTTP CONNECT gate (shared admission, byte counters, bounded flow ring, drain)
+internal/gate/http.go         HTTP CONNECT listener: bounded head parse, Basic proxy auth, 407/403/429/405 mapping, tunnel relay
+internal/publisher/reconcile.go  interval reconciler: desired-state hash, 1m→15m backoff, transition audits
+internal/api/tls.go          optional HTTPS admin listener: AJS_TLS_* parse, TLS 1.2/ECDHE-AEAD policy, HSTS
 internal/supervisor/          per-node child process: start, readiness, events, stop
 internal/lablog/              bounded, redacted in-memory log ring (allowlisted attrs)
 internal/model/lab.go        Lab wire structs (read-only reads + probe result; no credentials/raw ids)
@@ -556,10 +560,11 @@ package is imported and no emulator test changed.
 
 ## Gate (AJS-40)
 
-`internal/gate` is the per-node SOCKS5 front end Resin dials (`docs/PANEL.md`
-§1–§2). One `Server` owns one loopback listener for one node and injects the FV
-session through a one-method interface, so the gate knows nothing about the
-vendor protocol, credentials or the control API.
+`internal/gate` is the per-node proxy front end Resin dials (`docs/PANEL.md`
+§1–§2). One `Server` owns one node's loopback listeners — the SOCKS5 gate plus
+an optional HTTP CONNECT listener — and injects the FV session through a
+one-method interface, so the gate knows nothing about the vendor protocol,
+credentials or the control API.
 
 ```go
 srv, err := gate.NewServer(gate.Config{
@@ -587,13 +592,14 @@ _ = srv.Undrain()                // back to service
   extra), so the existing session factory is injected without an adapter.
   `server_test.go` pins the assignment with
   `var _ gate.Session = account.FlowSession(nil)`.
-- `Config`: `NodeID`, `AccountID`, `Listen`, `Limit`, `AdmissionTimeout`,
-  `DrainGrace`, `Now`, `Logger`, `OnFlow`, `QuotaCheck`, `AuthMode`,
-  `AuthTimeout`, `Authenticator`, `UserPolicy`. Zero values select the defaults
-  (`127.0.0.1:0`, 32, 30s, 30s, `time.Now`, `slog.Default()`, `AuthLoopback`,
-  3s). `Listen` must name a literal loopback IP (`127.0.0.1` or `::1`): a
-  wildcard, LAN/public address or hostname fails `NewServer`, and `Start`
-  rechecks the bound address before serving.
+- `Config`: `NodeID`, `AccountID`, `Listen`, `HTTPListen`, `Limit`,
+  `AdmissionTimeout`, `DrainGrace`, `Now`, `Logger`, `OnFlow`, `QuotaCheck`,
+  `AuthMode`, `AuthTimeout`, `Authenticator`, `UserPolicy`. Zero values select
+  the defaults (`127.0.0.1:0`, no HTTP listener, 32, 30s, 30s, `time.Now`,
+  `slog.Default()`, `AuthLoopback`, 3s). `Listen` and `HTTPListen` must name a
+  literal loopback IP (`127.0.0.1` or `::1`): a wildcard, LAN/public address or
+  hostname fails `NewServer`, and `Start` rechecks each bound address before
+  serving. `HTTPAddr()` returns the bound HTTP address (nil when disabled).
 - `State`: `NodeID`, `AccountID`, `Active`, `Limit`, `Draining`, `Accepted`,
   `Rejected`, `Probes`, `IngressBytes`, `EgressBytes`, `StartedAt`. `Accepted`
   counts flows that received the success reply and entered relay; `Rejected`
@@ -601,16 +607,17 @@ _ = srv.Undrain()                // back to service
   handshake, failed authentication or policy, failed `OpenFlow`); `Probes`
   counts connections that closed before sending any handshake byte (a
   health-sampler dial+close), which log at debug and never enter the flow ring.
-  Byte counters are updated live and exclude the handshake.
+  Byte counters are updated live, exclude the handshake and cover both
+  listeners: one node has one traffic total.
 - Flow ring: every finished flow, including a refusal, appends one
   `FlowRecord` (`ID`, `StartedAt`, `DurationMs`, `UserID`, `UserName`,
-  `Method`, `TargetHost`, `TargetPort`, `Status`, `BytesIn`, `BytesOut`,
-  `ErrorClass`) to a bounded 500-entry ring. Only host and port are recorded —
-  never a URL, headers or a credential. `UserID`/`UserName` are attribution
-  only and stay empty in `loopback` mode. `Flows(limit)` returns the newest
-  records first and `Dropped()` counts evictions. The runtime joins the records
-  with the node/account ids and a redacted session SID for
-  `GET /v1/lab/flows`.
+  `Method`, `Protocol`, `TargetHost`, `TargetPort`, `Status`, `BytesIn`,
+  `BytesOut`, `ErrorClass`) to a bounded 500-entry ring. `Protocol` is
+  `socks5` or `http`. Only host and port are recorded — never a URL, headers or
+  a credential. `UserID`/`UserName` are attribution only and stay empty in
+  `loopback` mode. `Flows(limit)` returns the newest records first and
+  `Dropped()` counts evictions. The runtime joins the records with the
+  node/account ids and a redacted session SID for `GET /v1/lab/flows`.
 
 Wire contract (RFC 1928 + RFC 1929, CONNECT only):
 
@@ -656,7 +663,9 @@ Wire contract (RFC 1928 + RFC 1929, CONNECT only):
 
 ### Per-user identity (AJS-266 / DESIGN-GATE-IDENTITY)
 
-`AJS_GATE_AUTH` selects the SOCKS5 method; unknown values abort startup:
+`AJS_GATE_AUTH` selects the gate authentication mode for both listeners (the SOCKS5
+method and, on the HTTP CONNECT listener, `Proxy-Authorization: Basic`); unknown values abort
+startup:
 
 - `loopback` (unset default) keeps the pre-RFC-1929 wire: the client offers
   `00`, the gate trusts every local process, and user fields stay empty. The
@@ -673,11 +682,24 @@ existing account quota. A refusal answers `05 02` with its class
 (`user_disabled`, `allowlist`, `user_quota_exceeded`, `policy_unavailable`,
 `quota_exceeded`) and never opens upstream traffic.
 
-- Allowlist entries are exact case-insensitive hostnames, exact IPs or CIDRs;
-  a host rule never implies a subdomain, a CIDR matches only a literal target
-  IP, and nothing is ever resolved. Empty denies every destination in
+- Allowlist entries are one exact case-insensitive hostname, one `*.domain`
+  wildcard, one exact IP or one CIDR. Every entry is normalized on write:
+  lowercase, one terminal dot trimmed, IPv4-mapped IPv6 unmapped, prefixes
+  masked (`10.20.5.7/16` becomes `10.20.0.0/16`), duplicates collapsed, at most
+  64 entries of at most 253 bytes each. A wildcard covers names with at least
+  one extra label (`*.example.com` matches `a.example.com` and
+  `a.b.example.com`, never `example.com` itself); bare `*` and a single-label
+  wildcard are refused. A host rule never implies a subdomain, a CIDR matches
+  only a literal target IP, and nothing is ever resolved. Schemes, paths, ports,
+  brackets and IPv6 zones are a 400 at write time, so a stored list only ever
+  holds entries the gate can compile. Empty denies every destination in
   `userpass`; a malformed stored entry denies the user rather than widening the
   policy.
+- `PanelUser.usedBytes` is derived, not stored: the store sums the current UTC
+  month's gate-metered request rows for that user on read (bounded by the
+  10,000-row request cap), so the panel, the gate's user quota and
+  `GET /v1/usage` all report the same figure. A new UTC month starts it at zero,
+  and the seeded dashboard-mock counters are seed data, never usage.
 - The key digest index, the compiled allowlists and the monthly user total are
   process-wide caches shared by every gate. Revoking a key, suspending a user or
   replacing an allowlist affects the next new connection; admitted flows finish
@@ -691,12 +713,74 @@ existing account quota. A refusal answers `05 02` with its class
   fields, verify attributed flows, then switch `AJS_GATE_AUTH=userpass`.
   Rollback is `AJS_GATE_AUTH=loopback` while the listener stays loopback.
 
+### HTTP CONNECT listener (AJS-271)
+
+Every node can also serve HTTP CONNECT on `127.0.0.1:(gatePort + offset)`. The
+offset defaults to 1000 (`AJS_GATE_HTTP_OFFSET`), so 13000/14000,
+13001/14001, ... The listener is opt-in: `AJS_GATE_HTTP=1` enables it, unset or
+`0` keeps it off, and any other value aborts startup. An upgrade therefore
+never starts binding a second port pair on its own. In the library it is
+`Config.HTTPListen` (empty disables it) and `HTTPAddr()` returns the bound
+address.
+
+- Both listeners feed one admission pipeline: the same credential check (the
+  RFC 1929 username/key pair, carried as
+  `Proxy-Authorization: Basic base64(user:key)`), the same per-user
+  enabled/allowlist/quota policy, the same account quota, one `Limit` slot
+  pool, one set of byte counters and one flow ring. `FlowRecord.Protocol` and
+  `RequestLog.Protocol` name the listener (`socks5` or `http`); a metered HTTP
+  flow is a normal 200 row with `method: CONNECT`.
+- `loopback` mode needs no credentials and ignores a supplied
+  `Proxy-Authorization`, exactly as the SOCKS5 no-auth method does. `userpass`
+  requires Basic credentials and answers one 407 for every failure, so an
+  unknown user, a wrong secret, a revoked key and a malformed header are
+  indistinguishable. The challenge realm is `apc`.
+- Wire contract (CONNECT only, HTTP/1.1):
+
+| Case | Response |
+|---|---|
+| admitted | `HTTP/1.1 200 Connection Established`, then the bidirectional tunnel |
+| missing/wrong credentials | `407 Proxy Authentication Required` + `Proxy-Authenticate: Basic realm="apc"` |
+| user disabled, allowlist miss, policy unavailable | `403 Forbidden` |
+| user or account monthly quota exhausted | `429 Too Many Requests` + `Retry-After: <seconds until the next UTC month>` |
+| method other than CONNECT | `405 Method Not Allowed` + `Allow: CONNECT` |
+| malformed request line, authority, version or header; head over 8 KiB or 64 headers | `400 Bad Request` |
+| `OpenFlow` failed | `502 Bad Gateway` |
+| draining, admission timeout, closed | `503 Service Unavailable` (an admission timeout also sends `Retry-After: 1`) |
+
+- The request head is bounded (8 KiB total, 64 headers, a single line no
+  longer than the 4 KiB reader buffer) and a refusal consumes the head before
+  closing, so the response is not lost to a TCP reset. Bytes the client
+  pipelines behind the head are preserved for the tunnel. Only host:port is
+  logged and recorded; a credential never reaches a log line or a flow record
+  and is cleared after the check.
+- Security note: `Proxy-Authorization: Basic` is base64, not encryption. The listener binds a
+  literal loopback address exactly like the SOCKS5 gate and refuses a wildcard, LAN/public or
+  hostname bind, so the credential never crosses a network — but anything that can read loopback
+  traffic on the host can read it. The 407 is stateless — one challenge per connection, no session
+  or cookie — and there is no second factor; revoking the API key is the only cut-off, and it
+  applies to the next connection.
+- Port allocation: the controller reserves both `p` and `p+offset` for every
+  running gate and every stored node, and a bind failure on either half retries
+  the next base port. `Start` is all-or-nothing, so a node never comes up with
+  only one listener. A lease still advertises `gatePort`; the HTTP port is that
+  port plus the offset.
+- Tests: `http_test.go` relays real TLS bytes end-to-end against a local TLS
+  echo server, and covers 407 (seven credential shapes), 403 allowlist, 429
+  user/account quota with a pinned `Retry-After`, the 405/400 matrix, 502,
+  pipelined bytes, loopback compatibility, drain, probe counting, non-loopback
+  peers, listener validation, atomic bind failure, shutdown and credential
+  redaction. `runtime/gate_http_test.go` proves the controller exposes
+  `gatePort+1000`, meters the row with `protocol: "http"`, reserves both ports
+  across nodes and retries the pair when the HTTP port is taken.
+
 `auth_test.go` covers the twelve acceptance rows at the wire and policy seams:
 `05 02`/`01 00`/relay and attribution, the four bad-credential cases, a missing
 `02` method, malformed/truncated frames and the 3s auth deadline, the loopback
 compatibility path, loopback-only binds, a non-loopback injected peer,
-allowlist matching (host/IP/CIDR, subdomain, malformed) and policy ordering
-before the account quota. `runtime/gate_identity_test.go` adds the store seam:
+allowlist matching (host, `*.domain`, IP/CIDR, subdomain, malformed) and policy
+ordering before the account quota. `runtime/gate_identity_test.go` adds the
+store seam:
 metered attribution and quota advance, immediate key revocation with the
 admitted flow still relaying, disabled/deleted users, allowlist updates, new-key
 discovery, and 32 concurrent flows under `-race` with live key/allowlist
@@ -763,9 +847,11 @@ service has already sent `loginSync`):
    Resin tag) is `<cc>-<account>-<server>` in the lowercase tag alphabet;
 3. reuse the gate of a server that already has one, so a repeated login never
    re-authenticates or re-binds;
-4. otherwise open one FV session (`account.Factory`) and start one SOCKS5 gate
-   on `127.0.0.1:<port>`, allocating from 13000 upward and skipping the ports
-   of running gates and store nodes; a bind failure retries the next port;
+4. otherwise open one FV session (`account.Factory`) and start one gate on
+   `127.0.0.1:<port>` (SOCKS5) plus `127.0.0.1:<port+offset>` (HTTP CONNECT,
+   `AJS_GATE_HTTP_OFFSET`, default 1000), allocating from 13000 upward and
+   skipping the ports of running gates and store nodes; a bind failure on
+   either half retries the next base port;
 5. write the node `LIVE` with `gatePort`, `serverId`, protocol `socks5` and the
    session's egress address (`sip`, then `cip`, then `ip`); a per-server
    failure writes it `DOWN` with no gate port and the batch continues;
@@ -821,7 +907,9 @@ panel after the mutation.
 
 - Port range: `127.0.0.1:13000` upward (`runtime.DefaultGatePortBase`),
   skipping ports already used by a running gate or a store node. Each gate
-  admits `32` concurrent flows, mirrored onto the node's `capacity`.
+  admits `32` concurrent flows across both listeners, mirrored onto the node's
+  `capacity`; with `GateHTTP` on, the pair (`p`, `p+GateHTTPOffset`) is reserved
+  as a unit, so a node's HTTP port is never another node's SOCKS5 port.
 - Store: `ProxyNode.ServerID` (`serverId`, `omitempty`) is additive, so
   `SnapshotVersion` stays 1 and older documents restore with an empty field.
   `Store.PutNode` upserts a runtime node (validating id, account, tag label,
@@ -1167,6 +1255,9 @@ test binary as the child.
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
 | `AJS_LISTEN` | `-listen` | `127.0.0.1:2261` | admin API address |
+| `AJS_TLS_CERT` | — | — | PEM certificate chain for the optional HTTPS admin listener; set together with `AJS_TLS_KEY`. The pair is loaded at startup, so an unreadable, mismatched or non-PEM pair aborts before either listener binds |
+| `AJS_TLS_KEY` | — | — | PEM private key matching `AJS_TLS_CERT`; never logged |
+| `AJS_TLS_LISTEN` | — | `127.0.0.1:2262` | HTTPS admin address; only meaningful with the pair set. `AJS_TLS_LISTEN` alone, or one half of the pair, fails startup; the address must differ from `AJS_LISTEN`; `AJS_ALLOW_INSECURE=1` still refuses a non-loopback bind |
 | `AJS_ADMIN_TOKEN` | `-token` | — | required bearer token unless `AJS_ALLOW_INSECURE=1`; at least 32 characters; the placeholders the repo ships or prints (`change-me`, `changeme`, `change_me`, `admin`, `test`, `password`, `secret`, `local-test-token`, `replace-me-with-openssl-rand-hex-32`) are refused at startup |
 | `AJS_ALLOW_INSECURE` | `-insecure` | `0` | `1` disables auth; refused unless `AJS_LISTEN` is loopback (`127.0.0.1`, `::1` or `localhost`) |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
@@ -1183,6 +1274,8 @@ test binary as the child.
 | `AJS_RESIN_ADMIN_TOKEN` | `-resin-token` | — | set → enable the Resin wiring; empty → `resin_disabled` |
 | `AJS_SUBSCRIPTION_NAME` | `-subscription-name` | `ajs-live` | Resin local subscription name |
 | `AJS_PLATFORM_NAME` | `-platform-name` | subscription name | Resin platform name |
+| `AJS_RESIN_RECONCILE` | — | `0` | `1` starts the continuous reconciler: each tick hashes the desired state (`LIVE` node tags/ports, lease identities, account ids) and calls the panel reconcile only when the hash changed. A failed publish backs off `1m→2m→4m→8m→15m` and emits `resin.reconcile_failed` on the transition, `resin.reconcile_recovered` on recovery. Requires `AJS_RESIN_ADMIN_TOKEN`; off by default so a converged daemon makes no periodic Resin calls |
+| `AJS_RESIN_RECONCILE_INTERVAL` | — | `5m` | cadence of the converged reconciler (Go duration or bare seconds); invalid or non-positive fails startup |
 | `AJS_MASTER_KEY` | — | — | 32-byte secret-encryption key (64 hex characters or base64); set → seal account passwords, empty → `secrets_disabled` |
 | `AJS_DEVICE_POOL` | — | on when `AJS_MASTER_KEY` is set | `1` requires `AJS_MASTER_KEY` and enables the sealed device pool; `0` is the test-only kill switch; any other value fails startup. With no master key the pool is off and the legacy plaintext `devices` map is used |
 | `AJS_SCHEDULES` | — | `0` | `1` starts the schedule engine; otherwise the read routes and the pure preview still work, but no goroutine runs and every mutation answers 503 |
@@ -1194,8 +1287,10 @@ test binary as the child.
 | `AJS_RENEWAL_LEAD_DAYS` | — | `30,14,7,3,1` | comma-separated reminder thresholds, days `1`–`365`, at most six values |
 | `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
 | `AJS_RENEWAL_TTL` | — | `6h` | how long a live purchase-page snapshot stays fresh (`time.ParseDuration`); a bad or non-positive value keeps the default. On failure the cache serves its last good snapshot, or the built-in static table on a cold cache |
-| `AJS_FLOW_METER` | — | on | `0` disables gate→request-log metering: every completed SOCKS5 flow then stops appending a row, so `GET /v1/usage` and `GET /v1/requests` see only the mutation-lab and seed rows. Any other value keeps metering on. A row is appended only after the gate's success reply, through the same 10,000-row cap as every other writer, and carries no URL, header, session id or credential |
+| `AJS_FLOW_METER` | — | on | `0` disables gate→request-log metering: every completed gate flow (SOCKS5 or HTTP CONNECT) then stops appending a row, so `GET /v1/usage` and `GET /v1/requests` see only the mutation-lab and seed rows. Any other value keeps metering on. A row is appended only after the gate's success reply, through the same 10,000-row cap as every other writer, carries the listener as `protocol` (`socks5`/`http`) and never a URL, header, session id or credential |
 | `AJS_GATE_AUTH` | — | `loopback` | SOCKS5 gate authentication method: `loopback` keeps the no-auth compatibility path (no user identity, allowlist or user quota; the loopback peer check and the account quota still apply), `userpass` requires RFC 1929 with the username = `PanelUser.ID` and the password = an API-key secret, then enforces the user's allowlist and monthly quota before admission. Any other value fails startup. `userpass` requires `AJS_FLOW_METER` (user quota is metered from the gate's request rows), and Resin needs the user id and secret in its username/password fields |
+| `AJS_GATE_HTTP` | — | off | `1` starts the per-node HTTP CONNECT listener beside the SOCKS5 gate on `127.0.0.1:<gatePort+offset>`; unset or `0` keeps it off; any other value fails startup. Opt-in so an upgrade never binds an extra port pair by itself. Both listeners share one admission pipeline (RFC 1929 key or loopback trust, allowlist, user and account quota, one slot pool, one flow ring), and metered rows carry `protocol:"http"` |
+| `AJS_GATE_HTTP_OFFSET` | — | `1000` | distance between a node's SOCKS5 gate port and its HTTP CONNECT port, `1`–`65534` (unset = default; `0`, negative, `65535+` and non-integers fail startup). The controller reserves the pair as a unit and retries the next base port when either half is taken |
 | `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most `AJS_HEALTH_MAX_NODES` watched nodes |
 | `AJS_HEALTH_MAX_NODES` | — | `16` | node rings the sampler retains, clamped to 1–64; a non-integer fails startup when the sampler is enabled (an out-of-range integer is clamped, not rejected; the value is not read under `AJS_HEALTH_PROBE=0`). Beyond the cap the sampler evicts an unwatched ring first; when every ring is watched it evicts the least-recently-used one and records it, and the reconciler re-arms a watched-but-evicted key on its next 15 s sweep (one attempt per key per sweep, one log line per minute) |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
@@ -1207,6 +1302,43 @@ test binary as the child.
 | `AJS_DROP_DEMO` | — | `0` | `1` runs `Store.PurgeDemo` once after loading the snapshot and before the listener starts: removes exactly the `seed.go` mock rows (`acc-01`…`acc-06`, `node-01`…`node-12` plus any node of a removed seed account, `lease-01`…`lease-08`, `u-01`…`u-04`, `key-01`…`key-06`, `req-001`…`req-040`, `audit-001`…`audit-020`), preserves `acc-07`, its runtime node and every other live row, logs the per-collection counts, and saves the snapshot immediately. Destructive: the purge is written through the normal atomic snapshot and survives a restart, so copy the state file first if you need to undo it. Unset it after the first run; a second run is a no-op |
 | `AJS_UPDATE_REPO` | `-update-repo` | — | GitHub `owner/repo` checked by `GET /v1/system/update`; empty disables the check (the endpoint answers `enabled:false` and no network is made). Read-only: the daemon never executes an update — the host runs `deploy/update.sh` |
 | `AJS_UPDATE_API_BASE` | `-update-api-base` | `https://api.github.com` | GitHub API root for the update check; tests point it at an httptest server |
+
+### TLS listener (AJS-276)
+
+The admin API stays plaintext on `AJS_LISTEN` (loopback by default). Setting `AJS_TLS_CERT` and
+`AJS_TLS_KEY` adds a second HTTPS listener on `AJS_TLS_LISTEN` that serves the same
+`http.Handler`: same routes, same bearer/scoped-key auth, same request log. Only the transport
+changes.
+
+- Off by default. Startup logs `tls_disabled` when the pair is unset and `tls_listener_started`
+  with the address (never the key) when it is on.
+- Partial configuration fails startup: `AJS_TLS_CERT` without `AJS_TLS_KEY`, the reverse, or
+  `AJS_TLS_LISTEN` without the pair. An unreadable, mismatched or non-PEM pair also aborts before
+  the port is bound.
+- TLS 1.2 is the floor (1.3 preferred) with ECDHE-AEAD suites only — no CBC, static RSA, RC4 or
+  3DES.
+- Every response, errors included, carries `Strict-Transport-Security: max-age=31536000`. The
+  directive is deliberately scoped: no `includeSubDomains` (the admin API is usually one host
+  name, and the daemon must not pin unrelated sibling subdomains of the operator's domain) and no
+  `preload`.
+- `AJS_ALLOW_INSECURE=1` keeps refusing non-loopback binds: the HTTPS listener cannot be used to
+  publish the unauthenticated mode.
+- The bearer token is only as safe as the transport it crosses. TLS protects it on the wire; it
+  adds no authentication, revocation or second factor.
+
+```bash
+# lab: self-signed pair, loopback only
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout privkey.pem -out fullchain.pem \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+AJS_TLS_CERT=./fullchain.pem AJS_TLS_KEY=./privkey.pem \
+  AJS_ADMIN_TOKEN=$(openssl rand -hex 32) ./ajs-accountd
+# msg="tls_listener_started" addr=127.0.0.1:2262 min_version=1.2
+curl --cacert fullchain.pem https://127.0.0.1:2262/healthz
+```
+
+For the compose deployment see
+[`../deploy/README.md`](../deploy/README.md#tls-for-the-admin-api-optional-ajs-276).
 
 ## Platform routes (AJS-205)
 
@@ -1749,6 +1881,28 @@ failed start logs `resin_start_failed` and the daemon keeps serving:
 succeeds, which retries the same sequence. Without the token the daemon logs
 `resin_disabled` and keeps the in-memory behaviour.
 
+### Continuous reconciliation (AJS-274)
+
+`AJS_RESIN_RECONCILE=1` keeps the subscription converged without an operator
+calling `POST /v1/reconcile`. Each tick hashes the desired state — the `LIVE`
+nodes' published tag and gate port, the active lease `(platform, account)`
+identities and the account ids — and runs the same render/PATCH/refresh
+sequence only when the digest differs from the last successful publish. The
+first tick after a restart always publishes (the digest starts empty), which
+is how a startup reconcile that failed recovers. Volatile counters (requests,
+bytes, latency) are deliberately not hashed, so a busy gate does not look like
+drift.
+
+The start delay is jittered in `[0, min(30s, interval))`. A failed publish is
+retried after `1m, 2m, 4m, 8m, 15m` (cap) and never stops the loop; a recovery
+resets the schedule to the interval. Only transitions are audited:
+`resin.reconcile_failed` (warn) on the first failure and
+`resin.reconcile_recovered` (info) when a later publish succeeds or the desired
+state reverts to the last published hash. Triggers coalesce and a single
+in-flight reconcile is shared, so two triggers cannot publish at once. Shutdown
+cancels the loop and waits for an in-flight reconcile before the panel/publisher
+closes.
+
 ### Panel endpoints
 
 | Method | Path | Behavior |
@@ -1937,7 +2091,7 @@ objects.
 | POST | `/v1/scoped-keys` | `{userId,label,scopes[],accountIds[],regions[],expiresAt,rateLimitPerMin}` → 201 `{key,secret}`; secret shown once; `rateLimitPerMin` defaults to 60, `0` = unlimited |
 | GET | `/v1/scoped-keys/{id}` | one key |
 | DELETE | `/v1/scoped-keys/{id}` | revoke (`revokedAt` set; row retained) → 204 |
-| GET | `/v1/requests` | request log, newest first |
+| GET | `/v1/requests` | request log, newest first; a metered gate row carries `protocol` (`socks5`/`http`), `userId`/`userName` attribution (empty in `loopback` mode), `target` as `host:port` and `source` (`gate`/`mutation-lab`/`proxy`) — never a URL, header or credential |
 | POST | `/v1/requests/mutations` | append a `mutation-lab` row + audit event |
 | GET | `/v1/audit?limit=` | newest-first audit, default 20, max 500 |
 | GET | `/v1/audit/export.csv?from=&to=&severity=` | retained audit history as CSV (`ts,severity,actor,action,target,detail,meta`), oldest-first, `text/csv` with an attachment filename and `no-store`. `from`/`to` are RFC 3339 and inclusive; absent `from` = seven days before `to` (or now); a reversed or >366-day window → 400, an unknown `severity` → 400; over 50 000 matching rows the older ones are dropped with `X-Truncated: true` |
@@ -1974,7 +2128,7 @@ or `connect_cooldown`), and `details` carries non-secret hints such as `ineligib
 | `NOT_FOUND` | 404 | unknown id or route, unknown catalog server, no catalog target |
 | `CONFLICT` | 409 | duplicate label/name, draining a DOWN node, Lab egress check with no running gate or no Lab reader, a catalog switch in progress or a changed snapshot, an ineligible server, an armed-action confirmation missing, a schedule run in flight, a concurrent account import/export/bulk-delete, a lease create refused as `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict` |
 | `UPSTREAM_UNAVAILABLE` | 503 | probing a DOWN node; reconcile/topology without or before a Resin panel; schedules disabled; a stopped node controller |
-| `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals (SOCKS5 `0x02`), not HTTP errors |
+| `QUOTA_EXCEEDED` | 429 | a lease create refused for `quota_exceeded`, `concurrency_exceeded` or `no_capacity`; repeat Lab egress check for the same node inside the 5 s cooldown. The account traffic budget and the `userpass` user quota are gate refusals, not `/v1/*` errors: SOCKS5 `05 02`, and `429`/`403` on the HTTP CONNECT listener |
 | `RATE_LIMITED` | 429 | catalog connect cooldown (`Retry-After` carries the remaining whole seconds) or a scoped key over its per-minute budget (`Retry-After` is one refill interval) |
 | `UNAUTHORIZED` | 401 | missing/wrong bearer token |
 | `FORBIDDEN` | 403 | a scoped key whose scope does not cover the route, or whose `accountIds`/`regions` exclude the requested account |
@@ -2012,6 +2166,9 @@ Other contract details:
 
 - Timestamps are RFC 3339 (nanosecond precision), byte counts are integers.
 - `quotaBytesMonth`, `lastUsedAt`, `revokedAt` are `null` when unset.
+- `PanelUser.usedBytes` is the derived current-month gate total, not a stored
+  counter (see Per-user identity); `GET /v1/usage` reports the same figure per
+  user while its `bytes` stays the queried-window total.
 - `POST /v1/apikeys` stores only a SHA-256 hash plus the 16-character prefix;
   the plaintext secret exists only in that response.
 - Middleware adds `X-Request-Id`, logs one `slog` line per request (never
@@ -2037,7 +2194,7 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | GET | `/v1/lab/overview` | version, commit, uptime, effective modes (login, Resin, update check, secrets, cert pin), aggregate counts and warnings |
 | GET | `/v1/lab/flags` | effective startup flags with provenance (`env`/`flag`/`default`); secret flags carry `set` + `redacted`, never a value |
 | GET | `/v1/lab/gates` | per-node gate listener, state, the accepted/rejected/probe counters and ingress/egress bytes from the controller snapshot; `probes` counts health-sampler connections that closed before sending a handshake byte, so it is separate from `rejected` |
-| GET | `/v1/lab/flows?limit=` | newest-first finished flows across every running gate, joined with node/account ids and a redacted SID; `limit` 1–500 (default 200), invalid → 400; the body is `{enabled,flows,dropped}` and a flow carries only `targetHost`/`targetPort` (no URL, headers or credential) |
+| GET | `/v1/lab/flows?limit=` | newest-first finished flows across every running gate, joined with node/account ids and a redacted SID; `limit` 1–500 (default 200), invalid → 400; the body is `{enabled,flows,dropped}` and a flow carries id, start/duration, `method`, `targetHost`/`targetPort` (no URL, headers or credential), `status`, bytes and `errorClass`. This view does not expose the gate's `protocol` or `userId`/`userName`; the gate records them on `FlowRecord`, and `/v1/requests` rows do carry `protocol` and attribution |
 | GET | `/v1/lab/sessions` | FV session health with a redacted SID (`a1b2…(32)`), age, last-flow time, claimed egress and keepalive support |
 | GET | `/v1/lab/egress` | the vendor's claimed exit address per running node (`source:"fv-claim"`); this GET never probes, so `verified` stays empty, `match` null and `checkedAt` null — a POST result is returned to its caller, not stored |
 | POST | `/v1/lab/egress-check` | body `{"nodeId":"…"}`; dials the node's running loopback SOCKS5 gate and `GET https://ifconfig.me/ip` over HTTPS (10 s total, environment proxy ignored), then answers `{nodeId,claimed,verified,match,latencyMs,checkedAt,source:"echo"}`. No store write and no vendor call. No running gate or no Lab reader → 409 `CONFLICT`; a second check for the same node within 5 s → 429 `QUOTA_EXCEEDED`; malformed, empty or unknown-field body → 400 `INVALID_ARGUMENT`; a probe failure is still 200 with `error` set, `verified` empty and `match` null |
@@ -2096,7 +2253,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **753 `func Test` functions across 95 `_test.go` files** (recounted 2026-10-25);
+The tree holds **815 `func Test` functions across 104 `_test.go` files** (recounted 2026-10-25);
 the emulator module adds 41 functions in 13 files. Every suite runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
@@ -2233,6 +2390,27 @@ refresh retry/backoff and last-known-good retention, the exact rotation call
 order (read filters → exclude PATCH → DELETE → restore PATCH), restore after a
 failed delete, restore retry, rotation rate limiting, circuit-open lease
 cleanup with DRAINING exclusion, and probe-config 404/405 tolerance.
+
+`internal/publisher/reconcile_test.go` covers the interval reconciler: the
+desired-state hash (nodes/leases/accounts, order-independent), publish only on
+a changed hash, retry after a failed publish without advancing the hash, the
+`1m→2m→4m→8m→15m` backoff cap, the failure/recovery audit transitions, the
+jittered start delay, context cancellation during a wait and during a publish,
+and coalesced triggers that never overlap. `cmd/ajs-accountd/reconcile_wire_test.go`
+pins `AJS_RESIN_RECONCILE_INTERVAL` parsing, the LIVE-node/account mapping and
+the default-off wiring.
+
+The access wave adds its own files. `internal/api/tls_test.go` pins the HTTPS admin listener: off
+by default, the all-or-nothing `AJS_TLS_*` parse, a missing/mismatched/non-PEM pair aborting before
+bind, the template copy (timeouts, handler), HSTS on a 200 and on a 401, a plaintext request
+refused on the HTTPS port, the TLS 1.2 floor with an explicit ECDHE-AEAD suite list, and shutdown;
+`cmd/ajs-accountd/tls_test.go` pins the two startup rules (the HTTPS address must differ from
+`AJS_LISTEN`, and `AJS_ALLOW_INSECURE=1` may not publish it off loopback). `internal/gate/http_test.go`
+is described under [HTTP CONNECT listener](#http-connect-listener-ajs-271).
+`internal/api/users_keys_test.go` covers the destination allowlist write path (hostname, `*.domain`,
+IP and CIDR accepted and normalized, duplicates collapsed, scheme/port/bracket refusals, the
+64-entry cap) and the derived `usedBytes` that `/v1/usage` reports. `internal/api/flows_test.go`
+adds the end-to-end row: a real gate flow served through `/v1/lab/flows`.
 
 `internal/runtime/panel_test.go` drives the real client and publisher against a
 fake Resin admin server (`httptest`) with a fake clock. It asserts the exact
@@ -3432,8 +3610,9 @@ header or credential). No live vendor call was made.
   guarded login per account; the node supervisor is not wired. Lease
   rotate/release and node drain/undrain write
   through Resin when a panel is configured; account, user, key and settings
-  mutations remain store-only, and `/v1/reconcile` is the only path that
-  re-renders the whole subscription on demand.
+  mutations remain store-only, and `/v1/reconcile` (or, with
+  `AJS_RESIN_RECONCILE=1`, the interval reconciler) is the path that
+  re-renders the whole subscription.
 - Account delete and logout now stop the controller's gates first: `DELETE
   /v1/accounts/{id}` runs `AccountDeleteHook` and `POST
   /v1/accounts/{id}/actions/logout` runs `AccountLogoutHook` (both
@@ -3454,8 +3633,11 @@ header or credential). No live vendor call was made.
 - `ApplyLeaseRotation` trusts Resin's `egress_ip`/`expiry` strings; there is no
   local validation or retry when `GetLease` answers 404 before Resin creates
   the replacement lease.
-- There is no background reconciler: after startup, Resin drift (node circuits,
-  an out-of-band subscription edit) is corrected only by `POST /v1/reconcile`.
+- Without `AJS_RESIN_RECONCILE=1` there is no background reconciler: after startup, Resin drift
+  (node circuits, an out-of-band subscription edit) is corrected only by `POST /v1/reconcile`.
+  With the switch on, the interval reconciler publishes on a changed desired-state hash and
+  retries a failed publish with `1m→15m` backoff; it is off by default so a converged daemon makes
+  no periodic Resin calls, and it has not been exercised against a live Resin.
 - Probe is a bookkeeping canary, not a network probe; `DOWN` nodes return 503.
 - The API's drain has no flow scheduler yet (`inUse` is seed data);
   `runtime.NodeController.DrainNode` drains the gate, but the HTTP drain path
@@ -3479,17 +3661,21 @@ header or credential). No live vendor call was made.
 - Account traffic budgets are enforced at the gate: an over-budget account gets SOCKS5 `0x02` with
   the `quota_exceeded` class before a slot or vendor flow is taken, metered from the current UTC
   month's gate rows. User quotas are enforced only in `AJS_GATE_AUTH=userpass` mode, because the
-  no-auth loopback method carries no user identity; both are SOCKS5 refusals, not HTTP errors. The
-  HTTP `QUOTA_EXCEEDED` (429) is a lease create refusal (`quota_exceeded`/`concurrency_exceeded`/
-  `no_capacity`) or the Lab egress-check cooldown, a probe rate limit rather than a traffic quota.
-- No TLS, request-wide rate limiting, multi-process coordination, or CSRF surface; the rate limits
-  are the per-node Lab egress-check cooldown and the per-scoped-key request budget
-  (`rateLimitPerMin`, default 60), and the admin bearer token is not rate-limited. The Lab
-  endpoints inherit the same single
-  bearer token, so anyone who can reach `2261` and holds the token can read the
-  whole panel; the HMC deployment keeps bearer auth (no `AJS_ALLOW_INSECURE`) and restricts
-  `2261`/`18082` to the `192.168.11.0/24` segment, but the API is still plain HTTP — run it on a
-  trusted segment or put a TLS terminator in front.
+  no-auth loopback method carries no user identity. On the SOCKS5 listener both are `05 02`
+  refusals; the HTTP CONNECT listener answers the same refusals with `429 Too Many Requests`
+  (quota) or `403 Forbidden` (disabled/allowlist). The HTTP `QUOTA_EXCEEDED` (429) on `/v1/*` is a
+  lease create refusal (`quota_exceeded`/`concurrency_exceeded`/`no_capacity`) or the Lab
+  egress-check cooldown, a probe rate limit rather than a traffic quota.
+- No request-wide rate limiting, multi-process coordination, or CSRF surface; the rate limits are
+  the per-node Lab egress-check cooldown and the per-scoped-key request budget
+  (`rateLimitPerMin`, default 60), and the admin bearer token is not rate-limited. TLS is opt-in
+  (`AJS_TLS_CERT`/`AJS_TLS_KEY`, see [TLS listener](#tls-listener-ajs-276)): the plaintext
+  `AJS_LISTEN` socket keeps working, so by default the admin API is still plain HTTP — enable the
+  HTTPS listener, run it on a trusted segment, or put a TLS terminator in front. The Lab endpoints
+  inherit the same single
+  bearer token, so anyone who can reach `2261` (or the HTTPS address) and holds the token can read
+  the whole panel; the HMC deployment keeps bearer auth (no `AJS_ALLOW_INSECURE`) and restricts
+  `2261`/`18082` to the `192.168.11.0/24` segment.
 - The Lab view reads in-process state; its GETs neither mutate nor probe. The one POST
   (`/v1/lab/egress-check`) dials the node's loopback gate and reads an HTTPS echo — a real
   outbound request, though not a vendor call — and persists nothing. The GET egress panel is a

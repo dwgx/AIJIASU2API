@@ -65,6 +65,9 @@ Then edit `.env`:
 - `AJS_CORS_ORIGINS` — browser origin allowed to call the API. The default is the dashboard
   published on `18081`; add `http://127.0.0.1:18082` if you also run the standalone `vite preview`
   live build.
+- `AJS_TLS_CERT` / `AJS_TLS_KEY` / `AJS_TLS_LISTEN` — optional HTTPS admin listener. Leave them
+  empty to keep the plaintext loopback listener only; see
+  [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276).
 - `VITE_USE_MOCK` — `true` (default) serves deterministic in-browser mock data; `false` builds the
   dashboard in live mode against `VITE_API_BASE`.
 - `VITE_PANEL_TOKEN` — the token the dashboard sends to the daemon in live mode. It is baked into
@@ -172,6 +175,84 @@ docker compose logs -f accountd
 curl -sS -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:2261/v1/accounts
 ```
 
+The compose health check stays on the plaintext loopback listener. With TLS enabled the same
+`/healthz` is also served on `AJS_TLS_LISTEN` (see below).
+
+## TLS for the admin API (optional, AJS-276)
+
+The daemon can serve the same admin API over HTTPS on a second listener while the plaintext one
+stays on `127.0.0.1:2261` — the dashboard and the compose health check keep using it. TLS is off
+unless both `AJS_TLS_CERT` and `AJS_TLS_KEY` are set; `AJS_TLS_LISTEN` defaults to
+`127.0.0.1:2262`.
+
+1. Put the certificate and key in `deploy/certs/`, which `compose.yml` mounts at `/certs`
+   read-only. `*.pem` and `*.key` are gitignored, so a key dropped there cannot be committed.
+
+   ```bash
+   mkdir -p deploy/certs
+   # self-signed, lab host only: one year, names for every address clients use
+   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+     -keyout deploy/certs/privkey.pem -out deploy/certs/fullchain.pem \
+     -subj "/CN=panel.example.com" \
+     -addext "subjectAltName=DNS:panel.example.com,IP:127.0.0.1"
+   ```
+
+   With certbot, copy the live files (the daemon reads the pair at startup, so restart
+   `accountd` after a renewal) or point the compose mount at the live directory:
+
+   ```bash
+   sudo certbot certonly --standalone -d panel.example.com
+   sudo install -m 0640 /etc/letsencrypt/live/panel.example.com/fullchain.pem deploy/certs/
+   sudo install -m 0640 /etc/letsencrypt/live/panel.example.com/privkey.pem deploy/certs/
+   ```
+
+   The image runs as the unprivileged `ajs` user (uid/gid `100` in this Alpine base), so the
+   mounted pair must be readable by it — otherwise startup fails with `permission denied` on the
+   key path. `docker compose exec accountd id` prints the actual uid if that ever changes:
+
+   ```bash
+   sudo chown -R 100:100 deploy/certs
+   sudo chmod 700 deploy/certs
+   sudo chmod 600 deploy/certs/*.pem
+   ```
+
+2. Uncomment the TLS rows in `.env`:
+
+   ```
+   AJS_TLS_CERT=/certs/fullchain.pem
+   AJS_TLS_KEY=/certs/privkey.pem
+   AJS_TLS_LISTEN=0.0.0.0:2262
+   ```
+
+   `0.0.0.0:2262` publishes the listener on every interface; keep `127.0.0.1:2262` when a
+   reverse proxy on the host terminates TLS instead. The firewall block in
+   `nftables/ajs-panel.nft` opens only `2261` to the LAN — add `2262` there before remote clients
+   rely on it.
+
+3. Restart and check:
+
+   ```bash
+   docker compose up -d accountd
+   docker compose logs accountd | grep -E 'tls_(listener_started|disabled)'
+   # msg="tls_listener_started" addr=0.0.0.0:2262 min_version=1.2
+   curl --cacert deploy/certs/fullchain.pem https://panel.example.com:2262/healthz
+   ```
+
+What TLS does and does not buy:
+
+- TLS 1.2 is the floor (1.3 preferred) with ECDHE-AEAD suites only. Every response, errors
+  included, carries `Strict-Transport-Security: max-age=31536000`.
+- The listener serves the same handler, so bearer/scoped-key auth, CORS, rate limits and the
+  request log behave exactly as on `2261`. TLS encrypts the token on the wire; it does not add
+  authentication, revocation or a second factor. **The bearer token is only as safe as the
+  transport it crosses** — a token pasted into a chat, a report or the dashboard bundle stays
+  exposed whatever the listener speaks.
+- `AJS_ALLOW_INSECURE=1` still refuses a non-loopback bind, including `AJS_TLS_LISTEN`, so the
+  unauthenticated lab mode cannot be published over TLS.
+- Partial configuration (one of the pair, or `AJS_TLS_LISTEN` alone) aborts startup instead of
+  silently serving plaintext, and an unreadable or mismatched pair fails before the port is
+  bound. The key is never logged and never enters the image or `.env`.
+
 ## Stop
 
 ```bash
@@ -209,11 +290,15 @@ cannot be opened. The snapshot is not SQLite and has no migration path yet; see
 ## Security notes
 
 - Everything is loopback-only: accountd and Resin bind `127.0.0.1` under host networking, and the
-  dashboard publishes `127.0.0.1:18081`. Do not change these bindings without adding TLS and real
+  dashboard publishes `127.0.0.1:18081`. Do not change these bindings without enabling the TLS
+  listener ([TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276)) and real
   authentication.
-- The daemon has no TLS and a single bearer token. `VITE_PANEL_TOKEN` is readable by anyone who can
-  fetch the dashboard bundle, so the dashboard must stay on loopback or behind a BFF/reverse proxy
-  that terminates real authentication.
+- The plaintext listener has no TLS and the API has a single bearer token. The optional HTTPS
+  listener (`AJS_TLS_*`, see [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276))
+  protects the token on the wire for remote clients; it adds no authentication, revocation or
+  second factor. `VITE_PANEL_TOKEN` is still readable by anyone who can fetch the dashboard
+  bundle, so the dashboard must stay on loopback or behind a BFF/reverse proxy that terminates
+  real authentication.
 - `AJS_MASTER_KEY` and the tokens are the only secrets. They live in `.env` (gitignored) and in the
   container environment; never commit them, never paste them into reports.
 - `accountd` reads `.env`; `resin` does not. The Resin service gets only its two credentials plus

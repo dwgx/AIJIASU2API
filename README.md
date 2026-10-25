@@ -31,7 +31,13 @@ keys (including customer-scoped read scopes), lease creation and revocation with
 SOCKS5 gate user authentication (`AJS_GATE_AUTH`), the device-pool HTTP API and its console page,
 renewal, flow-metered usage, webhooks with an SSRF policy and persisted delivery history, loopback
 gate health and passphrase-encrypted panel backup/restore — is served by the daemon and covered
-offline, but not yet exercised against the vendor. Startup recovery demotes a persisted
+offline, but not yet exercised against the vendor. The access wave — a per-node HTTP CONNECT
+listener beside the SOCKS5 gate (`AJS_GATE_HTTP`, offset `AJS_GATE_HTTP_OFFSET`, Basic proxy
+credentials, one shared admission pipeline and metered `protocol:"http"` rows), an opt-in HTTPS
+admin listener (`AJS_TLS_CERT`/`AJS_TLS_KEY`/`AJS_TLS_LISTEN`, HSTS on every response, TLS 1.2
+floor), a continuous Resin reconciler (`AJS_RESIN_RECONCILE=1`: hash-gated publish, `1m→15m`
+backoff, transition-only audits) and listener/operator attribution columns on the console's
+Requests table — is served and covered offline only. Startup recovery demotes a persisted
 `LIVE`/`DRAINING` node to `STALE` when no in-process gate serves it, and the opt-in
 `AJS_AUTO_LOGIN=1` reopens eligible sessions once per boot. Panel state survives a restart only as
 a versioned JSON snapshot, not SQLite.**
@@ -61,8 +67,11 @@ As of 2026-10-25:
   session per account and rejects a stale `snapshotId` or a repeat inside the 5 s cooldown. It
   merges each account's login-retained catalog with the running node marked current; Requests is
   the real gate-flow table fed by
-  `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab history, and
-  Requests, Logs and the Lab tables share a pagination footer. Overview draws no synthetic
+  `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab history, with
+  a user column, a `socks5`/`http` protocol badge, matching filters and the same fields in the
+  row drawer (`protocol`, `userId` and `userName` are optional on the wire, so a row from a
+  daemon that reports neither renders `—`). Requests, Logs and the Lab tables share a pagination
+  footer. Overview draws no synthetic
   traffic curve — when the daemon reports `telemetryAvailable:false` it shows a no-telemetry empty
   state beside the real counts. Mock data is the default; a live mode against `ajs-accountd` is
   opt-in at build time.
@@ -70,15 +79,16 @@ As of 2026-10-25:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 393 Vitest tests in 43 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 400 Vitest tests in 44 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); account
-  labels, server names, IPs and API values are data and are never translated. Settings is an
-  eight-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
-  Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later** states
-  for controls the daemon does not read yet; Integrations now carries the live webhook registry
-  (one-time signing secret, enable/disable, per-endpoint delivery history). HMC serves the mock
-  build on `18081` and the live build on `18082`, the latter published on the LAN at
+  labels, server names, IPs and API values are data and are never translated. Settings is a
+  nine-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
+  Access, Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later**
+  states for controls the daemon does not read yet; Integrations now carries the live webhook
+  registry (one-time signing secret, enable/disable, per-endpoint delivery history) and Access the
+  scoped-key manager. HMC serves the mock build on `18081` and the live build on `18082`, the
+  latter published on the LAN at
   `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
   bearer token is required (insecure mode is refused off loopback).
   The **Lab** page (`/lab`) is an instrument with eight tabs — Overview, Gates & sessions, Egress,
@@ -123,8 +133,8 @@ As of 2026-10-25:
   sessions, egress, profiles, bounded redacted log ring, diagnostics, plus per-account
   servers/device; the GETs are read-only and one POST (`/v1/lab/egress-check`) runs an explicit
   egress probe that stores nothing), and the account control, FV session factory, node controller,
-  SOCKS5 gate and process-group kill with `WaitDelay` supervisor seams. The P1 control surface is
-  served too: account export/import/bulk-delete, catalog selection with guarded
+  SOCKS5 + HTTP CONNECT gate and process-group kill with `WaitDelay` supervisor seams. The P1
+  control surface is served too: account export/import/bulk-delete, catalog selection with guarded
   connect/reconnect/disconnect (one session per account, per-account cooldown, `snapshotId`
   guard), and a cron/interval/once scheduler behind `AJS_SCHEDULES=1` whose fire journal makes a
   missed run `unknown` rather than replaying it. The device pool seals each account's vendor
@@ -154,12 +164,18 @@ As of 2026-10-25:
   to the no-auth loopback method; `AJS_GATE_AUTH=userpass` switches it to RFC 1929, where the
   username is a panel user id and the password an active API-key secret, and the gate then enforces
   that user's allowlist and monthly quota before admitting a flow (it requires `AJS_FLOW_METER`).
+  `AJS_GATE_HTTP=1` adds an HTTP CONNECT listener on the gate port plus `AJS_GATE_HTTP_OFFSET`
+  (default 1000) with Basic proxy credentials and the same admission pipeline, answering `200`,
+  `407` (challenge), `403` (policy), `429` (quota, with `Retry-After`) or `405` (non-CONNECT);
+  `AJS_TLS_CERT`/`AJS_TLS_KEY` add an opt-in HTTPS admin listener (HSTS on every response, TLS 1.2
+  floor) beside the plaintext one; and `AJS_RESIN_RECONCILE=1` keeps the Resin view converged with
+  a hash-gated publish, `1m→15m` backoff and transition-only audits.
   Startup recovery closes the restart gap: before the panel reconcile and the listener, every
   persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
   egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
   no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 794 Go test
-  functions — 753 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  accounts once per process, pausing a jittered 60 s after a failed login. 856 Go test
+  functions — 815 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -168,6 +184,12 @@ As of 2026-10-25:
 - `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
   on `127.0.0.1:18081`, and Resin v1.3.0 behind the optional `resin` profile. Both images build
   from this tree; the stack includes no node supervision and has not run the live login path.
+  The HTTPS admin listener is a compose switch, not a new service: put `fullchain.pem` and
+  `privkey.pem` in `deploy/certs/` (mounted read-only at `/certs`, `*.pem` gitignored) and set
+  `AJS_TLS_CERT=/certs/fullchain.pem`, `AJS_TLS_KEY=/certs/privkey.pem` and optionally
+  `AJS_TLS_LISTEN` (default `127.0.0.1:2262`) in `.env`; a partial pair aborts startup. The
+  continuous reconciler is switched on with `AJS_RESIN_RECONCILE=1` and
+  `AJS_RESIN_RECONCILE_INTERVAL` (default `5m`).
   A GHCR release pipeline and a one-command `update.sh` exist in the tree but are
   **`[UNVERIFIED]`**: this repository has no git remote and no tags, so the `v*` release
   workflow cannot fire and there is no registry image to pull. The AJS LAN ingress block is owned
@@ -222,7 +244,11 @@ As of 2026-10-25:
   `ajs-accountd` + the dashboard (Resin optional), but the supervisor node lifecycle is still
   absent and the stack has not run the live login path, so it proxies no traffic; there is no
   macOS or Windows build.
-- **Background reconciler.** Resin drift is corrected only by an explicit `POST /v1/reconcile`;
+- **Continuous reconciler is off by default.** With `AJS_RESIN_RECONCILE=1` the daemon keeps the
+  Resin view converged: each tick hashes the desired state and publishes only on a change, a failed
+  publish backs off `1m→2m→4m→8m→15m`, and only transitions are audited
+  (`resin.reconcile_failed` / `resin.reconcile_recovered`). Unset, Resin drift is corrected only by
+  an explicit `POST /v1/reconcile`. Neither path has been run against a live Resin in this wave;
   probes are bookkeeping canaries, not network probes.
 - **The P1 surfaces are offline-tested only.** Catalog selection/connect, account export/import
   and bulk delete, lease creation/revocation, SOCKS5 gate user authentication (`userpass`,
@@ -246,6 +272,12 @@ As of 2026-10-25:
   snapshot, and the signing secret survives a restart only with `AJS_MASTER_KEY`. A backup
   envelope carries sealed credentials; restore writes the panel files only on an explicit apply
   and the daemon must then be restarted.
+- **The access wave is offline-tested only.** HTTP CONNECT has relayed real TLS bytes only to a
+  local echo server in `http_test.go`; no HTTP CONNECT client has reached a vendor node. The HTTPS
+  admin listener has served in-process tests only — no browser or operator has used it. The
+  continuous reconciler has never published to a live Resin. The HTTP listener is loopback-only,
+  like the SOCKS5 gate, and the TLS listener changes the transport, not the authentication: a
+  bearer token is only as safe as the network it crosses.
 
 The remaining product layer — multi-account sessions on one daemon — is designed but not
 implemented. Lease allocation (`POST /v1/leases`, one active lease per user and platform) and
@@ -348,8 +380,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (393 tests in 43 files), `cd daemon && go test ./...`
-(753 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (400 tests in 44 files), `cd daemon && go test ./...`
+(815 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
