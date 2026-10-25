@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ajsaccountd/internal/backup"
@@ -48,6 +49,25 @@ const backupConfirm = "RESTORE"
 // envelope itself is capped at backup.MaxEnvelopeBytes; the extra megabyte
 // covers the JSON wrapper (passphrase, dryRun, confirm).
 const maxBackupBodyBytes int64 = backup.MaxEnvelopeBytes + (1 << 20)
+
+// RestoreFlag is the single bit of state the HTTP server shares with the
+// process that owns state.json. A successful apply marks it; from then on the
+// daemon's snapshot writer refuses every save, because the in-memory store
+// still holds the panel the restore replaced and writing it would undo the
+// restore. The zero value is ready to use.
+//
+// The flag lives here because only the restore handler sets it. The daemon
+// passes one instance to both Config and its snapshot writer, so the server
+// and the writer cannot disagree about whether a restore happened.
+type RestoreFlag struct {
+	restored atomic.Bool
+}
+
+// MarkRestored records that a restore has replaced the panel files.
+func (f *RestoreFlag) MarkRestored() { f.restored.Store(true) }
+
+// Restored reports whether a restore has replaced the panel files.
+func (f *RestoreFlag) Restored() bool { return f.restored.Load() }
 
 type backupCreateRequest struct {
 	Passphrase string `json:"passphrase"`
@@ -104,7 +124,11 @@ type backupRestoreView struct {
 	Applied bool `json:"applied"`
 	// RestartRequired is true after an apply: the running daemon still holds
 	// the replaced panel in memory and must be restarted.
-	RestartRequired bool            `json:"restartRequired"`
+	RestartRequired bool `json:"restartRequired"`
+	// ExitRecommended is true after an apply: the restored panel is on disk,
+	// this process has stopped writing snapshots and cannot serve the
+	// restored state, so the operator should stop it now.
+	ExitRecommended bool            `json:"exitRecommended"`
 	Manifest        backup.Manifest `json:"manifest"`
 	Diff            backupDiffView  `json:"diff"`
 	// Files lists the blobs an apply wrote. It is empty for a dry run.
@@ -238,8 +262,11 @@ func (s *Server) handleBackupInspect(w http.ResponseWriter, r *http.Request) {
 // handleBackupRestore compares an envelope with the panel files and, when the
 // caller asks for it explicitly, replaces them. dryRun defaults to true, an
 // apply needs confirm:"RESTORE", and an apply is refused while the daemon runs
-// unless AJS_BACKUP_ALLOW_RESTORE=1, because the running process would write
-// its stale in-memory panel over the restored file on the next snapshot.
+// unless AJS_BACKUP_ALLOW_RESTORE=1, because the running process cannot serve
+// the restored panel. A successful apply marks the shared RestoreFlag, which
+// makes the daemon stop writing state.json: the in-memory store still holds
+// the panel the restore replaced, so a later snapshot (including the shutdown
+// save) would undo the restore. The response says exitRecommended:true.
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	var req backupRestoreRequest
 	if !decodeJSON(w, r, &req) {
@@ -330,6 +357,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The files on disk are now the restored panel while the store still holds
+	// the replaced one. Marking the shared flag before anything else makes
+	// every later snapshot a no-op, so no interval tick, bulk persist or
+	// shutdown save can write the stale panel back over the restore.
+	s.restore.MarkRestored()
+
 	s.store.RecordAudit(model.SeverityWarn, "operator", "backup.restore", "backup",
 		fmt.Sprintf("blobs=%d changed=%d added=%d removed=%d",
 			len(written), view.Diff.Changed, view.Diff.Added, view.Diff.Removed))
@@ -343,8 +376,9 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 
 	view.Applied = true
 	view.RestartRequired = true
+	view.ExitRecommended = true
 	view.Files = written
-	view.Warning = "the panel files were replaced; restart the daemon now, because the running process will overwrite state.json with its stale in-memory panel on its next snapshot"
+	view.Warning = "the panel files were replaced and this process has stopped writing snapshots; stop it now and start it again to serve the restored panel"
 	writeJSON(w, http.StatusOK, view)
 }
 

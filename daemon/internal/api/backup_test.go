@@ -35,6 +35,7 @@ type backupFixture struct {
 	server    *Server
 	ts        *httptest.Server
 	st        *store.Store
+	restore   *RestoreFlag
 	original  map[string][]byte
 }
 
@@ -78,11 +79,13 @@ func newBackupFixtureWithStore(t *testing.T, allowRestore bool, st *store.Store)
 		original[name] = data
 	}
 
+	restore := &RestoreFlag{}
 	server := New(Config{
 		AdminToken:         testToken,
 		StateDir:           dir,
 		StatePath:          statePath,
 		AllowBackupRestore: allowRestore,
+		Restore:            restore,
 	}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ts := httptest.NewServer(server)
 	t.Cleanup(ts.Close)
@@ -92,6 +95,7 @@ func newBackupFixtureWithStore(t *testing.T, allowRestore bool, st *store.Store)
 		server:    server,
 		ts:        ts,
 		st:        st,
+		restore:   restore,
 		original:  original,
 	}
 }
@@ -214,6 +218,12 @@ func TestBackupRoundTripOverHTTP(t *testing.T) {
 	if len(dry.Files) != 0 || dry.RestartRequired {
 		t.Fatalf("dry run = %+v, want no files and no restart", dry)
 	}
+	if dry.ExitRecommended {
+		t.Fatalf("dry run = %+v, want no exit recommendation", dry)
+	}
+	if f.restore.Restored() {
+		t.Fatal("a dry run marked the panel restored")
+	}
 	if live, err := os.ReadFile(f.statePath); err != nil || !bytes.Contains(live, []byte("READY")) {
 		t.Fatalf("dry run rewrote state.json (err %v)", err)
 	}
@@ -229,6 +239,12 @@ func TestBackupRoundTripOverHTTP(t *testing.T) {
 	applied := decodeBody[backupRestoreView](t, body)
 	if applied.DryRun || !applied.Applied || !applied.RestartRequired {
 		t.Fatalf("apply = %+v, want applied with a restart", applied)
+	}
+	if !applied.ExitRecommended {
+		t.Fatalf("apply = %+v, want exitRecommended:true", applied)
+	}
+	if !f.restore.Restored() {
+		t.Fatal("apply did not mark the shared restore flag: the snapshot writer would overwrite the restored state.json")
 	}
 	if len(applied.Files) != 3 {
 		t.Fatalf("files = %v, want all three blobs", applied.Files)
@@ -288,6 +304,9 @@ func TestBackupRestoreRefusals(t *testing.T) {
 		})
 		requireStatus(t, resp, http.StatusConflict)
 		requireErrorCode(t, body, CodeBackupLiveNode)
+		if f.restore.Restored() {
+			t.Fatal("a refused restore marked the panel restored")
+		}
 		if !bytes.Contains(body, []byte(`"liveNodes":"1"`)) {
 			t.Fatalf("refusal does not name the LIVE node count: %s", body)
 		}

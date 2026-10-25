@@ -188,8 +188,14 @@ type Config struct {
 	// AllowBackupRestore lets POST /v1/backup/restore write the panel files
 	// while the daemon runs (AJS_BACKUP_ALLOW_RESTORE=1). The default refusal
 	// is deliberate: the running daemon keeps the replaced panel in memory and
-	// writes it over state.json on its next snapshot.
+	// cannot serve the restored one.
 	AllowBackupRestore bool
+	// Restore is the flag the server marks after a successful apply. The
+	// daemon shares one instance between this server and its snapshot writer,
+	// which stops writing state.json once the flag is set: the store still
+	// holds the panel the restore replaced. Nil gives the server a private
+	// flag, which is enough for a caller that never saves.
+	Restore *RestoreFlag
 	// TenantPortal enables the customer portal chains (/v1/portal/* and
 	// /v1/admin/tenants*). It is false unless AJS_TENANT_PORTAL=1, in which
 	// case the routes are not registered at all and answer 404. The feature is
@@ -240,6 +246,10 @@ type Server struct {
 	// state-directory files. TryLock turns a concurrent request into 409
 	// BACKUP_BUSY instead of queueing a multi-megabyte envelope behind it.
 	backupMu sync.Mutex
+
+	// restore is marked after a successful apply. It is the same instance the
+	// daemon's snapshot writer reads through Config.Restore.
+	restore *RestoreFlag
 }
 
 // New builds a server. Nil store and logger fall back to a seeded store and
@@ -260,6 +270,9 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 	if cfg.Version == "" {
 		cfg.Version = DefaultVersion
 	}
+	if cfg.Restore == nil {
+		cfg.Restore = &RestoreFlag{}
+	}
 	origins := make(map[string]struct{}, len(cfg.CORSOrigins))
 	for _, origin := range cfg.CORSOrigins {
 		origin = strings.TrimSpace(origin)
@@ -267,7 +280,7 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 			origins[origin] = struct{}{}
 		}
 	}
-	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, started: time.Now()}
+	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, started: time.Now(), restore: cfg.Restore}
 	if cfg.WebhookSecrets == nil {
 		s.webhookSecrets = make(map[string]string)
 	}

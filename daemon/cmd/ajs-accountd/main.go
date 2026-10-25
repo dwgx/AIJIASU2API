@@ -149,6 +149,13 @@ func run() error {
 	// listener starts so a corrupt or future-version file fails startup
 	// instead of serving a half-restored panel.
 	statePath := stateFilePath()
+	// restoreApplied is marked by POST /v1/backup/restore once it has replaced
+	// the panel files. snapshots shares the flag, so after an apply this
+	// process never writes the stale in-memory panel over the restored
+	// state.json — not on the interval ticker, not on a bulk persist and not
+	// on the shutdown save.
+	restoreApplied := &api.RestoreFlag{}
+	snapshots := &stateSaver{st: st, path: statePath, logger: logger, restore: restoreApplied}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		return fmt.Errorf("state directory %s: %w", filepath.Dir(statePath), err)
 	}
@@ -190,7 +197,7 @@ func run() error {
 			"keys", purged.Keys,
 			"requests", purged.Requests,
 			"audit", purged.Audit)
-		saveState(st, statePath, logger, "demo-purge")
+		snapshots.save("demo-purge")
 	}
 	pruneSecrets(secrets, st, logger)
 
@@ -206,7 +213,7 @@ func run() error {
 		logger.Error("startup_recovery_failed", "error", err)
 	}
 	if len(recovered.Demoted) > 0 {
-		saveState(st, statePath, logger, "startup-recovery")
+		snapshots.save("startup-recovery")
 	}
 
 	snapshotEvery, err := snapshotInterval()
@@ -222,19 +229,17 @@ func run() error {
 		for {
 			select {
 			case <-ticker.C:
-				saveState(st, statePath, logger, "interval")
+				snapshots.save("interval")
 			case <-stopSnapshots:
 				return
 			}
 		}
 	}()
 	// Runs after the HTTP server has stopped (and before secrets.Close, which
-	// was deferred earlier) so the last mutations reach disk.
-	defer func() {
-		close(stopSnapshots)
-		<-snapshotsDone
-		saveState(st, statePath, logger, "shutdown")
-	}()
+	// was deferred earlier) so the last mutations reach disk. After a restore
+	// the shared flag refuses this save, so a graceful stop cannot overwrite
+	// the restored panel with the stale in-memory one.
+	defer stopSnapshotWriter(snapshots, stopSnapshots, snapshotsDone)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -505,6 +510,7 @@ func run() error {
 		StateDir:             envOr("AJS_STATE_DIR", "./data"),
 		StatePath:            statePath,
 		AllowBackupRestore:   os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1",
+		Restore:              restoreApplied,
 		TenantPortal:         *tenantPortal,
 		TenantOrigin:         tenantOriginValue,
 		TrustedProxies:       trustedProxyValues,
@@ -528,7 +534,7 @@ func run() error {
 		EventRing:            eventRing,
 		AllowPlaintextExport: os.Getenv("AJS_ALLOW_PLAINTEXT_EXPORT") == "1",
 		Persist: func() {
-			saveState(st, statePath, logger, "account-io")
+			snapshots.save("account-io")
 		},
 	}, st, logger)
 
@@ -1553,15 +1559,45 @@ func pruneSecrets(secrets *secret.Store, st *store.Store, logger *slog.Logger) {
 	logger.Info("secret_pruned", "count", len(orphans))
 }
 
-// saveState writes the full snapshot and logs the outcome. Neither the log
-// line nor the error carries a credential: the document only holds sealed
-// envelopes and key hashes.
-func saveState(st *store.Store, path string, logger *slog.Logger, reason string) {
-	if err := st.Save(path); err != nil {
-		logger.Error("state_save_failed", "path", path, "reason", reason, "error", err)
+// stateSaver writes state.json snapshots for one process. Once the shared
+// RestoreFlag says a backup restore has replaced the panel files, every save is
+// refused: the in-memory store still holds the panel the restore replaced, so
+// writing it would silently undo the restore. The refusal is logged once, so
+// the interval ticker cannot flood the log ring.
+type stateSaver struct {
+	st      *store.Store
+	path    string
+	logger  *slog.Logger
+	restore *api.RestoreFlag
+	skipped sync.Once
+}
+
+// save writes the full snapshot and logs the outcome, or records the one-time
+// suppression notice after a restore. Neither the log line nor the error
+// carries a credential: the document only holds sealed envelopes and key
+// hashes.
+func (w *stateSaver) save(reason string) {
+	if w.restore != nil && w.restore.Restored() {
+		w.skipped.Do(func() {
+			w.logger.Warn("state_save_suppressed_after_restore", "path", w.path, "reason", reason)
+		})
 		return
 	}
-	logger.Info("state_saved", "path", path, "reason", reason)
+	if err := w.st.Save(w.path); err != nil {
+		w.logger.Error("state_save_failed", "path", w.path, "reason", reason, "error", err)
+		return
+	}
+	w.logger.Info("state_saved", "path", w.path, "reason", reason)
+}
+
+// stopSnapshotWriter stops the interval goroutine and writes the final
+// snapshot. A successful restore has marked the shared flag by then, so the
+// last save is refused and the restored state.json survives a graceful stop
+// (RESTORE-DRILL.md hazard H1).
+func stopSnapshotWriter(saver *stateSaver, stop chan struct{}, done <-chan struct{}) {
+	close(stop)
+	<-done
+	saver.save("shutdown")
 }
 
 // openStore builds the panel store. The daemon starts from an empty store:
