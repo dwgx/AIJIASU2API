@@ -340,10 +340,53 @@ sh deploy/check-nftables-drift.sh
 # state: OK - live block matches (1 rule, comments ignored)
 ```
 
-Exit codes: `0` match, `1` drift (`MISSING`: the repo rule is absent live; `EXTRA`: live has an
-AJS line the repo block does not own, including duplicates or a changed rule), `2` error (ssh,
-unreadable or malformed asset). The check reads `/etc/nftables.conf`; it does not inspect the
-running ruleset and never reloads nftables.
+Exit codes: `0` match (or an accepted `KNOWN_DIVERGENCE`, printed as `OK-with-note`), `1` drift
+(`MISSING`: the repo rule is absent live; `EXTRA`: live has an AJS line the repo block does not
+own, including duplicates or a changed rule), `2` error (ssh, unreadable or malformed asset). The
+check reads `/etc/nftables.conf`; it does not inspect the running ruleset and never reloads
+nftables.
+
+### Known divergences (`KNOWN_DIVERGENCE`)
+
+The comparison marker is the literal `tcp dport { 2261, 18082 }`: only non-comment rule lines
+containing that fragment are compared. Comments and blank lines are ignored.
+
+`check-nftables-drift.sh` carries an explicit `KNOWN_DIVERGENCE` allowlist for accepted live-only
+lines. A matching line is printed as `OK-with-note` and the check exits `0`; it is never silently
+dropped, and any line not on the allowlist is still `EXTRA` and exits `1`. The allowlist is a
+transition tool, not a way to accept real drift: remove an entry as soon as the host and the repo
+converge.
+
+The one current entry is the Owner-labelled HMC line:
+
+```text
+AJS-120 block pending merge (owner: APC)
+```
+
+It is the AJS-120 block hand-added to `hmc:/etc/nftables.conf:115-118` and pending merge into
+`ops/hmc/nftables.conf`. Display it, do not fail on it, and delete the entry after that merge.
+The live line is recognised by its trailing label:
+
+```text
+ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept # AJS-120 block pending merge (owner: APC)
+```
+
+Each allowlist entry is one line of the form `<reason>|<exact normalised rule>`. A live rule is
+recognised when its normalised form equals the entry rule, or when the live line carries the
+reason as a trailing `#` comment (for example `# KNOWN_DIVERGENCE: AJS-120 block pending merge
+(owner: APC)`) or as an nft `comment "..."` attribute. To add an entry, edit the
+`KNOWN_DIVERGENCE` block at the top of `deploy/check-nftables-drift.sh`, append the line, then run
+the fixtures and the real check:
+
+```bash
+bash deploy/check-nftables-drift.sh --self-test
+# self-test: PASS (6/6)
+sh deploy/check-nftables-drift.sh
+```
+
+`--self-test` needs no SSH access: it exercises the comparison engine with fixtures for a plain
+match, an owner-labelled known divergence, an unlabelled extra line, an unlabelled duplicate, a
+missing rule and a malformed asset.
 
 ## Limitations
 
