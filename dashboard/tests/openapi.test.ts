@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(91)
-    expect(entries).toHaveLength(111)
+    expect(Object.keys(doc.paths)).toHaveLength(104)
+    expect(entries).toHaveLength(128)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -282,6 +282,13 @@ describe('docs/openapi.json', () => {
       '/v1/portal/usage': true,
       '/v1/portal/keys': true,
       '/v1/portal/keys/{id}': true,
+      '/v1/portal/plans': true,
+      '/v1/portal/orders': true,
+      '/v1/portal/orders/{id}': true,
+      '/v1/portal/orders/{id}/cancel': true,
+      // The payment webhook authenticates its provider signature over the raw
+      // body; a provider cannot send a bearer token.
+      '/v1/payments/stripe': true,
     }
     for (const { method, path, operation } of entries) {
       if (path === '/healthz' || portalPaths[path]) continue
@@ -359,6 +366,109 @@ describe('docs/openapi.json', () => {
     })
     expect(schema('TenantSessionView').properties?.csrfToken).toMatchObject({ type: 'string' })
     expect(schema('TenantSignupAccepted').properties?.status?.enum).toEqual(['pending'])
+  })
+
+  it('documents the order and activation contract', () => {
+    // Customer order routes use the portal cookie, never a bearer token.
+    for (const [method, path] of [
+      ['get', '/v1/portal/plans'],
+      ['get', '/v1/portal/orders'],
+      ['post', '/v1/portal/orders'],
+      ['get', '/v1/portal/orders/{id}'],
+      ['post', '/v1/portal/orders/{id}/cancel'],
+    ] as Array<[string, string]>) {
+      const operation = doc.paths[path]?.[method]
+      expect(operation, `${method} ${path}`).toBeDefined()
+      expect(operation?.security, `${method} ${path}`).toEqual([{ portalCookie: [] }])
+      expect(operation?.['x-implementation-phase'], `${method} ${path}`).toBe('P0')
+    }
+    for (const [method, path] of [
+      ['post', '/v1/portal/orders'],
+      ['post', '/v1/portal/orders/{id}/cancel'],
+    ] as Array<[string, string]>) {
+      expect(parameterNames(doc.paths[path]![method]!), `${method} ${path}`).toContain(
+        'header:X-CSRF-Token',
+      )
+    }
+    expect(parameterNames(doc.paths['/v1/portal/orders']!.post!)).toContain(
+      'header:Idempotency-Key',
+    )
+    expect(responseSchema(doc.paths['/v1/portal/orders']!.post!, '201')).toEqual({
+      $ref: '#/components/schemas/Order',
+    })
+
+    // Admin order/plan routes inherit the global bearer requirement and are
+    // absent from routeScopes, so only an admin principal reaches them.
+    for (const [method, path] of [
+      ['get', '/v1/admin/plans'],
+      ['post', '/v1/admin/plans'],
+      ['get', '/v1/admin/plans/{id}'],
+      ['patch', '/v1/admin/plans/{id}'],
+      ['delete', '/v1/admin/plans/{id}'],
+      ['get', '/v1/admin/orders'],
+      ['get', '/v1/admin/orders/{id}'],
+      ['post', '/v1/admin/orders/{id}/settle'],
+      ['post', '/v1/admin/orders/{id}/refund'],
+      ['post', '/v1/admin/orders/{id}/chargeback'],
+      ['post', '/v1/admin/orders/{id}/cancel'],
+    ] as Array<[string, string]>) {
+      const operation = doc.paths[path]?.[method]
+      expect(operation, `${method} ${path}`).toBeDefined()
+      expect(operation?.security, `${method} ${path}`).toBeUndefined()
+      expect(operation?.['x-implementation-phase'], `${method} ${path}`).toBe('P0')
+    }
+    const listOrders = doc.paths['/v1/admin/orders']!.get!
+    for (const name of ['tenantId', 'userId', 'state']) {
+      expect(parameterNames(listOrders), name).toContain(`query:${name}`)
+    }
+    expect(doc.paths['/v1/admin/plans/{id}']!.delete!.responses['204']).toBeDefined()
+
+    // The webhook is signature-only; it overrides the global bearer rule and
+    // never falls back to manual settlement while disabled.
+    const webhook = doc.paths['/v1/payments/stripe']?.post
+    expect(webhook).toBeDefined()
+    expect(webhook?.security).toEqual([])
+    expect(parameterNames(webhook!)).toContain('header:Stripe-Signature')
+    expect(webhook?.responses['503']).toEqual({
+      $ref: '#/components/responses/ServiceUnavailable',
+    })
+
+    // The state machine and the honest settlement inputs are part of the
+    // contract: a reference alone is not an attestation.
+    expect(schema('OrderState').enum).toEqual([
+      'awaiting_payment',
+      'paid',
+      'active',
+      'cancelled',
+      'refunded',
+      'charged_back',
+    ])
+    expect(schema('Order').required).toEqual(expect.arrayContaining([
+      'id', 'tenantId', 'userId', 'planId', 'plan', 'provider', 'state',
+      'providerRef', 'reviewRequired', 'grant',
+    ]))
+    expect(schema('Order').properties?.grant?.oneOf).toBeDefined()
+    expect(schema('OrderSettleRequest').required).toEqual([
+      'reference',
+      'offlineFundsReceived',
+    ])
+    expect(schema('OrderSettleRequest').properties?.offlineFundsReceived).toMatchObject({
+      const: true,
+    })
+    expect(schema('Plan').properties?.amountMinor).toMatchObject({ minimum: 1 })
+    expect(schema('Plan').properties?.leaseTtlSeconds).toMatchObject({
+      minimum: 60,
+      maximum: 604800,
+    })
+    expect(schema('EntitlementGrant').required).toEqual(expect.arrayContaining([
+      'orderId', 'leaseId', 'quotaBytes', 'expiresAt', 'revokedAt',
+    ]))
+    expect(schema('WebhookEvent').enum).toEqual(expect.arrayContaining([
+      'order.created',
+      'order.paid',
+      'order.activated',
+      'order.refunded',
+    ]))
   })
 
   it('marks the proposed P1 interfaces', () => {

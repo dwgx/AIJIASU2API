@@ -5394,3 +5394,184 @@ svg {
   }
 }
 
+
+/* ==========================================================================
+   Orders and plans (AJS-299)
+
+   Customer plan cards and order rows share one status vocabulary; the admin
+   surface adds a plan rail beside the order table. Additive only.
+   ========================================================================== */
+.portal-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.portal-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.portal-plan__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.portal-plan__name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.portal-plan__price {
+  color: var(--mint);
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.portal-plan__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+
+.portal-plan__meta > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.portal-plan__meta dt {
+  color: var(--muted);
+}
+
+.portal-plan__meta dd {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.portal-plan__summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+.portal-plan__summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.portal-plan__summary dt {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.portal-plan__summary dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.portal-plan .btn--primary {
+  width: 100%;
+}
+
+.portal-alert--warning {
+  color: var(--warning);
+}
+
+.order-plan,
+.order-owner,
+.order-state {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.order-plan__meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.order-hint {
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.order-ref {
+  overflow-wrap: anywhere;
+}
+
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.orders-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.order-plan-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.order-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.order-plan-row:last-child {
+  border-bottom: 0;
+}
+
+.order-plan-row__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.order-plan-row__name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.order-plan-row__meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 1100px) {
+  .orders-grid {
+    grid-template-columns: 1fr;
+  }
+}

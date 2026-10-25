@@ -13,6 +13,7 @@ const Lab = lazy(() => import('./pages/Lab'))
 const Leases = lazy(() => import('./pages/Leases'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Nodes = lazy(() => import('./pages/Nodes'))
+const Orders = lazy(() => import('./pages/Orders'))
 const Overview = lazy(() => import('./pages/Overview'))
 const Requests = lazy(() => import('./pages/Requests'))
 const Schedules = lazy(() => import('./pages/Schedules'))
@@ -75,6 +76,7 @@ export default function App() {
                 <Route path="/accounts" element={<Accounts />} />
                 <Route path="/nodes" element={<Nodes />} />
                 <Route path="/leases" element={<Leases />} />
+                <Route path="/orders" element={<Orders />} />
                 <Route path="/device-pool" element={<DevicePool />} />
                 <Route path="/users" element={<Users />} />
                 <Route path="/requests" element={<Requests />} />

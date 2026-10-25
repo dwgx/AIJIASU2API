@@ -7,10 +7,12 @@ import { PortalError, portalApi } from '../../lib/portal-api'
 import type { PortalSession } from '../../lib/portal-api'
 import PortalKeys from './PortalKeys'
 import PortalLeases from './PortalLeases'
+import PortalOrders from './PortalOrders'
+import PortalPlans from './PortalPlans'
 import PortalUsage from './PortalUsage'
 import { PortalFrame } from './PortalFrame'
 
-type PortalTab = 'leases' | 'usage' | 'keys'
+type PortalTab = 'leases' | 'usage' | 'keys' | 'plans' | 'orders'
 
 function failureMessage(error: unknown, t: (key: string) => string): string {
   const status = error instanceof PortalError ? error.status : 0
@@ -124,6 +126,8 @@ export default function PortalDashboard() {
           { value: 'leases', label: t('portal.dashboard.leasesTab') },
           { value: 'usage', label: t('portal.dashboard.usageTab') },
           { value: 'keys', label: t('portal.dashboard.keysTab') },
+          { value: 'plans', label: t('portal.dashboard.plansTab') },
+          { value: 'orders', label: t('portal.dashboard.ordersTab') },
         ]}
         value={tab}
         onChange={setTab}
@@ -136,12 +140,18 @@ export default function PortalDashboard() {
             ? 'portal.dashboard.leasesTab'
             : tab === 'usage'
               ? 'portal.dashboard.usageTab'
-              : 'portal.dashboard.keysTab',
+              : tab === 'keys'
+                ? 'portal.dashboard.keysTab'
+                : tab === 'plans'
+                  ? 'portal.dashboard.plansTab'
+                  : 'portal.dashboard.ordersTab',
         )}
       >
         {tab === 'leases' ? <PortalLeases /> : null}
         {tab === 'usage' ? <PortalUsage /> : null}
         {tab === 'keys' ? <PortalKeys /> : null}
+        {tab === 'plans' ? <PortalPlans onCreated={() => setTab('orders')} /> : null}
+        {tab === 'orders' ? <PortalOrders /> : null}
       </div>
     </PortalFrame>
   )

@@ -1,6 +1,13 @@
 import { ApiError } from './errors'
 import { getDb } from './mock'
-import type { ApiKey, Lease, UsageBucket, UsageQuery, UsageSummary } from './types'
+import {
+  mockCancelOrder,
+  mockCreateOrder,
+  mockListOrders,
+  mockListPlans,
+  resetOrderMock,
+} from './order-mock'
+import type { ApiKey, Lease, Order, Plan, UsageBucket, UsageQuery, UsageSummary } from './types'
 
 /* --------------------------------------------------------------------------
  * Customer portal client (DESIGN-TENANT.md)
@@ -131,10 +138,16 @@ function requireCsrf(): string {
 
 async function request<T>(
   path: string,
-  options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; csrf?: boolean } = {},
+  options: {
+    method?: 'GET' | 'POST' | 'DELETE'
+    body?: unknown
+    csrf?: boolean
+    headers?: Record<string, string>
+  } = {},
 ): Promise<T> {
   const method = options.method ?? 'GET'
   const headers = new Headers({ Accept: 'application/json' })
+  for (const [name, value] of Object.entries(options.headers ?? {})) headers.set(name, value)
   if (options.body !== undefined) headers.set('Content-Type', 'application/json')
   if (method !== 'GET' && options.csrf !== false) headers.set('X-CSRF-Token', requireCsrf())
 
@@ -202,6 +215,17 @@ const MOCK_USAGE_DEFAULT_DAYS = 30
 const MOCK_USAGE_MAX_DAYS = 366
 export const PORTAL_PASSWORD_MIN = 10
 
+/**
+ * A fresh key per create dialog. Retrying a failed submit with the same key is
+ * safe: the daemon replays the original order instead of creating a second one.
+ * Never persisted or rendered.
+ */
+export function newOrderIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID()
+  return `order-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 let mockState: MockPortalState | null = null
 
 function mockRFC3339(ms: number): string {
@@ -251,6 +275,7 @@ function mockStateValue(): MockPortalState {
 export function resetPortalMock(): void {
   const db = getDb()
   db.keys = db.keys.filter((key) => !key.id.startsWith('key-p'))
+  resetOrderMock()
   mockState = null
   csrfToken = null
 }
@@ -668,6 +693,54 @@ export const portalApi = {
       return
     }
     await request<void>(`/v1/portal/keys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+
+  /** GET /v1/portal/plans — active catalog only. */
+  async plans(): Promise<Plan[]> {
+    if (mockEnabled()) {
+      await wait()
+      return mockListPlans()
+    }
+    return request<Plan[]>('/v1/portal/plans')
+  },
+
+  /** GET /v1/portal/orders — the session owner's orders, newest first. */
+  async orders(): Promise<Order[]> {
+    if (mockEnabled()) {
+      await wait()
+      const tenant = mockActiveTenant()
+      return mockListOrders(tenant.id, tenant.userId ?? '')
+    }
+    return request<Order[]>('/v1/portal/orders')
+  },
+
+  /**
+   * POST /v1/portal/orders — a request, never a payment. The same key with the
+   * same plan replays the original order; a different plan conflicts (409).
+   */
+  async createOrder(planId: string, idempotencyKey: string): Promise<Order> {
+    if (mockEnabled()) {
+      await wait()
+      const tenant = mockActiveTenant()
+      return mockCreateOrder(tenant.id, tenant.userId ?? '', planId, idempotencyKey)
+    }
+    return request<Order>('/v1/portal/orders', {
+      method: 'POST',
+      body: { planId },
+      headers: { 'Idempotency-Key': idempotencyKey },
+    })
+  },
+
+  /** POST /v1/portal/orders/{id}/cancel — awaiting-payment orders only. */
+  async cancelOrder(id: string): Promise<Order> {
+    if (mockEnabled()) {
+      await wait()
+      const tenant = mockActiveTenant()
+      return mockCancelOrder(id, { tenantId: tenant.id, userId: tenant.userId ?? '' })
+    }
+    return request<Order>(`/v1/portal/orders/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+    })
   },
 
   /** Test hook: reset the in-browser portal backend. */

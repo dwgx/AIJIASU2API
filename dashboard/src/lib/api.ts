@@ -39,6 +39,15 @@ import {
   resetMockDb,
   syncAccountCounts,
 } from './mock'
+import {
+  mockAdminOrders,
+  mockAdminPlans,
+  mockCancelOrder,
+  mockRefundOrder,
+  mockSettleOrder,
+  mockSetPlanActive,
+  resetOrderMock,
+} from './order-mock'
 import { ApiError, DevicePoolError, UnauthorizedError } from './errors'
 import { WEBHOOK_EVENTS } from './types'
 import type {
@@ -101,8 +110,10 @@ import type {
   MutationLabInput,
   NodeHealth,
   NodeState,
+  Order,
   PanelSettings,
   PanelUser,
+  Plan,
   ProxyNode,
   RenewalAccountView,
   RenewalPlan,
@@ -3412,10 +3423,79 @@ export const api = {
     })
   },
 
+  /** GET /v1/admin/plans — the full catalog, including deactivated plans. */
+  async listPlans(): Promise<Plan[]> {
+    if (!USE_MOCK) return http<Plan[]>('/v1/admin/plans')
+    await wait()
+    return mockAdminPlans()
+  },
+
+  /** GET /v1/admin/orders — every tenant's orders, newest first. */
+  async listOrders(): Promise<Order[]> {
+    if (!USE_MOCK) return http<Order[]>('/v1/admin/orders')
+    await wait()
+    return mockAdminOrders()
+  },
+
+  /**
+   * POST /v1/admin/orders/{id}/settle — attest an offline receipt. This never
+   * charges a card or claims an online transaction; a nonempty reference is
+   * required and a settlement on `paid` retries activation.
+   */
+  async settleOrder(id: string, reference: string): Promise<Order> {
+    if (!USE_MOCK) {
+      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/settle`, {
+        method: 'POST',
+        body: JSON.stringify({ reference, offlineFundsReceived: true }),
+      })
+    }
+    await wait()
+    return mockSettleOrder(id, reference)
+  },
+
+  /** POST /v1/admin/orders/{id}/cancel — awaiting-payment orders only. */
+  async cancelOrder(id: string): Promise<Order> {
+    if (!USE_MOCK) {
+      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/cancel`, {
+        method: 'POST',
+      })
+    }
+    await wait()
+    return mockCancelOrder(id)
+  },
+
+  /**
+   * POST /v1/admin/orders/{id}/refund — records a refund the operator already
+   * completed offline; it does not transfer money. Full refunds only.
+   */
+  async refundOrder(id: string, reference: string): Promise<Order> {
+    if (!USE_MOCK) {
+      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/refund`, {
+        method: 'POST',
+        body: JSON.stringify({ reference }),
+      })
+    }
+    await wait()
+    return mockRefundOrder(id, reference)
+  },
+
+  /** PATCH /v1/admin/plans/{id} — activate/deactivate; snapshots stay priced. */
+  async setPlanActive(id: string, active: boolean): Promise<Plan> {
+    if (!USE_MOCK) {
+      return http<Plan>(`/v1/admin/plans/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active }),
+      })
+    }
+    await wait()
+    return mockSetPlanActive(id, active)
+  },
+
   async resetMock(): Promise<void> {
     if (!USE_MOCK) return
     await wait()
     resetMockDb()
+    resetOrderMock()
     mockSelections.clear()
     mockScheduleState = null
     mockWebhookState = null

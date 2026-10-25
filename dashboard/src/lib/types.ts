@@ -150,6 +150,79 @@ export interface CreateLeaseResult {
   replayed?: boolean
 }
 
+/* --------------------------------------------------------------------------
+ * Orders and plans (DESIGN-ORDERS.md)
+ *
+ * A plan is admin catalog configuration; an order stores an immutable priced
+ * snapshot of it. `awaiting_payment` means nothing has been paid: only an
+ * administrator attesting an offline receipt (or a verified webhook) settles
+ * an order, and activation is a separate, retryable step.
+ * ------------------------------------------------------------------------ */
+
+export type OrderState =
+  | 'awaiting_payment'
+  | 'paid'
+  | 'active'
+  | 'cancelled'
+  | 'refunded'
+  | 'charged_back'
+
+/** Admin catalog plan; `amountMinor` is integer minor units of `currency`. */
+export interface Plan {
+  id: string
+  active: boolean
+  name: string
+  amountMinor: number
+  currency: string
+  leaseTtlSeconds: number
+  quotaBytes: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** The priced plan fields frozen onto an order at creation time. */
+export interface OrderPlanSnapshot {
+  id: string
+  name: string
+  amountMinor: number
+  currency: string
+  leaseTtlSeconds: number
+  quotaBytes: number
+}
+
+/** One grant per order; a reversal sets `revokedAt` instead of deleting it. */
+export interface EntitlementGrant {
+  orderId: string
+  leaseId: string
+  quotaBytes: number
+  previousQuotaBytes: number
+  expiresAt: string
+  revokedAt: string | null
+}
+
+/**
+ * `reviewRequired` is a flag, not a state: a mismatch (late settlement,
+ * conflicting reference, refund without recorded payment) quarantines the
+ * order for offline reconciliation without granting anything.
+ */
+export interface Order {
+  id: string
+  tenantId: string
+  userId: string
+  planId: string
+  plan: OrderPlanSnapshot
+  provider: string
+  state: OrderState
+  providerRef: string | null
+  reviewRequired: boolean
+  createdAt: string
+  paidAt: string | null
+  activatedAt: string | null
+  cancelledAt: string | null
+  refundedAt: string | null
+  grant: EntitlementGrant | null
+}
+
 export interface PanelUser {
   id: string
   name: string
