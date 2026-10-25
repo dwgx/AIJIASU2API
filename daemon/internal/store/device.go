@@ -87,7 +87,7 @@ func (s *Store) AccountDevice(id string) (DeviceIdentity, bool) {
 //
 // With the device pool enabled it creates a pool record with algorithm
 // "legacy/v1" and marks it presented, because the identity was supplied by a
-// caller that already had it. Production first logins use BindForLogin; this
+// caller that already had it. Production first logins use BindForLoginSlot; this
 // wrapper exists for account import and tests.
 //
 // dev must carry UID, OSDID, CUID and CSEID; the account must exist.
@@ -106,7 +106,7 @@ func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdenti
 	if existing, ok := s.devices[id]; ok {
 		return existing, nil
 	}
-	if recID, ok := s.deviceBindings[id]; ok {
+	if recID, ok := s.boundRecordIDLocked(accountSlotKey(id)); ok {
 		if rec := s.deviceRecordLocked(recID); rec != nil {
 			material, err := s.deviceMaterialLocked(rec)
 			if err != nil {
@@ -139,13 +139,15 @@ func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdenti
 	profile := profileForVersion(dev.Version)
 	now := iso(s.now())
 	accountKey := deviceAccountKey(family, account.Username)
+	slotKey := accountSlotKey(id)
 	rec := &DeviceRecord{
 		ID: deviceID, State: DeviceAssigned, Platform: family, Profile: profile,
 		Algorithm: DeviceAlgorithmLegacy, Fingerprint: deviceFingerprint(machineCode, dev),
 		Hashes: deviceHashes(dev, machineCode), Claims: deviceClaims(dev),
 		AccountKey:        accountKey,
 		AccountKeyAliases: appendDeviceAlias(nil, deviceAccountKey(family, strings.ToLower(account.Username))),
-		AssignedAccountID: id, AssignedAt: &now, PresentedAt: &now,
+		AssignedAccountID: id, AssignedSlotKey: cloneSlotKey(&slotKey),
+		AssignedAt: &now, PresentedAt: &now,
 		CreatedAt: now, CreatedBy: "system",
 	}
 	material := DeviceMaterial{
@@ -153,13 +155,15 @@ func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdenti
 		Platform: family, Profile: profile, Algorithm: DeviceAlgorithmLegacy,
 		Fingerprint: rec.Fingerprint, CreatedAt: now, PresentedAt: &now,
 		AccountKey: accountKey, AccountKeyAliases: rec.AccountKeyAliases,
+		AssignedSlotKey: cloneSlotKey(&slotKey),
 	}
 	if err := s.sealDeviceMaterial(material); err != nil {
 		return DeviceIdentity{}, err
 	}
+	s.ensureSlotRowLocked(slotKey)
 	s.devicePool[rec.ID] = rec
 	s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
-	s.deviceBindings[id] = rec.ID
+	s.setSlotBindingLocked(slotKey, rec.ID)
 	s.devices[id] = dev
 	s.deviceAppendEventLocked(rec, "created", "system", "from EnsureAccountDevice")
 	s.deviceAppendEventLocked(rec, "assigned", "system", "source=legacy")

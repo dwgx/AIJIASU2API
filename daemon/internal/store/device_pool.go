@@ -136,6 +136,10 @@ func DeviceErrorReason(err error) string {
 	if errors.As(err, &typed) {
 		return typed.Reason
 	}
+	var ambiguous *AmbiguousRestoreError
+	if errors.As(err, &ambiguous) {
+		return ambiguous.DeviceReason()
+	}
 	var conflict *DeviceImportConflictError
 	if errors.As(err, &conflict) {
 		return DeviceReasonImportConflict
@@ -191,9 +195,8 @@ type DeviceEvent struct {
 }
 
 // DeviceBindingKey identifies the account slot a device record is bound to.
-// Step 1 declares the type only: the pool still uses the account id as its map
-// key and slot 1 remains the compatibility projection until the per-slot
-// binding step.
+// The canonical binding map is keyed by this type; the account-keyed
+// deviceBindings map remains the slot-1 compatibility projection.
 type DeviceBindingKey = model.SlotKey
 
 // DeviceRecord is the non-secret index entry. Raw identity fields are not
@@ -212,18 +215,24 @@ type DeviceRecord struct {
 	AccountKey        string            `json:"accountKey,omitempty"`
 	AccountKeyAliases []string          `json:"accountKeyAliases,omitempty"`
 	AssignedAccountID string            `json:"assignedAccountId,omitempty"`
-	AssignedAt        *string           `json:"assignedAt,omitempty"`
-	PresentedAt       *string           `json:"presentedAt,omitempty"`
-	FirstSeenAt       *string           `json:"firstSeenAt,omitempty"`
-	LastSeenAt        *string           `json:"lastSeenAt,omitempty"`
-	LoginCount        int               `json:"loginCount"`
-	CreatedAt         string            `json:"createdAt"`
-	CreatedBy         string            `json:"createdBy"`
-	RetiredAt         *string           `json:"retiredAt,omitempty"`
-	RetiredReason     string            `json:"retiredReason,omitempty"`
-	ReplacedBy        string            `json:"replacedBy,omitempty"`
-	Replaces          string            `json:"replaces,omitempty"`
-	History           []DeviceEvent     `json:"history,omitempty"`
+	// AssignedSlotKey is the exact slot this record belongs to. It is set on
+	// every assigned record and retained on a retired record as its slot
+	// affinity, so a re-added account restores the right slot. It is nil for
+	// an available or quarantined record and for a legacy record whose slot is
+	// not known yet.
+	AssignedSlotKey *model.SlotKey `json:"assignedSlotKey,omitempty"`
+	AssignedAt      *string        `json:"assignedAt,omitempty"`
+	PresentedAt     *string        `json:"presentedAt,omitempty"`
+	FirstSeenAt     *string        `json:"firstSeenAt,omitempty"`
+	LastSeenAt      *string        `json:"lastSeenAt,omitempty"`
+	LoginCount      int            `json:"loginCount"`
+	CreatedAt       string         `json:"createdAt"`
+	CreatedBy       string         `json:"createdBy"`
+	RetiredAt       *string        `json:"retiredAt,omitempty"`
+	RetiredReason   string         `json:"retiredReason,omitempty"`
+	ReplacedBy      string         `json:"replacedBy,omitempty"`
+	Replaces        string         `json:"replaces,omitempty"`
+	History         []DeviceEvent  `json:"history,omitempty"`
 }
 
 // DeviceMaterial is the sealed plaintext, keyed by DeviceRecord.ID with the id
@@ -242,6 +251,10 @@ type DeviceMaterial struct {
 	PresentedAt       *string        `json:"presentedAt,omitempty"`
 	AccountKey        string         `json:"accountKey,omitempty"`
 	AccountKeyAliases []string       `json:"accountKeyAliases,omitempty"`
+	// AssignedSlotKey binds the sealed material to one slot. Legacy material
+	// predates the field and opens with nil; the record's binding is then the
+	// authority and is never rewritten just to fill this field.
+	AssignedSlotKey *model.SlotKey `json:"assignedSlotKey,omitempty"`
 }
 
 // DeviceSealer is the sealed-material store. *secret.Store implements it; a
@@ -574,6 +587,9 @@ func validDeviceAlgorithm(name string) bool {
 // validateDeviceMaterial enforces DESIGN-DEVICE-POOL §7.5 for every generator
 // and every import.
 func validateDeviceMaterial(profile DeviceProfile, m DeviceMaterial) error {
+	if m.AssignedSlotKey != nil && !m.AssignedSlotKey.Valid() {
+		return invalidf("device material has invalid assigned slot key %q", m.AssignedSlotKey.String())
+	}
 	if !isLowerHex(m.MachineCode, 64) {
 		return invalidf("device machine code must be 64 lowercase hex characters")
 	}
@@ -987,6 +1003,7 @@ func cloneDeviceRecord(rec DeviceRecord) DeviceRecord {
 	rec.Hashes = cloneStringMap(rec.Hashes)
 	rec.Claims = cloneStringMap(rec.Claims)
 	rec.AccountKeyAliases = append([]string(nil), rec.AccountKeyAliases...)
+	rec.AssignedSlotKey = cloneSlotKey(rec.AssignedSlotKey)
 	rec.History = append([]DeviceEvent(nil), rec.History...)
 	rec.AssignedAt = cloneStringPtr(rec.AssignedAt)
 	rec.PresentedAt = cloneStringPtr(rec.PresentedAt)
@@ -999,6 +1016,7 @@ func cloneDeviceRecord(rec DeviceRecord) DeviceRecord {
 func cloneDeviceMaterial(m DeviceMaterial) DeviceMaterial {
 	m.PresentedAt = cloneStringPtr(m.PresentedAt)
 	m.AccountKeyAliases = append([]string(nil), m.AccountKeyAliases...)
+	m.AssignedSlotKey = cloneSlotKey(m.AssignedSlotKey)
 	return m
 }
 
@@ -1019,15 +1037,6 @@ func cloneStringPtr(value *string) *string {
 	}
 	copied := *value
 	return &copied
-}
-
-func (s *Store) deviceLiveNodeLocked(accountID string) bool {
-	for _, node := range s.nodes {
-		if node.AccountID == accountID && node.State == model.NodeLive {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Store) deviceAccountLabelLocked(accountID string) string {
@@ -1117,6 +1126,9 @@ func (s *Store) openDeviceMaterial(id string) (DeviceMaterial, error) {
 	if material.Format != DeviceMaterialFormat || material.Version != DeviceMaterialVersion {
 		return DeviceMaterial{}, fmt.Errorf("%w: unsupported material format", ErrDeviceMaterialMissing)
 	}
+	if material.AssignedSlotKey != nil && !material.AssignedSlotKey.Valid() {
+		return DeviceMaterial{}, fmt.Errorf("%w: invalid assigned slot key", ErrDeviceMaterialMissing)
+	}
 	return material, nil
 }
 
@@ -1124,6 +1136,16 @@ func (s *Store) openDeviceMaterial(id string) (DeviceMaterial, error) {
 // Callers hold s.mu; the open is a local file read at admin/login rate.
 func (s *Store) deviceMaterialLocked(rec *DeviceRecord) (DeviceMaterial, error) {
 	if material, ok := s.deviceMaterial[rec.ID]; ok {
+		if rec.AssignedSlotKey != nil {
+			if material.AssignedSlotKey != nil && material.AssignedSlotKey.Index != rec.AssignedSlotKey.Index {
+				return DeviceMaterial{}, deviceMaterialMissingf("device %q material belongs to slot %s, record to %s",
+					rec.ID, material.AssignedSlotKey.String(), rec.AssignedSlotKey.String())
+			}
+			if material.AssignedSlotKey == nil && rec.AssignedSlotKey.Index != 1 {
+				return DeviceMaterial{}, deviceMaterialMissingf("device %q material has no slot binding for %s",
+					rec.ID, rec.AssignedSlotKey.String())
+			}
+		}
 		return cloneDeviceMaterial(material), nil
 	}
 	material, err := s.openDeviceMaterial(rec.ID)
@@ -1133,8 +1155,18 @@ func (s *Store) deviceMaterialLocked(rec *DeviceRecord) (DeviceMaterial, error) 
 	if material.Fingerprint != rec.Fingerprint {
 		return DeviceMaterial{}, deviceMaterialMissingf("device %q material fingerprint does not match the record", rec.ID)
 	}
+	if rec.AssignedSlotKey != nil {
+		switch {
+		case material.AssignedSlotKey != nil && material.AssignedSlotKey.Index != rec.AssignedSlotKey.Index:
+			return DeviceMaterial{}, deviceMaterialMissingf("device %q material belongs to slot %s, record to %s",
+				rec.ID, material.AssignedSlotKey.String(), rec.AssignedSlotKey.String())
+		case material.AssignedSlotKey == nil && rec.AssignedSlotKey.Index != 1:
+			return DeviceMaterial{}, deviceMaterialMissingf("device %q material has no slot binding for %s",
+				rec.ID, rec.AssignedSlotKey.String())
+		}
+	}
 	s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
-	return material, nil
+	return cloneDeviceMaterial(material), nil
 }
 
 func (s *Store) deleteDeviceMaterial(id string) error {
@@ -1149,405 +1181,17 @@ func (s *Store) deleteDeviceMaterial(id string) error {
 
 // --- login binding ---
 
-// BindForLogin returns the material the account must present. It is
-// first-writer-wins: retries, restarts and concurrent first logins get the
-// same identity. Missing material fails closed; the identity is never
-// regenerated silently.
-func (s *Store) BindForLogin(accountID, profileName string) (DeviceMaterial, error) {
-	if s.deviceSealer == nil {
-		return DeviceMaterial{}, devicePoolDisabled()
-	}
-	s.deviceMu.Lock()
-	defer s.deviceMu.Unlock()
-
-	// Fast path: the account is already bound.
-	s.mu.RLock()
-	idx := s.accountIndexLocked(accountID)
-	if idx < 0 {
-		s.mu.RUnlock()
-		return DeviceMaterial{}, notFoundf("account %q not found", accountID)
-	}
-	account := cloneAccount(s.accounts[idx])
-	recID, bound := s.deviceBindings[accountID]
-	var recCopy DeviceRecord
-	var material DeviceMaterial
-	var cached bool
-	if bound {
-		if rec := s.deviceRecordLocked(recID); rec != nil {
-			recCopy = cloneDeviceRecord(*rec)
-			material, cached = s.deviceMaterial[recID]
-		}
-	}
-	cfg := s.deviceCfg
-	s.mu.RUnlock()
-
-	if bound {
-		if recCopy.ID == "" {
-			return DeviceMaterial{}, deviceMaterialMissingf("account %q is bound to a missing device record", accountID)
-		}
-		if _, known := DeviceProfileByName(recCopy.Profile); !known {
-			return DeviceMaterial{}, deviceInvalidf(DeviceReasonProfileMismatch,
-				"device %q uses unavailable profile %q", recID, recCopy.Profile)
-		}
-		if !cached {
-			opened, err := s.openDeviceMaterial(recID)
-			if err != nil {
-				return DeviceMaterial{}, deviceMaterialMissingf("device %q material is missing or corrupt", recID)
-			}
-			if opened.Fingerprint != recCopy.Fingerprint {
-				return DeviceMaterial{}, deviceMaterialMissingf("device %q material fingerprint does not match the record", recID)
-			}
-			material = opened
-		}
-		if recCopy.PresentedAt == nil {
-			now := iso(s.now())
-			recCopy.PresentedAt = &now
-			material.PresentedAt = &now
-			if err := s.sealDeviceMaterial(material); err != nil {
-				return DeviceMaterial{}, err
-			}
-		}
-		s.mu.Lock()
-		if current := s.deviceRecordLocked(recID); current != nil && s.deviceBindings[accountID] == recID {
-			current.PresentedAt = cloneStringPtr(recCopy.PresentedAt)
-			s.deviceMaterial[recID] = cloneDeviceMaterial(material)
-		}
-		s.mu.Unlock()
-		return cloneDeviceMaterial(material), nil
-	}
-
-	// No binding: resolve the profile and look for a tombstone.
-	resolvedName := strings.TrimSpace(profileName)
-	if resolvedName == "" {
-		resolvedName = DevicePoolDefaultProfile
-	}
-	profile, ok := DeviceProfileByName(resolvedName)
-	if !ok {
-		return DeviceMaterial{}, deviceInvalidf(DeviceReasonProfileMismatch, "unknown device profile %q", resolvedName)
-	}
-	keys := []string{
-		deviceAccountKey(profile.Family, account.Username),
-		deviceAccountKey(profile.Family, strings.ToLower(account.Username)),
-	}
-
-	s.mu.RLock()
-	candidates := s.restoreCandidatesLocked(keys, profile.Family)
-	s.mu.RUnlock()
-
-	switch {
-	case cfg.RestoreMode != "off" && cfg.RestoreMode != "manual" && len(candidates) > 1:
-		ids := make([]string, 0, len(candidates))
-		for _, candidate := range candidates {
-			ids = append(ids, candidate.ID)
-		}
-		s.mu.Lock()
-		s.addAuditLocked(model.SeverityWarn, "system", "device.restore_ambiguous", "pool",
-			fmt.Sprintf("account=%s candidates=%d", account.Label, len(candidates)))
-		s.mu.Unlock()
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonRestoreAmbiguous,
-			"account %q matches %d retired devices (%s); restore one explicitly",
-			accountID, len(candidates), strings.Join(ids, ","))
-	case cfg.RestoreMode == "auto" && len(candidates) == 1:
-		return s.bindRestoredDevice(accountID, candidates[0].ID, keys, account.Label)
-	}
-
-	// Preallocated mode draws an available record before generating.
-	if cfg.Mode == "preallocated" {
-		s.mu.RLock()
-		var chosen *DeviceRecord
-		for _, rec := range s.devicePool {
-			if rec.State != DeviceAvailable || rec.Platform != profile.Family || rec.PresentedAt != nil {
-				continue
-			}
-			if chosen == nil || rec.CreatedAt < chosen.CreatedAt ||
-				(rec.CreatedAt == chosen.CreatedAt && rec.ID < chosen.ID) {
-				chosen = rec
-			}
-		}
-		if chosen != nil {
-			copy := cloneDeviceRecord(*chosen)
-			s.mu.RUnlock()
-			return s.bindAvailableDevice(accountID, copy.ID, account.Label)
-		}
-		s.mu.RUnlock()
-		if cfg.Strict {
-			return DeviceMaterial{}, deviceConflictf(DeviceReasonPoolEmpty,
-				"device pool has no available %s record", profile.Family)
-		}
-	}
-
-	generator, ok := DeviceGeneratorByName(cfg.Algorithm)
-	if !ok {
-		return DeviceMaterial{}, deviceInvalidf(DeviceReasonAlgorithmUnknown, "unknown device algorithm %q", cfg.Algorithm)
-	}
-	generated, err := generator.Generate(DeviceGenerateSpec{
-		Profile: profile, Seed: cfg.Seed, DimMode: cfg.DimMode,
-	})
-	if err != nil {
-		return DeviceMaterial{}, err
-	}
-	now := iso(s.now())
-	s.mu.RLock()
-	generated.DeviceID = s.newDeviceIDLocked()
-	s.mu.RUnlock()
-	if generated.DeviceID == "" {
-		return DeviceMaterial{}, fmt.Errorf("store: device id generation failed")
-	}
-	generated.CreatedAt = now
-	generated.PresentedAt = &now
-	generated.AccountKey = keys[0]
-	generated.AccountKeyAliases = appendDeviceAlias(nil, keys[1])
-	if err := s.sealDeviceMaterial(generated); err != nil {
-		return DeviceMaterial{}, err
-	}
-
-	s.mu.Lock()
-	if s.accountIndexLocked(accountID) < 0 {
-		s.mu.Unlock()
-		_ = s.deleteDeviceMaterial(generated.DeviceID)
-		return DeviceMaterial{}, notFoundf("account %q not found", accountID)
-	}
-	if _, ok := s.deviceBindings[accountID]; ok {
-		// Defensive: deviceMu serialises binders, so this is unreachable.
-		s.mu.Unlock()
-		_ = s.deleteDeviceMaterial(generated.DeviceID)
-		return s.boundMaterial(accountID)
-	}
-	rec := DeviceRecord{
-		ID: generated.DeviceID, State: DeviceAssigned, Platform: profile.Family,
-		Profile: profile.Name, Algorithm: generated.Algorithm,
-		Fingerprint: generated.Fingerprint,
-		Hashes:      deviceHashes(generated.Identity, generated.MachineCode),
-		Claims:      deviceClaims(generated.Identity),
-		AccountKey:  keys[0], AccountKeyAliases: appendDeviceAlias(nil, keys[1]),
-		AssignedAccountID: accountID, AssignedAt: &now, PresentedAt: &now,
-		CreatedAt: now, CreatedBy: "system",
-	}
-	s.devicePool[rec.ID] = &rec
-	s.deviceMaterial[rec.ID] = cloneDeviceMaterial(generated)
-	s.deviceBindings[accountID] = rec.ID
-	s.devices[accountID] = generated.Identity
-	s.deviceAppendEventLocked(&rec, "created", "system", "algorithm="+generated.Algorithm+" profile="+profile.Name)
-	s.deviceAppendEventLocked(&rec, "assigned", "system", "source=login")
-	s.addAuditLocked(model.SeverityInfo, "system", "device.assign", rec.ID,
-		"account="+account.Label+" source=login")
-	s.mu.Unlock()
-	return cloneDeviceMaterial(generated), nil
-}
-
-func (s *Store) boundMaterial(accountID string) (DeviceMaterial, error) {
-	material, err := s.AccountDeviceMaterial(accountID)
-	if err != nil {
-		return DeviceMaterial{}, err
-	}
-	return material, nil
-}
-
-// bindRestoredDevice binds a tombstone selected by automatic restore.
-func (s *Store) bindRestoredDevice(accountID, deviceID string, keys []string, label string) (DeviceMaterial, error) {
-	s.mu.RLock()
-	rec := s.deviceRecordLocked(deviceID)
-	if rec == nil {
-		s.mu.RUnlock()
-		return DeviceMaterial{}, deviceNotFoundf("device %q not found", deviceID)
-	}
-	recCopy := cloneDeviceRecord(*rec)
-	material, cached := s.deviceMaterial[deviceID]
-	s.mu.RUnlock()
-	if _, known := DeviceProfileByName(recCopy.Profile); !known {
-		return DeviceMaterial{}, deviceInvalidf(DeviceReasonProfileMismatch,
-			"device %q uses unavailable profile %q", deviceID, recCopy.Profile)
-	}
-	if !cached {
-		opened, err := s.openDeviceMaterial(deviceID)
-		if err != nil {
-			return DeviceMaterial{}, deviceMaterialMissingf("device %q material is missing or corrupt", deviceID)
-		}
-		if opened.Fingerprint != recCopy.Fingerprint {
-			return DeviceMaterial{}, deviceMaterialMissingf("device %q material fingerprint does not match the record", deviceID)
-		}
-		material = opened
-	}
-	now := iso(s.now())
-	if material.PresentedAt == nil {
-		material.PresentedAt = &now
-	}
-	if err := s.sealDeviceMaterial(material); err != nil {
-		return DeviceMaterial{}, err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current := s.deviceRecordLocked(deviceID)
-	if current == nil || current.State != DeviceRetired || current.AssignedAccountID != "" {
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q changed while it was being restored", deviceID)
-	}
-	if boundID, ok := s.deviceBindings[accountID]; ok {
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonAlreadyBound,
-			"account %q is already bound to device %q", accountID, boundID)
-	}
-	if !deviceRecordHasKey(current, keys) {
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q was retired for a different account key", deviceID)
-	}
-	current.State = DeviceAssigned
-	current.AssignedAccountID = accountID
-	current.AssignedAt = &now
-	current.PresentedAt = cloneStringPtr(material.PresentedAt)
-	current.RetiredAt = nil
-	current.RetiredReason = ""
-	s.deviceBindings[accountID] = current.ID
-	s.deviceMaterial[current.ID] = cloneDeviceMaterial(material)
-	s.devices[accountID] = material.Identity
-	s.deviceAppendEventLocked(current, "restored", "system", "candidate=auto")
-	s.addAuditLocked(model.SeverityInfo, "system", "device.restore", current.ID,
-		"account="+label+" candidate=auto")
-	return cloneDeviceMaterial(material), nil
-}
-
-// bindAvailableDevice binds a preallocated record at first login.
-func (s *Store) bindAvailableDevice(accountID, deviceID, label string) (DeviceMaterial, error) {
-	s.mu.RLock()
-	rec := s.deviceRecordLocked(deviceID)
-	if rec == nil {
-		s.mu.RUnlock()
-		return DeviceMaterial{}, deviceNotFoundf("device %q not found", deviceID)
-	}
-	recCopy := cloneDeviceRecord(*rec)
-	idx := s.accountIndexLocked(accountID)
-	username := ""
-	if idx >= 0 {
-		username = s.accounts[idx].Username
-	}
-	material, cached := s.deviceMaterial[deviceID]
-	s.mu.RUnlock()
-	if idx < 0 {
-		return DeviceMaterial{}, notFoundf("account %q not found", accountID)
-	}
-	if !cached {
-		opened, err := s.openDeviceMaterial(deviceID)
-		if err != nil {
-			return DeviceMaterial{}, deviceMaterialMissingf("device %q material is missing or corrupt", deviceID)
-		}
-		material = opened
-	}
-	if material.Fingerprint != recCopy.Fingerprint {
-		return DeviceMaterial{}, deviceMaterialMissingf("device %q material fingerprint does not match the record", deviceID)
-	}
-	now := iso(s.now())
-	accountKey := deviceAccountKey(recCopy.Platform, username)
-	alias := deviceAccountKey(recCopy.Platform, strings.ToLower(username))
-	material.PresentedAt = &now
-	material.AccountKey = accountKey
-	material.AccountKeyAliases = appendDeviceAlias(material.AccountKeyAliases, alias)
-	if err := s.sealDeviceMaterial(material); err != nil {
-		return DeviceMaterial{}, err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current := s.deviceRecordLocked(deviceID)
-	if current == nil || current.State != DeviceAvailable || current.PresentedAt != nil {
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q changed while it was being assigned", deviceID)
-	}
-	if boundID, ok := s.deviceBindings[accountID]; ok {
-		return DeviceMaterial{}, deviceConflictf(DeviceReasonAlreadyBound,
-			"account %q is already bound to device %q", accountID, boundID)
-	}
-	idx = s.accountIndexLocked(accountID)
-	if idx < 0 {
-		return DeviceMaterial{}, notFoundf("account %q not found", accountID)
-	}
-	current.State = DeviceAssigned
-	current.AssignedAccountID = accountID
-	current.AssignedAt = &now
-	current.PresentedAt = &now
-	current.AccountKey = accountKey
-	current.AccountKeyAliases = appendDeviceAlias(current.AccountKeyAliases, alias)
-	s.deviceBindings[accountID] = current.ID
-	s.deviceMaterial[current.ID] = cloneDeviceMaterial(material)
-	s.devices[accountID] = material.Identity
-	s.deviceAppendEventLocked(current, "assigned", "system", "source=pool")
-	s.addAuditLocked(model.SeverityInfo, "system", "device.assign", current.ID,
-		"account="+label+" source=pool")
-	return cloneDeviceMaterial(material), nil
-}
-
-// AccountDeviceMaterial returns the sealed identity of a bound account. A
-// missing or corrupt material reports ErrDeviceMaterialMissing; it never
-// falls back to generating a new identity.
-func (s *Store) AccountDeviceMaterial(accountID string) (DeviceMaterial, error) {
-	s.mu.RLock()
-	recID, bound := s.deviceBindings[accountID]
-	material, cached := s.deviceMaterial[recID]
-	s.mu.RUnlock()
-	if !bound {
-		return DeviceMaterial{}, deviceMaterialMissingf("account %q has no device binding", accountID)
-	}
-	if cached {
-		return cloneDeviceMaterial(material), nil
-	}
-	opened, err := s.openDeviceMaterial(recID)
-	if err != nil {
-		return DeviceMaterial{}, deviceMaterialMissingf("device %q material is missing or corrupt", recID)
-	}
-	s.mu.Lock()
-	s.deviceMaterial[recID] = cloneDeviceMaterial(opened)
-	s.mu.Unlock()
-	return opened, nil
-}
-
 // MarkDeviceSeen records a successful vendor login: first/last seen, the login
 // counter and the canonical username alias. Counters are best effort and never
 // affect identity stability.
 func (s *Store) MarkDeviceSeen(accountID, username string) (DeviceRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.accountIndexLocked(accountID) < 0 {
-		return DeviceRecord{}, notFoundf("account %q not found", accountID)
-	}
-	recID, ok := s.deviceBindings[accountID]
-	if !ok {
-		return DeviceRecord{}, deviceNotFoundf("account %q has no device binding", accountID)
-	}
-	rec := s.deviceRecordLocked(recID)
-	if rec == nil {
-		return DeviceRecord{}, deviceNotFoundf("device %q not found", recID)
-	}
-	s.markDeviceSeenLocked(accountID, username)
-	return cloneDeviceRecord(*rec), nil
+	return s.MarkDeviceSeenSlot(accountSlotKey(accountID), username)
 }
 
-// markDeviceSeenLocked updates the bound record. The caller holds the write
+// markDeviceSeenLocked updates the slot-1 record. The caller holds the write
 // lock (MarkLogin calls it for a successful vendor login).
 func (s *Store) markDeviceSeenLocked(accountID, username string) {
-	recID, ok := s.deviceBindings[accountID]
-	if !ok {
-		return
-	}
-	rec := s.deviceRecordLocked(recID)
-	if rec == nil {
-		return
-	}
-	now := iso(s.now())
-	if rec.FirstSeenAt == nil {
-		rec.FirstSeenAt = &now
-	}
-	rec.LastSeenAt = &now
-	rec.LoginCount++
-	username = strings.TrimSpace(username)
-	if username == "" {
-		return
-	}
-	exact := deviceAccountKey(rec.Platform, username)
-	lower := deviceAccountKey(rec.Platform, strings.ToLower(username))
-	if rec.AccountKey == "" {
-		rec.AccountKey = exact
-	}
-	rec.AccountKeyAliases = appendDeviceAlias(rec.AccountKeyAliases, exact)
-	rec.AccountKeyAliases = appendDeviceAlias(rec.AccountKeyAliases, lower)
+	s.markDeviceSeenSlotLocked(accountSlotKey(accountID), username)
 }
 
 // --- migration, reconciliation and GC ---
@@ -1578,8 +1222,17 @@ func (s *Store) MigrateDevices() error {
 		s.deviceMaterial[id] = cloneDeviceMaterial(material)
 	}
 	s.deviceBindings = bindings
+	if s.deviceSlotBindings == nil {
+		s.deviceSlotBindings = make(map[model.SlotKey]string, len(bindings))
+	}
 	s.devices = make(map[string]DeviceIdentity, len(bindings))
 	for accountID, deviceID := range bindings {
+		key := accountSlotKey(accountID)
+		s.deviceSlotBindings[key] = deviceID
+		s.ensureSlotRowLocked(key)
+		slot := s.accountSlots[key]
+		slot.DeviceID = deviceID
+		s.accountSlots[key] = slot
 		if material, ok := s.deviceMaterial[deviceID]; ok {
 			s.devices[accountID] = material.Identity
 		}
@@ -1633,12 +1286,14 @@ func buildLegacyPool(
 			presented = iso(now)
 		}
 		key := deviceAccountKey(family, account.Username)
+		slotKey := accountSlotKey(accountID)
 		rec := DeviceRecord{
 			ID: deviceID, State: DeviceAssigned, Platform: family, Profile: profile,
 			Algorithm: DeviceAlgorithmLegacy, Fingerprint: deviceFingerprint(machine, identity),
 			Hashes: deviceHashes(identity, machine), Claims: deviceClaims(identity),
 			AccountKey: key, AccountKeyAliases: appendDeviceAlias(nil, deviceAccountKey(family, strings.ToLower(account.Username))),
-			AssignedAccountID: accountID, AssignedAt: &presented, PresentedAt: &presented,
+			AssignedAccountID: accountID, AssignedSlotKey: cloneSlotKey(&slotKey),
+			AssignedAt: &presented, PresentedAt: &presented,
 			CreatedAt: iso(now), CreatedBy: "system",
 			History: []DeviceEvent{{At: iso(now), Action: "migrated", Actor: "system", Detail: "from snapshot v1"}},
 		}
@@ -1647,6 +1302,7 @@ func buildLegacyPool(
 			Platform: family, Profile: profile, Algorithm: DeviceAlgorithmLegacy,
 			Fingerprint: rec.Fingerprint, CreatedAt: rec.CreatedAt, PresentedAt: &presented,
 			AccountKey: key, AccountKeyAliases: rec.AccountKeyAliases,
+			AssignedSlotKey: cloneSlotKey(&slotKey),
 		}
 		if err := seal(material); err != nil {
 			return nil, nil, nil, err
@@ -1709,11 +1365,26 @@ func (s *Store) ReconcileDeviceMaterials() error {
 	dropped := make([]string, 0)
 	for _, rec := range records {
 		material, err := s.openDeviceMaterial(rec.ID)
-		if err != nil || material.Fingerprint != rec.Fingerprint {
+		if err == nil && material.Fingerprint != rec.Fingerprint {
+			err = fmt.Errorf("fingerprint mismatch")
+		}
+		if err == nil && material.AssignedSlotKey != nil && rec.AssignedSlotKey != nil &&
+			material.AssignedSlotKey.Index != rec.AssignedSlotKey.Index {
+			err = fmt.Errorf("slot mismatch")
+		}
+		if err == nil && material.AssignedSlotKey == nil && rec.AssignedSlotKey != nil &&
+			rec.AssignedSlotKey.Index != 1 {
+			err = fmt.Errorf("missing slot binding")
+		}
+		if err != nil {
 			// A crash between the two GC deletes leaves a retired, unbound
 			// record without material. Drop it: it can never be restored and
 			// must not resurrect. Any other record degrades in place.
 			if rec.State == DeviceRetired && rec.AssignedAccountID == "" {
+				if _, bound := s.deviceRecordBoundSlotLocked(rec.ID); bound {
+					missing = append(missing, rec)
+					continue
+				}
 				dropped = append(dropped, rec.ID)
 				continue
 			}
@@ -1753,7 +1424,8 @@ func (s *Store) ReconcileDeviceMaterials() error {
 			Algorithm: material.Algorithm, Fingerprint: material.Fingerprint,
 			Hashes: deviceHashes(material.Identity, material.MachineCode), Claims: deviceClaims(material.Identity),
 			AccountKey: material.AccountKey, AccountKeyAliases: append([]string(nil), material.AccountKeyAliases...),
-			PresentedAt: presented, CreatedAt: created, CreatedBy: "system",
+			AssignedSlotKey: cloneSlotKey(material.AssignedSlotKey),
+			PresentedAt:     presented, CreatedAt: created, CreatedBy: "system",
 			RetiredAt: &nowStamp, RetiredReason: "recovered",
 			History: []DeviceEvent{{At: nowStamp, Action: "recovered", Actor: "system", Detail: "source=sealed_file"}},
 		}
@@ -1772,8 +1444,20 @@ func (s *Store) ReconcileDeviceMaterials() error {
 		s.devicePool[rec.ID] = &rec
 		s.addAuditLocked(model.SeverityWarn, "system", "device.recovered", rec.ID, "source=sealed_file")
 	}
+	s.reconcileSlotBindingsLocked()
 	mirror := make(map[string]DeviceIdentity, len(s.deviceBindings))
+	for key, deviceID := range s.deviceSlotBindings {
+		if key.Index != 1 {
+			continue
+		}
+		if material, ok := s.deviceMaterial[deviceID]; ok {
+			mirror[key.AccountID] = material.Identity
+		}
+	}
 	for accountID, deviceID := range s.deviceBindings {
+		if _, ok := mirror[accountID]; ok {
+			continue
+		}
 		if material, ok := s.deviceMaterial[deviceID]; ok {
 			mirror[accountID] = material.Identity
 		}
@@ -1822,6 +1506,9 @@ func (s *Store) GCDevices(now time.Time, retentionDays int) (int, error) {
 		if rec.State != DeviceRetired || rec.AssignedAccountID != "" {
 			continue
 		}
+		if _, bound := s.deviceRecordBoundSlotLocked(rec.ID); bound {
+			continue
+		}
 		if deviceExpired(*rec, now, retentionDays) {
 			candidates = append(candidates, cloneDeviceRecord(*rec))
 		}
@@ -1857,6 +1544,16 @@ func (s *Store) GCDevices(now time.Time, retentionDays int) (int, error) {
 		if current != nil && current.State == DeviceRetired && current.AssignedAccountID == "" {
 			delete(s.devicePool, rec.ID)
 			delete(s.deviceMaterial, rec.ID)
+			for key, id := range s.deviceSlotBindings {
+				if id == rec.ID {
+					delete(s.deviceSlotBindings, key)
+				}
+			}
+			for accountID, id := range s.deviceBindings {
+				if id == rec.ID {
+					delete(s.deviceBindings, accountID)
+				}
+			}
 			removed++
 		}
 		s.mu.Unlock()
@@ -1936,6 +1633,7 @@ type DeviceExportDevice struct {
 	Fingerprint       string         `json:"fingerprint"`
 	AccountKey        string         `json:"accountKey,omitempty"`
 	AccountKeyAliases []string       `json:"accountKeyAliases,omitempty"`
+	AssignedSlotKey   *model.SlotKey `json:"assignedSlotKey,omitempty"`
 	CreatedAt         string         `json:"createdAt"`
 	PresentedAt       *string        `json:"presentedAt,omitempty"`
 	FirstSeenAt       *string        `json:"firstSeenAt,omitempty"`
@@ -2014,7 +1712,8 @@ func (s *Store) ExportDevicePool(opts DeviceExportOptions) (DeviceExportEnvelope
 			DeviceID: rec.ID, Platform: rec.Platform, Profile: rec.Profile,
 			Algorithm: rec.Algorithm, MachineCode: material.MachineCode,
 			Identity: material.Identity, Fingerprint: rec.Fingerprint,
-			CreatedAt: rec.CreatedAt, PresentedAt: cloneStringPtr(rec.PresentedAt),
+			AssignedSlotKey: cloneSlotKey(rec.AssignedSlotKey),
+			CreatedAt:       rec.CreatedAt, PresentedAt: cloneStringPtr(rec.PresentedAt),
 			FirstSeenAt: cloneStringPtr(rec.FirstSeenAt), LastSeenAt: cloneStringPtr(rec.LastSeenAt),
 			LoginCount: rec.LoginCount,
 		}
@@ -2371,7 +2070,9 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 	}
 
 	// Binding plan: exactly one local account match, no existing binding.
-	bindings := make(map[string]string)
+	// An imported record that carries a slot key binds to that slot index on
+	// the matched local account; older exports without one bind to slot 1.
+	bindings := make(map[string]model.SlotKey)
 	var bindingConflicts []DeviceBindingConflict
 	var warnings []string
 	if opts.Bind {
@@ -2400,6 +2101,19 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 					matches = append(matches, account)
 				}
 			}
+			slotIndex := 1
+			if device.AssignedSlotKey != nil {
+				slotIndex = device.AssignedSlotKey.Index
+			}
+			key := model.SlotKey{AccountID: matches[0].ID, Index: slotIndex}
+			_, alreadyBound := s.boundRecordIDLocked(key)
+			plannedSlot := false
+			for _, plannedKey := range bindings {
+				if plannedKey == key {
+					plannedSlot = true
+					break
+				}
+			}
 			switch {
 			case len(matches) == 0:
 				continue
@@ -2407,12 +2121,16 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 				bindingConflicts = append(bindingConflicts, DeviceBindingConflict{
 					DeviceID: device.DeviceID, Reason: "multiple_matches",
 				})
-			case s.deviceBindings[matches[0].ID] != "":
+			case alreadyBound:
 				bindingConflicts = append(bindingConflicts, DeviceBindingConflict{
 					DeviceID: device.DeviceID, AccountID: matches[0].ID, Reason: "already_bound",
 				})
+			case plannedSlot:
+				bindingConflicts = append(bindingConflicts, DeviceBindingConflict{
+					DeviceID: device.DeviceID, AccountID: matches[0].ID, Reason: "slot_conflict",
+				})
 			default:
-				bindings[device.DeviceID] = matches[0].ID
+				bindings[device.DeviceID] = key
 			}
 		}
 		s.mu.RUnlock()
@@ -2464,6 +2182,11 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			material.CreatedAt = now
 		}
 		material.PresentedAt = cloneStringPtr(device.PresentedAt)
+		if key, ok := bindings[device.DeviceID]; ok {
+			material.AssignedSlotKey = cloneSlotKey(&key)
+		} else if plan.State == DeviceAvailable {
+			material.AssignedSlotKey = nil
+		}
 		if err := s.sealDeviceMaterial(material); err != nil {
 			s.rollbackDeviceSeals(sealedIDs)
 			return DeviceImportResult{}, err
@@ -2493,7 +2216,7 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			continue
 		}
 		if plan.Action == "skipped" {
-			accountID, ok := bindings[device.DeviceID]
+			key, ok := bindings[device.DeviceID]
 			if !ok {
 				continue
 			}
@@ -2502,13 +2225,18 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 				continue
 			}
 			rec.State = DeviceAssigned
-			rec.AssignedAccountID = accountID
+			rec.AssignedAccountID = key.AccountID
+			rec.AssignedSlotKey = cloneSlotKey(&key)
 			rec.AssignedAt = &now
 			rec.RetiredAt = nil
 			rec.RetiredReason = ""
-			s.deviceBindings[accountID] = rec.ID
-			s.devices[accountID] = materials[device.DeviceID].Identity
-			s.deviceAppendEventLocked(rec, "assigned", "operator", "source=import")
+			s.ensureSlotRowLocked(key)
+			s.setSlotBindingLocked(key, rec.ID)
+			if key.Index == 1 {
+				s.devices[key.AccountID] = materials[device.DeviceID].Identity
+			}
+			s.deviceAppendEventLocked(rec, "assigned", "operator",
+				"source=import slot="+key.String())
 			continue
 		}
 		if plan.Action != "added" {
@@ -2522,24 +2250,32 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			Hashes:      deviceHashes(material.Identity, material.MachineCode),
 			Claims:      deviceClaims(material.Identity),
 			AccountKey:  device.AccountKey, AccountKeyAliases: append([]string(nil), device.AccountKeyAliases...),
-			PresentedAt: cloneStringPtr(device.PresentedAt),
-			FirstSeenAt: cloneStringPtr(device.FirstSeenAt), LastSeenAt: cloneStringPtr(device.LastSeenAt),
+			AssignedSlotKey: cloneSlotKey(device.AssignedSlotKey),
+			PresentedAt:     cloneStringPtr(device.PresentedAt),
+			FirstSeenAt:     cloneStringPtr(device.FirstSeenAt), LastSeenAt: cloneStringPtr(device.LastSeenAt),
 			LoginCount: device.LoginCount, CreatedAt: material.CreatedAt, CreatedBy: "import",
 			History: []DeviceEvent{{At: now, Action: "imported", Actor: "operator", Detail: "from envelope"}},
 		}
 		if rec.State == DeviceRetired {
 			rec.RetiredAt = &now
 			rec.RetiredReason = "imported"
+		} else {
+			rec.AssignedSlotKey = nil
 		}
-		if accountID, ok := bindings[device.DeviceID]; ok {
+		if key, ok := bindings[device.DeviceID]; ok {
 			rec.State = DeviceAssigned
-			rec.AssignedAccountID = accountID
+			rec.AssignedAccountID = key.AccountID
+			rec.AssignedSlotKey = cloneSlotKey(&key)
 			rec.AssignedAt = &now
 			rec.RetiredAt = nil
 			rec.RetiredReason = ""
-			s.deviceBindings[accountID] = rec.ID
-			s.devices[accountID] = material.Identity
-			s.deviceAppendEventLocked(&rec, "assigned", "operator", "source=import")
+			s.ensureSlotRowLocked(key)
+			s.setSlotBindingLocked(key, rec.ID)
+			if key.Index == 1 {
+				s.devices[key.AccountID] = material.Identity
+			}
+			s.deviceAppendEventLocked(&rec, "assigned", "operator",
+				"source=import slot="+key.String())
 		}
 		s.devicePool[rec.ID] = &rec
 		s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
@@ -2634,6 +2370,9 @@ func validateImportDevice(device DeviceExportDevice) (DeviceProfile, DeviceMater
 		}
 		aliases = appendDeviceAlias(aliases, alias)
 	}
+	if device.AssignedSlotKey != nil && !device.AssignedSlotKey.Valid() {
+		return DeviceProfile{}, DeviceMaterial{}, errors.New("assigned slot key is malformed")
+	}
 	for _, stamp := range []*string{device.PresentedAt, device.FirstSeenAt, device.LastSeenAt} {
 		if stamp != nil && !validRFC3339(*stamp) {
 			return DeviceProfile{}, DeviceMaterial{}, errors.New("timestamp is not RFC 3339")
@@ -2655,6 +2394,7 @@ func validateImportDevice(device DeviceExportDevice) (DeviceProfile, DeviceMater
 		Fingerprint: fingerprint, CreatedAt: device.CreatedAt,
 		PresentedAt: cloneStringPtr(device.PresentedAt),
 		AccountKey:  accountKey, AccountKeyAliases: aliases,
+		AssignedSlotKey: cloneSlotKey(device.AssignedSlotKey),
 	}
 	if err := validateDeviceMaterial(profile, material); err != nil {
 		return DeviceProfile{}, DeviceMaterial{}, err
@@ -2859,76 +2599,6 @@ func deviceTupleEqual(a, b map[string]string) bool {
 
 // --- lifecycle ---
 
-// AssignDevice binds an available record, or a retired record that belongs to
-// the same account key (a manual restore). It never marks the identity as
-// presented: only a login does that.
-func (s *Store) AssignDevice(deviceID, accountID string) (DeviceRecord, error) {
-	s.deviceMu.Lock()
-	defer s.deviceMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rec := s.deviceRecordLocked(deviceID)
-	if rec == nil {
-		return DeviceRecord{}, deviceNotFoundf("device %q not found", deviceID)
-	}
-	if s.accountIndexLocked(accountID) < 0 {
-		return DeviceRecord{}, notFoundf("account %q not found", accountID)
-	}
-	idx := s.accountIndexLocked(accountID)
-	if boundID, ok := s.deviceBindings[accountID]; ok {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonAlreadyBound,
-			"account %q is already bound to device %q", accountID, boundID)
-	}
-	switch rec.State {
-	case DeviceAvailable:
-		if rec.PresentedAt != nil {
-			return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-				"device %q has been presented to the vendor and cannot be reassigned", deviceID)
-		}
-	case DeviceRetired:
-		if !s.deviceAccountMatchesLocked(rec, accountID) {
-			return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-				"device %q was retired for a different account key", deviceID)
-		}
-		if deviceExpired(*rec, s.now(), s.deviceCfg.RetentionDays) {
-			return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-				"device %q is past its retention window", deviceID)
-		}
-	default:
-		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q is %s and cannot be assigned", deviceID, rec.State)
-	}
-	material, err := s.deviceMaterialLocked(rec)
-	if err != nil {
-		return DeviceRecord{}, err
-	}
-	now := iso(s.now())
-	accountKey := deviceAccountKey(rec.Platform, s.accounts[idx].Username)
-	alias := deviceAccountKey(rec.Platform, strings.ToLower(s.accounts[idx].Username))
-	if material.AccountKey != accountKey || len(material.AccountKeyAliases) == 0 {
-		material.AccountKey = accountKey
-		material.AccountKeyAliases = appendDeviceAlias(material.AccountKeyAliases, alias)
-		if err := s.sealDeviceMaterial(material); err != nil {
-			return DeviceRecord{}, err
-		}
-	}
-	rec.AccountKey = accountKey
-	rec.AccountKeyAliases = appendDeviceAlias(rec.AccountKeyAliases, alias)
-	s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
-	rec.State = DeviceAssigned
-	rec.AssignedAccountID = accountID
-	rec.AssignedAt = &now
-	rec.RetiredAt = nil
-	rec.RetiredReason = ""
-	s.deviceBindings[accountID] = rec.ID
-	s.devices[accountID] = material.Identity
-	s.deviceAppendEventLocked(rec, "assigned", "operator", "source=manual")
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.assign", rec.ID,
-		"account="+s.deviceAccountLabelLocked(accountID)+" source=manual")
-	return cloneDeviceRecord(*rec), nil
-}
-
 // ReleaseDevice unbinds an assigned record. A record that has ever been
 // presented to the vendor is retired, never returned to available.
 func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
@@ -2945,20 +2615,35 @@ func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
 		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
 			"device %q is %s and cannot be released", deviceID, rec.State)
 	}
-	accountID := rec.AssignedAccountID
-	if s.deviceLiveNodeLocked(accountID) {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
-			"account %q has a live node; log out before releasing its device", accountID)
+	key := accountSlotKey(rec.AssignedAccountID)
+	if rec.AssignedSlotKey != nil {
+		key = *rec.AssignedSlotKey
 	}
-	label := s.deviceAccountLabelLocked(accountID)
+	if s.deviceLiveNodeSlotLocked(key) {
+		return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
+			"slot %s has a live node; log out before releasing its device", key.String())
+	}
+	label := s.deviceAccountLabelLocked(rec.AssignedAccountID)
 	now := iso(s.now())
-	delete(s.deviceBindings, accountID)
-	delete(s.devices, accountID)
-	rec.AssignedAccountID = ""
-	rec.AssignedAt = nil
 	reused := rec.PresentedAt == nil
 	if reused {
+		// The record returns to the available pool, so its material must not
+		// keep claiming a slot it no longer owns. The identity itself is not
+		// changed; only the slot reference is cleared.
+		if material, err := s.deviceMaterialLocked(rec); err == nil && material.AssignedSlotKey != nil {
+			material.AssignedSlotKey = nil
+			if err := s.sealDeviceMaterial(material); err != nil {
+				return DeviceRecord{}, err
+			}
+			s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
+		}
+	}
+	s.clearSlotBindingLocked(key)
+	rec.AssignedAccountID = ""
+	rec.AssignedAt = nil
+	if reused {
 		rec.State = DeviceAvailable
+		rec.AssignedSlotKey = nil
 		rec.RetiredAt = nil
 		rec.RetiredReason = ""
 	} else {
@@ -2966,9 +2651,10 @@ func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
 		rec.RetiredAt = &now
 		rec.RetiredReason = "released_after_presentation"
 	}
-	s.deviceAppendEventLocked(rec, "released", "operator", "account="+label)
+	s.deviceAppendEventLocked(rec, "released", "operator",
+		"account="+label+" slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, "operator", "device.release", rec.ID,
-		fmt.Sprintf("account=%s reused=%t", label, reused))
+		fmt.Sprintf("account=%s reused=%t slot=%s", label, reused, key.String()))
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -2988,15 +2674,26 @@ func (s *Store) RetireDevice(deviceID, reason string) (DeviceRecord, error) {
 		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
 			"device %q is quarantined; purge it instead", deviceID)
 	}
-	if rec.State == DeviceAssigned {
-		if s.deviceLiveNodeLocked(rec.AssignedAccountID) {
-			return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
-				"account %q has a live node; log out before retiring its device", rec.AssignedAccountID)
+	if rec.State != DeviceAssigned {
+		if key, bound := s.deviceRecordBoundSlotLocked(deviceID); bound {
+			s.clearSlotBindingLocked(key)
 		}
-		delete(s.deviceBindings, rec.AssignedAccountID)
-		delete(s.devices, rec.AssignedAccountID)
+	}
+	if rec.State == DeviceAssigned {
+		key := accountSlotKey(rec.AssignedAccountID)
+		if rec.AssignedSlotKey != nil {
+			key = *rec.AssignedSlotKey
+		}
+		if s.deviceLiveNodeSlotLocked(key) {
+			return DeviceRecord{}, deviceConflictf(DeviceReasonActiveSession,
+				"slot %s has a live node; log out before retiring its device", key.String())
+		}
+		s.clearSlotBindingLocked(key)
 		rec.AssignedAccountID = ""
 		rec.AssignedAt = nil
+		if rec.AssignedSlotKey == nil {
+			rec.AssignedSlotKey = cloneSlotKey(&key)
+		}
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -3026,6 +2723,9 @@ func (s *Store) QuarantineDevice(deviceID, reason string) (DeviceRecord, error) 
 		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
 			"device %q is assigned; release it before quarantining", deviceID)
 	}
+	if key, bound := s.deviceRecordBoundSlotLocked(deviceID); bound {
+		s.clearSlotBindingLocked(key)
+	}
 	if rec.State == DeviceQuarantined {
 		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
 			"device %q is already quarantined", deviceID)
@@ -3035,6 +2735,7 @@ func (s *Store) QuarantineDevice(deviceID, reason string) (DeviceRecord, error) 
 		reason = "operator"
 	}
 	rec.State = DeviceQuarantined
+	rec.AssignedSlotKey = nil
 	rec.RetiredAt = nil
 	rec.RetiredReason = ""
 	s.deviceAppendEventLocked(rec, "quarantined", "operator", "reason="+reason)
@@ -3059,6 +2760,11 @@ func (s *Store) PurgeDevice(deviceID string) error {
 		return deviceConflictf(DeviceReasonStateInvalid,
 			"device %q is assigned; rotate or release it before purging", deviceID)
 	}
+	if _, bound := s.deviceRecordBoundSlotLocked(deviceID); bound {
+		s.mu.RUnlock()
+		return deviceConflictf(DeviceReasonStateInvalid,
+			"device %q is still referenced by a slot; release it before purging", deviceID)
+	}
 	s.mu.RUnlock()
 
 	// Sealed entry first: if it fails the record stays and the operator can
@@ -3080,6 +2786,16 @@ func (s *Store) PurgeDevice(deviceID string) error {
 	delete(s.devicePool, deviceID)
 	delete(s.deviceMaterial, deviceID)
 	delete(s.devices, rec.AssignedAccountID)
+	for key, id := range s.deviceSlotBindings {
+		if id == deviceID {
+			delete(s.deviceSlotBindings, key)
+		}
+	}
+	for accountID, id := range s.deviceBindings {
+		if id == deviceID {
+			delete(s.deviceBindings, accountID)
+		}
+	}
 	s.addAuditLocked(model.SeverityWarn, "operator", "device.purge", deviceID, "reason=purge")
 	return nil
 }
@@ -3091,125 +2807,4 @@ type RestoreCandidate struct {
 	RetiredAt     string `json:"retiredAt,omitempty"`
 	RetiredReason string `json:"retiredReason,omitempty"`
 	Profile       string `json:"profile"`
-}
-
-// RestoreCandidates lists retired, unexpired records matching the account's
-// key in the requested profile family. It performs no mutation.
-func (s *Store) RestoreCandidates(accountID, profileName string) ([]RestoreCandidate, error) {
-	profileName = strings.TrimSpace(profileName)
-	if profileName == "" {
-		profileName = DevicePoolDefaultProfile
-	}
-	profile, ok := DeviceProfileByName(profileName)
-	if !ok {
-		return nil, deviceInvalidf(DeviceReasonProfileMismatch, "unknown device profile %q", profileName)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	idx := s.accountIndexLocked(accountID)
-	if idx < 0 {
-		return nil, notFoundf("account %q not found", accountID)
-	}
-	if _, bound := s.deviceBindings[accountID]; bound {
-		return nil, nil
-	}
-	keys := []string{
-		deviceAccountKey(profile.Family, s.accounts[idx].Username),
-		deviceAccountKey(profile.Family, strings.ToLower(s.accounts[idx].Username)),
-	}
-	records := s.restoreCandidatesLocked(keys, profile.Family)
-	out := make([]RestoreCandidate, 0, len(records))
-	for _, rec := range records {
-		candidate := RestoreCandidate{
-			DeviceID: rec.ID, Fingerprint: rec.Fingerprint, Profile: rec.Profile,
-			RetiredReason: rec.RetiredReason,
-		}
-		if rec.RetiredAt != nil {
-			candidate.RetiredAt = *rec.RetiredAt
-		}
-		out = append(out, candidate)
-	}
-	return out, nil
-}
-
-// restoreCandidatesLocked returns matching tombstones, newest retirement
-// first. Callers hold at least the read lock.
-func (s *Store) restoreCandidatesLocked(keys []string, family model.Platform) []DeviceRecord {
-	out := []DeviceRecord{}
-	now := s.now()
-	for _, rec := range s.devicePool {
-		if rec.State != DeviceRetired || rec.AssignedAccountID != "" {
-			continue
-		}
-		if rec.Platform != family || !deviceRecordHasKey(rec, keys) {
-			continue
-		}
-		if deviceExpired(*rec, now, s.deviceCfg.RetentionDays) {
-			continue
-		}
-		out = append(out, cloneDeviceRecord(*rec))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		left, right := "", ""
-		if out[i].RetiredAt != nil {
-			left = *out[i].RetiredAt
-		}
-		if out[j].RetiredAt != nil {
-			right = *out[j].RetiredAt
-		}
-		if left != right {
-			return left > right
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
-}
-
-// RestoreDevice binds a specific retired record to an account. It is the
-// operator's resolution for an ambiguous automatic match.
-func (s *Store) RestoreDevice(deviceID, accountID string) (DeviceRecord, error) {
-	s.deviceMu.Lock()
-	defer s.deviceMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rec := s.deviceRecordLocked(deviceID)
-	if rec == nil {
-		return DeviceRecord{}, deviceNotFoundf("device %q not found", deviceID)
-	}
-	if s.accountIndexLocked(accountID) < 0 {
-		return DeviceRecord{}, notFoundf("account %q not found", accountID)
-	}
-	if boundID, ok := s.deviceBindings[accountID]; ok {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonAlreadyBound,
-			"account %q is already bound to device %q", accountID, boundID)
-	}
-	if rec.State != DeviceRetired {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q is %s and cannot be restored", deviceID, rec.State)
-	}
-	if !s.deviceAccountMatchesLocked(rec, accountID) {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q was retired for a different account key", deviceID)
-	}
-	if deviceExpired(*rec, s.now(), s.deviceCfg.RetentionDays) {
-		return DeviceRecord{}, deviceConflictf(DeviceReasonStateInvalid,
-			"device %q is past its retention window", deviceID)
-	}
-	material, err := s.deviceMaterialLocked(rec)
-	if err != nil {
-		return DeviceRecord{}, err
-	}
-	now := iso(s.now())
-	rec.State = DeviceAssigned
-	rec.AssignedAccountID = accountID
-	rec.AssignedAt = &now
-	rec.RetiredAt = nil
-	rec.RetiredReason = ""
-	s.deviceBindings[accountID] = rec.ID
-	s.devices[accountID] = material.Identity
-	s.deviceAppendEventLocked(rec, "restored", "operator", "source=manual")
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.restore", rec.ID,
-		"account="+s.deviceAccountLabelLocked(accountID)+" candidate=manual")
-	return cloneDeviceRecord(*rec), nil
 }

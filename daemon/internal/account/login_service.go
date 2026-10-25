@@ -163,7 +163,7 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	password := Secret(string(plaintext))
 	clear(plaintext)
 
-	identity, err := s.deviceFor(accountID)
+	identity, err := s.deviceForSlot(model.SlotKey{AccountID: accountID, Index: 1})
 	if err != nil {
 		return model.Account{}, err
 	}
@@ -232,31 +232,39 @@ func (s *LoginService) Login(ctx context.Context, accountID string) (model.Accou
 	return updated, nil
 }
 
-// deviceFor returns the account's device identity for the login. With the
-// device pool enabled it binds the account to a sealed pool record through
-// BindForLogin: a retry or a concurrent login gets the same material because
-// the binding is first-writer-wins, and a missing or corrupt entry fails closed
-// instead of regenerating an identity. Without the pool (tests and mock mode)
-// it keeps the legacy in-memory path: EnsureAccountDevice stores the generated
-// identity once per process. Neither path logs an identity field.
+// deviceFor returns slot 1's device identity. It is the compatibility entry
+// point used by tests and by callers that still speak in account ids.
 func (s *LoginService) deviceFor(accountID string) (store.DeviceIdentity, error) {
+	return s.deviceForSlot(model.SlotKey{AccountID: accountID, Index: 1})
+}
+
+// deviceForSlot returns one slot's device identity for login. With the device
+// pool enabled it binds that slot to a sealed pool record through
+// BindForLoginSlot: a retry or a concurrent login gets the same material
+// because the binding is first-writer-wins per slot, and a missing or corrupt
+// entry fails closed instead of regenerating an identity. Without the pool
+// (tests and mock mode) only slot 1 has the legacy in-memory path.
+func (s *LoginService) deviceForSlot(key model.SlotKey) (store.DeviceIdentity, error) {
 	if s.store.DevicePoolEnabled() {
-		material, err := s.store.BindForLogin(accountID, s.profile.Name)
+		material, err := s.store.BindForLoginSlot(key, s.profile.Name)
 		if err != nil {
-			return store.DeviceIdentity{}, fmt.Errorf("account: bind device for %q: %w", accountID, err)
+			return store.DeviceIdentity{}, fmt.Errorf("account: bind device for %s: %w", key.String(), err)
 		}
 		return material.Identity, nil
 	}
-	if identity, ok := s.store.AccountDevice(accountID); ok {
+	if key.Index != 1 {
+		return store.DeviceIdentity{}, fmt.Errorf("account: device pool is disabled for %s", key.String())
+	}
+	if identity, ok := s.store.AccountDeviceSlot(key); ok {
 		return identity, nil
 	}
 	device, err := NewDeviceForProfile(s.profile)
 	if err != nil {
-		return store.DeviceIdentity{}, fmt.Errorf("account: device for %q: %w", accountID, err)
+		return store.DeviceIdentity{}, fmt.Errorf("account: device for %q: %w", key.AccountID, err)
 	}
-	identity, err := s.store.EnsureAccountDevice(accountID, Identify(device))
+	identity, err := s.store.EnsureAccountDevice(key.AccountID, Identify(device))
 	if err != nil {
-		return store.DeviceIdentity{}, fmt.Errorf("account: store device for %q: %w", accountID, err)
+		return store.DeviceIdentity{}, fmt.Errorf("account: store device for %q: %w", key.AccountID, err)
 	}
 	return identity, nil
 }

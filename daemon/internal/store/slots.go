@@ -145,13 +145,15 @@ func (s *Store) AllSlots() []model.AccountSlot {
 	return out
 }
 
-// slotWithBindingLocked projects the account-level device binding onto slot
-// 1. Existing installations may have a binding that predates the slot row;
-// the read view must show the same record id the next snapshot will persist.
-// The caller holds at least the read lock.
+// slotWithBindingLocked projects the canonical device binding onto a slot.
+// Existing installations may have a binding that predates the slot row; the
+// read view must show the same record id the next snapshot will persist. The
+// caller holds at least the read lock.
 func (s *Store) slotWithBindingLocked(slot model.AccountSlot) model.AccountSlot {
-	if slot.Index == 1 && slot.DeviceID == "" {
-		slot.DeviceID = s.deviceBindings[slot.AccountID]
+	if slot.DeviceID == "" {
+		if id, ok := s.slotBindingLocked(slot.SlotKey); ok {
+			slot.DeviceID = id
+		}
 	}
 	return slot
 }
@@ -176,6 +178,19 @@ func (s *Store) UpsertSlot(slot model.AccountSlot) error {
 	defer s.mu.Unlock()
 	if s.accountIndexLocked(slot.AccountID) < 0 {
 		return notFoundf("account %q not found", slot.AccountID)
+	}
+	// When the device pool is live, a slot may only reference the exact
+	// assigned record that names this slot. The pre-pool slot CRUD tests use
+	// synthetic ids with an empty pool and remain valid.
+	if slot.DeviceID != "" {
+		if rec := s.deviceRecordLocked(slot.DeviceID); rec != nil {
+			if rec.State != DeviceAssigned || rec.AssignedAccountID != slot.AccountID ||
+				rec.AssignedSlotKey == nil || *rec.AssignedSlotKey != slot.SlotKey {
+				return conflictf("device %q is not assigned to slot %s", slot.DeviceID, slot.SlotKey.String())
+			}
+		} else if len(s.devicePool) > 0 {
+			return conflictf("slot %s references unknown device %q", slot.SlotKey.String(), slot.DeviceID)
+		}
 	}
 	previous, exists := s.accountSlots[slot.SlotKey]
 	if exists {
@@ -283,6 +298,14 @@ func (s *Store) DeleteSlot(key model.SlotKey) error {
 	if _, ok := s.accountSlots[key]; !ok {
 		return notFoundf("slot %s not found", key.String())
 	}
+	if _, bound := s.boundRecordIDLocked(key); bound {
+		return conflictf("slot_in_use: slot %s still owns a device binding", key.String())
+	}
+	if slot, ok := s.accountSlots[key]; ok && slot.DeviceID != "" {
+		if rec := s.deviceRecordLocked(slot.DeviceID); rec != nil && rec.State == DeviceAssigned {
+			return conflictf("slot_in_use: slot %s references assigned device %q", key.String(), slot.DeviceID)
+		}
+	}
 	delete(s.accountSlots, key)
 	return nil
 }
@@ -306,15 +329,19 @@ func (s *Store) EnsureAccountSlots(accountID string, capacity int) ([]model.Acco
 		if key.AccountID != accountID || key.Index <= capacity {
 			continue
 		}
-		if !slotBare(slot) {
+		if _, bound := s.boundRecordIDLocked(key); bound || !slotBare(slot) {
 			return nil, conflictf("slot_in_use: slot %s must be drained before capacity can shrink", key.String())
 		}
 	}
 
 	for key, slot := range s.accountSlots {
-		if key.AccountID == accountID && key.Index > capacity && slotBare(slot) {
-			delete(s.accountSlots, key)
+		if key.AccountID != accountID || key.Index <= capacity || !slotBare(slot) {
+			continue
 		}
+		if _, bound := s.boundRecordIDLocked(key); bound {
+			continue
+		}
+		delete(s.accountSlots, key)
 	}
 	for index := 1; index <= capacity; index++ {
 		key := model.SlotKey{AccountID: accountID, Index: index}

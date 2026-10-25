@@ -64,16 +64,17 @@ type Snapshot struct {
 	// sealed material file.
 	Devices map[string]DeviceIdentity `json:"devices,omitempty"`
 
-	// DeviceBindings maps an account id to a device record id. DevicePool is
-	// the non-secret record index; raw material is sealed separately.
+	// DeviceBindings maps an account id to its slot-1 device record id. It is
+	// the compatibility projection of AccountSlots[account#1]; DevicePool is
+	// the non-secret record index and raw material is sealed separately.
 	DeviceBindings map[string]string `json:"deviceBindings,omitempty"`
 	DevicePool     []DeviceRecord    `json:"devicePool,omitempty"`
 
-	// AccountSlots is the per-account slot contract (MULTISLOT-PLAN step 1).
+	// AccountSlots is the per-account slot contract (MULTISLOT-PLAN steps 1-2).
 	// It is additive and omitempty: a pre-slot document restores with slot 1
-	// derived from DeviceBindings, and an older build ignores the field. Slot
-	// 1's DeviceID is the same record id as DeviceBindings[accountID]; it is
-	// a reference, never a regenerated identity.
+	// derived from DeviceBindings, and an older build ignores the field. Each
+	// slot's DeviceID is a reference to the record named by AssignedSlotKey;
+	// it is never a regenerated identity.
 	AccountSlots []model.AccountSlot `json:"accountSlots,omitempty"`
 
 	// Selections and ServerStats are the P1 catalog state (DESIGN-CATALOG
@@ -196,8 +197,15 @@ func (s *Store) Snapshot() ([]byte, error) {
 		}
 	}
 	snap.DeviceBindings = make(map[string]string, len(s.deviceBindings))
+	for key, deviceID := range s.deviceSlotBindings {
+		if key.Index == 1 {
+			snap.DeviceBindings[key.AccountID] = deviceID
+		}
+	}
 	for accountID, deviceID := range s.deviceBindings {
-		snap.DeviceBindings[accountID] = deviceID
+		if _, ok := snap.DeviceBindings[accountID]; !ok {
+			snap.DeviceBindings[accountID] = deviceID
+		}
 	}
 	snap.DevicePool = s.devicePoolLocked()
 	snap.AccountSlots = make([]model.AccountSlot, 0, len(s.accountSlots))
@@ -205,7 +213,15 @@ func (s *Store) Snapshot() ([]byte, error) {
 		// Slot 1 is the compatibility projection of the account-level device
 		// binding. The binding may predate the slot row (existing installs),
 		// so fill it on save without changing the record id.
-		snap.AccountSlots = append(snap.AccountSlots, s.slotWithBindingLocked(slot))
+		slot = s.slotWithBindingLocked(slot)
+		snap.AccountSlots = append(snap.AccountSlots, slot)
+		if slot.Index == 1 && slot.DeviceID != "" &&
+			(len(s.devicePool) > 0 || s.deviceBindings[slot.AccountID] != "") {
+			if snap.DeviceBindings == nil {
+				snap.DeviceBindings = make(map[string]string)
+			}
+			snap.DeviceBindings[slot.AccountID] = slot.DeviceID
+		}
 	}
 	sortAccountSlots(snap.AccountSlots)
 	snap.Selections = make(map[string]model.Selection, len(s.selections))
@@ -310,6 +326,10 @@ func (s *Store) Restore(data []byte) error {
 	// account-level device binding before validation. This copies the record
 	// id and never generates or reseals an identity.
 	snap.migrateAccountSlots()
+	// Fill AssignedSlotKey for assigned records from the slot table (or the
+	// slot-1 compatibility projection). This only copies the slot reference;
+	// it never reseals material or changes a record id.
+	snap.migrateDeviceSlotBindings()
 	if err := snap.validate(); err != nil {
 		return err
 	}
@@ -339,10 +359,22 @@ func (s *Store) Restore(data []byte) error {
 	if s.devices == nil {
 		s.devices = make(map[string]DeviceIdentity)
 	}
-	s.deviceBindings = snap.DeviceBindings
+	s.deviceBindings = make(map[string]string, len(snap.DeviceBindings))
+	for accountID, deviceID := range snap.DeviceBindings {
+		s.deviceBindings[accountID] = deviceID
+	}
+	s.deviceSlotBindings = make(map[model.SlotKey]string, len(snap.AccountSlots))
 	s.accountSlots = make(map[model.SlotKey]model.AccountSlot, len(snap.AccountSlots))
+	poolBacked := len(snap.DevicePool) > 0
 	for _, slot := range snap.AccountSlots {
 		s.accountSlots[slot.SlotKey] = slot
+		if slot.DeviceID == "" || !poolBacked {
+			continue
+		}
+		s.deviceSlotBindings[slot.SlotKey] = slot.DeviceID
+		if slot.Index == 1 {
+			s.deviceBindings[slot.AccountID] = slot.DeviceID
+		}
 	}
 	s.devicePool = make(map[string]*DeviceRecord, len(snap.DevicePool))
 	for i := range snap.DevicePool {
@@ -819,6 +851,25 @@ func (snap *Snapshot) validateDevicePool(accounts map[string]struct{}) error {
 		if !validDeviceState(rec.State) {
 			return fmt.Errorf("state snapshot device %q has unknown state %q", rec.ID, rec.State)
 		}
+		if rec.AssignedSlotKey != nil {
+			if !rec.AssignedSlotKey.Valid() {
+				return fmt.Errorf("state snapshot device %q has invalid assigned slot key %q",
+					rec.ID, rec.AssignedSlotKey.String())
+			}
+			switch rec.State {
+			case DeviceAssigned:
+				if rec.AssignedSlotKey.AccountID != rec.AssignedAccountID {
+					return fmt.Errorf("state snapshot device %q slot key names account %q, record names %q",
+						rec.ID, rec.AssignedSlotKey.AccountID, rec.AssignedAccountID)
+				}
+			case DeviceRetired:
+				// Retired records keep the slot they were retired from.
+			default:
+				return fmt.Errorf("state snapshot device %q is %s but still carries a slot key", rec.ID, rec.State)
+			}
+		} else if rec.State == DeviceAssigned {
+			return fmt.Errorf("state snapshot device %q is assigned without an assigned slot", rec.ID)
+		}
 		if rec.Platform != model.PlatformLinux && rec.Platform != model.PlatformAndroid {
 			return fmt.Errorf("state snapshot device %q has unsupported platform %q", rec.ID, rec.Platform)
 		}
@@ -910,7 +961,7 @@ func (snap *Snapshot) validateDevicePool(accounts map[string]struct{}) error {
 		}
 	}
 	for _, rec := range records {
-		if rec.State == DeviceAssigned {
+		if rec.State == DeviceAssigned && rec.AssignedSlotKey == nil {
 			if _, ok := bound[rec.ID]; !ok {
 				return fmt.Errorf("state snapshot device %q is assigned without a binding", rec.ID)
 			}
@@ -968,12 +1019,55 @@ func (snap *Snapshot) migrateAccountSlots() {
 	}
 }
 
+// migrateDeviceSlotBindings backfills AssignedSlotKey on assigned records from
+// the slot table. A pre-slot snapshot has only DeviceBindings; migrateAccountSlots
+// has already copied that binding to slot 1, so the same lookup covers both
+// shapes. It never calls a generator, BindForLogin or the sealer.
+func (snap *Snapshot) migrateDeviceSlotBindings() {
+	if len(snap.DevicePool) == 0 {
+		return
+	}
+	// Slot 1 remains the compatibility projection. A document that carries
+	// only the slot row (for example a hand-written migration fixture) gets
+	// the projection filled from the same record id, never from a generator.
+	if snap.DeviceBindings == nil {
+		snap.DeviceBindings = make(map[string]string)
+	}
+	for _, slot := range snap.AccountSlots {
+		if slot.Index == 1 && slot.DeviceID != "" && snap.DeviceBindings[slot.AccountID] == "" {
+			snap.DeviceBindings[slot.AccountID] = slot.DeviceID
+		}
+	}
+	byDevice := make(map[string]model.SlotKey, len(snap.AccountSlots))
+	for _, slot := range snap.AccountSlots {
+		if slot.DeviceID != "" {
+			byDevice[slot.DeviceID] = slot.SlotKey
+		}
+	}
+	for i := range snap.DevicePool {
+		rec := &snap.DevicePool[i]
+		if rec.State != DeviceAssigned || rec.AssignedSlotKey != nil {
+			continue
+		}
+		if slot, ok := byDevice[rec.ID]; ok && slot.AccountID == rec.AssignedAccountID {
+			key := slot
+			rec.AssignedSlotKey = &key
+			continue
+		}
+		if rec.AssignedAccountID != "" && snap.DeviceBindings[rec.AssignedAccountID] == rec.ID {
+			key := model.SlotKey{AccountID: rec.AssignedAccountID, Index: 1}
+			rec.AssignedSlotKey = &key
+		}
+	}
+}
+
 // validateAccountSlots rejects a document whose slot rows cannot be loaded
 // as-is. A duplicate (account,index), an index outside 1..8, an unknown state,
 // a device id or gate port used twice, and a slot-1/binding mismatch are hard
 // errors: silently dropping a slot would change capacity or identity.
 func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
 	seen := make(map[model.SlotKey]struct{}, len(snap.AccountSlots))
+	slotsByKey := make(map[model.SlotKey]model.AccountSlot, len(snap.AccountSlots))
 	deviceOwners := make(map[string]model.SlotKey, len(snap.AccountSlots))
 	portOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
 	httpPortOwners := make(map[int]model.SlotKey, len(snap.AccountSlots))
@@ -989,6 +1083,7 @@ func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
 			return fmt.Errorf("state snapshot has duplicate slot %s", slot.SlotKey.String())
 		}
 		seen[slot.SlotKey] = struct{}{}
+		slotsByKey[slot.SlotKey] = slot
 		if slot.DeviceID != "" {
 			if other, used := deviceOwners[slot.DeviceID]; used {
 				return fmt.Errorf("state snapshot slots %s and %s share device %q",
@@ -1022,6 +1117,51 @@ func (snap *Snapshot) validateAccountSlots(accounts map[string]struct{}) error {
 		if slot.DeviceID != deviceID {
 			return fmt.Errorf("state snapshot slot 1 of account %q references device %q, binding is %q",
 				accountID, slot.DeviceID, deviceID)
+		}
+	}
+	if len(snap.DevicePool) == 0 {
+		return nil
+	}
+	// With a real pool, every slot device reference and every assigned record
+	// must agree in both directions. This is the invariant the mutation paths
+	// maintain under one lock.
+	records := make(map[string]*DeviceRecord, len(snap.DevicePool))
+	for i := range snap.DevicePool {
+		records[snap.DevicePool[i].ID] = &snap.DevicePool[i]
+	}
+	for _, slot := range snap.AccountSlots {
+		if slot.DeviceID == "" {
+			continue
+		}
+		rec, ok := records[slot.DeviceID]
+		if !ok {
+			return fmt.Errorf("state snapshot slot %s references unknown device %q", slot.SlotKey.String(), slot.DeviceID)
+		}
+		if rec.State != DeviceAssigned {
+			return fmt.Errorf("state snapshot slot %s references %s device %q", slot.SlotKey.String(), rec.State, rec.ID)
+		}
+		if rec.AssignedAccountID != slot.AccountID {
+			return fmt.Errorf("state snapshot slot %s device %q names account %q",
+				slot.SlotKey.String(), rec.ID, rec.AssignedAccountID)
+		}
+		if rec.AssignedSlotKey == nil || *rec.AssignedSlotKey != slot.SlotKey {
+			return fmt.Errorf("state snapshot slot %s device %q has slot key %v",
+				slot.SlotKey.String(), rec.ID, rec.AssignedSlotKey)
+		}
+	}
+	for _, rec := range snap.DevicePool {
+		if rec.State != DeviceAssigned {
+			continue
+		}
+		if rec.AssignedSlotKey == nil {
+			return fmt.Errorf("state snapshot device %q is assigned without an assigned slot", rec.ID)
+		}
+		slot, ok := slotsByKey[*rec.AssignedSlotKey]
+		if !ok {
+			return fmt.Errorf("state snapshot device %q names missing slot %s", rec.ID, rec.AssignedSlotKey.String())
+		}
+		if slot.DeviceID != rec.ID {
+			return fmt.Errorf("state snapshot device %q is not the device of slot %s", rec.ID, rec.AssignedSlotKey.String())
 		}
 	}
 	return nil

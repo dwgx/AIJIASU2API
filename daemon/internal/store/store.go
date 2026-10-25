@@ -150,13 +150,18 @@ type Store struct {
 	// deviceSealer seals raw device material; nil disables the pool. deviceMu
 	// serialises material I/O so a seal never blocks API reads, and pool
 	// mutations so two first logins cannot bind two records.
-	deviceSealer   DeviceSealer
-	deviceMu       sync.Mutex
-	deviceCfg      DevicePoolConfig
-	devicePool     map[string]*DeviceRecord
-	deviceBindings map[string]string
-	deviceMaterial map[string]DeviceMaterial
-	deviceWarnings []string
+	deviceSealer DeviceSealer
+	deviceMu     sync.Mutex
+	deviceCfg    DevicePoolConfig
+	devicePool   map[string]*DeviceRecord
+	// deviceBindings is the slot-1 compatibility projection that older builds
+	// and the existing account-level API read. deviceSlotBindings is the
+	// canonical per-slot index (MULTISLOT-PLAN step 2). Every writer updates
+	// both through setSlotBindingLocked.
+	deviceBindings     map[string]string
+	deviceSlotBindings map[model.SlotKey]string
+	deviceMaterial     map[string]DeviceMaterial
+	deviceWarnings     []string
 
 	// selections is the persisted operator target per account (DESIGN-CATALOG
 	// §3.4). It is not a session: setting one starts no gate. serverStats is
@@ -278,45 +283,46 @@ func NewWithSealers(password Sealer, device DeviceSealer) *Store {
 
 func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 	return &Store{
-		now:               now,
-		accounts:          []model.Account{},
-		nodes:             []model.ProxyNode{},
-		leases:            []model.Lease{},
-		users:             []model.PanelUser{},
-		keys:              []model.APIKey{},
-		scopedKeys:        []model.ScopedKey{},
-		requests:          []model.RequestLog{},
-		audit:             []model.AuditEvent{},
-		settings:          defaultSettings(),
-		keyHashes:         make(map[string]string),
-		scopedKeyHashes:   make(map[string]string),
-		scopedKeyUse:      make(map[string]int64),
-		monthlyUsage:      make(map[string]int64),
-		accountUsage:      make(map[string]int64),
-		sealer:            sealer,
-		secrets:           make(map[string][]byte),
-		devices:           make(map[string]DeviceIdentity),
-		accountSlots:      make(map[model.SlotKey]model.AccountSlot),
-		deviceCfg:         defaultDevicePoolConfig(),
-		devicePool:        make(map[string]*DeviceRecord),
-		deviceBindings:    make(map[string]string),
-		deviceMaterial:    make(map[string]DeviceMaterial),
-		pendingLabels:     make(map[string]struct{}),
-		selections:        make(map[string]model.Selection),
-		serverStats:       make(map[string]model.ServerStat),
-		schedules:         []model.Schedule{},
-		scheduleRuns:      []model.ScheduleRun{},
-		scheduleFires:     []model.ScheduleFire{},
-		reminderMarks:     make(map[string]model.ReminderMark),
-		webhookEndpoints:  []model.WebhookEndpoint{},
-		webhookDeliveries: []model.WebhookDelivery{},
-		webhookOutbox:     []WebhookOutboxEntry{},
-		tenants:           []tenantRecord{},
-		portalSessions:    []model.PortalSession{},
-		tenantHashSem:     make(chan struct{}, tenantHashConcurrency),
-		plans:             []model.Plan{},
-		orders:            []orderRecord{},
-		paymentEvents:     []model.PaymentEvent{},
+		now:                now,
+		accounts:           []model.Account{},
+		nodes:              []model.ProxyNode{},
+		leases:             []model.Lease{},
+		users:              []model.PanelUser{},
+		keys:               []model.APIKey{},
+		scopedKeys:         []model.ScopedKey{},
+		requests:           []model.RequestLog{},
+		audit:              []model.AuditEvent{},
+		settings:           defaultSettings(),
+		keyHashes:          make(map[string]string),
+		scopedKeyHashes:    make(map[string]string),
+		scopedKeyUse:       make(map[string]int64),
+		monthlyUsage:       make(map[string]int64),
+		accountUsage:       make(map[string]int64),
+		sealer:             sealer,
+		secrets:            make(map[string][]byte),
+		devices:            make(map[string]DeviceIdentity),
+		accountSlots:       make(map[model.SlotKey]model.AccountSlot),
+		deviceCfg:          defaultDevicePoolConfig(),
+		devicePool:         make(map[string]*DeviceRecord),
+		deviceBindings:     make(map[string]string),
+		deviceSlotBindings: make(map[model.SlotKey]string),
+		deviceMaterial:     make(map[string]DeviceMaterial),
+		pendingLabels:      make(map[string]struct{}),
+		selections:         make(map[string]model.Selection),
+		serverStats:        make(map[string]model.ServerStat),
+		schedules:          []model.Schedule{},
+		scheduleRuns:       []model.ScheduleRun{},
+		scheduleFires:      []model.ScheduleFire{},
+		reminderMarks:      make(map[string]model.ReminderMark),
+		webhookEndpoints:   []model.WebhookEndpoint{},
+		webhookDeliveries:  []model.WebhookDelivery{},
+		webhookOutbox:      []WebhookOutboxEntry{},
+		tenants:            []tenantRecord{},
+		portalSessions:     []model.PortalSession{},
+		tenantHashSem:      make(chan struct{}, tenantHashConcurrency),
+		plans:              []model.Plan{},
+		orders:             []orderRecord{},
+		paymentEvents:      []model.PaymentEvent{},
 	}
 }
 
@@ -1068,23 +1074,9 @@ func (s *Store) DeleteAccount(id string) error {
 	delete(s.accountUsage, id)
 	s.usageMu.Unlock()
 	// A bound identity is retired, not erased: re-adding the same
-	// (family, username) inside the retention window restores it. The sealed
-	// material and the account-key aliases stay.
-	if recID, ok := s.deviceBindings[id]; ok {
-		if rec := s.deviceRecordLocked(recID); rec != nil {
-			now := iso(s.now())
-			rec.State = DeviceRetired
-			rec.AssignedAccountID = ""
-			rec.AssignedAt = nil
-			rec.RetiredAt = &now
-			rec.RetiredReason = "account_deleted"
-			s.deviceAppendEventLocked(rec, "retired", "operator", "account delete")
-			s.addAuditLocked(model.SeverityInfo, "operator", "device.retire", rec.ID,
-				"reason=account_deleted account="+label)
-		}
-		delete(s.deviceBindings, id)
-	}
-	delete(s.devices, id)
+	// (family, username) inside the retention window restores it. Every slot
+	// is retired separately, preserving its slot affinity for the restore.
+	s.retireAccountDeviceBindingsLocked(id, label, "account_deleted")
 	for key := range s.accountSlots {
 		if key.AccountID == id {
 			delete(s.accountSlots, key)
