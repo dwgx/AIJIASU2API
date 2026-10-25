@@ -27,11 +27,11 @@ const acceptedStatus = 200
 // reach relay, so they are dropped here; the Lab flow ring still exposes them
 // for diagnosis.
 //
-// A row carries the account label, node label, region, method, host:port
-// target, status, byte total and latency. It never carries a URL, header,
-// session id or credential. UserID/UserName are the authenticated gate user in
-// userpass mode and stay empty in loopback mode, where the account is the
-// attribution unit.
+// A row carries the account label, node label, region, method, listener
+// protocol ("socks5" or "http"), host:port target, status, byte total and
+// latency. It never carries a URL, header, session id or credential.
+// UserID/UserName are the authenticated gate user in userpass mode and stay
+// empty in loopback mode, where the account is the attribution unit.
 type FlowMeter struct {
 	store    *store.Store
 	quota    *Quota
@@ -113,6 +113,7 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		NodeLabel:    nodeLabel,
 		Region:       region,
 		Method:       record.Method,
+		Protocol:     record.Protocol,
 		Target:       flowTarget(record.TargetHost, record.TargetPort),
 		Status:       acceptedStatus,
 		Bytes:        record.BytesIn + record.BytesOut,

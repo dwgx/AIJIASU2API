@@ -27,6 +27,11 @@ import (
 // binds 127.0.0.1 only.
 const DefaultGatePortBase = 13000
 
+// DefaultGateHTTPOffset is the distance between a node's SOCKS5 gate port and
+// its HTTP CONNECT port. The offset keeps the pair derivable from the one gate
+// port the node row stores: 13000/14000, 13001/14001, ...
+const DefaultGateHTTPOffset = 1000
+
 const (
 	// gateFlowLimit is passed to every gate and mirrored onto the node's
 	// capacity, so the dashboard reports the admission limit Resin sees.
@@ -149,6 +154,15 @@ type NodeControllerConfig struct {
 	Logger     *slog.Logger
 	// PortBase is the first port tried; zero selects DefaultGatePortBase.
 	PortBase int
+	// GateHTTP starts an HTTP CONNECT listener beside every SOCKS5 gate. The
+	// zero value keeps it off, so a test double or a direct gate.NewServer
+	// caller opts in explicitly; the daemon enables it only when
+	// AJS_GATE_HTTP=1.
+	GateHTTP bool
+	// GateHTTPOffset is the HTTP listener's port offset from the SOCKS5 gate
+	// port. Zero selects DefaultGateHTTPOffset; a negative or out-of-range
+	// value is invalid.
+	GateHTTPOffset int
 	// Now overrides the clock used for the connect cooldown and result
 	// durations. Nil uses time.Now; tests pin it.
 	Now func() time.Time
@@ -172,6 +186,7 @@ type nodeGate struct {
 	accountID string
 	serverID  string
 	port      int
+	httpPort  int
 	egressIP  string
 	draining  bool
 	startedAt time.Time
@@ -223,6 +238,12 @@ type NodeController struct {
 	// every handshake fail closed rather than falling back to no-auth.
 	gateAuth gate.AuthMode
 	identity *GateIdentity
+
+	// httpEnabled and httpOffset configure the HTTP CONNECT listener that runs
+	// beside every SOCKS5 gate. The offset is validated once so the port pair
+	// arithmetic in the allocation loop cannot overflow the TCP range.
+	httpEnabled bool
+	httpOffset  int
 }
 
 // NewNodeController validates cfg and returns a controller with no gates. It
@@ -273,6 +294,13 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 	if err != nil {
 		return nil, err
 	}
+	httpOffset := cfg.GateHTTPOffset
+	switch {
+	case httpOffset == 0:
+		httpOffset = DefaultGateHTTPOffset
+	case httpOffset < 0 || httpOffset >= maxGatePort:
+		return nil, fmt.Errorf("runtime: gate HTTP offset %d is outside 1..%d", cfg.GateHTTPOffset, maxGatePort-1)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &NodeController{
 		store:       cfg.Store,
@@ -294,6 +322,8 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		lastAttempt: make(map[string]time.Time),
 		gateAuth:    gateAuth,
 		identity:    cfg.GateIdentity,
+		httpEnabled: cfg.GateHTTP,
+		httpOffset:  httpOffset,
 	}, nil
 }
 
@@ -427,7 +457,7 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 			c.markDownLocked(id, acct, srv)
 			continue
 		}
-		g, port, err := c.startGateLocked(id, accountID, srv.id, session)
+		g, addrs, err := c.startGateLocked(id, accountID, srv.id, session)
 		if err != nil {
 			_ = session.Close()
 			failures = append(failures, fmt.Errorf("node %s: start gate: %w", id, err))
@@ -440,7 +470,8 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 			session:   session,
 			accountID: accountID,
 			serverID:  srv.id,
-			port:      port,
+			port:      addrs.socks,
+			httpPort:  addrs.http,
 			egressIP:  sessionEgress(session),
 			startedAt: time.Now(),
 		}
@@ -454,7 +485,7 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 		}
 		started++
 		c.logger.Info("node_started", "node_id", id, "account_id", accountID, "server_id", srv.id,
-			"port", port, "egress_ip", running.egressIP)
+			"port", addrs.socks, "http_port", addrs.http, "egress_ip", running.egressIP)
 	}
 
 	reconcileErr := c.reconcileLocked(ctx)
@@ -703,16 +734,37 @@ func (c *NodeController) removeUndesiredLocked(accountID string, desired map[str
 	return failures
 }
 
-// startGateLocked binds the first free loopback port at or above the
+// gateAddresses is one started gate's loopback ports. http is zero when the
+// HTTP CONNECT listener is disabled; otherwise it is the port the gate config
+// requested (the real gate binds exactly that pair).
+type gateAddresses struct {
+	socks int
+	http  int
+}
+
+// startGateLocked binds the first free loopback port pair at or above the
 // controller's cursor and starts a gate on it. The gate lives on the
-// controller's context, never on the login request's.
-func (c *NodeController) startGateLocked(id, accountID, serverID string, session account.FlowSession) (Gate, int, error) {
+// controller's context, never on the login request's. With the HTTP listener
+// enabled the candidate must free both p and p+httpOffset; a bind failure on
+// either half retries the next base port.
+func (c *NodeController) startGateLocked(id, accountID, serverID string, session account.FlowSession) (Gate, gateAddresses, error) {
 	reserved := c.reservedPortsLocked()
 	attempts := 0
 	var lastErr error
 	for port := c.nextPort; port <= maxGatePort && attempts < maxGatePortAttempts; port++ {
 		if _, used := reserved[port]; used {
 			continue
+		}
+		httpPort := 0
+		if c.httpEnabled {
+			httpPort = port + c.httpOffset
+			if httpPort > maxGatePort {
+				// No base at or above the cursor leaves room for the pair.
+				break
+			}
+			if _, used := reserved[httpPort]; used {
+				continue
+			}
 		}
 		cfg := gate.Config{
 			NodeID:    id,
@@ -722,13 +774,16 @@ func (c *NodeController) startGateLocked(id, accountID, serverID string, session
 			Logger:    c.logger,
 			AuthMode:  c.gateAuth,
 		}
+		if httpPort != 0 {
+			cfg.HTTPListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
+		}
 		if c.gateAuth == gate.AuthUserPass && c.identity != nil {
 			cfg.Authenticator = c.identity
 			cfg.UserPolicy = c.identity
 		}
 		g, err := c.gates(cfg, session)
 		if err != nil {
-			return nil, 0, err
+			return nil, gateAddresses{}, err
 		}
 		if err := g.Start(c.ctx); err != nil {
 			_ = g.Close()
@@ -745,25 +800,36 @@ func (c *NodeController) startGateLocked(id, accountID, serverID string, session
 			}
 		}
 		c.nextPort = bound + 1
-		return g, bound, nil
+		return g, gateAddresses{socks: bound, http: httpPort}, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("runtime: no free loopback gate port")
 	}
-	return nil, 0, lastErr
+	return nil, gateAddresses{}, lastErr
 }
 
 // reservedPortsLocked returns the ports already claimed by a running gate or a
-// store node, so a new gate never takes another node's port.
+// store node, so a new gate never takes another node's port. With the HTTP
+// listener enabled the pair's second port is reserved too, and a stored node
+// reserves gatePort+offset by derivation because the node row stores one port.
 func (c *NodeController) reservedPortsLocked() map[int]struct{} {
 	nodes := c.store.Nodes()
-	used := make(map[int]struct{}, len(c.running)+len(nodes))
+	used := make(map[int]struct{}, 2*(len(c.running)+len(nodes)))
 	for _, running := range c.running {
 		used[running.port] = struct{}{}
+		if running.httpPort > 0 {
+			used[running.httpPort] = struct{}{}
+		}
 	}
 	for _, node := range nodes {
-		if node.GatePort > 0 {
-			used[node.GatePort] = struct{}{}
+		if node.GatePort <= 0 {
+			continue
+		}
+		used[node.GatePort] = struct{}{}
+		if c.httpEnabled {
+			if httpPort := node.GatePort + c.httpOffset; httpPort <= maxGatePort {
+				used[httpPort] = struct{}{}
+			}
 		}
 	}
 	return used

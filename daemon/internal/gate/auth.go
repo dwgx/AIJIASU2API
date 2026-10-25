@@ -73,24 +73,46 @@ type UserPolicy interface {
 }
 
 // Allowlist is one user's compiled destination policy. Host entries are exact,
-// case-insensitive names; prefix entries match only a literal target IP inside
-// that prefix. Matching never resolves a name, so a domain rule can never
-// authorize an address the client reached through DNS.
+// case-insensitive names; a wildcard entry ("*.example.com") matches any name
+// with at least one extra label below it; prefix entries match only a literal
+// target IP inside that prefix. Matching never resolves a name, so a domain
+// rule can never authorize an address the client reached through DNS.
 type Allowlist struct {
 	hosts    map[string]struct{}
+	suffixes map[string]struct{}
 	prefixes []netip.Prefix
 	invalid  bool
 }
 
 // CompileAllowlist parses the entries once per user write. An entry that is
-// neither a hostname, an IP literal nor a CIDR marks the whole list invalid:
-// the gate then denies that user instead of skipping the bad entry, so a
-// malformed persisted row can never widen the policy into allow-all.
+// neither a hostname, a "*.domain" wildcard, an IP literal nor a CIDR marks the
+// whole list invalid: the gate then denies that user instead of skipping the
+// bad entry, so a malformed persisted row can never widen the policy into
+// allow-all. A wildcard must be exactly one leading "*." followed by a plain
+// name; "*", "*example.com", "a.*.com" and "**.example.com" are all invalid.
 func CompileAllowlist(entries []string) Allowlist {
-	list := Allowlist{hosts: make(map[string]struct{}, len(entries))}
+	list := Allowlist{
+		hosts:    make(map[string]struct{}, len(entries)),
+		suffixes: make(map[string]struct{}, len(entries)),
+	}
 	for _, raw := range entries {
 		entry := strings.TrimSpace(raw)
 		if entry == "" {
+			list.invalid = true
+			continue
+		}
+		if base, wildcard := strings.CutPrefix(entry, "*."); wildcard {
+			base = CanonicalHost(base)
+			// A wildcard base needs at least two labels: "*.com" would
+			// authorize a whole TLD from one typo, and the store refuses it.
+			if !validHostname(base) || !strings.Contains(base, ".") {
+				list.invalid = true
+				continue
+			}
+			list.suffixes[base] = struct{}{}
+			continue
+		}
+		if strings.Contains(entry, "*") {
 			list.invalid = true
 			continue
 		}
@@ -104,6 +126,13 @@ func CompileAllowlist(entries []string) Allowlist {
 			continue
 		}
 		if addr, err := netip.ParseAddr(entry); err == nil {
+			// A zone names a local interface, not a destination; the store
+			// refuses one at write time and a persisted snapshot must not
+			// silently carry it.
+			if addr.Zone() != "" {
+				list.invalid = true
+				continue
+			}
 			list.hosts[addr.Unmap().String()] = struct{}{}
 			continue
 		}
@@ -118,8 +147,10 @@ func CompileAllowlist(entries []string) Allowlist {
 }
 
 // Match reports whether host is authorized. An empty list authorizes nothing,
-// an invalid list authorizes nothing, and a subdomain is never implied by its
-// parent's rule.
+// an invalid list authorizes nothing, a wildcard requires at least one label
+// below its base (so "*.example.com" never matches "example.com" itself), and
+// a subdomain is never implied by its parent's exact rule. A wildcard rule
+// never matches an IP literal.
 func (a Allowlist) Match(host string) bool {
 	if a.invalid {
 		return false
@@ -140,8 +171,20 @@ func (a Allowlist) Match(host string) bool {
 		}
 		return false
 	}
-	_, ok := a.hosts[canonical]
-	return ok
+	if _, ok := a.hosts[canonical]; ok {
+		return true
+	}
+	// Every dot splits the name into a candidate wildcard base; looking the
+	// remainder up in the suffix set keeps one match O(labels), not O(entries).
+	for i := 1; i < len(canonical); i++ {
+		if canonical[i] != '.' {
+			continue
+		}
+		if _, ok := a.suffixes[canonical[i+1:]]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Invalid reports whether the compiled list contained an entry the gate could

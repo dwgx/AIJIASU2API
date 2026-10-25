@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,7 +74,7 @@ func (s *Store) CreateUser(in model.CreateUserInput) (model.PanelUser, error) {
 	}
 	s.users = append([]model.PanelUser{user}, s.users...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.create", name,
-		fmt.Sprintf("platform %s · sticky ttl %s", platform, stickyTTL))
+		fmt.Sprintf("platform %s Â· sticky ttl %s", platform, stickyTTL))
 	return cloneUser(user), nil
 }
 
@@ -173,7 +173,7 @@ func (s *Store) DeleteUser(id string) error {
 	}
 	s.users = append(s.users[:idx], s.users[idx+1:]...)
 	s.addAuditLocked(model.SeverityInfo, "operator", "user.delete", name,
-		fmt.Sprintf("%d leases released · %d keys revoked", leasesRemoved, keysRevoked))
+		fmt.Sprintf("%d leases released Â· %d keys revoked", leasesRemoved, keysRevoked))
 	return nil
 }
 
@@ -191,12 +191,12 @@ func (s *Store) SetUserEnabled(id string, enabled bool) (model.PanelUser, error)
 	if enabled {
 		s.addAuditLocked(model.SeverityInfo, "operator", "user.resume", user.Name, "Kill switch released")
 	} else {
-		s.addAuditLocked(model.SeverityWarn, "operator", "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
+		s.addAuditLocked(model.SeverityWarn, "operator", "user.suspend", user.Name, "Kill switch engaged Â· requests fail closed")
 	}
 	return cloneUser(*user), nil
 }
 
-// SetUserAllowlist replaces the user's CIDR allowlist.
+// SetUserAllowlist replaces the user's destination allowlist.
 func (s *Store) SetUserAllowlist(id string, allowlist []string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,7 +325,7 @@ func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, err
 	}
 	s.requests = prependCapped(s.requests, entry, RequestRetention)
 	s.addAuditLocked(model.SeverityInfo, "operator", "request.mutation", node.Label,
-		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
+		fmt.Sprintf("%s %s Â· %d bytes", method, target, entry.Bytes))
 	return entry, nil
 }
 
@@ -456,7 +456,36 @@ func (s *Store) Topology() model.Topology {
 	}
 }
 
+// Allowlist caps. One list is one user's whole destination policy, so an
+// unbounded list would be a denial of service on the gate's per-flow match and
+// on the state snapshot; 253 is the DNS name limit the gate applies per entry.
+const (
+	maxAllowlistEntries  = 64
+	maxAllowlistEntryLen = 253
+)
+
+// normalizeAllowlist canonicalizes one user's destination allowlist into the
+// vocabulary the gate compiles (gate.CompileAllowlist): an exact hostname, a
+// wildcard `*.domain`, an IP literal or a CIDR prefix. Entries are lowercased,
+// one terminal dot is trimmed, IP literals are unmapped and CIDR prefixes are
+// masked, so two spellings of one rule collapse into one stored entry.
+//
+// A wildcard matches names only. `*.example.com` authorizes any host ending in
+// `.example.com` with at least one extra label, so `a.example.com` and
+// `a.b.example.com` match while `example.com` itself does not. Bare `*`, a
+// wildcard over a single label and a wildcard anywhere but the leftmost label
+// are refused, because any of them turns a typo into allow-all or into a whole
+// TLD.
+//
+// Schemes, paths, ports, brackets and IPv6 zones are refused rather than
+// silently narrowed, so a client learns its entry is wrong at write time. The
+// gate treats an entry it cannot compile as invalid and denies every
+// destination for that user, so a stored list must only ever hold entries the
+// gate accepts.
 func normalizeAllowlist(in []string) ([]string, error) {
+	if len(in) > maxAllowlistEntries {
+		return nil, invalidf("allowlist must have at most %d entries", maxAllowlistEntries)
+	}
 	out := make([]string, 0, len(in))
 	seen := make(map[string]struct{}, len(in))
 	for _, raw := range in {
@@ -464,16 +493,103 @@ func normalizeAllowlist(in []string) ([]string, error) {
 		if entry == "" {
 			return nil, invalidf("allowlist entries must not be empty")
 		}
-		if _, _, err := net.ParseCIDR(entry); err != nil && net.ParseIP(entry) == nil {
-			return nil, invalidf("allowlist entry %q is not an IP or CIDR", entry)
+		if len(entry) > maxAllowlistEntryLen {
+			return nil, invalidf("allowlist entry is longer than %d characters", maxAllowlistEntryLen)
 		}
-		if _, ok := seen[entry]; ok {
+		canonical, err := canonicalAllowlistEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[canonical]; ok {
 			continue
 		}
-		seen[entry] = struct{}{}
-		out = append(out, entry)
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
 	}
 	return out, nil
+}
+
+// canonicalAllowlistEntry canonicalizes one trimmed entry, or reports why it is
+// not a destination rule. The caller has already applied the length cap.
+func canonicalAllowlistEntry(entry string) (string, error) {
+	if strings.Contains(entry, "://") {
+		return "", invalidf("allowlist entry %q must be a hostname, IP or CIDR, not a URL", entry)
+	}
+	if strings.Contains(entry, "/") {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return "", invalidf("allowlist entry %q must be a CIDR prefix, not a URL or path", entry)
+		}
+		return canonicalPrefix(prefix), nil
+	}
+	if addr, err := netip.ParseAddr(entry); err == nil {
+		if addr.Zone() != "" {
+			// A zone names a local interface, never a gate destination.
+			return "", invalidf("allowlist entry %q carries an IPv6 zone", entry)
+		}
+		return addr.Unmap().String(), nil
+	}
+	if strings.Contains(entry, ":") {
+		return "", invalidf("allowlist entry %q must not carry a port", entry)
+	}
+	host := strings.TrimSuffix(asciiLower(entry), ".")
+	if strings.HasPrefix(host, "*.") {
+		domain := strings.TrimPrefix(host, "*.")
+		if !validAllowlistHost(domain) || !strings.Contains(domain, ".") {
+			return "", invalidf("allowlist entry %q is not a valid wildcard domain", entry)
+		}
+		return "*." + domain, nil
+	}
+	if !validAllowlistHost(host) {
+		return "", invalidf("allowlist entry %q is not a hostname, IP or CIDR", entry)
+	}
+	return host, nil
+}
+
+// canonicalPrefix masks a parsed prefix and folds an IPv4-mapped IPv6 prefix
+// onto its IPv4 form, so `::ffff:10.0.0.0/104` and `10.0.0.0/8` are one rule.
+func canonicalPrefix(prefix netip.Prefix) string {
+	masked := prefix.Masked()
+	addr := masked.Addr()
+	if addr.Is4In6() && masked.Bits() >= 96 {
+		return netip.PrefixFrom(addr.Unmap(), masked.Bits()-96).String()
+	}
+	return masked.String()
+}
+
+// validAllowlistHost reports whether host is a plain DNS name: labels of 1-63
+// bytes drawn from a-z, 0-9, '-' and '_', at most 253 bytes in total. The rule
+// mirrors gate.validHostname, so the store never accepts an entry the gate
+// would reject and thereby invalidate the user's whole list.
+func validAllowlistHost(host string) bool {
+	if host == "" || len(host) > maxAllowlistEntryLen {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for i := range len(label) {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// asciiLower lowercases A-Z only. Hostnames are ASCII; leaving every other byte
+// alone keeps the stored entry byte-comparable with the gate's canonical host.
+func asciiLower(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, value)
 }
 
 func validTTL(value string) bool {

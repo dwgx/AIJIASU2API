@@ -91,6 +91,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// AJS_GATE_HTTP=1 enables the HTTP CONNECT listener that runs beside every
+	// SOCKS5 gate. It is opt-in: an upgrade must not start binding a second
+	// port pair per node, and the listener shares the same admission pipeline,
+	// so it adds no policy the gate does not already enforce.
+	// AJS_GATE_HTTP_OFFSET places it relative to the gate port (default 1000).
+	gateHTTP, err := gateHTTPEnabled(os.Getenv("AJS_GATE_HTTP"))
+	if err != nil {
+		return err
+	}
+	gateHTTPOffset, err := gateHTTPOffset(os.Getenv("AJS_GATE_HTTP_OFFSET"))
+	if err != nil {
+		return err
+	}
 
 	// The Lab ring is a bounded, redacted copy of the same log stream. It is
 	// teed in front of the console handler so AJS_LOG_LEVEL still controls
@@ -300,7 +313,7 @@ func run() error {
 			return err
 		}
 		nodeLimitValue = limit
-		controller, err = startNodeController(st, logger, panel, service, profile, limit, gateAuth)
+		controller, err = startNodeController(st, logger, panel, service, profile, limit, gateAuth, gateHTTP, gateHTTPOffset)
 		if err != nil {
 			return err
 		}
@@ -1458,7 +1471,8 @@ func pinState() string {
 // starts (default 1, the vendor's one active data session per account; an
 // explicit 0 = all). auth selects the gate's SOCKS5 authentication mode; in
 // userpass mode the meter owns the identity service, so metering must be on.
-func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int, auth gate.AuthMode) (*runtime.NodeController, error) {
+// httpEnabled adds the HTTP CONNECT listener at gatePort+httpOffset.
+func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, logins runtime.LoginResults, profile account.VersionProfile, limit int, auth gate.AuthMode, httpEnabled bool, httpOffset int) (*runtime.NodeController, error) {
 	factory := account.NewFactory(profile, &fvfacade.HTTPUpgrade{}, fvfacade.AuthOptions{})
 	var reconciler runtime.Reconciler
 	if panel != nil {
@@ -1484,24 +1498,26 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 		return nil, errors.New("AJS_GATE_AUTH=userpass requires AJS_FLOW_METER: user quota is metered from gate request rows")
 	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
-		Store:        st,
-		Logins:       logins,
-		Sessions:     factory,
-		Gates:        gates,
-		Reconciler:   reconciler,
-		Profile:      profile,
-		MaxServers:   limit,
-		Logger:       logger,
-		GateAuth:     auth,
-		GateIdentity: identity,
+		Store:          st,
+		Logins:         logins,
+		Sessions:       factory,
+		Gates:          gates,
+		Reconciler:     reconciler,
+		Profile:        profile,
+		MaxServers:     limit,
+		Logger:         logger,
+		GateAuth:       auth,
+		GateIdentity:   identity,
+		GateHTTP:       httpEnabled,
+		GateHTTPOffset: httpOffset,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("node controller: %w", err)
 	}
 	if limit > 0 {
-		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", limit, "gate_auth", auth)
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", limit, "gate_auth", auth, "gate_http", httpEnabled, "gate_http_offset", httpOffset)
 	} else {
-		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all", "gate_auth", auth)
+		logger.Info("node_controller_enabled", "profile", profile.Name, "reconcile", reconciler != nil, "max_servers", "all", "gate_auth", auth, "gate_http", httpEnabled, "gate_http_offset", httpOffset)
 	}
 	return controller, nil
 }
@@ -1511,6 +1527,37 @@ func startNodeController(st *store.Store, logger *slog.Logger, panel api.Panel, 
 // matching the AJS_HEALTH_PROBE convention.
 func flowMeterEnabled(raw string) bool {
 	return strings.TrimSpace(raw) != "0"
+}
+
+// gateHTTPEnabled parses AJS_GATE_HTTP. The HTTP CONNECT listener is opt-in:
+// an upgrade must never bind an extra port pair, and an operator enables it
+// deliberately. "1" enables it, unset/"0" disables it, and anything else
+// aborts startup rather than silently changing the listener surface.
+func gateHTTPEnabled(raw string) (bool, error) {
+	switch strings.TrimSpace(raw) {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("AJS_GATE_HTTP=%q: want 1 or 0", raw)
+	}
+}
+
+// gateHTTPOffset parses AJS_GATE_HTTP_OFFSET, the distance between a node's
+// SOCKS5 gate port and its HTTP CONNECT port. Unset selects the runtime
+// default (1000). An explicit 0 is refused: it would bind both listeners to
+// the same port.
+func gateHTTPOffset(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return runtime.DefaultGateHTTPOffset, nil
+	}
+	offset, err := strconv.Atoi(raw)
+	if err != nil || offset < 1 || offset >= 65535 {
+		return 0, fmt.Errorf("AJS_GATE_HTTP_OFFSET=%q: want an integer between 1 and 65534", raw)
+	}
+	return offset, nil
 }
 
 // nodeLimit parses AJS_NODE_LIMIT, the per-account cap on usable servers the

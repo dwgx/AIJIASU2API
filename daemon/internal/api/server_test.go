@@ -1149,7 +1149,7 @@ func TestUserSuspendResumeAllowlist(t *testing.T) {
 	}
 
 	resp, body = apiCall(t, ts, http.MethodPatch, "/v1/users/u-01", map[string]any{
-		"allowlist": []string{"not-a-cidr"},
+		"allowlist": []string{"http://example.com/path"},
 	})
 	requireStatus(t, resp, http.StatusBadRequest)
 	requireErrorCode(t, body, CodeInvalidArgument)

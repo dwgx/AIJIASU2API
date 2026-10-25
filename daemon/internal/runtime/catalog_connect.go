@@ -453,7 +453,7 @@ func (c *NodeController) switchLocked(ctx context.Context, acct model.Account, r
 		return c.failSwitch(acct, target, old, trigger, start, ReasonSessionOpen,
 			"session_open_failed", classifyConnectError(err), "could not open the new session", err)
 	}
-	g, port, err := c.startGateLocked(newID, acct.ID, target.id, session)
+	g, addrs, err := c.startGateLocked(newID, acct.ID, target.id, session)
 	if err != nil {
 		_ = session.Close()
 		restoreOld()
@@ -465,7 +465,8 @@ func (c *NodeController) switchLocked(ctx context.Context, acct model.Account, r
 		session:   session,
 		accountID: acct.ID,
 		serverID:  target.id,
-		port:      port,
+		port:      addrs.socks,
+		httpPort:  addrs.http,
 		egressIP:  sessionEgress(session),
 		startedAt: c.now(),
 	}
@@ -474,7 +475,7 @@ func (c *NodeController) switchLocked(ctx context.Context, acct model.Account, r
 	node := applyServerToNode(model.ProxyNode{
 		ID:       newID,
 		Capacity: gateFlowLimit,
-	}, acct, target, model.NodeLive, port, running.egressIP)
+	}, acct, target, model.NodeLive, addrs.socks, running.egressIP)
 	var selection *model.Selection
 	if trigger == "manual" {
 		selection = &model.Selection{
@@ -495,7 +496,7 @@ func (c *NodeController) switchLocked(ctx context.Context, acct model.Account, r
 	meta := map[string]string{
 		"serverId":   target.id,
 		"nodeId":     newID,
-		"gatePort":   strconv.Itoa(port),
+		"gatePort":   strconv.Itoa(addrs.socks),
 		"durationMs": strconv.FormatInt(duration, 10),
 		"trigger":    trigger,
 		"result":     "ok",

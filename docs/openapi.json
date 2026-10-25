@@ -2715,7 +2715,7 @@
         "tags": [
           "Users"
         ],
-        "summary": "Replace the user's IP allowlist.",
+        "summary": "Replace the user's destination allowlist: exact hostname, *.domain wildcard, IP or CIDR, normalized on write.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {

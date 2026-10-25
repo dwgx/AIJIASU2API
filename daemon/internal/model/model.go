@@ -325,7 +325,9 @@ type WebhookDelivery struct {
 	DurationMs int64  `json:"durationMs"`
 }
 
-// RequestLog mirrors the dashboard RequestLog interface.
+// RequestLog mirrors the dashboard RequestLog interface. Protocol names the
+// gate listener that carried the flow ("socks5" or "http"); it is empty for
+// rows written by another source (the mutation lab or seeded demo traffic).
 type RequestLog struct {
 	ID           string        `json:"id"`
 	TS           string        `json:"ts"`
@@ -335,6 +337,7 @@ type RequestLog struct {
 	NodeLabel    string        `json:"nodeLabel"`
 	Region       string        `json:"region"`
 	Method       string        `json:"method"`
+	Protocol     string        `json:"protocol,omitempty"`
 	Target       string        `json:"target"`
 	Status       int           `json:"status"`
 	Bytes        int64         `json:"bytes"`

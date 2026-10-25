@@ -41,6 +41,13 @@ const (
 	FlowErrorUserQuota         = "user_quota_exceeded"
 )
 
+// Flow protocols name the listener that admitted a flow. A gate can serve the
+// SOCKS5 and the HTTP CONNECT listener side by side; the record says which one.
+const (
+	FlowProtocolSOCKS5 = "socks5"
+	FlowProtocolHTTP   = "http"
+)
+
 // FlowRecord is one finished gate flow. It deliberately carries the target as
 // host plus port only: never a full URL, headers, a session id or a
 // credential. NodeID and AccountID are filled by the runtime that owns the
@@ -58,6 +65,7 @@ type FlowRecord struct {
 	UserID     string `json:"userId,omitempty"`
 	UserName   string `json:"userName,omitempty"`
 	Method     string `json:"method"`
+	Protocol   string `json:"protocol,omitempty"`
 	TargetHost string `json:"targetHost"`
 	TargetPort int    `json:"targetPort"`
 	Status     string `json:"status"`
@@ -161,10 +169,11 @@ func (s *Server) recordFlow(record FlowRecord) {
 	}
 }
 
-// recordReject records a pre-relay refusal. An empty target host means the
-// handshake never produced a destination; Method stays empty in that case
-// rather than inventing one. principal carries attribution only after a
-// successful authentication and stays empty for a failed handshake.
+// recordReject records a pre-relay refusal from the SOCKS5 listener. An empty
+// target host means the handshake never produced a destination; Method stays
+// empty in that case rather than inventing one. principal carries attribution
+// only after a successful authentication and stays empty for a failed
+// handshake. The HTTP CONNECT listener has its own recorder in http.go.
 func (s *Server) recordReject(started time.Time, target target, principal Principal, errorClass string) {
 	method := ""
 	if target.host != "" {
@@ -175,6 +184,7 @@ func (s *Server) recordReject(started time.Time, target target, principal Princi
 		UserID:     principal.UserID,
 		UserName:   principal.UserName,
 		Method:     method,
+		Protocol:   FlowProtocolSOCKS5,
 		TargetHost: target.host,
 		TargetPort: target.port,
 		Status:     FlowStatusRejected,

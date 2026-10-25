@@ -1,11 +1,14 @@
-// Package gate implements the per-node SOCKS5 front end that Resin dials.
+// Package gate implements the per-node proxy front end that Resin dials.
 //
-// One Server owns one loopback listener for one node (docs/PANEL.md §1–§2).
-// It accepts the SOCKS5 CONNECT command after negotiating either the no-auth
-// method (AuthLoopback) or RFC 1929 username/password (AuthUserPass), admits
-// at most Limit concurrent flows, relays bytes between the client and one
-// Session flow, and exposes counters plus a drain/undrain state machine for
-// the node supervisor.
+// One Server owns one node's loopback listeners: the SOCKS5 gate and an
+// optional HTTP CONNECT listener that share one admission pipeline (per-user
+// policy, account quota, one slot limit), one set of byte counters, one drain
+// state machine and one bounded flow ring. It accepts the SOCKS5 CONNECT
+// command after negotiating either the no-auth method (AuthLoopback) or RFC
+// 1929 username/password (AuthUserPass), or the HTTP CONNECT method with Basic
+// proxy credentials, admits at most Limit concurrent flows across both, relays
+// bytes between the client and one Session flow, and exposes counters plus a
+// drain/undrain state machine for the node supervisor.
 //
 // The Session seam is deliberately one method (OpenFlow), so an
 // account.FlowSession or a test fake satisfies it structurally. The gate never
@@ -98,6 +101,11 @@ type Config struct {
 	// Listen is the TCP listen address. Default 127.0.0.1:0 (ephemeral
 	// loopback port); the operator may widen it explicitly.
 	Listen string
+	// HTTPListen is the optional HTTP CONNECT listener. Empty disables it.
+	// The runtime derives it from the SOCKS5 gate port plus
+	// AJS_GATE_HTTP_OFFSET; both listeners share admission, counters and the
+	// flow ring. Like Listen it must name a literal loopback address.
+	HTTPListen string
 	// Limit is the maximum number of concurrently admitted flows. Default 32.
 	Limit int
 	// AdmissionTimeout bounds how long a new flow waits for a slot. Default
@@ -165,7 +173,9 @@ type State struct {
 	// never enters the flow ring.
 	Probes uint64 `json:"probes"`
 	// IngressBytes is client -> target payload; EgressBytes is target ->
-	// client. They exclude the SOCKS5 handshake.
+	// client. They exclude the protocol handshakes. Both listeners feed the
+	// same counters: one node has one traffic total, whichever front end a
+	// client speaks.
 	IngressBytes uint64    `json:"ingressBytes"`
 	EgressBytes  uint64    `json:"egressBytes"`
 	StartedAt    time.Time `json:"startedAt"`
@@ -189,6 +199,7 @@ type Server struct {
 
 	mu        sync.Mutex
 	ln        net.Listener
+	httpLn    net.Listener
 	started   bool
 	startedAt time.Time
 	active    int
@@ -224,6 +235,11 @@ func NewServer(cfg Config, session Session) (*Server, error) {
 	}
 	if err := validateListen(cfg.Listen); err != nil {
 		return nil, err
+	}
+	if cfg.HTTPListen != "" {
+		if err := validateListen(cfg.HTTPListen); err != nil {
+			return nil, err
+		}
 	}
 	mode, err := ParseAuthMode(string(cfg.AuthMode))
 	if err != nil {
@@ -295,12 +311,35 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return err
 	}
+	// The HTTP CONNECT listener is all-or-nothing with the SOCKS5 one: a node
+	// that advertises both must not come up half-bound, so a failed HTTP bind
+	// releases the SOCKS5 port and fails Start (the controller then retries
+	// the next port pair).
+	var httpLn net.Listener
+	if s.cfg.HTTPListen != "" {
+		httpLn, err = net.Listen("tcp", s.cfg.HTTPListen)
+		if err != nil {
+			_ = ln.Close()
+			s.mu.Unlock()
+			return fmt.Errorf("gate: listen http %s: %w", s.cfg.HTTPListen, err)
+		}
+		if err := validateBoundLoopback(httpLn.Addr()); err != nil {
+			_ = httpLn.Close()
+			_ = ln.Close()
+			s.mu.Unlock()
+			return err
+		}
+	}
 	s.ln = ln
+	s.httpLn = httpLn
 	s.started = true
 	s.startedAt = s.cfg.Now()
 	s.mu.Unlock()
 
 	go s.serve(ln)
+	if httpLn != nil {
+		go s.serveHTTP(httpLn)
+	}
 	go s.watchContext(ctx)
 	s.logger.Info("gate listening",
 		"node_id", s.cfg.NodeID,
@@ -308,6 +347,13 @@ func (s *Server) Start(ctx context.Context) error {
 		"addr", ln.Addr().String(),
 		"limit", s.cfg.Limit,
 	)
+	if httpLn != nil {
+		s.logger.Info("gate http listening",
+			"node_id", s.cfg.NodeID,
+			"account_id", s.cfg.AccountID,
+			"addr", httpLn.Addr().String(),
+		)
+	}
 	return nil
 }
 
@@ -319,6 +365,17 @@ func (s *Server) Addr() net.Addr {
 		return nil
 	}
 	return s.ln.Addr()
+}
+
+// HTTPAddr returns the bound HTTP CONNECT listener address, or nil when the
+// listener is disabled or the server has not started.
+func (s *Server) HTTPAddr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.httpLn == nil {
+		return nil
+	}
+	return s.httpLn.Addr()
 }
 
 // State returns a consistent snapshot of the counters and the drain flag.
@@ -406,12 +463,16 @@ func (s *Server) Close() error {
 			close(s.drainCh)
 		}
 		ln := s.ln
+		httpLn := s.httpLn
 		active := s.active
 		zero := s.zeroCh
 		s.mu.Unlock()
 
 		if ln != nil {
 			_ = ln.Close()
+		}
+		if httpLn != nil {
+			_ = httpLn.Close()
 		}
 
 		if active > 0 {
@@ -450,13 +511,26 @@ func (s *Server) watchContext(ctx context.Context) {
 	}
 }
 
-// serve accepts connections until the listener closes. A transient Accept
-// error (EMFILE, ECONNABORTED, a reset backlog) must not end the loop: the
-// listener stays bound and the port keeps completing handshakes, so returning
-// would leave a dead gate that looks healthy to a readiness dial. Only a closed
-// listener ends the loop.
+// serve accepts SOCKS5 connections until the listener closes.
 func (s *Server) serve(ln net.Listener) {
 	defer close(s.serveDone)
+	s.accept(ln, s.handle)
+}
+
+// serveHTTP accepts HTTP CONNECT connections until the listener closes. It
+// shares the admission slots, counters, drain state and flow ring with the
+// SOCKS5 listener: one node has one capacity, whichever front end a client
+// speaks.
+func (s *Server) serveHTTP(ln net.Listener) {
+	s.accept(ln, s.handleHTTP)
+}
+
+// accept runs one listener's accept loop. A transient Accept error (EMFILE,
+// ECONNABORTED, a reset backlog) must not end the loop: the listener stays
+// bound and the port keeps completing handshakes, so returning would leave a
+// dead listener that looks healthy to a readiness dial. Only a closed listener
+// ends the loop.
+func (s *Server) accept(ln net.Listener, handle func(net.Conn)) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -470,7 +544,7 @@ func (s *Server) serve(ln net.Listener) {
 		s.handlers.Add(1)
 		go func() {
 			defer s.handlers.Done()
-			s.handle(conn)
+			handle(conn)
 		}()
 	}
 }
@@ -546,52 +620,32 @@ func (s *Server) handle(client net.Conn) {
 	}
 	_ = client.SetDeadline(time.Time{})
 
-	// Per-user policy runs at the one post-parse point: enabled state, the
-	// destination allowlist and the user quota, in that order. It precedes the
-	// account quota, the admission slot and every vendor call.
-	if s.cfg.AuthMode == AuthUserPass {
-		ok, errorClass, used, budget := s.admitUser(principal, target.host)
-		if !ok {
-			s.rejected.Add(1)
-			s.recordReject(started, target, principal, errorClass)
-			_ = writeReply(client, repNotAllowed)
-			s.logger.Warn("gate flow rejected",
-				"node_id", s.cfg.NodeID,
-				"user_id", principal.UserID,
-				"target", target.String(),
-				"reason", errorClass,
-				"used_bytes", used,
-				"budget_bytes", budget,
-			)
-			return
-		}
-	}
-
-	// Quota admission runs before the slot wait and before any vendor
-	// connection: an over-budget account must not consume capacity or open
-	// upstream traffic. 0x02 is SOCKS5's "connection not allowed by ruleset".
-	if s.cfg.QuotaCheck != nil {
-		if ok, used, budget := s.cfg.QuotaCheck(s.cfg.AccountID); !ok {
-			s.rejected.Add(1)
-			s.recordReject(started, target, principal, FlowErrorQuota)
-			_ = writeReply(client, repNotAllowed)
-			s.logger.Warn("gate flow rejected",
-				"node_id", s.cfg.NodeID,
-				"account_id", s.cfg.AccountID,
-				"user_id", principal.UserID,
-				"target", target.String(),
-				"reason", FlowErrorQuota,
-				"used_bytes", used,
-				"budget_bytes", budget,
-			)
-			return
-		}
+	// The shared admission pipeline runs at the one post-parse point: the
+	// per-user policy (enabled state, allowlist, user quota) and then the
+	// account quota. Both precede the admission slot and every vendor call, so
+	// a refusal never consumes capacity or opens upstream traffic. 0x02 is
+	// SOCKS5's "connection not allowed by ruleset".
+	if verdict := s.admit(principal, target); !verdict.ok {
+		s.rejected.Add(1)
+		s.recordReject(started, target, principal, verdict.errorClass)
+		_ = writeReply(client, repNotAllowed)
+		s.logger.Warn("gate flow rejected",
+			"node_id", s.cfg.NodeID,
+			"account_id", s.cfg.AccountID,
+			"user_id", principal.UserID,
+			"target", target.String(),
+			"reason", verdict.errorClass,
+			"used_bytes", verdict.used,
+			"budget_bytes", verdict.budget,
+		)
+		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := s.acquire(ctx); err != nil {
+	release, err := s.acquireFlow(ctx)
+	if err != nil {
 		s.rejected.Add(1)
 		rep := byte(repConnectionRefused)
 		errorClass := FlowErrorClosed
@@ -612,28 +666,15 @@ func (s *Server) handle(client net.Conn) {
 		)
 		return
 	}
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { <-s.slots }) }
 	defer release()
 
-	f := &flow{client: client, cancel: cancel}
-	s.mu.Lock()
-	closed = s.closed
-	draining := s.draining
-	if closed || draining {
-		s.mu.Unlock()
+	f, errorClass := s.beginFlow(client, cancel)
+	if errorClass != "" {
 		s.rejected.Add(1)
-		errorClass := FlowErrorDraining
-		if closed {
-			errorClass = FlowErrorClosed
-		}
 		s.recordReject(started, target, principal, errorClass)
 		_ = writeReply(client, repConnectionRefused)
 		return
 	}
-	s.flows[f] = struct{}{}
-	s.beginFlowLocked()
-	s.mu.Unlock()
 	defer s.finishFlow(f)
 
 	remote, err := s.session.OpenFlow(ctx, target.host, target.port)
@@ -668,6 +709,7 @@ func (s *Server) handle(client net.Conn) {
 		UserID:     principal.UserID,
 		UserName:   principal.UserName,
 		Method:     "CONNECT",
+		Protocol:   FlowProtocolSOCKS5,
 		TargetHost: target.host,
 		TargetPort: target.port,
 		Status:     FlowStatusOK,
@@ -676,6 +718,7 @@ func (s *Server) handle(client net.Conn) {
 	})
 	s.logger.Info("gate flow closed",
 		"node_id", s.cfg.NodeID,
+		"protocol", FlowProtocolSOCKS5,
 		"user_id", principal.UserID,
 		"target", target.String(),
 		"ingress_bytes", in,
@@ -726,6 +769,39 @@ func (s *Server) acquire(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// acquireFlow takes one admission slot and returns its idempotent release.
+// Both listeners use it, so the slot accounting is identical for SOCKS5 and
+// HTTP CONNECT.
+func (s *Server) acquireFlow(ctx context.Context) (func(), error) {
+	if err := s.acquire(ctx); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-s.slots }) }, nil
+}
+
+// beginFlow registers one admitted flow and bumps Active. It returns the
+// credential-free FlowError class when the server closed or started draining
+// while the flow waited for its slot; the caller answers with its protocol's
+// refusal.
+func (s *Server) beginFlow(client net.Conn, cancel context.CancelFunc) (*flow, string) {
+	f := &flow{client: client, cancel: cancel}
+	s.mu.Lock()
+	closed := s.closed
+	draining := s.draining
+	if closed || draining {
+		s.mu.Unlock()
+		if closed {
+			return nil, FlowErrorClosed
+		}
+		return nil, FlowErrorDraining
+	}
+	s.flows[f] = struct{}{}
+	s.beginFlowLocked()
+	s.mu.Unlock()
+	return f, ""
 }
 
 func (s *Server) track(c net.Conn) {
@@ -1029,6 +1105,36 @@ func (s *Server) admitUser(principal Principal, host string) (bool, string, int6
 		errorClass = FlowErrorPolicyUnavailable
 	}
 	return false, errorClass, used, budget
+}
+
+// admission is the shared policy verdict for one parsed destination. A
+// refusal names the credential-free FlowRecord class; used and budget are
+// diagnostics for the rejection log only.
+type admission struct {
+	ok         bool
+	errorClass string
+	used       int64
+	budget     int64
+}
+
+// admit evaluates the two policy stages both listeners share, in the order the
+// design fixes: the per-user policy (userpass mode only: enabled state,
+// allowlist, user quota) and then the account quota. It runs after the
+// destination parses and before an admission slot is taken or any vendor flow
+// opens, so a refusal never consumes capacity or opens upstream traffic.
+func (s *Server) admit(principal Principal, target target) admission {
+	if s.cfg.AuthMode == AuthUserPass {
+		ok, errorClass, used, budget := s.admitUser(principal, target.host)
+		if !ok {
+			return admission{errorClass: errorClass, used: used, budget: budget}
+		}
+	}
+	if s.cfg.QuotaCheck != nil {
+		if ok, used, budget := s.cfg.QuotaCheck(s.cfg.AccountID); !ok {
+			return admission{errorClass: FlowErrorQuota, used: used, budget: budget}
+		}
+	}
+	return admission{ok: true}
 }
 
 // loopbackPeer reports whether addr is a literal loopback TCP peer. Any other
