@@ -1306,11 +1306,11 @@ test binary as the child.
 | `AJS_TRUSTED_PROXIES` | `-trusted-proxies` | — | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed for portal rate limiting; empty trusts no forwarding header and uses the socket peer. A malformed entry fails startup |
 | `AJS_STRIPE_WEBHOOK_SECRET` | `-stripe-webhook-secret` | — | signing secret for the Stripe-compatible webhook (`POST /v1/payments/stripe`). Empty leaves the adapter disabled: the route answers 503 and never falls back to manual settlement. Set it only when a real provider is configured; the value is never logged |
 | `AJS_EPAY_GATEWAY` | `-epay-gateway` | — | 易支付 gateway base URL, for example `https://pay.example.com/`; `submit.php` and `api.php` are resolved below it. Empty leaves epay disabled |
-| `AJS_EPAY_PID` | `-epay-pid` | — | 易支付 merchant id sent as `pid` on checkout and notify. All-or-nothing with the gateway and key |
+| `AJS_EPAY_PID` | `-epay-pid` | — | 易支付 merchant id sent as `pid` on checkout and notify. Required together with the gateway and key |
 | `AJS_EPAY_KEY` | `-epay-key` | — | 易支付 merchant key used for MD5 signing and order queries. Never logged, never persisted; empty disables epay |
 | `AJS_EPAY_SIGN_TYPE` | `-epay-sign-type` | `MD5` | signature algorithm; must be `MD5` (case-insensitive) when epay is configured. Any other value disables the adapter instead of signing with a different algorithm |
-| `AJS_EPAY_NOTIFY_URL` | `-epay-notify-url` | derived | public URL the gateway posts the signed notify to; empty derives `AJS_TENANT_ORIGIN + /v1/payments/epay/notify` |
-| `AJS_EPAY_RETURN_URL` | `-epay-return-url` | derived | public browser return URL after checkout; empty derives `AJS_TENANT_ORIGIN + /portal` |
+| `AJS_EPAY_NOTIFY_URL` | `-epay-notify-url` | derived or omitted | optional public URL the gateway posts the signed notify to. Empty derives `AJS_TENANT_ORIGIN + /v1/payments/epay/notify` when a tenant origin is set; with neither set, checkout omits the parameter and the 60-second query reconciler settles the order (poll-only) |
+| `AJS_EPAY_RETURN_URL` | `-epay-return-url` | derived or omitted | optional public browser return URL after checkout. Empty derives `AJS_TENANT_ORIGIN + /portal` when a tenant origin is set; otherwise checkout omits it (poll-only) |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
 | `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
@@ -1812,10 +1812,14 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   falls back to manual settlement.
 - **易支付 (epay).** `POST /v1/portal/orders/{id}/checkout` returns `{payUrl}` for an own
   `awaiting_payment` order: `pid`, `type=alipay|wxpay`, `out_trade_no`, `money` (two decimals),
-  `notify_url`, `return_url`, `name` (the plan name) and `sign_type=MD5` are signed with
-  `md5(canonical-sorted-querystring + KEY)`. A checkout records provider intent only; it never
-  settles. `POST /v1/payments/epay/notify` is the second unauthenticated route: it verifies the MD5
-  signature, `pid`, `trade_status=TRADE_SUCCESS` and `money ==` the immutable snapshot before
+  `name` (the plan name), `sign_type=MD5` and, when configured, `notify_url`/`return_url` are
+  signed with `md5(canonical-sorted-querystring + KEY)`. A checkout records provider intent only;
+  it never settles. Two deployment modes share the adapter: **public callback** sets
+  `AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL` (or derives them from `AJS_TENANT_ORIGIN`) so the
+  gateway can POST the signed notify, while **poll-only** leaves both empty, checkout signs
+  without them, and the 60-second query reconciler settles pending orders. The second
+  unauthenticated route, `POST /v1/payments/epay/notify`, verifies the MD5 signature, `pid`,
+  `trade_status=TRADE_SUCCESS` and `money ==` the immutable snapshot before
   applying the same store settlement path, keyed by `trade_no` for idempotency. It answers the
   plain-text protocol (`success` only for accepted/duplicate, otherwise `fail`). A 60-second,
   ±10%-jittered poller queries `api.php?act=order` for pending epay orders, settles

@@ -137,6 +137,50 @@ func TestPortalEpayCheckoutShapeAndDisabledPath(t *testing.T) {
 	requireErrorCode(t, body, CodeUpstreamUnavailable)
 }
 
+func TestPortalEpayCheckoutPollOnlyWithoutTenantOrigin(t *testing.T) {
+	ts, st, _ := newEpayAPITestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	tenant, cookie, csrf := activePortalTenant(t, ts, st, "epay-poll-only@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-poll-only")
+
+	user, ok := st.User("u-01")
+	if !ok {
+		t.Fatalf("seeded user u-01 not found")
+	}
+	// The real portal refuses an empty tenant origin at login, so drive the
+	// handler directly with an authenticated principal: the checkout guard is
+	// what this test pins down.
+	server := New(Config{
+		AdminToken:     testToken,
+		TenantPortal:   true,
+		ManualPayments: payment.NewManual(time.Now),
+		Epay: payment.NewEpay(payment.EpayConfig{
+			Gateway: "https://pay.example.test/", PID: epayAPITestPID, Key: epayAPITestKey,
+		}),
+	}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := newRequest(t, http.MethodPost, "/v1/portal/orders/"+order.ID+"/checkout",
+		orderCheckoutRequest{Type: "alipay"})
+	req = req.WithContext(context.WithValue(req.Context(), paramsKey{}, map[string]string{"id": order.ID}))
+	req = withPortalPrincipal(req, portalPrincipal{Tenant: tenant, User: user})
+	rec := httptest.NewRecorder()
+	server.handlePortalCheckoutOrder(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("poll-only checkout status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	out := decodeBody[orderCheckoutResponse](t, rec.Body.Bytes())
+	parsed, err := url.Parse(out.PayURL)
+	if err != nil {
+		t.Fatalf("parse poll-only payUrl: %v", err)
+	}
+	query := parsed.Query()
+	if query.Has("notify_url") || query.Has("return_url") {
+		t.Fatalf("poll-only checkout carried callback URLs: %s", out.PayURL)
+	}
+	if got := payment.SignMD5(query, epayAPITestKey); got != query.Get("sign") {
+		t.Fatalf("poll-only checkout signature does not verify")
+	}
+}
+
 func TestEpayNotifySettlesIdempotentlyAndRejectsSpoofs(t *testing.T) {
 	ts, st, _ := newEpayAPITestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)

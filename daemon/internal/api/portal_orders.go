@@ -214,18 +214,16 @@ func (s *Server) handlePortalCheckoutOrder(w http.ResponseWriter, r *http.Reques
 			"epay checkout is not configured")
 		return
 	}
+	// The callback URLs are optional. With a tenant origin (or explicit
+	// overrides) checkout advertises the public callback path; without either
+	// it signs a poll-only checkout and the reconciler settles the order.
 	base := strings.TrimRight(strings.TrimSpace(s.cfg.TenantOrigin), "/")
 	notifyURL := strings.TrimSpace(s.cfg.Epay.NotifyURL())
 	returnURL := strings.TrimSpace(s.cfg.Epay.ReturnURL())
-	if base == "" && (notifyURL == "" || returnURL == "") {
-		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
-			"epay checkout is not configured")
-		return
-	}
-	if notifyURL == "" {
+	if notifyURL == "" && base != "" {
 		notifyURL = base + epayNotifyPath
 	}
-	if returnURL == "" {
+	if returnURL == "" && base != "" {
 		returnURL = base + "/portal"
 	}
 	payURL, err := s.cfg.Epay.Checkout(order, kind, notifyURL, returnURL)

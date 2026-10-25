@@ -133,17 +133,135 @@ func TestEpayCheckoutURLShape(t *testing.T) {
 		t.Fatalf("pay URL leaks the merchant key: %s", payURL)
 	}
 
-	if _, err := provider.Checkout(order, "wxpay", "", ""); !errors.Is(err, ErrInvalidEvent) {
-		t.Fatalf("missing callback URLs error = %v, want ErrInvalidEvent", err)
+	// Callback URLs are optional: omitting both keeps them out of the signed
+	// query instead of failing checkout.
+	payURL, err = provider.Checkout(order, "wxpay", "", "")
+	if err != nil {
+		t.Fatalf("poll-only checkout: %v", err)
 	}
+	parsed, err = url.Parse(payURL)
+	if err != nil {
+		t.Fatalf("parse poll-only pay URL: %v", err)
+	}
+	pollQuery := parsed.Query()
+	if pollQuery.Has("notify_url") || pollQuery.Has("return_url") {
+		t.Fatalf("poll-only checkout carried callback URLs: %s", payURL)
+	}
+	if got := SignMD5(pollQuery, epayTestKey); got != pollQuery.Get("sign") {
+		t.Fatalf("poll-only query signature does not verify")
+	}
+
 	provider.notifyURL = "https://panel.example.com/v1/payments/epay/notify"
 	provider.returnURL = "https://panel.example.com/portal"
 	payURL, err = provider.Checkout(order, "wxpay", "", "")
 	if err != nil || !strings.Contains(payURL, "type=wxpay") {
 		t.Fatalf("wxpay checkout = %q, %v", payURL, err)
 	}
+	parsed, _ = url.Parse(payURL)
+	query = parsed.Query()
+	if query.Get("notify_url") != provider.notifyURL || query.Get("return_url") != provider.returnURL {
+		t.Fatalf("configured callback URLs missing: %s", payURL)
+	}
 	if _, err := provider.Checkout(order, "card", "", ""); !errors.Is(err, ErrInvalidEvent) {
 		t.Fatalf("unknown type error = %v, want ErrInvalidEvent", err)
+	}
+}
+
+func TestEpayCheckoutOptionalCallbackURLs(t *testing.T) {
+	order := testEpayOrder()
+	coreOnly := NewEpay(EpayConfig{
+		Gateway: "https://pay.example.test/", PID: "1001", Key: epayTestKey,
+	})
+	if !coreOnly.Enabled() || !coreOnly.Configured() {
+		t.Fatalf("core-only config enabled=%t configured=%t", coreOnly.Enabled(), coreOnly.Configured())
+	}
+	payURL, err := coreOnly.Checkout(order, "alipay", "", "")
+	if err != nil {
+		t.Fatalf("core-only Checkout: %v", err)
+	}
+	parsed, err := url.Parse(payURL)
+	if err != nil {
+		t.Fatalf("parse core-only pay URL: %v", err)
+	}
+	query := parsed.Query()
+	for _, key := range []string{"notify_url", "return_url"} {
+		if query.Has(key) {
+			t.Fatalf("core-only checkout includes %s: %s", key, payURL)
+		}
+	}
+	if got := SignMD5(query, epayTestKey); got != query.Get("sign") {
+		t.Fatalf("core-only query signature does not verify")
+	}
+	if _, err := coreOnly.Checkout(order, "alipay", "not-a-url", ""); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("invalid notify URL error = %v, want ErrInvalidEvent", err)
+	}
+
+	// Explicit config-level overrides are included when set.
+	withCallbacks := NewEpay(EpayConfig{
+		Gateway:   "https://pay.example.test/",
+		PID:       "1001",
+		Key:       epayTestKey,
+		NotifyURL: "https://panel.example.com/v1/payments/epay/notify",
+		ReturnURL: "https://panel.example.com/portal",
+	})
+	payURL, err = withCallbacks.Checkout(order, "alipay", "", "")
+	if err != nil {
+		t.Fatalf("configured Checkout: %v", err)
+	}
+	parsed, _ = url.Parse(payURL)
+	query = parsed.Query()
+	if query.Get("notify_url") != withCallbacks.NotifyURL() ||
+		query.Get("return_url") != withCallbacks.ReturnURL() {
+		t.Fatalf("configured callback URLs missing: %s", payURL)
+	}
+	if got := SignMD5(query, epayTestKey); got != query.Get("sign") {
+		t.Fatalf("configured query signature does not verify")
+	}
+
+	// One callback alone is valid; the other stays absent.
+	notifyOnly := NewEpay(EpayConfig{
+		Gateway:   "https://pay.example.test/",
+		PID:       "1001",
+		Key:       epayTestKey,
+		NotifyURL: "https://panel.example.com/v1/payments/epay/notify",
+	})
+	payURL, err = notifyOnly.Checkout(order, "alipay", "", "")
+	if err != nil {
+		t.Fatalf("notify-only Checkout: %v", err)
+	}
+	parsed, _ = url.Parse(payURL)
+	query = parsed.Query()
+	if query.Get("notify_url") == "" || query.Has("return_url") {
+		t.Fatalf("notify-only callbacks = %v", query)
+	}
+}
+
+func TestEpayDisabledOnlyWithoutCoreConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  EpayConfig
+		want bool
+	}{
+		{"empty", EpayConfig{}, false},
+		{"missing gateway", EpayConfig{PID: "1001", Key: epayTestKey}, false},
+		{"missing pid", EpayConfig{Gateway: "https://pay.example.test/", Key: epayTestKey}, false},
+		{"missing key", EpayConfig{Gateway: "https://pay.example.test/", PID: "1001"}, false},
+		{"core only", EpayConfig{Gateway: "https://pay.example.test/", PID: "1001", Key: epayTestKey}, true},
+		{"core with callbacks", EpayConfig{
+			Gateway:   "https://pay.example.test/",
+			PID:       "1001",
+			Key:       epayTestKey,
+			NotifyURL: "https://panel.example.com/v1/payments/epay/notify",
+			ReturnURL: "https://panel.example.com/portal",
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := NewEpay(tc.cfg)
+			if got := provider.Enabled(); got != tc.want {
+				t.Fatalf("Enabled() = %t, want %t (reason %q)", got, tc.want, provider.DisabledReason())
+			}
+		})
 	}
 }
 

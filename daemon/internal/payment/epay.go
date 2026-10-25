@@ -31,8 +31,10 @@ const (
 // EpayConfig configures the 易支付 adapter. Gateway, PID and Key are the
 // all-or-nothing core: if any one is missing the adapter stays disabled and
 // every route answers 503. SignType defaults to MD5. NotifyURL and ReturnURL
-// are optional overrides; when empty the API derives them from the configured
-// tenant origin so the same binary works behind any portal hostname.
+// are optional: a public deployment sets them (or lets the API derive them
+// from the tenant origin) so the gateway can call back, while a poll-only
+// deployment leaves them empty, checkout omits both parameters, and the
+// order-query reconciler settles pending payments.
 type EpayConfig struct {
 	Gateway    string
 	PID        string
@@ -160,7 +162,8 @@ func (p *Epay) GatewayHost() string {
 }
 
 // NotifyURL returns the configured callback URL override. Empty means the API
-// derives one from the tenant origin.
+// may derive one from the tenant origin; without either, checkout omits the
+// parameter and the query reconciler settles the order (poll-only).
 func (p *Epay) NotifyURL() string {
 	if p == nil {
 		return ""
@@ -168,7 +171,9 @@ func (p *Epay) NotifyURL() string {
 	return p.notifyURL
 }
 
-// ReturnURL returns the configured browser return URL override.
+// ReturnURL returns the configured browser return URL override. Empty means
+// the API may derive one from the tenant origin; without either, checkout
+// omits the parameter and the gateway keeps the buyer on its own page.
 func (p *Epay) ReturnURL() string {
 	if p == nil {
 		return ""
@@ -209,8 +214,10 @@ func SignMD5(values url.Values, key string) string {
 
 // Checkout builds the hosted payment URL. It carries only public order data:
 // the merchant id, the order id, the amount formatted with two decimals, the
-// plan name and the two callback URLs. The merchant key and the signature are
-// never logged.
+// plan name and, when configured, the callback URLs. A poll-only deployment
+// leaves the callback URLs empty and the signed query simply omits them; the
+// order-query reconciler still settles the order. The merchant key and the
+// signature are never logged.
 func (p *Epay) Checkout(order model.Order, kind, notifyURL, returnURL string) (string, error) {
 	if !p.Enabled() {
 		return "", ErrDisabled
@@ -235,17 +242,26 @@ func (p *Epay) Checkout(order model.Order, kind, notifyURL, returnURL string) (s
 	if back == "" {
 		back = p.returnURL
 	}
-	if !validHTTPURL(notify) || !validHTTPURL(back) ||
-		strings.ContainsAny(notify, "&\r\n\t") || strings.ContainsAny(back, "&\r\n\t") {
-		return "", ErrInvalidEvent
+	// Both callback URLs are optional. An empty value means "no public
+	// callback": the parameter is left out of the signed query and the
+	// reconciler settles the order from the gateway's order-query API.
+	// A supplied value must still be a clean absolute http(s) URL.
+	for _, raw := range []string{notify, back} {
+		if raw != "" && (!validHTTPURL(raw) || strings.ContainsAny(raw, "&\r\n\t")) {
+			return "", ErrInvalidEvent
+		}
 	}
 
 	values := url.Values{}
 	values.Set("pid", p.pid)
 	values.Set("type", kind)
 	values.Set("out_trade_no", orderID)
-	values.Set("notify_url", notify)
-	values.Set("return_url", back)
+	if notify != "" {
+		values.Set("notify_url", notify)
+	}
+	if back != "" {
+		values.Set("return_url", back)
+	}
 	values.Set("name", name)
 	values.Set("money", FormatMoneyMinor(order.Plan.AmountMinor))
 	values.Set("sign_type", p.signType)
