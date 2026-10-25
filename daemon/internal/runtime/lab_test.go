@@ -87,7 +87,7 @@ func TestLabViewTelemetry(t *testing.T) {
 
 	ring := lablog.NewRing(10)
 	ringLogger := slog.New(ring.Handler(nil))
-	ringLogger.Warn("gate flow rejected", "node_id", acct.ID+":s1", "account_id", acct.ID,
+	ringLogger.Warn("gate flow rejected", "node_id", slot1NodeID(acct.ID, "s1"), "account_id", acct.ID,
 		"error_class", "vendor_rejected", "password", "hunter2")
 
 	view := runtime.NewLabView(runtime.LabConfig{
@@ -135,7 +135,7 @@ func TestLabViewTelemetry(t *testing.T) {
 		t.Fatalf("gates = %+v reason=%q", gates, reason)
 	}
 	got := gates[0]
-	if got.NodeID != acct.ID+":s1" || got.AccountID != acct.ID || got.State != model.NodeLive {
+	if got.NodeID != slot1NodeID(acct.ID, "s1") || got.AccountID != acct.ID || got.State != model.NodeLive {
 		t.Fatalf("gate identity = %+v", got)
 	}
 	if got.Active != 2 || got.Limit != 32 || got.Accepted != 3 || got.Rejected != 1 ||
@@ -252,7 +252,7 @@ func TestLabViewTelemetry(t *testing.T) {
 	}
 
 	logs := view.Logs(lablog.Query{Level: slog.LevelDebug, Limit: 10})
-	if !logs.Enabled || len(logs.Entries) != 1 || logs.Entries[0].NodeID != acct.ID+":s1" {
+	if !logs.Enabled || len(logs.Entries) != 1 || logs.Entries[0].NodeID != slot1NodeID(acct.ID, "s1") {
 		t.Fatalf("logs = %+v", logs)
 	}
 	logJSON, _ := json.Marshal(logs)

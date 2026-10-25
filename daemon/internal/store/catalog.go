@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 
 	"ajsaccountd/internal/model"
@@ -13,9 +14,10 @@ import (
 // catalog.switch/catalog.connect audit covers the whole transition.
 
 // SwitchCommit is one atomic switch commit: delete every other node of the
-// account (and their leases), put the new node LIVE, optionally persist the
-// operator selection, bump the server stat and write the catalog audit. The
-// caller holds no store lock; the whole commit happens under one write lock.
+// same slot (and rebind their leases), put the new node LIVE, optionally
+// persist the slot row, the operator selection, bump the server stat and write
+// the catalog audit. The caller holds no store lock; the whole commit happens
+// under one write lock.
 type SwitchCommit struct {
 	Node   model.ProxyNode
 	Actor  string
@@ -23,6 +25,13 @@ type SwitchCommit struct {
 	Target string
 	Detail string
 	Meta   map[string]string
+	// Slot is required; a zero Index defaults to 1 and a zero AccountID
+	// defaults to the node's account. After that it must match the node
+	// exactly: a commit never widens scope to the whole account.
+	Slot model.SlotKey
+	// SlotState is the optional slot row written atomically with the node
+	// (state, ports, generation). Its SlotKey must equal Slot.
+	SlotState *model.AccountSlot
 	// Selection is set for a manual connect/switch only. A rotation or login
 	// sync passes nil so it never overwrites the operator's target.
 	Selection *model.Selection
@@ -41,6 +50,9 @@ type AttemptRecord struct {
 	Detail     string
 	Meta       map[string]string
 	ErrorClass string
+	// Slot is the slot the attempt targeted; a zero Index defaults to 1 and a
+	// zero AccountID defaults to AccountID.
+	Slot model.SlotKey
 }
 
 // Selection returns the persisted target of one account.
@@ -165,13 +177,44 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 	node.AccountID = account.ID
 	node.AccountLabel = account.Label
 
-	// Plan the deletion of every other node of the account and its leases, and
-	// validate the new row against the rows that will remain, before mutating
-	// anything. A failure here must leave the old node and its lease intact.
+	// Resolve and validate the slot before planning any deletion. A zero Index
+	// defaults to slot 1; a zero AccountID defaults to the node's account.
+	// After that the slot must match the node exactly: a caller that passes
+	// slot 2 for a slot-1 node is a bug, not a request to widen scope to the
+	// account. A node with Slot 0 is rejected because the store never infers a
+	// slot from the id or from the account.
+	slotKey := commit.Slot
+	if slotKey.Index == 0 {
+		slotKey.Index = 1
+	}
+	if slotKey.AccountID == "" {
+		slotKey.AccountID = node.AccountID
+	}
+	if !slotKey.Valid() || slotKey.AccountID != node.AccountID || slotKey.Index != node.Slot {
+		return model.ProxyNode{}, "", invalidf(
+			"switch commit slot %q does not match node %q (slot %d)",
+			slotKey.String(), node.ID, node.Slot)
+	}
+	var slotRow *model.AccountSlot
+	if commit.SlotState != nil {
+		planned := *commit.SlotState
+		if planned.SlotKey != slotKey {
+			return model.ProxyNode{}, "", invalidf(
+				"switch commit slot %q does not match slot state %q",
+				slotKey.String(), planned.SlotKey.String())
+		}
+		slotRow = &planned
+	}
+
+	// Plan the deletion of every other node of the same slot, and validate the
+	// new row against the rows that will remain, before mutating anything. A
+	// failure here must leave the old node and its lease intact. A slot-1
+	// switch never touches slot 2, and a legacy/seeded row (Slot 0) is never
+	// collateral.
 	removed := make(map[string]struct{}, len(s.nodes))
 	kept := make([]model.ProxyNode, 0, len(s.nodes))
 	for _, other := range s.nodes {
-		if other.AccountID == node.AccountID && other.ID != node.ID {
+		if other.AccountID == node.AccountID && other.Slot == node.Slot && other.ID != node.ID {
 			removed[other.ID] = struct{}{}
 			continue
 		}
@@ -206,22 +249,46 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 		selection = &planned
 	}
 
+	// The slot row is the only fallible write left, so it runs before the node
+	// and lease mutations: a rejected row leaves the switch unapplied.
+	if slotRow != nil {
+		if err := s.upsertSlotLocked(*slotRow); err != nil {
+			return model.ProxyNode{}, "", err
+		}
+	}
 	// Everything below this line is infallible.
 	s.nodes = kept
-	if len(removed) > 0 {
-		keptLeases := s.leases[:0]
-		for _, lease := range s.leases {
-			if _, drop := removed[lease.NodeID]; drop {
-				continue
-			}
-			keptLeases = append(keptLeases, lease)
+	// A lease on the replaced same-slot node is rebound, not deleted: a switch
+	// inside one slot must not revoke a customer's access. The generation comes
+	// from the slot row, never from a node field.
+	slotGen := uint64(0)
+	if slotRow != nil {
+		slotGen = slotRow.Generation
+	} else if current, ok := s.accountSlots[slotKey]; ok {
+		slotGen = current.Generation
+	}
+	for i := range s.leases {
+		if _, drop := removed[s.leases[i].NodeID]; !drop {
+			continue
 		}
-		s.leases = keptLeases
+		s.leases[i].NodeID = node.ID
+		s.leases[i].NodeLabel = node.Label
+		s.leases[i].Region = node.Region
+		s.leases[i].EgressIP = node.EgressIP
+		s.leases[i].GatePort = node.GatePort
+		s.leases[i].Protocol = node.Protocol
+		s.leases[i].Slot = node.Slot
+		s.leases[i].Generation = slotGen
+	}
+	// InUse is derived, never inherited: it is the number of active leases that
+	// now point at the new node. (s.leases holds active rows only.)
+	node.InUse = 0
+	for _, lease := range s.leases {
+		if lease.NodeID == node.ID {
+			node.InUse++
+		}
 	}
 	if existing != nil {
-		if node.InUse == 0 {
-			node.InUse = existing.InUse
-		}
 		if node.SuccessRate == 0 {
 			node.SuccessRate = existing.SuccessRate
 		}
@@ -283,8 +350,23 @@ func (s *Store) RecordCatalogAttempt(rec AttemptRecord) (string, error) {
 	stat.LastAttemptAt = iso(s.now())
 	stat.LastErrorClass = rec.ErrorClass
 	s.serverStats[key] = stat
+	slotKey := rec.Slot
+	if slotKey.Index == 0 {
+		slotKey.Index = 1
+	}
+	if slotKey.AccountID == "" {
+		slotKey.AccountID = rec.AccountID
+	}
+	meta := make(map[string]string, len(rec.Meta)+2)
+	for name, value := range rec.Meta {
+		meta[name] = value
+	}
+	meta["slot"] = slotKey.String()
+	if slot, ok := s.accountSlots[slotKey]; ok {
+		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
+	}
 	return s.addAuditLocked(model.SeverityWarn, "operator", rec.Action,
-		rec.Target, rec.Detail, rec.Meta), nil
+		rec.Target, rec.Detail, meta), nil
 }
 
 // ServerStat returns one account/server attempt counter.

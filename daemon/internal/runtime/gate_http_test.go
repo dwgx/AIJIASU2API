@@ -18,11 +18,22 @@ import (
 	"ajsproxy/apifacade"
 )
 
-// newHTTPGateFixture builds a store, one account and a node controller whose
-// real gates are metered. httpOffset selects the HTTP CONNECT port distance.
+// newHTTPGateFixture builds and syncs a metered node controller. httpOffset
+// selects the HTTP CONNECT port distance.
 func newHTTPGateFixture(t *testing.T, label string, servers map[string]apifacade.Server, maxServers, portBase, httpOffset int) (*storeFixture, *runtime.NodeController) {
 	t.Helper()
-	st := newNodeTestStore(t)
+	fixture, controller := newHTTPGateController(t, label, servers, maxServers, portBase, httpOffset)
+	if err := controller.SyncAccount(context.Background(), fixture.account.ID); err != nil {
+		t.Fatalf("SyncAccount: %v", err)
+	}
+	return fixture, controller
+}
+
+// newHTTPGateController builds a store, one account and a metered node
+// controller without syncing, so a test can assert the sync failure itself.
+func newHTTPGateController(t *testing.T, label string, servers map[string]apifacade.Server, maxServers, portBase, httpOffset int) (*storeFixture, *runtime.NodeController) {
+	t.Helper()
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, label)
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -31,6 +42,12 @@ func newHTTPGateFixture(t *testing.T, label string, servers map[string]apifacade
 		ConnectPassword: account.Secret(testConnectPassword),
 		Servers:         servers,
 	})
+	if maxServers > 1 {
+		t.Setenv("AJS_ACCOUNT_SLOTS", strconv.Itoa(maxServers))
+		if _, err := st.SetAccountUseCount(acct.ID, maxServers); err != nil {
+			t.Fatalf("SetAccountUseCount(%d): %v", maxServers, err)
+		}
+	}
 	meter := runtime.NewFlowMeter(st)
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
 		Store:          st,
@@ -51,9 +68,6 @@ func newHTTPGateFixture(t *testing.T, label string, servers map[string]apifacade
 		defer cancel()
 		_ = controller.Stop(stopCtx)
 	})
-	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
-		t.Fatalf("SyncAccount: %v", err)
-	}
 	return &storeFixture{store: st, account: acct}, controller
 }
 
@@ -63,14 +77,16 @@ type storeFixture struct {
 	account model.Account
 }
 
-// node returns one running node row.
+// node returns one running node row of the fixture account.
 func (f *storeFixture) node(t *testing.T, serverID string) model.ProxyNode {
 	t.Helper()
-	node, ok := f.store.Node(f.account.ID + ":" + serverID)
-	if !ok {
-		t.Fatalf("node %s:%s is missing", f.account.ID, serverID)
+	for _, node := range f.store.Nodes() {
+		if node.AccountID == f.account.ID && node.ServerID == serverID {
+			return node
+		}
 	}
-	return node
+	t.Fatalf("node for server %s is missing", serverID)
+	return model.ProxyNode{}
 }
 
 // httpProxyConnect sends one CONNECT request and returns the status line plus
@@ -216,9 +232,11 @@ func TestNodeControllerReservesHTTPPorts(t *testing.T) {
 	}
 }
 
-// TestNodeControllerRetriesPortPairOnHTTPBindFailure proves a gate whose HTTP
-// port is taken moves to the next base port instead of coming up half-bound.
-func TestNodeControllerRetriesPortPairOnHTTPBindFailure(t *testing.T) {
+// TestNodeControllerFailsReservedPairOnHTTPBindFailure proves a gate whose
+// reserved HTTP port is taken fails the slot down instead of silently moving to
+// another pair: a lease stores GatePort, so a silent move would change the
+// customer's endpoint. The claimed pair is released for the next attempt.
+func TestNodeControllerFailsReservedPairOnHTTPBindFailure(t *testing.T) {
 	const offset = 500
 	base := freePortPair(t, offset)
 	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+offset)))
@@ -227,18 +245,27 @@ func TestNodeControllerRetriesPortPairOnHTTPBindFailure(t *testing.T) {
 	}
 	defer blocker.Close()
 
-	fixture, _ := newHTTPGateFixture(t, "http-retry",
+	fixture, controller := newHTTPGateController(t, "http-retry",
 		map[string]apifacade.Server{"s1": testServer("s1")}, 1, base, offset)
+	err = controller.SyncAccount(context.Background(), fixture.account.ID)
+	if err == nil {
+		t.Fatal("SyncAccount succeeded with the reserved HTTP port occupied")
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(base+offset)) {
+		t.Fatalf("error = %v, want the occupied HTTP port %d", err, base+offset)
+	}
+	slot, ok := fixture.store.Slot(model.SlotKey{AccountID: fixture.account.ID, Index: 1})
+	if !ok || slot.State != model.SlotDown || slot.GatePort != 0 || slot.LastError != "gate_start_failed" {
+		t.Fatalf("slot = %+v/%v, want DOWN without a pair and gate_start_failed", slot, ok)
+	}
 	node := fixture.node(t, "s1")
-	if node.GatePort == base {
-		t.Fatalf("gate kept port %d although its HTTP port was occupied", base)
+	if node.State != model.NodeDown || node.GatePort != 0 {
+		t.Fatalf("node = %+v, want DOWN without a port", node)
 	}
-	httpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(node.GatePort+offset))
-	conn, err := net.DialTimeout("tcp", httpAddr, time.Second)
-	if err != nil {
-		t.Fatalf("retried node's HTTP port %s is not listening: %v", httpAddr, err)
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base)), time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatalf("gate on the failed pair %d still listens", base)
 	}
-	_ = conn.Close()
 }
 
 // TestNodeControllerHTTPOffsetValidation pins the construction guard.

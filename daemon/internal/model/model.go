@@ -190,6 +190,11 @@ type Lease struct {
 	Status         LeaseStatus   `json:"status"`
 	IdempotencyKey string        `json:"idempotencyKey"`
 	CreatedAt      string        `json:"createdAt"`
+	// Slot is the one-based account slot the lease was issued for; zero marks
+	// a lease that predates multi-slot. Generation is the slot generation the
+	// lease was issued under, refreshed when a same-slot switch rebinds it.
+	Slot       int    `json:"slot,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 // CreateLeaseInput is the body accepted by POST /v1/leases. TTLSeconds 0 asks

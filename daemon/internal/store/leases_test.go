@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -246,15 +247,16 @@ func TestCreateLeaseNoCapacityAndSuspendedUser(t *testing.T) {
 		t.Fatalf("suspended create = %v, want user_disabled", err)
 	}
 
-	// Fill the node-bearing account (admission is one per account), then add
-	// an active account with no node. The next user sees no_capacity rather
-	// than a slot refusal because every account is either admission-full or
-	// node-less.
-	holder := addLeaseUser(t, st, "holder-1", nil)
-	if _, _, err := st.CreateLease(model.CreateLeaseInput{
-		UserID: holder.ID, Platform: model.PlatformAndroid,
-	}); err != nil {
-		t.Fatalf("holder create: %v", err)
+	// Fill the node-bearing account (both of its slot capacity), then add an
+	// active account with no node. The next user sees no_capacity rather than a
+	// slot refusal because every account is either capacity-full or node-less.
+	for index := 1; index <= 2; index++ {
+		holder := addLeaseUser(t, st, "holder-"+strconv.Itoa(index), nil)
+		if _, _, err := st.CreateLease(model.CreateLeaseInput{
+			UserID: holder.ID, Platform: model.PlatformAndroid,
+		}); err != nil {
+			t.Fatalf("holder %d create: %v", index, err)
+		}
 	}
 	addLeaseAccount(t, st, "Empty Ops", "empty-ops")
 	third := addLeaseUser(t, st, "third-bot", nil)

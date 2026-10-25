@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"ajsaccountd/internal/model"
 	"ajsproxy/apifacade"
 	"ajsproxy/fvfacade"
 )
@@ -548,4 +549,51 @@ func closeWrite(conn net.Conn) error {
 		return conn.Close()
 	}
 	return tcp.CloseWrite()
+}
+
+// TestSlotUserName pins the vendor tunnel name of one slot: the base name for
+// slot 1 (and any index at or below one), base#N for higher slots, and an
+// empty result when the login carried no user name at all.
+func TestSlotUserName(t *testing.T) {
+	cases := []struct {
+		base  string
+		index int
+		want  string
+	}{
+		{base: "", index: 1, want: ""},
+		{base: "", index: 2, want: ""},
+		{base: "   ", index: 3, want: ""},
+		{base: " vendor-user ", index: 1, want: "vendor-user"},
+		{base: "vendor-user", index: 0, want: "vendor-user"},
+		{base: "vendor-user", index: 2, want: "vendor-user#2"},
+		{base: "vendor-user", index: 8, want: "vendor-user#8"},
+	}
+	for _, tc := range cases {
+		if got := SlotUserName(tc.base, tc.index); got != tc.want {
+			t.Fatalf("SlotUserName(%q, %d) = %q, want %q", tc.base, tc.index, got, tc.want)
+		}
+	}
+}
+
+// TestSessionRequestSlot pins the factory guard: a non-zero slot that is not a
+// valid key fails before any network work, while the zero key means slot 1 and
+// falls through to the factory's own checks.
+func TestSessionRequestSlot(t *testing.T) {
+	factory := NewFactory(Linux423Binary, nil, fvfacade.AuthOptions{})
+	invalid := []model.SlotKey{
+		{AccountID: "", Index: 2},
+		{AccountID: "   ", Index: 1},
+		{AccountID: "acc-01", Index: 9},
+		{AccountID: "acc-01", Index: -1},
+	}
+	for _, key := range invalid {
+		_, err := factory.Open(context.Background(), SessionRequest{Slot: key})
+		if err == nil || !strings.Contains(err.Error(), "slot") {
+			t.Fatalf("Open(slot %q) error = %v, want an invalid-slot refusal", key.String(), err)
+		}
+	}
+	_, err := factory.Open(context.Background(), SessionRequest{})
+	if err == nil || !strings.Contains(err.Error(), "no transport") {
+		t.Fatalf("Open(zero slot) error = %v, want the transport refusal", err)
+	}
 }

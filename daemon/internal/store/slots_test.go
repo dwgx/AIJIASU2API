@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/secret"
@@ -145,69 +147,125 @@ func TestSlotCapacity(t *testing.T) {
 	}
 }
 
-// TestAdmissionSlots pins the pre-runtime split: SlotCapacity remains the
-// display capacity (up to eight), while AdmissionSlots is always one until
-// the multi-slot runtime can open one gate per slot. No environment value may
-// widen the admission cap.
+// TestAdmissionSlots pins the single admission calculation: the account's slot
+// allowance (vendor UseCount capped by AJS_ACCOUNT_SLOTS) further capped by the
+// nodes that can actually serve. A slot node counts only while its slot row is
+// live; an unavailable account admits nothing; and a pool-disabled installation
+// (legacy Slot 0 nodes) keeps the pre-slot answer.
 func TestAdmissionSlots(t *testing.T) {
-	cases := []struct {
-		name       string
-		useCount   int
-		accountCap int
-		display    int
-	}{
-		{name: "absent inputs mean one", useCount: 0, accountCap: 0, display: 1},
-		{name: "operator cap wins for display", useCount: 8, accountCap: 2, display: 2},
-		{name: "use count wins for display", useCount: 1, accountCap: 8, display: 1},
-		{name: "eight is allowed for display", useCount: 8, accountCap: 8, display: 8},
-		{name: "service cap wins over 2000", useCount: 2000, accountCap: 2000, display: 8},
-		{name: "negative values normalize", useCount: -3, accountCap: -2, display: 1},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := SlotCapacity(tc.useCount, tc.accountCap); got != tc.display {
-				t.Fatalf("display SlotCapacity(%d, %d) = %d, want %d",
-					tc.useCount, tc.accountCap, got, tc.display)
-			}
-			if got := AdmissionSlots(tc.useCount, tc.accountCap); got != MaxAdmissionSlots {
-				t.Fatalf("AdmissionSlots(%d, %d) = %d, want %d",
-					tc.useCount, tc.accountCap, got, MaxAdmissionSlots)
-			}
-			if got := admissionSlotCapacity(tc.useCount, tc.accountCap); got != MaxAdmissionSlots {
-				t.Fatalf("admissionSlotCapacity(%d, %d) = %d, want %d",
-					tc.useCount, tc.accountCap, got, MaxAdmissionSlots)
-			}
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+	newAccount := func(t *testing.T, useCount int) (*Store, model.Account) {
+		t.Helper()
+		st := newEmptyWithClock(func() time.Time { return now }, nil)
+		created, err := st.CreateAccount(model.CreateAccountInput{
+			Label: "Admission " + strconv.Itoa(useCount), Username: "admission",
+			Password: "local-placeholder", Platform: model.PlatformAndroid, Concurrency: 8,
 		})
+		if err != nil {
+			t.Fatalf("CreateAccount: %v", err)
+		}
+		account, err := st.SetAccountUseCount(created.ID, useCount)
+		if err != nil {
+			t.Fatalf("SetAccountUseCount: %v", err)
+		}
+		return st, account
+	}
+	addNode := func(t *testing.T, st *Store, account model.Account, id string, slot int, state model.NodeState) {
+		t.Helper()
+		if _, err := st.PutNode(model.ProxyNode{
+			ID: id, AccountID: account.ID, Label: "cn-" + id, Region: "cn",
+			State: state, Protocol: model.ProtocolSOCKS5, GatePort: 14000 + slot,
+			ServerID: "srv-" + id, Slot: slot,
+		}); err != nil {
+			t.Fatalf("PutNode(%s): %v", id, err)
+		}
+	}
+	liveSlot := func(t *testing.T, st *Store, account model.Account, index int) {
+		t.Helper()
+		key := model.SlotKey{AccountID: account.ID, Index: index}
+		if err := st.UpsertSlot(model.AccountSlot{
+			SlotKey: key, ServerID: "srv-node-" + strconv.Itoa(index),
+			GatePort: 14000 + index, State: model.SlotLive, Generation: 1,
+		}); err != nil {
+			t.Fatalf("UpsertSlot(%s): %v", key.String(), err)
+		}
 	}
 
-	envCases := []struct {
-		configured string
-		display    int
-	}{
-		{configured: "1", display: 1},
-		{configured: "2", display: 2},
-		{configured: "8", display: 8},
-		{configured: "2000", display: MaxServiceSlots},
-		{configured: "not-a-number", display: 1},
-		{configured: "", display: 1},
-	}
-	for _, tc := range envCases {
-		t.Run("env="+tc.configured, func(t *testing.T) {
-			t.Setenv("AJS_ACCOUNT_SLOTS", tc.configured)
-			if got := ConfiguredSlotCapacity(2000); got != tc.display {
-				t.Fatalf("display ConfiguredSlotCapacity(%q) = %d, want %d",
-					tc.configured, got, tc.display)
-			}
-			if got := ConfiguredAdmissionSlots(2000); got != MaxAdmissionSlots {
-				t.Fatalf("ConfiguredAdmissionSlots(%q) = %d, want %d",
-					tc.configured, got, MaxAdmissionSlots)
-			}
-			if got := effectiveAccountSlots(model.Account{UseCount: 2000}); got != MaxAdmissionSlots {
-				t.Fatalf("effectiveAccountSlots(%q) = %d, want %d",
-					tc.configured, got, MaxAdmissionSlots)
-			}
-		})
-	}
+	t.Run("one live slot caps a wider allowance", func(t *testing.T) {
+		t.Setenv("AJS_ACCOUNT_SLOTS", "8")
+		st, account := newAccount(t, 8)
+		addNode(t, st, account, "node-1", 1, model.NodeLive)
+		liveSlot(t, st, account, 1)
+		if got := st.accountCapacityLocked(account, now); got != 1 {
+			t.Fatalf("capacity = %d, want 1 (one live slot)", got)
+		}
+	})
+
+	t.Run("two live slots admit two", func(t *testing.T) {
+		t.Setenv("AJS_ACCOUNT_SLOTS", "8")
+		st, account := newAccount(t, 8)
+		for _, index := range []int{1, 2} {
+			id := "node-" + strconv.Itoa(index)
+			addNode(t, st, account, id, index, model.NodeLive)
+			liveSlot(t, st, account, index)
+		}
+		// A third node whose slot row is down is not capacity.
+		addNode(t, st, account, "node-3", 3, model.NodeLive)
+		if err := st.UpsertSlot(model.AccountSlot{
+			SlotKey:  model.SlotKey{AccountID: account.ID, Index: 3},
+			ServerID: "srv-node-3", GatePort: 14003, State: model.SlotDown,
+		}); err != nil {
+			t.Fatalf("UpsertSlot(slot 3): %v", err)
+		}
+		if got := st.accountCapacityLocked(account, now); got != 2 {
+			t.Fatalf("capacity = %d, want 2 (two live slots)", got)
+		}
+	})
+
+	t.Run("operator cap narrows the allowance", func(t *testing.T) {
+		t.Setenv("AJS_ACCOUNT_SLOTS", "2")
+		st, account := newAccount(t, 8)
+		for index := 1; index <= 5; index++ {
+			addNode(t, st, account, "node-"+strconv.Itoa(index), 0, model.NodeLive)
+		}
+		if got := st.accountCapacityLocked(account, now); got != 2 {
+			t.Fatalf("capacity = %d, want 2 (operator cap)", got)
+		}
+	})
+
+	t.Run("pool disabled keeps the legacy answer", func(t *testing.T) {
+		t.Setenv("AJS_ACCOUNT_SLOTS", "8")
+		st, account := newAccount(t, 4)
+		for index := 1; index <= 3; index++ {
+			addNode(t, st, account, "node-"+strconv.Itoa(index), 0, model.NodeLive)
+		}
+		if got := st.accountCapacityLocked(account, now); got != 3 {
+			t.Fatalf("capacity = %d, want 3 (legacy nodes)", got)
+		}
+	})
+
+	t.Run("unavailable accounts admit nothing", func(t *testing.T) {
+		t.Setenv("AJS_ACCOUNT_SLOTS", "8")
+		st, account := newAccount(t, 8)
+		addNode(t, st, account, "node-1", 0, model.NodeLive)
+		expired := now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		updated, err := st.UpdateAccount(account.ID, model.AccountPatch{ExpiresAt: &expired})
+		if err != nil {
+			t.Fatalf("UpdateAccount(expired): %v", err)
+		}
+		if got := st.accountCapacityLocked(updated, now); got != 0 {
+			t.Fatalf("capacity = %d, want 0 for an expired account", got)
+		}
+		paused := model.AccountPaused
+		updated, err = st.UpdateAccount(account.ID, model.AccountPatch{State: &paused})
+		if err != nil {
+			t.Fatalf("UpdateAccount(paused): %v", err)
+		}
+		if got := st.accountCapacityLocked(updated, now); got != 0 {
+			t.Fatalf("capacity = %d, want 0 for a paused account", got)
+		}
+	})
 }
 
 func TestAccountSlotCRUD(t *testing.T) {

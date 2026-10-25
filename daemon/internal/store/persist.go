@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -330,6 +331,12 @@ func (s *Store) Restore(data []byte) error {
 	// slot-1 compatibility projection). This only copies the slot reference;
 	// it never reseals material or changes a record id.
 	snap.migrateDeviceSlotBindings()
+	// Controller-owned node ids gain the slot segment ("acc:server" ->
+	// "acc#1:server"); the leases that pointed at them follow. Seeded and
+	// hand-written rows keep their shape, and the rewrite is idempotent.
+	if migrated := snap.migrateNodeIDs(); migrated > 0 {
+		slog.Info("node_ids_migrated", "count", migrated)
+	}
 	if err := snap.validate(); err != nil {
 		return err
 	}
@@ -597,6 +604,7 @@ func (snap *Snapshot) validate() error {
 		accounts[account.ID] = struct{}{}
 	}
 	nodes := make(map[string]struct{}, len(snap.Nodes))
+	nodeSlots := make(map[string]int, len(snap.Nodes))
 	for _, node := range snap.Nodes {
 		if node.ID == "" {
 			return errors.New("state snapshot has a node without an id")
@@ -605,6 +613,16 @@ func (snap *Snapshot) validate() error {
 			return fmt.Errorf("state snapshot has duplicate node %q", node.ID)
 		}
 		nodes[node.ID] = struct{}{}
+		nodeSlots[node.ID] = node.Slot
+		if node.Slot > 0 {
+			if node.ServerID == "" {
+				return fmt.Errorf("state snapshot node %q has slot %d without a server id", node.ID, node.Slot)
+			}
+			key := model.SlotKey{AccountID: node.AccountID, Index: node.Slot}
+			if want := key.NodeID(node.ServerID); node.ID != want {
+				return fmt.Errorf("state snapshot node %q does not match its slot id %q", node.ID, want)
+			}
+		}
 	}
 	leases := make(map[string]struct{}, len(snap.Leases))
 	for _, lease := range snap.Leases {
@@ -615,6 +633,17 @@ func (snap *Snapshot) validate() error {
 			return fmt.Errorf("state snapshot has duplicate lease %q", lease.ID)
 		}
 		leases[lease.ID] = struct{}{}
+		if lease.Slot < 0 || lease.Slot > model.MaxSlotIndex {
+			return fmt.Errorf("state snapshot lease %q has slot %d outside 0..%d",
+				lease.ID, lease.Slot, model.MaxSlotIndex)
+		}
+		if lease.Slot > 0 {
+			slot, ok := nodeSlots[lease.NodeID]
+			if !ok || slot != lease.Slot {
+				return fmt.Errorf("state snapshot lease %q names node %q with slot %d, want slot %d",
+					lease.ID, lease.NodeID, slot, lease.Slot)
+			}
+		}
 	}
 	users := make(map[string]struct{}, len(snap.Users))
 	for _, user := range snap.Users {
@@ -1017,6 +1046,62 @@ func (snap *Snapshot) migrateAccountSlots() {
 		byKey[key] = len(snap.AccountSlots) - 1
 		rowsPerAccount[account.ID]++
 	}
+}
+
+// slotByKey resolves the slot row a node belongs to. A legacy node (Slot 0) has
+// no slot row.
+func slotByKey(slots []model.AccountSlot, node model.ProxyNode) (model.AccountSlot, bool) {
+	if node.Slot <= 0 {
+		return model.AccountSlot{}, false
+	}
+	for _, slot := range slots {
+		if slot.AccountID == node.AccountID && slot.Index == node.Slot {
+			return slot, true
+		}
+	}
+	return model.AccountSlot{}, false
+}
+
+// migrateNodeIDs rewrites controller-owned node ids from "account:server" to
+// "account#1:server" and rewrites every lease that pointed at them. It also
+// backfills Lease.Slot/Generation from the node and slot table. Seeded rows
+// (id "node-01", empty ServerID) and any row that is not exactly
+// account:server are untouched. Idempotent: a rewritten row no longer matches
+// the pre-slot shape, and the lease rewrite is a lookup miss on the next boot.
+func (snap *Snapshot) migrateNodeIDs() int {
+	mapping := make(map[string]string)
+	for i := range snap.Nodes {
+		node := &snap.Nodes[i]
+		if node.Slot != 0 || node.ServerID == "" {
+			continue
+		}
+		if node.ID != node.AccountID+":"+node.ServerID {
+			continue
+		}
+		key := model.SlotKey{AccountID: node.AccountID, Index: 1}
+		newID := key.NodeID(node.ServerID)
+		mapping[node.ID] = newID
+		node.ID = newID
+		node.Slot = 1
+	}
+	for i := range snap.Leases {
+		lease := &snap.Leases[i]
+		if newID, ok := mapping[lease.NodeID]; ok {
+			lease.NodeID = newID
+		}
+		if lease.Slot == 0 {
+			for _, node := range snap.Nodes {
+				if node.ID == lease.NodeID && node.Slot > 0 {
+					lease.Slot = node.Slot
+					if slot, ok := slotByKey(snap.AccountSlots, node); ok {
+						lease.Generation = slot.Generation
+					}
+					break
+				}
+			}
+		}
+	}
+	return len(mapping)
 }
 
 // migrateDeviceSlotBindings backfills AssignedSlotKey on assigned records from

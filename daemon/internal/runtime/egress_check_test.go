@@ -70,7 +70,7 @@ func newEgressFixture(t *testing.T, claimed string) (*runtime.NodeController, st
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount: %v", err)
 	}
-	return controller, acct.ID + ":s1"
+	return controller, slot1NodeID(acct.ID, "s1")
 }
 
 // echoServer serves a plain-text address, like ifconfig.me/ip.

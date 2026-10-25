@@ -2,6 +2,7 @@ package store
 
 import (
 	"sort"
+	"time"
 
 	"ajsaccountd/internal/model"
 )
@@ -47,37 +48,39 @@ func ConfiguredSlotCapacity(useCount int) int {
 	return SlotCapacity(useCount, configuredAccountSlots())
 }
 
-// MaxAdmissionSlots is the hard ceiling on active leases per account until
-// the multi-slot runtime can start one gate per slot. Display capacity may be
-// higher: SlotCapacity reports the purchased allowance for the UI, while
-// AdmissionSlots is what the lease guard actually admits.
-const MaxAdmissionSlots = 1
-
-// AdmissionSlots returns the lease-admission capacity for one account:
-//
-//	min(SlotCapacity(useCount, accountSlots), MaxAdmissionSlots)
-//
-// Until the multi-slot runtime lands this is always one, even when the vendor
-// UseCount or the operator's AJS_ACCOUNT_SLOTS asks for more. Keeping this
-// helper separate from SlotCapacity lets the account API keep showing the
-// purchased display capacity while the store refuses a second lease.
-func AdmissionSlots(useCount, accountSlots int) int {
-	capacity := SlotCapacity(useCount, accountSlots)
-	if capacity > MaxAdmissionSlots {
-		capacity = MaxAdmissionSlots
+// accountCapacityLocked is the one admission calculation (B1): the account's
+// slot allowance further capped by the number of nodes that can actually
+// serve. It uses the same membership predicate as the lease path, so capacity
+// and admission cannot disagree. The caller holds at least the read lock.
+func (s *Store) accountCapacityLocked(account model.Account, now time.Time) int {
+	// Membership and expiry: an unavailable account admits nothing.
+	if leaseAccountAvailable(account, now) != nil {
+		return 0
+	}
+	capacity := SlotCapacity(account.UseCount, configuredAccountSlots())
+	serving := 0
+	for _, node := range s.nodes {
+		if node.AccountID != account.ID {
+			continue
+		}
+		if node.State != model.NodeLive && node.State != model.NodeReady {
+			continue
+		}
+		// A slot node is capacity only while its slot row is live; a legacy
+		// node (Slot 0) is capacity as before. A pool-disabled installation has
+		// no slot nodes at all, so it keeps the legacy answer.
+		if node.Slot > 0 {
+			slot, ok := s.accountSlots[model.SlotKey{AccountID: node.AccountID, Index: node.Slot}]
+			if !ok || slot.State != model.SlotLive {
+				continue
+			}
+		}
+		serving++
+	}
+	if serving < capacity {
+		capacity = serving
 	}
 	return capacity
-}
-
-// ConfiguredAdmissionSlots applies the process-wide AJS_ACCOUNT_SLOTS value
-// to the admission cap. It is the helper the lease guard uses.
-func ConfiguredAdmissionSlots(useCount int) int {
-	return AdmissionSlots(useCount, configuredAccountSlots())
-}
-
-// admissionSlotCapacity is the package-local spelling used by the lease guard.
-func admissionSlotCapacity(useCount, accountSlots int) int {
-	return AdmissionSlots(useCount, accountSlots)
 }
 
 // normalizeOperatorSlotCap keeps an operator-supplied cap in the vendor's
@@ -164,6 +167,15 @@ func (s *Store) slotWithBindingLocked(slot model.AccountSlot) model.AccountSlot 
 // its generation when the caller omits it, and a non-zero generation may never
 // move backwards.
 func (s *Store) UpsertSlot(slot model.AccountSlot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upsertSlotLocked(slot)
+}
+
+// upsertSlotLocked is the body of UpsertSlot for callers that already hold the
+// write lock (CommitSlotStart, CommitSwitch). It validates and writes under
+// that same lock, so a node and its slot row cannot be written half-way.
+func (s *Store) upsertSlotLocked(slot model.AccountSlot) error {
 	if slot.State == "" {
 		slot.State = model.SlotProvisioning
 	}
@@ -173,9 +185,6 @@ func (s *Store) UpsertSlot(slot model.AccountSlot) error {
 	if slot.GatePort != 0 && slot.GatePort == slot.HTTPPort {
 		return invalidf("slot %s gate and http ports must differ", slot.SlotKey.String())
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.accountIndexLocked(slot.AccountID) < 0 {
 		return notFoundf("account %q not found", slot.AccountID)
 	}
@@ -221,6 +230,157 @@ func (s *Store) UpsertSlot(slot model.AccountSlot) error {
 
 // PutSlot is an alias for UpsertSlot kept for the plan's vocabulary.
 func (s *Store) PutSlot(slot model.AccountSlot) error { return s.UpsertSlot(slot) }
+
+// SlotDeviceBound reports whether the slot already owns a device binding. It
+// is the read that decides "bind once" in the runtime; it never generates.
+func (s *Store) SlotDeviceBound(key model.SlotKey) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, bound := s.slotBindingLocked(key)
+	return bound
+}
+
+// SlotStartCommit writes one started slot and its node under a single lock.
+// Slot.Generation must be >= the stored generation (monotonic); Slot.State must
+// be SlotLive; Slot.SlotKey must equal Node.Slot and Node.AccountID.
+type SlotStartCommit struct {
+	Slot model.AccountSlot
+	Node model.ProxyNode
+}
+
+// CommitSlotStart writes one started slot and its node under a single lock, so
+// a concurrent reader never sees a LIVE node without its slot row (or the
+// other way round). It returns the node as written.
+func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error) {
+	node, err := normalizeNode(commit.Node)
+	if err != nil {
+		return model.ProxyNode{}, err
+	}
+	slot := commit.Slot
+	if !slot.SlotKey.Valid() {
+		return model.ProxyNode{}, invalidf("slot key %q is invalid", slot.SlotKey.String())
+	}
+	if slot.Index != node.Slot || slot.AccountID != node.AccountID {
+		return model.ProxyNode{}, invalidf("slot %s does not match node %q (account %q, slot %d)",
+			slot.SlotKey.String(), node.ID, node.AccountID, node.Slot)
+	}
+	if slot.State != model.SlotLive {
+		return model.ProxyNode{}, invalidf("slot %s start commit requires state %q",
+			slot.SlotKey.String(), model.SlotLive)
+	}
+	if node.GatePort != slot.GatePort {
+		return model.ProxyNode{}, invalidf("node %q gate port %d does not match slot %s port %d",
+			node.ID, node.GatePort, slot.SlotKey.String(), slot.GatePort)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountIdx := s.accountIndexLocked(node.AccountID)
+	if accountIdx < 0 {
+		return model.ProxyNode{}, notFoundf("account %q not found", node.AccountID)
+	}
+	account := s.accounts[accountIdx]
+	node.AccountID = account.ID
+	node.AccountLabel = account.Label
+
+	idx := s.nodeIndexLocked(node.ID)
+	if idx >= 0 && s.nodes[idx].AccountID != node.AccountID {
+		return model.ProxyNode{}, conflictf("node %q belongs to account %q", node.ID, s.nodes[idx].AccountID)
+	}
+	for i, other := range s.nodes {
+		if i != idx && other.Label == node.Label {
+			return model.ProxyNode{}, conflictf("node label %q is already used by %q", node.Label, other.ID)
+		}
+	}
+	// The slot write is the only fallible step of the commit, so it runs before
+	// the node is touched: a rejected slot leaves the node table unchanged.
+	if err := s.upsertSlotLocked(slot); err != nil {
+		return model.ProxyNode{}, err
+	}
+	if idx >= 0 {
+		existing := s.nodes[idx]
+		if node.InUse == 0 {
+			node.InUse = existing.InUse
+		}
+		if node.SuccessRate == 0 {
+			node.SuccessRate = existing.SuccessRate
+		}
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = existing.LastProbeAt
+		}
+		s.nodes[idx] = node
+	} else {
+		if node.LastProbeAt == "" {
+			node.LastProbeAt = iso(s.now())
+		}
+		s.nodes = append(s.nodes, node)
+	}
+	s.syncAccountCountsLocked()
+	return node, nil
+}
+
+// SetSlotFailure marks one slot down with a bounded reason and records the
+// server the attempt targeted. DeviceID, ports and generation are preserved.
+func (s *Store) SetSlotFailure(key model.SlotKey, serverID, reason string) error {
+	if !key.Valid() {
+		return invalidf("slot key %q is invalid", key.String())
+	}
+	detail := clientMessage(reason)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot, ok := s.accountSlots[key]
+	if !ok {
+		return notFoundf("slot %s not found", key.String())
+	}
+	slot.State = model.SlotDown
+	slot.Health = model.SlotHealthDegraded
+	slot.LastAttemptAt = iso(s.now())
+	slot.LastError = detail
+	if serverID != "" {
+		slot.ServerID = serverID
+	}
+	s.accountSlots[key] = slot
+	meta := map[string]string{"slot": key.String(), "reason": detail}
+	if serverID != "" {
+		meta["serverId"] = serverID
+	}
+	s.addAuditLocked(model.SeverityWarn, "system", "slot.failure", key.String(),
+		"Slot down · "+detail, meta)
+	return nil
+}
+
+// DisableSlot releases one slot: state down, ports cleared, row kept. It
+// refuses while an active lease points at the slot's node, so a capacity
+// change never revokes a customer lease.
+func (s *Store) DisableSlot(key model.SlotKey) error {
+	if !key.Valid() {
+		return invalidf("slot key %q is invalid", key.String())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot, ok := s.accountSlots[key]
+	if !ok {
+		return notFoundf("slot %s not found", key.String())
+	}
+	if slot.ServerID != "" {
+		nodeID := key.NodeID(slot.ServerID)
+		for _, lease := range s.leases {
+			if lease.NodeID == nodeID {
+				return conflictf("slot_has_lease: slot %s still has an active lease", key.String())
+			}
+		}
+	}
+	slot.State = model.SlotDown
+	slot.Health = model.SlotHealthDegraded
+	slot.GatePort, slot.HTTPPort = 0, 0
+	slot.LastAttemptAt = iso(s.now())
+	slot.LastError = "disabled"
+	s.accountSlots[key] = slot
+	s.addAuditLocked(model.SeverityInfo, "operator", "slot.disable", key.String(),
+		"Slot disabled · capacity reduced",
+		map[string]string{"slot": key.String(), "serverId": slot.ServerID})
+	return nil
+}
 
 // SetSlotState updates the lifecycle and health of one existing slot. Detail
 // is reduced to one bounded line and kept only as the slot's last error, so a

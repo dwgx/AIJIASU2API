@@ -486,7 +486,7 @@ func TestEventEmissionAndHealthLifecycle(t *testing.T) {
 	}
 
 	catalog.connect = runtime.SwitchResult{
-		AccountID: "acc-01", NodeID: "acc-01:srv-1", ServerID: "srv-1",
+		AccountID: "acc-01", NodeID: "acc-01#1:srv-1", ServerID: "srv-1",
 		NodeState: model.NodeLive, GatePort: 20001,
 	}
 	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/connect", map[string]any{
@@ -496,14 +496,14 @@ func TestEventEmissionAndHealthLifecycle(t *testing.T) {
 	if sink.count(webhook.EventNodeConnected) != 1 {
 		t.Fatalf("connect emitted %v, want node.connected", sink.types())
 	}
-	if port, ok := probes.watchPort("acc-01:srv-1"); !ok || port != 20001 {
+	if port, ok := probes.watchPort("acc-01#1:srv-1"); !ok || port != 20001 {
 		t.Fatalf("health did not watch the connected gate: port=%d ok=%t", port, ok)
 	}
 
 	// A switch emits node.switched and drops the old gate from the sampler.
 	catalog.connect = runtime.SwitchResult{
-		AccountID: "acc-01", NodeID: "acc-01:srv-2", ServerID: "srv-2", SwitchedFrom: "srv-1",
-		NodeState: model.NodeLive, GatePort: 20002,
+		AccountID: "acc-01", NodeID: "acc-01#1:srv-2", ServerID: "srv-2", SwitchedFrom: "srv-1",
+		PrevNodeID: "acc-01#1:srv-1", NodeState: model.NodeLive, GatePort: 20002,
 	}
 	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/accounts/acc-01/actions/connect", map[string]any{
 		"confirm": true, "serverId": "srv-2",
@@ -512,10 +512,10 @@ func TestEventEmissionAndHealthLifecycle(t *testing.T) {
 	if sink.count(webhook.EventNodeSwitched) != 1 {
 		t.Fatalf("switch emitted %v, want node.switched", sink.types())
 	}
-	if _, ok := probes.watchPort("acc-01:srv-1"); ok {
+	if _, ok := probes.watchPort("acc-01#1:srv-1"); ok {
 		t.Fatal("switch kept sampling the old gate")
 	}
-	if port, ok := probes.watchPort("acc-01:srv-2"); !ok || port != 20002 {
+	if port, ok := probes.watchPort("acc-01#1:srv-2"); !ok || port != 20002 {
 		t.Fatalf("health did not watch the switched gate: port=%d ok=%t", port, ok)
 	}
 

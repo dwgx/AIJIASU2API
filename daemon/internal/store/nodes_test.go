@@ -10,10 +10,11 @@ import (
 	"ajsaccountd/internal/store"
 )
 
-// runtimeNode is a valid controller-written node for accountID.
+// runtimeNode is a valid controller-written node for accountID: the slot-1
+// node id carries the slot segment and the row names its slot.
 func runtimeNode(accountID string) model.ProxyNode {
 	return model.ProxyNode{
-		ID:        accountID + ":s1",
+		ID:        model.SlotKey{AccountID: accountID, Index: 1}.NodeID("s1"),
 		AccountID: accountID,
 		Label:     "cn-" + accountID + "-s1",
 		Region:    "cn",
@@ -23,6 +24,7 @@ func runtimeNode(accountID string) model.ProxyNode {
 		Protocol:  model.ProtocolSOCKS5,
 		GatePort:  13000,
 		ServerID:  "s1",
+		Slot:      1,
 		Capacity:  32,
 	}
 }

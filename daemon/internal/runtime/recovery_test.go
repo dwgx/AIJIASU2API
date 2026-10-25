@@ -72,7 +72,7 @@ func newAutoLoginAccount(t *testing.T, st *store.Store, label string) model.Acco
 func putAutoLoginNode(t *testing.T, st *store.Store, acct model.Account, label string) model.ProxyNode {
 	t.Helper()
 	node, err := st.PutNode(model.ProxyNode{
-		ID:        acct.ID + ":s1",
+		ID:        slot1NodeID(acct.ID, "s1"),
 		AccountID: acct.ID,
 		Label:     label,
 		Region:    "cn",

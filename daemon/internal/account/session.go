@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync/atomic"
 
+	"ajsaccountd/internal/model"
 	"ajsproxy/apifacade"
 	"ajsproxy/fvfacade"
 )
@@ -95,12 +98,29 @@ var OpenAJSAndroid = VersionProfile{
 // Profile is optional. A zero value selects the factory's profile; any other
 // value must match it, so two profiles cannot disagree at runtime.
 type SessionRequest struct {
-	AccountID       string
+	AccountID string
+	// Slot is the account slot the session belongs to. It is optional: the
+	// zero key means slot 1, and a non-zero invalid key fails Open.
+	Slot            model.SlotKey
 	Server          apifacade.Server
 	Device          apifacade.Device
 	UserName        string
 	ConnectPassword Secret
 	Profile         VersionProfile
+}
+
+// SlotUserName is the vendor tunnel name of one slot: base for slot 1, base#N
+// otherwise. An empty base returns "" (the caller falls back to the account
+// username first).
+func SlotUserName(base string, index int) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return ""
+	}
+	if index <= 1 {
+		return base
+	}
+	return base + "#" + strconv.Itoa(index)
 }
 
 // FlowSession is one authenticated FV session and its data channels. It is
@@ -150,6 +170,9 @@ func (f *Factory) Profile() VersionProfile {
 // returns it wrapped as a FlowSession. The connect password is put on the wire
 // and is never logged.
 func (f *Factory) Open(ctx context.Context, req SessionRequest) (FlowSession, error) {
+	if req.Slot.Index != 0 && !req.Slot.Valid() {
+		return nil, fmt.Errorf("account: session request slot %q is invalid", req.Slot.String())
+	}
 	if f == nil || f.transport == nil {
 		return nil, errors.New("account: session factory has no transport")
 	}

@@ -2,17 +2,18 @@ package store
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"ajsaccountd/internal/model"
 )
 
-// TestCreateLeaseRefusesBeyondAdmissionSlots pins the default: one account
-// backs one active lease, even when its manual Concurrency and node count
-// would allow more. The refusal is a quota-class 429 with the dedicated
-// account_slots_exhausted reason.
-func TestCreateLeaseRefusesBeyondAdmissionSlots(t *testing.T) {
+// TestCreateLeaseRefusesBeyondCapacity pins the default: one account backs one
+// active lease while its UseCount and AJS_ACCOUNT_SLOTS allow one slot. The
+// refusal is a quota-class 429 with the dedicated account_slots_exhausted
+// reason.
+func TestCreateLeaseRefusesBeyondCapacity(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 8)
 	st := fixture.st
@@ -38,40 +39,43 @@ func TestCreateLeaseRefusesBeyondAdmissionSlots(t *testing.T) {
 	}
 }
 
-// TestCreateLeaseAdmissionStaysOneDespiteDisplayCapacity proves the split
-// introduced by AJS-332: UseCount=3 and AJS_ACCOUNT_SLOTS=2 give the UI a
-// display capacity of two, but the lease guard admits exactly one active
-// lease because the multi-slot runtime is not implemented.
-func TestCreateLeaseAdmissionStaysOneDespiteDisplayCapacity(t *testing.T) {
+// TestCreateLeaseAdmitsConfiguredSlotCapacity proves the lease guard follows
+// the slot allowance: UseCount=3 with AJS_ACCOUNT_SLOTS=2 admits two leases and
+// refuses the third with account_slots_exhausted.
+func TestCreateLeaseAdmitsConfiguredSlotCapacity(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 8)
 	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
 	st := fixture.st
-	if _, err := st.SetAccountUseCount(fixture.account.ID, 3); err != nil {
+	account, err := st.SetAccountUseCount(fixture.account.ID, 3)
+	if err != nil {
 		t.Fatalf("SetAccountUseCount: %v", err)
 	}
 	if got := ConfiguredSlotCapacity(3); got != 2 {
 		t.Fatalf("display capacity = %d, want 2", got)
 	}
-	if got := ConfiguredAdmissionSlots(3); got != MaxAdmissionSlots {
-		t.Fatalf("admission capacity = %d, want %d", got, MaxAdmissionSlots)
+	if got := st.accountCapacityLocked(account, now); got != 2 {
+		t.Fatalf("admission capacity = %d, want 2", got)
 	}
 
-	if _, _, err := st.CreateLease(model.CreateLeaseInput{
-		UserID: fixture.user.ID, Platform: model.PlatformAndroid,
-	}); err != nil {
-		t.Fatalf("first CreateLease: %v", err)
+	users := []model.PanelUser{fixture.user, addLeaseUser(t, st, "second-bot", nil)}
+	for i, user := range users {
+		if _, _, err := st.CreateLease(model.CreateLeaseInput{
+			UserID: user.ID, Platform: model.PlatformAndroid,
+		}); err != nil {
+			t.Fatalf("CreateLease #%d: %v", i+1, err)
+		}
 	}
-	second := addLeaseUser(t, st, "second-bot", nil)
-	_, _, err := st.CreateLease(model.CreateLeaseInput{
-		UserID: second.ID, Platform: model.PlatformAndroid,
+	third := addLeaseUser(t, st, "third-bot", nil)
+	_, _, err = st.CreateLease(model.CreateLeaseInput{
+		UserID: third.ID, Platform: model.PlatformAndroid,
 	})
 	var leaseErr *LeaseError
 	if !errors.As(err, &leaseErr) || leaseErr.Reason != "account_slots_exhausted" {
-		t.Fatalf("second create = %v, want account_slots_exhausted", err)
+		t.Fatalf("third create = %v, want account_slots_exhausted", err)
 	}
-	if got := len(st.Leases()); got != 1 {
-		t.Fatalf("leases = %d, want 1", got)
+	if got := len(st.Leases()); got != 2 {
+		t.Fatalf("leases = %d, want 2", got)
 	}
 }
 
@@ -131,10 +135,10 @@ func TestSetAccountUseCountClamps(t *testing.T) {
 	}
 }
 
-// TestCreateLeaseAdmissionIgnoresUseCountAboveOne proves the admission guard
-// does not follow the vendor's UseCount: a generous AJS_ACCOUNT_SLOTS and
-// UseCount=2 still admit only the first lease.
-func TestCreateLeaseAdmissionIgnoresUseCountAboveOne(t *testing.T) {
+// TestCreateLeaseAdmissionFollowsSlotCapacity proves the guard follows the
+// vendor UseCount capped by AJS_ACCOUNT_SLOTS: UseCount=2 with
+// AJS_ACCOUNT_SLOTS=5 admits two leases, then refuses the third.
+func TestCreateLeaseAdmissionFollowsSlotCapacity(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 8)
 	t.Setenv("AJS_ACCOUNT_SLOTS", "5")
@@ -146,29 +150,32 @@ func TestCreateLeaseAdmissionIgnoresUseCountAboveOne(t *testing.T) {
 		t.Fatalf("display capacity = %d, want 2", got)
 	}
 
-	first := fixture.user
-	second := addLeaseUser(t, st, "second-bot", nil)
-	if _, _, err := st.CreateLease(model.CreateLeaseInput{
-		UserID: first.ID, Platform: model.PlatformAndroid,
-	}); err != nil {
-		t.Fatalf("CreateLease(%s): %v", first.Name, err)
+	users := []model.PanelUser{fixture.user, addLeaseUser(t, st, "second-bot", nil)}
+	for i, user := range users {
+		if _, _, err := st.CreateLease(model.CreateLeaseInput{
+			UserID: user.ID, Platform: model.PlatformAndroid,
+		}); err != nil {
+			t.Fatalf("CreateLease #%d: %v", i+1, err)
+		}
 	}
+	third := addLeaseUser(t, st, "third-bot", nil)
 	_, _, err := st.CreateLease(model.CreateLeaseInput{
-		UserID: second.ID, Platform: model.PlatformAndroid,
+		UserID: third.ID, Platform: model.PlatformAndroid,
 	})
 	var leaseErr *LeaseError
 	if !errors.As(err, &leaseErr) || leaseErr.Reason != "account_slots_exhausted" {
-		t.Fatalf("second create = %v, want account_slots_exhausted", err)
+		t.Fatalf("third create = %v, want account_slots_exhausted", err)
 	}
-	if got := len(st.Leases()); got != 1 {
-		t.Fatalf("leases = %d, want 1", got)
+	if got := len(st.Leases()); got != 2 {
+		t.Fatalf("leases = %d, want 2", got)
 	}
 }
 
-// TestCreateLeaseAdmissionCannotBeBypassedByEnv runs the whole operator-cap
-// range against a UseCount=8 account. Every value must leave the admission
-// guard at exactly one active lease; only the display capacity changes.
-func TestCreateLeaseAdmissionCannotBeBypassedByEnv(t *testing.T) {
+// TestCreateLeaseAdmissionFollowsEnvCapacity runs the whole operator-cap range
+// against a UseCount=8 account with enough nodes to serve it. The admitted
+// lease count equals the configured slot capacity; only the display capacity
+// changes with the value.
+func TestCreateLeaseAdmissionFollowsEnvCapacity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		configured string
@@ -183,34 +190,46 @@ func TestCreateLeaseAdmissionCannotBeBypassedByEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
-			fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 8)
+			fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 32)
 			t.Setenv("AJS_ACCOUNT_SLOTS", tc.configured)
 			st := fixture.st
-			if _, err := st.SetAccountUseCount(fixture.account.ID, 8); err != nil {
+			account, err := st.SetAccountUseCount(fixture.account.ID, 8)
+			if err != nil {
 				t.Fatalf("SetAccountUseCount: %v", err)
+			}
+			for index := 3; index <= 8; index++ {
+				addLeaseNode(t, st, fixture.account.ID,
+					"node-"+strconv.Itoa(index), "cn-extra-"+strconv.Itoa(index))
 			}
 			if got := ConfiguredSlotCapacity(8); got != tc.display {
 				t.Fatalf("display capacity = %d, want %d", got, tc.display)
 			}
-			if got := ConfiguredAdmissionSlots(8); got != MaxAdmissionSlots {
-				t.Fatalf("admission capacity = %d, want %d", got, MaxAdmissionSlots)
+			if got := st.accountCapacityLocked(account, now); got != tc.display {
+				t.Fatalf("admission capacity = %d, want %d", got, tc.display)
 			}
 
-			if _, _, err := st.CreateLease(model.CreateLeaseInput{
-				UserID: fixture.user.ID, Platform: model.PlatformAndroid,
-			}); err != nil {
-				t.Fatalf("first CreateLease: %v", err)
+			users := make([]model.PanelUser, 0, tc.display)
+			users = append(users, fixture.user)
+			for index := 1; index < tc.display; index++ {
+				users = append(users, addLeaseUser(t, st, "bot-"+strconv.Itoa(index), nil))
 			}
-			second := addLeaseUser(t, st, "second-bot", nil)
-			_, _, err := st.CreateLease(model.CreateLeaseInput{
-				UserID: second.ID, Platform: model.PlatformAndroid,
+			for i, user := range users {
+				if _, _, err := st.CreateLease(model.CreateLeaseInput{
+					UserID: user.ID, Platform: model.PlatformAndroid,
+				}); err != nil {
+					t.Fatalf("CreateLease #%d: %v", i+1, err)
+				}
+			}
+			extra := addLeaseUser(t, st, "over-capacity", nil)
+			_, _, err = st.CreateLease(model.CreateLeaseInput{
+				UserID: extra.ID, Platform: model.PlatformAndroid,
 			})
 			var leaseErr *LeaseError
 			if !errors.As(err, &leaseErr) || leaseErr.Reason != "account_slots_exhausted" {
-				t.Fatalf("second create = %v, want account_slots_exhausted", err)
+				t.Fatalf("over-capacity create = %v, want account_slots_exhausted", err)
 			}
-			if got := len(st.Leases()); got != 1 {
-				t.Fatalf("leases = %d, want 1", got)
+			if got := len(st.Leases()); got != tc.display {
+				t.Fatalf("leases = %d, want %d", got, tc.display)
 			}
 		})
 	}

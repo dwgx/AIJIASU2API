@@ -299,15 +299,15 @@ func classifySwitchError(err error, ctx context.Context) (class, reason string, 
 	var switchErr *runtime.SwitchError
 	if errors.As(err, &switchErr) {
 		switch switchErr.Reason {
-		case runtime.ReasonSwitchInProgress, runtime.ReasonConnectCooldown:
+		case runtime.ReasonSwitchInProgress, runtime.ReasonConnectCooldown, runtime.ReasonPortUnavailable:
 			return "conflict", switchErr.Reason, false
-		case runtime.ReasonMultipleSessions:
+		case runtime.ReasonSlotMultipleSessions:
 			return "invariant", switchErr.Reason, true
 		case runtime.ReasonLoginRequired, runtime.ReasonLoginDisabled, runtime.ReasonAccountState,
 			runtime.ReasonUnknownServer, runtime.ReasonServerIneligible, runtime.ReasonNoTarget,
 			runtime.ReasonSnapshotChanged:
 			return "permanent", switchErr.Reason, true
-		case runtime.ReasonSessionOpen, runtime.ReasonGateStart:
+		case runtime.ReasonSessionOpen, runtime.ReasonGateStart, runtime.ReasonSessionUnverified:
 			return "transient", switchErr.Reason, false
 		case runtime.ReasonStoreFailed:
 			return "internal", switchErr.Reason, true

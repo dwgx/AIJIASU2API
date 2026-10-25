@@ -279,7 +279,8 @@ func (s *Server) writeCatalogError(w http.ResponseWriter, err error) {
 		case runtime.ReasonUnknownServer, runtime.ReasonNoTarget:
 			writeErrorReason(w, http.StatusNotFound, CodeNotFound, switchErr.Reason, switchErr.Message, switchErr.Details)
 		case runtime.ReasonSnapshotChanged, runtime.ReasonServerIneligible, runtime.ReasonSwitchInProgress,
-			runtime.ReasonMultipleSessions, runtime.ReasonLoginRequired, runtime.ReasonLoginDisabled,
+			runtime.ReasonSlotMultipleSessions, runtime.ReasonPortUnavailable,
+			runtime.ReasonLoginRequired, runtime.ReasonLoginDisabled,
 			runtime.ReasonAccountState:
 			writeErrorReason(w, http.StatusConflict, CodeConflict, switchErr.Reason, switchErr.Message, switchErr.Details)
 		case runtime.ReasonConnectCooldown:
@@ -289,7 +290,7 @@ func (s *Server) writeCatalogError(w http.ResponseWriter, err error) {
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeErrorReason(w, http.StatusTooManyRequests, CodeRateLimited, switchErr.Reason, switchErr.Message, switchErr.Details)
-		case runtime.ReasonSessionOpen, runtime.ReasonGateStart:
+		case runtime.ReasonSessionOpen, runtime.ReasonGateStart, runtime.ReasonSessionUnverified:
 			s.logger.Warn("catalog_connect_failed", "reason", switchErr.Reason, "error", switchErr.Cause)
 			writeErrorReason(w, http.StatusBadGateway, CodeUpstreamUnavailable, switchErr.Reason, switchErr.Message, switchErr.Details)
 		case runtime.ReasonStoreFailed:

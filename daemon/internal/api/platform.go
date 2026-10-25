@@ -505,8 +505,10 @@ func (s *Server) accountNodeIDs(accountID string) []string {
 // old gate is dropped, and the matching customer event is emitted.
 func (s *Server) observeConnect(result runtime.SwitchResult) {
 	s.watchHealth(result.NodeID, result.GatePort)
-	if result.SwitchedFrom != "" && result.SwitchedFrom != result.ServerID {
-		s.unwatchHealth(result.AccountID + ":" + result.SwitchedFrom)
+	// A same-server reconnect reuses the node id: the watcher just registered
+	// is the current one, so only a replaced node is dropped.
+	if result.PrevNodeID != "" && result.PrevNodeID != result.NodeID {
+		s.unwatchHealth(result.PrevNodeID)
 	}
 	if result.AlreadyConnected {
 		return

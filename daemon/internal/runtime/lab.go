@@ -612,7 +612,7 @@ func (v *LabView) Servers(_ context.Context, accountID string) (model.ServersVie
 			}
 			usableIndex++
 		}
-		id := nodeID(accountID, entry.id)
+		id := nodeID(model.SlotKey{AccountID: accountID, Index: 1}, entry.id)
 		node, hasNode := v.store.Node(id)
 		item := model.ServerView{
 			ID:             entry.id,

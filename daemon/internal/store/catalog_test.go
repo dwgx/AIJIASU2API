@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"ajsaccountd/internal/model"
 )
@@ -100,16 +101,71 @@ func TestCatalogSelectionClearAndLost(t *testing.T) {
 }
 
 func TestCatalogCommitSwitch(t *testing.T) {
-	st := New()
-	selection := &model.Selection{AccountID: "acc-01", ServerID: "new", UpdatedBy: "operator"}
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	st := newEmptyWithClock(func() time.Time { return now }, nil)
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Switch Ops", Username: "switch-ops", Password: "local-placeholder",
+		Platform: model.PlatformAndroid, Concurrency: 8,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if _, err := st.SetAccountUseCount(account.ID, 2); err != nil {
+		t.Fatalf("SetAccountUseCount: %v", err)
+	}
+	key := model.SlotKey{AccountID: account.ID, Index: 1}
+	oldID := key.NodeID("old")
+	if err := st.UpsertSlot(model.AccountSlot{
+		SlotKey: key, ServerID: "old", GatePort: 13020,
+		State: model.SlotLive, Health: model.SlotHealthHealthy, Generation: 1,
+	}); err != nil {
+		t.Fatalf("UpsertSlot: %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: oldID, AccountID: account.ID, Label: "cn-switch-old", Region: "cn",
+		State: model.NodeLive, GatePort: 13020, ServerID: "old", Slot: 1,
+		Capacity: 32, Protocol: model.ProtocolSOCKS5,
+	}); err != nil {
+		t.Fatalf("PutNode(old): %v", err)
+	}
+	// A legacy row (Slot 0) must survive a slot-1 switch: it is never
+	// collateral for a slot-scoped commit.
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "legacy-node", AccountID: account.ID, Label: "cn-legacy", Region: "cn",
+		State: model.NodeReady, GatePort: 13021, Capacity: 32, Protocol: model.ProtocolSOCKS5,
+	}); err != nil {
+		t.Fatalf("PutNode(legacy): %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "switch-user"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformAndroid, AccountID: account.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if lease.NodeID != oldID || lease.Slot != 1 || lease.Generation != 1 {
+		t.Fatalf("lease = %+v, want node %s slot 1 generation 1", lease, oldID)
+	}
+
+	selection := &model.Selection{AccountID: account.ID, ServerID: "new", UpdatedBy: "operator"}
 	latency := 12
-	stat := &model.ServerStat{AccountID: "acc-01", ServerID: "new", LastLatencyMs: &latency}
+	stat := &model.ServerStat{AccountID: account.ID, ServerID: "new", LastLatencyMs: &latency}
+	newID := key.NodeID("new")
 	node, auditID, err := st.CommitSwitch(SwitchCommit{
 		Node: model.ProxyNode{
-			ID: "acc-01:new", AccountID: "acc-01", Label: "cn-test-01", Region: "cn", State: model.NodeLive,
-			GatePort: 13020, ServerID: "new", Capacity: 32, Protocol: model.ProtocolSOCKS5,
+			ID: newID, AccountID: account.ID, Label: "cn-switch-new", Region: "cn",
+			State: model.NodeLive, GatePort: 13020, ServerID: "new", Slot: 1,
+			Capacity: 32, Protocol: model.ProtocolSOCKS5,
 		},
-		Actor: "operator", Action: "catalog.switch", Target: "acc-01:new",
+		Slot: key,
+		SlotState: &model.AccountSlot{
+			SlotKey: key, ServerID: "new", GatePort: 13020,
+			State: model.SlotLive, Health: model.SlotHealthHealthy, Generation: 2,
+		},
+		Actor: "operator", Action: "catalog.switch", Target: newID,
 		Detail:    "Switched · one session live",
 		Meta:      map[string]string{"fromServerId": "old", "toServerId": "new", "result": "ok"},
 		Selection: selection,
@@ -118,36 +174,41 @@ func TestCatalogCommitSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitSwitch: %v", err)
 	}
-	if node.ID != "acc-01:new" || node.State != model.NodeLive || node.AccountLabel != "Northwind Ops" {
+	if node.ID != newID || node.State != model.NodeLive || node.AccountLabel != "Switch Ops" {
 		t.Fatalf("node = %+v", node)
 	}
-	nodes := st.Nodes()
-	count := 0
-	for _, candidate := range nodes {
-		if candidate.AccountID == "acc-01" {
-			count++
-			if candidate.ID != "acc-01:new" {
-				t.Fatalf("unexpected account node %+v", candidate)
-			}
-		}
+	if node.InUse != 1 {
+		t.Fatalf("node inUse = %d, want 1 (the rebound lease)", node.InUse)
 	}
-	if count != 1 {
-		t.Fatalf("account nodes = %d, want 1", count)
+	if _, ok := st.Node(oldID); ok {
+		t.Fatalf("old slot node %q survived the switch", oldID)
 	}
-	for _, lease := range st.Leases() {
-		if lease.AccountID == "acc-01" {
-			t.Fatalf("lease %s survived the switch", lease.ID)
-		}
+	if _, ok := st.Node("legacy-node"); !ok {
+		t.Fatal("legacy Slot 0 node was deleted by a slot-scoped switch")
 	}
-	account, _ := st.Account("acc-01")
-	if account.NodeCount != 1 || account.LiveNodeCount != 1 {
-		t.Fatalf("account counts = %d/%d, want 1/1", account.NodeCount, account.LiveNodeCount)
+	leases := st.Leases()
+	if len(leases) != 1 {
+		t.Fatalf("leases = %d, want the one rebound lease", len(leases))
 	}
-	gotSelection, ok := st.Selection("acc-01")
+	rebound := leases[0]
+	if rebound.NodeID != newID || rebound.NodeLabel != "cn-switch-new" || rebound.GatePort != 13020 ||
+		rebound.Slot != 1 || rebound.Generation != 2 {
+		t.Fatalf("rebound lease = %+v, want node %s slot 1 generation 2", rebound, newID)
+	}
+	slot, ok := st.Slot(key)
+	if !ok || slot.ServerID != "new" || slot.State != model.SlotLive || slot.Generation != 2 {
+		t.Fatalf("slot = %+v/%v, want server new LIVE generation 2", slot, ok)
+	}
+	accountAfter, _ := st.Account(account.ID)
+	if accountAfter.NodeCount != 2 || accountAfter.LiveNodeCount != 1 {
+		t.Fatalf("account counts = %d/%d, want 2/1 (new LIVE plus the legacy READY row)",
+			accountAfter.NodeCount, accountAfter.LiveNodeCount)
+	}
+	gotSelection, ok := st.Selection(account.ID)
 	if !ok || gotSelection.ServerID != "new" {
 		t.Fatalf("selection = %+v/%v", gotSelection, ok)
 	}
-	gotStat, ok := st.ServerStat("acc-01", "new")
+	gotStat, ok := st.ServerStat(account.ID, "new")
 	if !ok || gotStat.Attempts != 1 || gotStat.Successes != 1 || gotStat.LastLatencyMs == nil || *gotStat.LastLatencyMs != 12 {
 		t.Fatalf("stat = %+v/%v", gotStat, ok)
 	}
@@ -177,7 +238,7 @@ func TestCatalogCommitSwitchFailureKeepsState(t *testing.T) {
 		Node: model.ProxyNode{
 			// node-04 belongs to acc-02 and already owns this label.
 			ID: "acc-01:new", AccountID: "acc-01", Label: "jp-tyo-01", Region: "cn", State: model.NodeLive,
-			GatePort: 13020, ServerID: "new", Capacity: 32, Protocol: model.ProtocolSOCKS5,
+			GatePort: 13020, ServerID: "new", Slot: 1, Capacity: 32, Protocol: model.ProtocolSOCKS5,
 		},
 		Actor: "operator", Action: "catalog.switch", Target: "acc-01:new",
 		Detail: "Switched", Stat: &model.ServerStat{AccountID: "acc-01", ServerID: "new"},
@@ -208,6 +269,28 @@ func TestCatalogCommitSwitchFailureKeepsState(t *testing.T) {
 	}
 	if got := len(st.Audit(1000)); got != beforeAudits {
 		t.Fatalf("failed commit wrote an audit: %d -> %d", beforeAudits, got)
+	}
+}
+
+// TestCatalogCommitSwitchRejectsLegacySlot proves the store never infers a slot
+// from the id or the account: a commit whose node still carries Slot 0 is a
+// caller bug, not an account-wide switch.
+func TestCatalogCommitSwitchRejectsLegacySlot(t *testing.T) {
+	st := New()
+	_, _, err := st.CommitSwitch(SwitchCommit{
+		Node: model.ProxyNode{
+			ID: "acc-01:new", AccountID: "acc-01", Label: "cn-test-legacy", Region: "cn",
+			State: model.NodeLive, GatePort: 13020, ServerID: "new",
+			Capacity: 32, Protocol: model.ProtocolSOCKS5,
+		},
+		Actor: "operator", Action: "catalog.switch", Target: "acc-01:new",
+		Detail: "Switched", Stat: &model.ServerStat{AccountID: "acc-01", ServerID: "new"},
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("CommitSwitch error = %v, want ErrInvalid", err)
+	}
+	if _, ok := st.Node("acc-01:new"); ok {
+		t.Fatal("rejected commit wrote the node")
 	}
 }
 

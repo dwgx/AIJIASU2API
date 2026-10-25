@@ -92,7 +92,7 @@ func newMeterFixture(t *testing.T, label string) *meterFixture {
 // gatePort returns the loopback port of the fixture's only node.
 func (f *meterFixture) gatePort(t *testing.T) int {
 	t.Helper()
-	node, ok := f.store.Node(f.account.ID + ":s1")
+	node, ok := f.store.Node(slot1NodeID(f.account.ID, "s1"))
 	if !ok || node.GatePort == 0 {
 		t.Fatalf("node %s:s1 has no gate port", f.account.ID)
 	}
@@ -226,7 +226,7 @@ func TestFlowMeterMetersAcceptedFlowsIntoUsage(t *testing.T) {
 	if row.AccountLabel != fixture.account.Label {
 		t.Fatalf("accountLabel = %q, want %q", row.AccountLabel, fixture.account.Label)
 	}
-	node, ok := fixture.store.Node(fixture.account.ID + ":s1")
+	node, ok := fixture.store.Node(slot1NodeID(fixture.account.ID, "s1"))
 	if !ok || row.NodeLabel != node.Label || row.Region != node.Region {
 		t.Fatalf("node attribution = %q/%q, want %q/%q", row.NodeLabel, row.Region, node.Label, node.Region)
 	}

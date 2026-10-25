@@ -333,7 +333,7 @@ func TestFlowRingHTTPServesRealGateRows(t *testing.T) {
 			t.Fatalf("decode flows: %v (%s)", err, body)
 		}
 		if len(view.Flows) == 1 {
-			if view.Flows[0].NodeID != acct.ID+":s1" || view.Flows[0].TargetHost != "example.com" ||
+			if view.Flows[0].NodeID != (model.SlotKey{AccountID: acct.ID, Index: 1}).NodeID("s1") || view.Flows[0].TargetHost != "example.com" ||
 				view.Flows[0].TargetPort != 443 || view.Flows[0].Status != gate.FlowStatusOK ||
 				view.Flows[0].BytesIn != 4 || view.Flows[0].BytesOut != 4 {
 				t.Fatalf("flow = %+v", view.Flows[0])

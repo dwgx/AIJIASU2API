@@ -39,15 +39,12 @@ const (
 
 	// maxGatePort is the highest TCP port.
 	maxGatePort = 65535
-
-	// maxGatePortAttempts bounds how many bind failures one gate may see
-	// before the controller gives up. A Start failure is retried on the next
-	// port instead of classifying the OS error: Windows reports
-	// WSAEADDRINUSE (10048), which is not syscall.EADDRINUSE, and every other
-	// Start failure (a stopped controller, an invalid listen address) fails
-	// every port the same way.
-	maxGatePortAttempts = 32
 )
+
+// errSlotPortUnavailable marks a slot whose reserved listener pair cannot be
+// used. The pair is immutable while the slot row owns it, so the slot fails
+// down instead of moving to another port: a lease stores the gate port.
+var errSlotPortUnavailable = errors.New("runtime: slot port pair is unavailable")
 
 // NodeController errors are matched with errors.Is by the API hook and tests.
 var (
@@ -94,6 +91,13 @@ type GateFlows interface {
 	Dropped() uint64
 }
 
+// GateHTTPAddr is the optional HTTP-listener view a Gate may expose. The
+// controller checks it after Start so a gate that ignored HTTPListen cannot be
+// recorded as owning a port pair it does not serve.
+type GateHTTPAddr interface {
+	HTTPAddr() net.Addr
+}
+
 // NodeRuntime is one running node as seen by the read-only Lab view: the
 // node's identity, its session summary and, when the gate exposes them, the
 // counter snapshot and bounded flow window. It carries no credentials.
@@ -104,6 +108,10 @@ type NodeRuntime struct {
 	Port      int
 	EgressIP  string
 	Draining  bool
+	// Slot is the one-based account slot that owns the gate. Generation is
+	// the controlled session-open counter the gate was started under.
+	Slot       int
+	Generation uint64
 
 	SessionSID     string
 	SessionHealthy bool
@@ -146,10 +154,11 @@ type NodeControllerConfig struct {
 	// Profile is the FV profile of the sessions; the zero value selects
 	// account.Linux423Binary, matching the login service default.
 	Profile account.VersionProfile
-	// MaxServers caps how many usable servers one account starts: after the
-	// deterministic sort only the first MaxServers server IDs get a session
-	// and a gate. Zero starts every usable server (a live login can expose
-	// 100+); negative is invalid.
+	// MaxServers caps how many slots one account starts. It is a ceiling on
+	// the account's slot capacity, not a server fan-out switch: zero means no
+	// additional cap, so min(UseCount, AJS_ACCOUNT_SLOTS, 8) decides, and a
+	// positive value below that capacity starts fewer sessions. Negative is
+	// invalid.
 	MaxServers int
 	Logger     *slog.Logger
 	// PortBase is the first port tried; zero selects DefaultGatePortBase.
@@ -181,22 +190,24 @@ type NodeControllerConfig struct {
 
 // nodeGate is one running gate plus the session it serves.
 type nodeGate struct {
-	gate      Gate
-	session   account.FlowSession
-	accountID string
-	serverID  string
-	port      int
-	httpPort  int
-	egressIP  string
-	draining  bool
-	startedAt time.Time
+	gate       Gate
+	session    account.FlowSession
+	accountID  string
+	serverID   string
+	slot       model.SlotKey
+	generation uint64
+	port       int
+	httpPort   int
+	egressIP   string
+	draining   bool
+	startedAt  time.Time
 }
 
-// NodeController owns one SOCKS5 gate per usable vendor server. After a
-// successful login, SyncAccount opens a session and a loopback gate for every
-// server the login returned, persists the node, and reconciles Resin. It is
-// the production caller of account.Factory and gate.NewServer that B0 was
-// missing.
+// NodeController owns one SOCKS5 gate per enabled account slot. After a
+// successful login, SyncAccount opens one session and one loopback gate per
+// slot within the account's capacity, persists the slot row and node, and
+// reconciles Resin. It is the production caller of account.Factory and
+// gate.NewServer that B0 was missing.
 //
 // Every mutation is serialized: a login sync holds the lock across its vendor
 // calls, so a concurrent drain or shutdown cannot interleave with a half-built
@@ -221,17 +232,23 @@ type NodeController struct {
 	now      func() time.Time
 	cooldown time.Duration
 
-	// switchMu guards the per-account switch markers and last-attempt times.
-	// It is separate from mu so a second switch for the same account gets
-	// 409 switch_in_progress instead of blocking behind the first one.
+	// switchMu guards the per-slot switch markers, the account-wide mutation
+	// marker and last-attempt times. It is separate from mu so a second switch
+	// for the same slot gets 409 switch_in_progress instead of blocking behind
+	// the first one.
 	switchMu    sync.Mutex
-	switching   map[string]struct{}
-	lastAttempt map[string]time.Time
+	switching   map[model.SlotKey]struct{}
+	lastAttempt map[model.SlotKey]time.Time
+	accountBusy map[string]struct{}
 
-	mu       sync.Mutex
-	running  map[string]*nodeGate
-	nextPort int
-	stopped  bool
+	mu      sync.Mutex
+	running map[string]*nodeGate
+	// slotGates maps one slot to its running node id. At most one gate per
+	// slot is the runtime invariant the switch predicate and lease picker
+	// rely on.
+	slotGates map[model.SlotKey]string
+	nextPort  int
+	stopped   bool
 
 	// gateAuth and identity configure every gate the controller starts. In
 	// loopback mode identity is unused; in userpass mode a nil identity makes
@@ -314,12 +331,14 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 		ctx:         ctx,
 		cancel:      cancel,
 		running:     make(map[string]*nodeGate),
+		slotGates:   make(map[model.SlotKey]string),
 		nextPort:    portBase,
 		maxServers:  cfg.MaxServers,
 		now:         now,
 		cooldown:    cooldown,
-		switching:   make(map[string]struct{}),
-		lastAttempt: make(map[string]time.Time),
+		switching:   make(map[model.SlotKey]struct{}),
+		lastAttempt: make(map[model.SlotKey]time.Time),
+		accountBusy: make(map[string]struct{}),
 		gateAuth:    gateAuth,
 		identity:    cfg.GateIdentity,
 		httpEnabled: cfg.GateHTTP,
@@ -327,26 +346,26 @@ func NewNodeController(cfg NodeControllerConfig) (*NodeController, error) {
 	}, nil
 }
 
-// SyncAccount opens or reuses one gate per usable server of the account's last
-// successful login, writes each node, and reconciles the panel once.
+// SyncAccount opens or reuses one gate per enabled account slot, writes each
+// slot row and node, and reconciles the panel once.
 //
-// It is idempotent: a server that already owns a gate keeps it (and its port),
-// and a server that disappeared from the login has its gate closed and its
-// node deleted. A per-server failure marks that node DOWN and does not stop
-// the remaining servers; the aggregate error is returned only when no node
-// started at all. A reconcile failure is always returned because Resin may now
-// disagree with the store.
+// Capacity is min(account.SlotCapacity(UseCount, AJS_ACCOUNT_SLOTS), MaxServers
+// when positive). Slots above capacity are disabled and their nodes deleted;
+// a slot that still carries a customer lease is left serving and the sync
+// reports slot_capacity_blocked instead of revoking access. Slots above the
+// capacity are never planned, so a disabled row cannot be restarted by the same
+// sync.
 //
-// When MaxServers is positive only the first MaxServers server IDs of the
-// deterministic sort are desired: the rest are skipped, and on a later sync
-// with a lower cap their gates close and their nodes are deleted like any
-// server the login no longer lists.
+// It is idempotent: a slot that already owns a gate keeps it (and its port),
+// and a slot that no longer resolves a server is marked DOWN while its node row
+// is kept. A per-slot failure marks that slot DOWN and does not stop the
+// remaining slots; the aggregate error is returned only when no slot started.
+// A reconcile failure is always returned because Resin may now disagree with
+// the store.
 //
-// A persisted selection overrides MaxServers and makes exactly one server
-// desired (DESIGN-CATALOG §3.6). A selection that no longer resolves is cleared
-// with a catalog.selection_lost audit and the default desired set is used. If
-// the account is already serving a different server, the move runs through the
-// guarded switch so a failed open leaves the old session live.
+// A persisted selection fixes slot 1's target and makes no other slot change
+// (DESIGN-CATALOG §3.6). A selection that no longer resolves is cleared with a
+// catalog.selection_lost audit and the default assignment is used.
 func (c *NodeController) SyncAccount(ctx context.Context, accountID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -362,79 +381,92 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 	if !ok {
 		return &store.Error{Kind: store.ErrNotFound, Message: fmt.Sprintf("account %q not found", accountID)}
 	}
-	identity, ok := c.store.AccountDevice(accountID)
-	if !ok {
-		return fmt.Errorf("runtime: account %s has no device identity", accountID)
+
+	capacity := c.slotCapacity(acct)
+	blocked, reduceErrs := c.reduceSlotsLocked(ctx, accountID, capacity)
+	if len(reduceErrs) > 0 {
+		// A slot above the new capacity still carries a lease: keep serving it
+		// and report. Never revoke a customer lease to shrink.
+		c.logger.Warn("slot_capacity_blocked", "account_id", accountID, "capacity", capacity,
+			"error", errors.Join(reduceErrs...))
 	}
-	device, err := account.DeviceForIdentity(identity)
-	if err != nil {
-		return fmt.Errorf("runtime: account %s: %w", accountID, err)
+	if capacity > c.store.SlotCount(accountID) {
+		if _, err := c.store.EnsureAccountSlots(accountID, capacity); err != nil {
+			return fmt.Errorf("runtime: account %s: slots: %w", accountID, err)
+		}
+	}
+	slots := make([]model.AccountSlot, 0, capacity)
+	for _, slot := range c.store.Slots(accountID) {
+		if slot.Index > capacity {
+			continue
+		}
+		slots = append(slots, slot)
 	}
 
 	servers := usableServers(result.Servers)
-	selection, hasSelection := c.store.Selection(accountID)
-	selectionApplied := false
-	if hasSelection {
-		selected, found := findServer(result.Servers, selection.ServerID)
-		switch {
-		case found && selected.server.OK():
-			// The operator's target is the whole desired set, regardless of
-			// MaxServers: exactly one session, never a sorted fallback.
-			servers = []serverRef{selected}
-			selectionApplied = true
-			if c.maxServers > 1 {
-				c.logger.Info("catalog_selection_limits_desired", "account_id", accountID,
-					"server_id", selected.id, "node_limit", c.maxServers)
+	plans := c.planSlotsLocked(accountID, slots, servers, result)
+	desired := make(map[string]struct{}, len(plans))
+	for i, plan := range plans {
+		if plan.srv.id != "" {
+			desired[nodeID(plan.key, plan.srv.id)] = struct{}{}
+			// A target change is not an undesired gate: keep the running node
+			// so the switch path below can close it break-before-make and
+			// commit the replacement under one guarded transition.
+			if current, ok := c.slotGates[plan.key]; ok && current != nodeID(plan.key, plan.srv.id) {
+				desired[current] = struct{}{}
 			}
-		default:
-			reason := "server_missing"
-			if found {
-				reason = "server_ineligible"
-			}
-			if _, err := c.store.LoseSelection(accountID, reason); err != nil {
-				c.logger.Warn("catalog_selection_lost_audit_failed", "account_id", accountID, "error", err)
-			}
-			c.logger.Info("catalog_selection_lost", "account_id", accountID,
-				"server_id", selection.ServerID, "reason", reason)
+			continue
+		}
+		// No server resolved: keep the slot's existing DOWN row instead of
+		// letting removeUndesiredLocked delete it.
+		if slots[i].ServerID != "" {
+			desired[nodeID(plan.key, slots[i].ServerID)] = struct{}{}
 		}
 	}
-	if !selectionApplied && c.maxServers > 0 && len(servers) > c.maxServers {
-		skipped := len(servers) - c.maxServers
-		servers = servers[:c.maxServers]
-		c.logger.Info("node_limit_skipped", "account_id", accountID, "limit", c.maxServers, "skipped", skipped)
-	}
-	desired := make(map[string]struct{}, len(servers))
-	for _, srv := range servers {
-		desired[nodeID(accountID, srv.id)] = struct{}{}
-	}
-
-	userName := strings.TrimSpace(result.UserName)
-	if userName == "" {
-		userName = acct.Username
-	}
-
-	// A selection changed while the account was offline must move the session
-	// through the same guarded switch as a manual connect, not close the old
-	// gate first: an open failure has to keep the old session serving.
-	if selectionApplied && len(servers) == 1 {
-		if old, err := c.accountGateLocked(accountID); err == nil && old != nil && old.serverID != servers[0].id {
-			if _, switchErr := c.switchLocked(ctx, acct, result, servers[0], old, "login", c.now()); switchErr != nil {
-				c.logger.Warn("catalog_login_switch_failed", "account_id", accountID, "error", switchErr)
-				if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
-					return errors.Join(switchErr, reconcileErr)
-				}
-				return switchErr
-			}
+	// A blocked slot still serves its lease, so its node and gate are desired
+	// even though the slot is above the capacity.
+	for key := range blocked {
+		if id, ok := c.slotGates[key]; ok {
+			desired[id] = struct{}{}
+		}
+		if slot, ok := c.store.Slot(key); ok && slot.ServerID != "" {
+			desired[nodeID(key, slot.ServerID)] = struct{}{}
 		}
 	}
-
 	failures := c.removeUndesiredLocked(accountID, desired)
 
 	started := 0
-	for _, srv := range servers {
-		id := nodeID(accountID, srv.id)
-		if running, ok := c.running[id]; ok {
-			if err := c.activateLocked(id, acct, srv, running); err != nil {
+	for _, plan := range plans {
+		if plan.srv.id == "" {
+			if errs := c.closeSlotLocked(plan.key); len(errs) > 0 {
+				failures = append(failures, fmt.Errorf("slot %s: %w", plan.key.String(), errors.Join(errs...)))
+			}
+			c.markSlotDownLocked(plan.key, acct, plan.srv, "no_server")
+			continue
+		}
+		id := nodeID(plan.key, plan.srv.id)
+		// One gate per slot, always. A slot already serving another server is
+		// a target change: route it through the guarded slot switch, which
+		// closes the old gate before opening the new one (the vendor allows
+		// one session per identity) and commits the slot row atomically.
+		if current, ok := c.slotGates[plan.key]; ok && current != id {
+			if running, ok := c.running[current]; ok {
+				res, switchErr := c.switchSlotLocked(ctx, acct, result, plan.srv, running, plan.key, "login", c.now())
+				if switchErr != nil {
+					failures = append(failures, fmt.Errorf("node %s: %w", id, switchErr))
+					continue
+				}
+				if len(res.Warnings) > 0 {
+					c.logger.Warn("catalog_login_switch_warnings", "account_id", accountID,
+						"slot", plan.key.String(), "warnings", res.Warnings)
+				}
+				started++
+				continue
+			}
+			delete(c.slotGates, plan.key)
+		}
+		if running, ok := c.running[id]; ok { // reuse: never a second session
+			if err := c.activateSlotLocked(plan.key, acct, plan.srv, running); err != nil {
 				failures = append(failures, fmt.Errorf("node %s: %w", id, err))
 				c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", accountID, "state", string(model.NodeLive), "error", err)
 				continue
@@ -442,63 +474,316 @@ func (c *NodeController) SyncAccount(ctx context.Context, accountID string) erro
 			started++
 			continue
 		}
-
-		session, err := c.sessions.Open(ctx, account.SessionRequest{
-			AccountID:       accountID,
-			Server:          srv.server,
-			Device:          device,
-			UserName:        userName,
-			ConnectPassword: result.ConnectPassword,
-			Profile:         c.profile,
-		})
-		if err != nil {
-			failures = append(failures, fmt.Errorf("node %s: open session: %w", id, err))
-			c.logger.Warn("node_session_failed", "node_id", id, "account_id", accountID, "server_id", srv.id, "error", err)
-			c.markDownLocked(id, acct, srv)
-			continue
-		}
-		g, addrs, err := c.startGateLocked(id, accountID, srv.id, session)
-		if err != nil {
-			_ = session.Close()
-			failures = append(failures, fmt.Errorf("node %s: start gate: %w", id, err))
-			c.logger.Warn("node_gate_failed", "node_id", id, "account_id", accountID, "server_id", srv.id, "error", err)
-			c.markDownLocked(id, acct, srv)
-			continue
-		}
-		running := &nodeGate{
-			gate:      g,
-			session:   session,
-			accountID: accountID,
-			serverID:  srv.id,
-			port:      addrs.socks,
-			httpPort:  addrs.http,
-			egressIP:  sessionEgress(session),
-			startedAt: time.Now(),
-		}
-		c.running[id] = running
-		if err := c.activateLocked(id, acct, srv, running); err != nil {
+		if err := c.startSlotLocked(ctx, acct, result, plan); err != nil {
 			failures = append(failures, fmt.Errorf("node %s: %w", id, err))
-			c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", accountID, "state", string(model.NodeLive), "error", err)
-			failures = append(failures, c.closeGateLocked(id, running)...)
-			delete(c.running, id)
 			continue
 		}
 		started++
-		c.logger.Info("node_started", "node_id", id, "account_id", accountID, "server_id", srv.id,
-			"port", addrs.socks, "http_port", addrs.http, "egress_ip", running.egressIP)
 	}
+	c.logger.Info("slot_sync", "account_id", accountID, "capacity", capacity,
+		"planned", len(plans), "started", started)
 
 	reconcileErr := c.reconcileLocked(ctx)
 	if started > 0 {
 		return reconcileErr
 	}
 	errs := make([]error, 0, len(failures)+2)
-	errs = append(errs, fmt.Errorf("runtime: account %s: no node started for %d usable servers", accountID, len(servers)))
+	errs = append(errs, fmt.Errorf("runtime: account %s: no slot started for %d planned slots", accountID, len(plans)))
 	errs = append(errs, failures...)
 	if reconcileErr != nil {
 		errs = append(errs, reconcileErr)
 	}
 	return errors.Join(errs...)
+}
+
+// slotCapacity is the number of sessions one account may run: the account's
+// slot allowance further capped by MaxServers when the operator set one.
+func (c *NodeController) slotCapacity(acct model.Account) int {
+	capacity := account.SlotCapacity(acct.UseCount, account.ConfiguredAccountSlots())
+	if c.maxServers > 0 && c.maxServers < capacity {
+		capacity = c.maxServers
+	}
+	if capacity < 1 {
+		capacity = 1
+	}
+	return capacity
+}
+
+// slotPlan is one slot's target for the current sync. A zero srv.id means no
+// server resolved: the slot is marked down and keeps any existing node row.
+type slotPlan struct {
+	key model.SlotKey
+	srv serverRef
+}
+
+// planSlotsLocked assigns at most one server per slot. A server is never
+// reused across slots in this step, and the persisted selection only fixes
+// slot 1's target.
+func (c *NodeController) planSlotsLocked(accountID string, slots []model.AccountSlot, servers []serverRef, result account.LoginResult) []slotPlan {
+	plans := make([]slotPlan, len(slots))
+	used := make(map[string]struct{}, len(slots))
+	take := func(id string) { used[id] = struct{}{} }
+	nextUnused := func() serverRef {
+		for _, srv := range servers {
+			if _, taken := used[srv.id]; taken {
+				continue
+			}
+			return srv
+		}
+		return serverRef{}
+	}
+	selection, hasSelection := c.store.Selection(accountID)
+	for i, slot := range slots {
+		key := slot.SlotKey
+		var target serverRef
+		if slot.Index == 1 && hasSelection {
+			selected, found := findServer(result.Servers, selection.ServerID)
+			if found && selected.server.OK() {
+				target = selected
+			} else {
+				reason := "server_missing"
+				if found {
+					reason = "server_ineligible"
+				}
+				if _, err := c.store.LoseSelection(accountID, reason); err != nil {
+					c.logger.Warn("catalog_selection_lost_audit_failed", "account_id", accountID, "error", err)
+				}
+				c.logger.Info("catalog_selection_lost", "account_id", accountID,
+					"server_id", selection.ServerID, "reason", reason)
+				hasSelection = false
+			}
+		}
+		if target.id == "" && slot.ServerID != "" {
+			if previous, found := findServer(result.Servers, slot.ServerID); found && previous.server.OK() {
+				if _, taken := used[previous.id]; !taken {
+					target = previous
+				}
+			}
+		}
+		if target.id == "" {
+			target = nextUnused()
+		}
+		if target.id != "" {
+			take(target.id)
+		}
+		plans[i] = slotPlan{key: key, srv: target}
+	}
+	return plans
+}
+
+// startSlotLocked resolves one slot's device material and port pair, opens its
+// session and gate, and commits the LIVE node with its slot row. The pair is
+// claimed before the session opens and released only when this attempt claimed
+// it, so a pre-existing pair survives a failed attempt.
+func (c *NodeController) startSlotLocked(ctx context.Context, acct model.Account, result account.LoginResult, plan slotPlan) error {
+	key, srv := plan.key, plan.srv
+	if !c.store.SlotDeviceBound(key) {
+		if !c.store.DevicePoolEnabled() {
+			// Without a pool only slot 1 has the legacy in-memory identity.
+			if key.Index != 1 {
+				c.markSlotDownLocked(key, acct, srv, "device_material_missing")
+				return fmt.Errorf("runtime: device pool is disabled for slot %s", key.String())
+			}
+		} else if _, err := c.store.BindForLoginSlot(key, c.profile.Name); err != nil {
+			c.markSlotDownLocked(key, acct, srv, "device_bind_failed")
+			return err
+		}
+	}
+	device, err := c.slotDevice(key)
+	if err != nil {
+		c.markSlotDownLocked(key, acct, srv, "device_material_missing")
+		return err
+	}
+	slot, ok := c.store.Slot(key)
+	if !ok {
+		return fmt.Errorf("runtime: slot %s not found", key.String())
+	}
+	addrs, claimed, err := c.reserveSlotPairLocked(key, slot.GatePort)
+	if err != nil {
+		c.markSlotDownLocked(key, acct, srv, "port_unavailable")
+		return err
+	}
+	session, err := c.sessions.Open(ctx, account.SessionRequest{
+		AccountID:       acct.ID,
+		Slot:            key,
+		Server:          srv.server,
+		Device:          device,
+		UserName:        account.SlotUserName(baseUserName(result, acct), key.Index),
+		ConnectPassword: result.ConnectPassword,
+		Profile:         c.profile,
+	})
+	if err != nil {
+		if claimed {
+			_ = c.store.SetSlotPorts(key, 0, 0)
+		}
+		c.markSlotDownLocked(key, acct, srv, "session_open_failed")
+		return err
+	}
+	if session.SID() == "" { // never LIVE without a session id
+		_ = session.Close()
+		if claimed {
+			_ = c.store.SetSlotPorts(key, 0, 0)
+		}
+		c.markSlotDownLocked(key, acct, srv, "session_unverified")
+		return &SwitchError{Reason: ReasonSessionUnverified, Message: "session has no SID"}
+	}
+	g, bound, err := c.startGateLocked(key, srv, session, addrs)
+	if err != nil {
+		_ = session.Close()
+		if claimed {
+			_ = c.store.SetSlotPorts(key, 0, 0)
+		}
+		c.markSlotDownLocked(key, acct, srv, "gate_start_failed")
+		return err
+	}
+	running := &nodeGate{
+		gate: g, session: session, accountID: acct.ID, serverID: srv.id,
+		slot: key, generation: slot.Generation + 1,
+		port: bound.socks, httpPort: bound.http,
+		egressIP: sessionEgress(session), startedAt: c.now(),
+	}
+	id := nodeID(key, srv.id)
+	c.running[id] = running
+	if err := c.activateSlotLocked(key, acct, srv, running); err != nil {
+		errs := c.closeGateLocked(id, running)
+		delete(c.running, id)
+		if claimed {
+			_ = c.store.SetSlotPorts(key, 0, 0)
+		}
+		c.markSlotDownLocked(key, acct, srv, "store_failed")
+		return errors.Join(append(errs, err)...)
+	}
+	c.slotGates[key] = id
+	c.logger.Info("node_started", "node_id", id, "account_id", acct.ID, "server_id", srv.id,
+		"slot", key.String(), "port", bound.socks, "http_port", bound.http, "egress_ip", running.egressIP)
+	return nil
+}
+
+// slotDevice returns the identity a slot must present. With the pool enabled
+// it is the slot's own sealed material; without a pool only slot 1 exists and
+// the account-level in-memory identity is the same record. It never generates.
+func (c *NodeController) slotDevice(key model.SlotKey) (apifacade.Device, error) {
+	material, materialErr := c.store.AccountDeviceMaterialSlot(key)
+	if materialErr == nil {
+		return account.DeviceForIdentity(material.Identity)
+	}
+	if c.store.DevicePoolEnabled() {
+		return apifacade.Device{}, materialErr
+	}
+	identity, ok := c.store.AccountDeviceSlot(key)
+	if !ok {
+		return apifacade.Device{}, materialErr
+	}
+	return account.DeviceForIdentity(identity)
+}
+
+// baseUserName is the vendor tunnel name every slot derives from: the login
+// result's user name, else the account's own username.
+func baseUserName(result account.LoginResult, acct model.Account) string {
+	if userName := strings.TrimSpace(result.UserName); userName != "" {
+		return userName
+	}
+	return acct.Username
+}
+
+// activateSlotLocked writes a running slot as LIVE and its slot row atomically.
+// An operator drain survives a login refresh, and a reused gate keeps its
+// generation instead of bumping it.
+func (c *NodeController) activateSlotLocked(key model.SlotKey, acct model.Account, srv serverRef, running *nodeGate) error {
+	id := nodeID(key, srv.id)
+	state := model.NodeLive
+	if existing, ok := c.store.Node(id); ok && existing.State == model.NodeDraining {
+		state = model.NodeDraining
+	}
+	if running.draining {
+		state = model.NodeDraining
+	}
+	slot, ok := c.store.Slot(key)
+	if !ok {
+		return fmt.Errorf("runtime: slot %s not found", key.String())
+	}
+	node, err := c.store.CommitSlotStart(store.SlotStartCommit{
+		Slot: model.AccountSlot{
+			SlotKey: key, DeviceID: slot.DeviceID, ServerID: srv.id,
+			GatePort: running.port, HTTPPort: running.httpPort,
+			State: model.SlotLive, Health: model.SlotHealthHealthy,
+			Generation: running.generation, // set at start, never bumped on reuse
+		},
+		Node: applyServerToNode(model.ProxyNode{ID: id, Capacity: gateFlowLimit},
+			acct, key, srv, state, running.port, running.egressIP),
+	})
+	if err != nil {
+		return err
+	}
+	c.slotGates[key] = node.ID
+	return nil
+}
+
+// markSlotDownLocked records a slot that could not be served: the node loses
+// its gate port and the slot row keeps its device, ports and generation through
+// SetSlotFailure. With no resolved server the slot's existing node row is the
+// one that must go DOWN, so a dead gate never keeps showing as LIVE.
+func (c *NodeController) markSlotDownLocked(key model.SlotKey, acct model.Account, srv serverRef, reason string) {
+	if srv.id == "" {
+		if slot, ok := c.store.Slot(key); ok && slot.ServerID != "" {
+			id := nodeID(key, slot.ServerID)
+			if node, ok := c.store.Node(id); ok {
+				node.State = model.NodeDown
+				node.GatePort = 0
+				if _, err := c.store.PutNode(node); err != nil {
+					c.logger.Warn("node_state_write_failed", "node_id", id,
+						"account_id", acct.ID, "state", string(model.NodeDown), "error", err)
+				}
+			}
+		}
+	} else if _, err := c.writeNodeLocked(key, acct, srv, model.NodeDown, 0, ""); err != nil {
+		c.logger.Warn("node_state_write_failed", "node_id", nodeID(key, srv.id),
+			"account_id", acct.ID, "state", string(model.NodeDown), "error", err)
+	}
+	if err := c.store.SetSlotFailure(key, srv.id, reason); err != nil {
+		c.logger.Warn("slot_state_write_failed", "slot", key.String(), "reason", reason, "error", err)
+	}
+	delete(c.slotGates, key)
+}
+
+// reduceSlotsLocked disables and closes the slots above capacity. DisableSlot
+// refuses while a customer lease pins the slot, so a config change never
+// revokes access; the caller reports the refusal and retries on the next sync.
+func (c *NodeController) reduceSlotsLocked(ctx context.Context, accountID string, capacity int) (map[model.SlotKey]struct{}, []error) {
+	var errs []error
+	blocked := make(map[model.SlotKey]struct{})
+	slots := c.store.Slots(accountID)
+	for i := len(slots) - 1; i >= 0; i-- {
+		slot := slots[i]
+		if slot.Index <= capacity {
+			continue
+		}
+		if err := c.store.DisableSlot(slot.SlotKey); err != nil {
+			// Keep the slot, its gate and its node: the lease pins them.
+			blocked[slot.SlotKey] = struct{}{}
+			errs = append(errs, fmt.Errorf("slot %s: %w", slot.SlotKey.String(), err))
+			continue
+		}
+		if running, err := c.slotGateLocked(slot.SlotKey); err == nil && running != nil {
+			_ = c.store.SetNodeStateQuiet(nodeID(slot.SlotKey, running.serverID), model.NodeDraining)
+			drainCtx, cancel := context.WithTimeout(ctx, switchDrainGrace)
+			_ = running.gate.Drain(drainCtx)
+			cancel()
+		}
+		errs = append(errs, c.closeSlotLocked(slot.SlotKey)...)
+		// Every node row of the slot is out of capacity now. A target change
+		// may have left the running gate on another server, so sweep by slot
+		// rather than by the persisted server id.
+		for _, node := range c.store.Nodes() {
+			if node.AccountID != accountID || node.Slot != slot.Index {
+				continue
+			}
+			if err := c.store.DeleteNodeQuiet(node.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return blocked, errs
 }
 
 // DrainNode drains one node: the store moves it to DRAINING, the controller's
@@ -562,6 +847,7 @@ func (c *NodeController) Stop(ctx context.Context) error {
 	for id, running := range c.running {
 		errs = append(errs, c.closeGateLocked(id, running)...)
 		delete(c.running, id)
+		delete(c.slotGates, running.slot)
 	}
 	c.cancel()
 	c.mu.Unlock()
@@ -597,6 +883,7 @@ func (c *NodeController) StopAccount(_ context.Context, accountID string) error 
 		}
 		errs = append(errs, c.closeGateLocked(id, running)...)
 		delete(c.running, id)
+		delete(c.slotGates, running.slot)
 		c.logger.Info("account_gates_stopped", "account_id", accountID, "node_id", id, "server_id", running.serverID)
 	}
 	return errors.Join(errs...)
@@ -613,13 +900,15 @@ func (c *NodeController) Snapshot() []NodeRuntime {
 	out := make([]NodeRuntime, 0, len(c.running))
 	for id, running := range c.running {
 		node := NodeRuntime{
-			NodeID:    id,
-			AccountID: running.accountID,
-			ServerID:  running.serverID,
-			Port:      running.port,
-			EgressIP:  running.egressIP,
-			Draining:  running.draining,
-			StartedAt: running.startedAt,
+			NodeID:     id,
+			AccountID:  running.accountID,
+			ServerID:   running.serverID,
+			Port:       running.port,
+			EgressIP:   running.egressIP,
+			Draining:   running.draining,
+			Slot:       running.slot.Index,
+			Generation: running.generation,
+			StartedAt:  running.startedAt,
 		}
 		if running.session != nil {
 			node.SessionPresent = true
@@ -639,31 +928,10 @@ func (c *NodeController) Snapshot() []NodeRuntime {
 	return out
 }
 
-// activateLocked writes a running node. An operator drain survives a login
-// refresh: the node stays DRAINING instead of being forced back to LIVE.
-func (c *NodeController) activateLocked(id string, acct model.Account, srv serverRef, running *nodeGate) error {
-	state := model.NodeLive
-	if existing, ok := c.store.Node(id); ok && existing.State == model.NodeDraining {
-		state = model.NodeDraining
-	}
-	if running.draining {
-		state = model.NodeDraining
-	}
-	_, err := c.writeNodeLocked(id, acct, srv, state, running.port, running.egressIP)
-	return err
-}
-
-// markDownLocked records a server that could not be served. The node keeps its
-// lease/probe fields but loses the gate port because no listener is bound.
-func (c *NodeController) markDownLocked(id string, acct model.Account, srv serverRef) {
-	if _, err := c.writeNodeLocked(id, acct, srv, model.NodeDown, 0, ""); err != nil {
-		c.logger.Warn("node_state_write_failed", "node_id", id, "account_id", acct.ID, "state", string(model.NodeDown), "error", err)
-	}
-}
-
 // writeNodeLocked creates or refreshes one store node from the vendor server.
 // An existing node keeps its lease/probe fields through store.PutNode.
-func (c *NodeController) writeNodeLocked(id string, acct model.Account, srv serverRef, state model.NodeState, port int, egressIP string) (model.ProxyNode, error) {
+func (c *NodeController) writeNodeLocked(key model.SlotKey, acct model.Account, srv serverRef, state model.NodeState, port int, egressIP string) (model.ProxyNode, error) {
+	id := nodeID(key, srv.id)
 	node, ok := c.store.Node(id)
 	if !ok {
 		node = model.ProxyNode{
@@ -672,17 +940,17 @@ func (c *NodeController) writeNodeLocked(id string, acct model.Account, srv serv
 			Protocol: model.ProtocolSOCKS5,
 		}
 	}
-	node = applyServerToNode(node, acct, srv, state, port, egressIP)
+	node = applyServerToNode(node, acct, key, srv, state, port, egressIP)
 	return c.store.PutNode(node)
 }
 
 // applyServerToNode overlays one vendor server onto a node row. It is shared by
 // the login sync (PutNode) and the switch commit (CommitSwitch), so both paths
-// write the same label, region and gate fields.
-func applyServerToNode(node model.ProxyNode, acct model.Account, srv serverRef, state model.NodeState, port int, egressIP string) model.ProxyNode {
+// write the same label, region, slot and gate fields.
+func applyServerToNode(node model.ProxyNode, acct model.Account, key model.SlotKey, srv serverRef, state model.NodeState, port int, egressIP string) model.ProxyNode {
 	node.AccountID = acct.ID
 	node.AccountLabel = acct.Label
-	node.Label = nodeTag(srv, acct.ID)
+	node.Label = nodeTag(srv, key)
 	node.Region = nodeRegion(srv.server)
 	node.Country = serverCountry(srv.server)
 	node.City = serverCity(srv.server)
@@ -690,6 +958,7 @@ func applyServerToNode(node model.ProxyNode, acct model.Account, srv serverRef, 
 	node.Protocol = model.ProtocolSOCKS5
 	node.GatePort = port
 	node.ServerID = srv.id
+	node.Slot = key.Index
 	if egressIP != "" {
 		node.EgressIP = egressIP
 	}
@@ -709,6 +978,7 @@ func (c *NodeController) removeUndesiredLocked(accountID string, desired map[str
 		}
 		failures = append(failures, c.closeGateLocked(id, running)...)
 		delete(c.running, id)
+		delete(c.slotGates, running.slot)
 		if err := c.store.DeleteNode(id); err != nil && !errors.Is(err, store.ErrNotFound) {
 			failures = append(failures, fmt.Errorf("node %s: delete: %w", id, err))
 			continue
@@ -742,45 +1012,30 @@ type gateAddresses struct {
 	http  int
 }
 
-// startGateLocked binds the first free loopback port pair at or above the
-// controller's cursor and starts a gate on it. The gate lives on the
-// controller's context, never on the login request's. With the HTTP listener
-// enabled the candidate must free both p and p+httpOffset; a bind failure on
-// either half retries the next base port.
-func (c *NodeController) startGateLocked(id, accountID, serverID string, session account.FlowSession) (Gate, gateAddresses, error) {
-	reserved := c.reservedPortsLocked()
-	attempts := 0
+// startGateLocked starts a gate on a pair the slot already reserved. The gate
+// lives on the controller's context, never on the login request's. A pair that
+// was just closed may lose a short close-to-bind race on Windows, so one
+// immediate retry of the same pair is allowed; after that the slot fails down
+// (a lease stores GatePort, so there is no fallback port).
+func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, session account.FlowSession, addrs gateAddresses) (Gate, gateAddresses, error) {
+	id := nodeID(key, srv.id)
+	cfg := gate.Config{
+		NodeID:    id,
+		AccountID: key.AccountID,
+		Listen:    net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.socks)),
+		Limit:     gateFlowLimit,
+		Logger:    c.logger,
+		AuthMode:  c.gateAuth,
+	}
+	if addrs.http > 0 {
+		cfg.HTTPListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.http))
+	}
+	if c.gateAuth == gate.AuthUserPass && c.identity != nil {
+		cfg.Authenticator = c.identity
+		cfg.UserPolicy = c.identity
+	}
 	var lastErr error
-	for port := c.nextPort; port <= maxGatePort && attempts < maxGatePortAttempts; port++ {
-		if _, used := reserved[port]; used {
-			continue
-		}
-		httpPort := 0
-		if c.httpEnabled {
-			httpPort = port + c.httpOffset
-			if httpPort > maxGatePort {
-				// No base at or above the cursor leaves room for the pair.
-				break
-			}
-			if _, used := reserved[httpPort]; used {
-				continue
-			}
-		}
-		cfg := gate.Config{
-			NodeID:    id,
-			AccountID: accountID,
-			Listen:    net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
-			Limit:     gateFlowLimit,
-			Logger:    c.logger,
-			AuthMode:  c.gateAuth,
-		}
-		if httpPort != 0 {
-			cfg.HTTPListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
-		}
-		if c.gateAuth == gate.AuthUserPass && c.identity != nil {
-			cfg.Authenticator = c.identity
-			cfg.UserPolicy = c.identity
-		}
+	for range 2 {
 		g, err := c.gates(cfg, session)
 		if err != nil {
 			return nil, gateAddresses{}, err
@@ -788,51 +1043,150 @@ func (c *NodeController) startGateLocked(id, accountID, serverID string, session
 		if err := g.Start(c.ctx); err != nil {
 			_ = g.Close()
 			lastErr = err
-			attempts++
 			continue
 		}
-		// The configured port is the default; a factory that binds something
-		// else (port 0, for example) still reports the real one to the node.
-		bound := port
+		// The reservation is a claim, not a bind: check what the listener
+		// really got.
 		if addr := g.Addr(); addr != nil {
-			if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Port > 0 {
-				bound = tcp.Port
+			if tcp, ok := addr.(*net.TCPAddr); ok && tcp.Port > 0 && tcp.Port != addrs.socks {
+				_ = g.Close()
+				return nil, gateAddresses{}, fmt.Errorf("runtime: gate bound %d, slot reserved %d", tcp.Port, addrs.socks)
 			}
 		}
-		c.nextPort = bound + 1
-		return g, gateAddresses{socks: bound, http: httpPort}, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("runtime: no free loopback gate port")
+		if addrs.http > 0 {
+			verifier, ok := g.(GateHTTPAddr)
+			if !ok {
+				_ = g.Close()
+				return nil, gateAddresses{}, errors.New("runtime: gate cannot report its HTTP listener")
+			}
+			tcp, ok := verifier.HTTPAddr().(*net.TCPAddr)
+			if !ok || tcp.Port != addrs.http {
+				_ = g.Close()
+				return nil, gateAddresses{}, fmt.Errorf("runtime: gate HTTP listener is not %d", addrs.http)
+			}
+		}
+		return g, addrs, nil
 	}
 	return nil, gateAddresses{}, lastErr
 }
 
-// reservedPortsLocked returns the ports already claimed by a running gate or a
-// store node, so a new gate never takes another node's port. With the HTTP
-// listener enabled the pair's second port is reserved too, and a stored node
-// reserves gatePort+offset by derivation because the node row stores one port.
-func (c *NodeController) reservedPortsLocked() map[int]struct{} {
-	nodes := c.store.Nodes()
-	used := make(map[int]struct{}, 2*(len(c.running)+len(nodes)))
+// reservedPortsLocked returns the ports claimed by every running gate, every
+// store node, and every slot row except the caller's own slot. AllSlots is what
+// makes a reservation survive a restart: the node row may be gone (slot down)
+// while the slot still owns its pair.
+func (c *NodeController) reservedPortsLocked(except model.SlotKey) map[int]struct{} {
+	used := make(map[int]struct{})
 	for _, running := range c.running {
+		if running.slot == except {
+			continue
+		}
 		used[running.port] = struct{}{}
 		if running.httpPort > 0 {
 			used[running.httpPort] = struct{}{}
 		}
 	}
-	for _, node := range nodes {
-		if node.GatePort <= 0 {
+	for _, node := range c.store.Nodes() {
+		if node.GatePort <= 0 || node.Slot == except.Index && node.AccountID == except.AccountID {
 			continue
 		}
 		used[node.GatePort] = struct{}{}
 		if c.httpEnabled {
-			if httpPort := node.GatePort + c.httpOffset; httpPort <= maxGatePort {
-				used[httpPort] = struct{}{}
+			if p := node.GatePort + c.httpOffset; p <= maxGatePort {
+				used[p] = struct{}{}
 			}
 		}
 	}
+	for _, slot := range c.store.AllSlots() {
+		if slot.SlotKey == except {
+			continue
+		}
+		if slot.GatePort > 0 {
+			used[slot.GatePort] = struct{}{}
+		}
+		if slot.HTTPPort > 0 {
+			used[slot.HTTPPort] = struct{}{}
+		}
+	}
 	return used
+}
+
+// reserveSlotPairLocked claims a pair for key BEFORE the session opens.
+// preferred > 0 is the slot's existing pair and is immutable: if it is taken,
+// the slot fails down instead of moving (a lease stores GatePort). The bool
+// reports whether this call claimed a NEW pair; only those are released on a
+// failed attempt.
+func (c *NodeController) reserveSlotPairLocked(key model.SlotKey, preferred int) (gateAddresses, bool, error) {
+	reserved := c.reservedPortsLocked(key)
+	pairFree := func(port int) (gateAddresses, bool) {
+		if port < 1 || port > maxGatePort {
+			return gateAddresses{}, false
+		}
+		if _, used := reserved[port]; used {
+			return gateAddresses{}, false
+		}
+		addrs := gateAddresses{socks: port}
+		if c.httpEnabled {
+			addrs.http = port + c.httpOffset
+			if addrs.http > maxGatePort {
+				return gateAddresses{}, false
+			}
+			if _, used := reserved[addrs.http]; used {
+				return gateAddresses{}, false
+			}
+		}
+		return addrs, true
+	}
+	if preferred > 0 {
+		addrs, ok := pairFree(preferred)
+		if !ok {
+			return gateAddresses{}, false, fmt.Errorf("%w: slot %s pair %d is not free",
+				errSlotPortUnavailable, key.String(), preferred)
+		}
+		if err := c.store.SetSlotPorts(key, addrs.socks, addrs.http); err != nil {
+			return gateAddresses{}, false, err
+		}
+		return addrs, false, nil
+	}
+	for port := c.nextPort; port <= maxGatePort; port++ {
+		addrs, ok := pairFree(port)
+		if !ok {
+			continue
+		}
+		if err := c.store.SetSlotPorts(key, addrs.socks, addrs.http); err != nil {
+			return gateAddresses{}, false, err
+		}
+		c.nextPort = port + 1
+		return addrs, true, nil
+	}
+	return gateAddresses{}, false, errors.New("runtime: no free loopback gate port pair")
+}
+
+// closeSlotLocked closes every gate a slot currently serves. The id normally
+// comes from slotGates; a missing entry falls back to the running scan so a
+// stale map can never leak a listener. The gate closes before its session so no
+// flow can outlive the connection it relays through.
+func (c *NodeController) closeSlotLocked(key model.SlotKey) []error {
+	ids := make([]string, 0, 1)
+	if id, ok := c.slotGates[key]; ok {
+		ids = append(ids, id)
+	} else {
+		for id, running := range c.running {
+			if running.slot == key {
+				ids = append(ids, id)
+			}
+		}
+	}
+	delete(c.slotGates, key)
+	var errs []error
+	for _, id := range ids {
+		running, ok := c.running[id]
+		if !ok {
+			continue
+		}
+		delete(c.running, id)
+		errs = append(errs, c.closeGateLocked(id, running)...)
+	}
+	return errs
 }
 
 // closeGateLocked stops a gate before its session, so no flow can outlive the
@@ -904,22 +1258,26 @@ func usableServers(servers map[string]apifacade.Server) []serverRef {
 	return out
 }
 
-// nodeID is the stable node id for one account/server pair.
-func nodeID(accountID, serverID string) string {
-	return accountID + ":" + serverID
+// nodeID is the stable node id of one slot: "<account>#<N>:<server>". It is
+// the only runtime producer of the format; model.SlotKey.NodeID owns it.
+func nodeID(key model.SlotKey, serverID string) string {
+	return key.NodeID(serverID)
 }
 
 // nodeTag derives the node label, which is also the Resin subscription tag:
-// "<country>-<account>-<server>" in the lowercase alphanumeric alphabet
-// publisher.ValidTag accepts. The account is part of the tag because vendor
-// server ids are shared by every account, so "<country>-<server>" would
-// collide across accounts.
-func nodeTag(srv serverRef, accountID string) string {
+// "<country>-<account>-<server>" for slot 1 and
+// "<country>-<account>-s<N>-<server>" for the other slots, in the lowercase
+// alphanumeric alphabet publisher.ValidTag accepts. The account is part of the
+// tag because vendor server ids are shared by every account, so
+// "<country>-<server>" would collide across accounts. tagPart keeps only
+// [a-z0-9], so no part can contain a hyphen: a three-part slot-1 label can
+// never equal a four-part slot-N label.
+func nodeTag(srv serverRef, key model.SlotKey) string {
 	country := tagPart(serverCountry(srv.server))
 	if country == "" {
 		country = "xx"
 	}
-	account := tagPart(accountID)
+	account := tagPart(key.AccountID)
 	if account == "" {
 		account = "acct"
 	}
@@ -927,7 +1285,10 @@ func nodeTag(srv serverRef, accountID string) string {
 	if server == "" {
 		server = "srv"
 	}
-	return country + "-" + account + "-" + server
+	if key.Index <= 1 {
+		return country + "-" + account + "-" + server
+	}
+	return country + "-" + account + "-s" + strconv.Itoa(key.Index) + "-" + server
 }
 
 // tagPart keeps only ASCII letters and digits, lowercased.

@@ -38,6 +38,13 @@ func (k SlotKey) String() string {
 	return fmt.Sprintf("%s#%d", k.AccountID, k.Index)
 }
 
+// NodeID is the stable runtime id of one slot's node: "<account>#<N>:<server>".
+// It is the only place the format is written; every other package composes a
+// node id through it so the switch predicate and the persisted row agree.
+func (k SlotKey) NodeID(serverID string) string {
+	return k.String() + ":" + serverID
+}
+
 // ParseSlotKey parses the "acc-01#2" form produced by String. The account id
 // may contain characters other than '#', so the last separator is used.
 func ParseSlotKey(raw string) (SlotKey, error) {

@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,10 +30,68 @@ import (
 const testConnectPassword = "connect-password-not-a-credential"
 
 // newNodeTestStore returns an empty store: Restore replaces the dashboard seed
-// so the controller's first gate can bind 127.0.0.1:13000.
+// so the controller's first gate can bind 127.0.0.1:13000. The device pool is
+// disabled, which is the shipped no-master-key mode: only slot 1 has the
+// legacy in-memory identity.
 func newNodeTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	st := store.New()
+	if err := st.Restore([]byte(`{"version":1}`)); err != nil {
+		t.Fatalf("Restore empty snapshot: %v", err)
+	}
+	return st
+}
+
+// testDeviceSealer is a reversible in-memory store.DeviceSealer.
+type testDeviceSealer struct {
+	mu    sync.Mutex
+	blobs map[string][]byte
+}
+
+func newTestDeviceSealer() *testDeviceSealer {
+	return &testDeviceSealer{blobs: make(map[string][]byte)}
+}
+
+func (s *testDeviceSealer) Seal(id string, plaintext []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blobs[id] = append([]byte(nil), plaintext...)
+	return []byte("sealed:" + id), nil
+}
+
+func (s *testDeviceSealer) OpenID(id string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	blob, ok := s.blobs[id]
+	if !ok {
+		return nil, errors.New("sealed device material is missing")
+	}
+	return append([]byte(nil), blob...), nil
+}
+
+func (s *testDeviceSealer) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.blobs, id)
+	return nil
+}
+
+func (s *testDeviceSealer) IDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.blobs))
+	for id := range s.blobs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// newNodeTestPoolStore returns an empty store with the device pool enabled, so
+// every slot can bind and reopen its own sealed identity.
+func newNodeTestPoolStore(t *testing.T) *store.Store {
+	t.Helper()
+	st := store.NewEmptyWithSealers(testSealer{}, newTestDeviceSealer())
 	if err := st.Restore([]byte(`{"version":1}`)); err != nil {
 		t.Fatalf("Restore empty snapshot: %v", err)
 	}
@@ -60,6 +120,17 @@ func newNodeTestAccount(t *testing.T, st *store.Store, label string) model.Accou
 		t.Fatalf("EnsureAccountDevice: %v", err)
 	}
 	return acct
+}
+
+// grantSlots raises one account's slot capacity for a test. AJS_ACCOUNT_SLOTS
+// is process-wide, so a test that needs more than one session sets it before
+// the controller syncs.
+func grantSlots(t *testing.T, st *store.Store, acct model.Account, slots int) {
+	t.Helper()
+	t.Setenv("AJS_ACCOUNT_SLOTS", strconv.Itoa(slots))
+	if _, err := st.SetAccountUseCount(acct.ID, slots); err != nil {
+		t.Fatalf("SetAccountUseCount(%d): %v", slots, err)
+	}
 }
 
 // testServer is one usable vendor server entry.
@@ -356,18 +427,32 @@ func echoOnce(t *testing.T, conn net.Conn) {
 	}
 }
 
+// slot1NodeID is the runtime node id of slot 1 in tests.
+func slot1NodeID(accountID, serverID string) string {
+	return model.SlotKey{AccountID: accountID, Index: 1}.NodeID(serverID)
+}
+
+// slotNodeID is the runtime node id of one slot in tests.
+func slotNodeID(accountID string, index int, serverID string) string {
+	return model.SlotKey{AccountID: accountID, Index: index}.NodeID(serverID)
+}
+
+// nodeByServer finds the node one account serves serverID on. One server is
+// assigned to at most one slot, so the server id is unique per account.
 func nodeByServer(t *testing.T, st *store.Store, accountID, serverID string) model.ProxyNode {
 	t.Helper()
-	node, ok := st.Node(accountID + ":" + serverID)
-	if !ok {
-		t.Fatalf("node %s:%s is missing", accountID, serverID)
+	for _, node := range st.Nodes() {
+		if node.AccountID == accountID && node.ServerID == serverID {
+			return node
+		}
 	}
-	return node
+	t.Fatalf("node for %s server %s is missing", accountID, serverID)
+	return model.ProxyNode{}
 }
 
 func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-sync")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -381,6 +466,7 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
@@ -412,6 +498,12 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	if first.Region != "cn" || first.Country != "CN" || first.City != "Shanghai" {
 		t.Fatalf("node location = %q/%q/%q, want cn/CN/Shanghai", first.Region, first.Country, first.City)
 	}
+	if first.Slot != 1 || second.Slot != 2 {
+		t.Fatalf("node slots = %d/%d, want 1/2", first.Slot, second.Slot)
+	}
+	if first.ID != slotNodeID(acct.ID, 1, "s1") || second.ID != slotNodeID(acct.ID, 2, "s2") {
+		t.Fatalf("node ids = %q/%q, want the slot-scoped form", first.ID, second.ID)
+	}
 
 	if got := opener.callCount(); got != 2 {
 		t.Fatalf("session opens = %d, want 2", got)
@@ -428,6 +520,16 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	}
 	if requests[0].UserName != "vendor-user" || requests[0].ConnectPassword.Reveal() != testConnectPassword {
 		t.Fatal("session request does not carry the login credentials")
+	}
+	if requests[0].Slot != (model.SlotKey{AccountID: acct.ID, Index: 1}) {
+		t.Fatalf("s1 request slot = %q, want slot 1", requests[0].Slot.String())
+	}
+	secondRequests := opener.requestsFor("s2")
+	if len(secondRequests) != 1 || secondRequests[0].UserName != "vendor-user#2" {
+		t.Fatalf("s2 session requests = %+v, want the slot-2 username", secondRequests)
+	}
+	if secondRequests[0].Slot != (model.SlotKey{AccountID: acct.ID, Index: 2}) {
+		t.Fatalf("s2 request slot = %q, want slot 2", secondRequests[0].Slot.String())
 	}
 	identity, ok := st.AccountDevice(acct.ID)
 	if !ok || requests[0].Device.DeviceID != identity.OSDID {
@@ -455,7 +557,8 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	}
 	t.Logf("sync 2: reused %s port=%d without a new session", first.ID, first.GatePort)
 
-	// Dropping s2 stops its gate and deletes its node; s1 keeps serving.
+	// Dropping s2 stops its gate and marks the slot down; the DOWN node row is
+	// kept until the slot leaves the capacity. s1 keeps serving.
 	logins.set(acct.ID, account.LoginResult{
 		AuthResult:      "OK",
 		UserName:        "vendor-user",
@@ -465,8 +568,13 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount after server removal: %v", err)
 	}
-	if _, ok := st.Node(acct.ID + ":s2"); ok {
-		t.Fatal("node for the removed server survived")
+	down, ok := st.Node(second.ID)
+	if !ok || down.State != model.NodeDown || down.GatePort != 0 {
+		t.Fatalf("node for the removed server = %+v/%v, want DOWN without a port", down, ok)
+	}
+	slot2, ok := st.Slot(model.SlotKey{AccountID: acct.ID, Index: 2})
+	if !ok || slot2.State != model.SlotDown || slot2.LastError != "no_server" {
+		t.Fatalf("slot 2 after server removal = %+v/%v, want DOWN no_server", slot2, ok)
 	}
 	if session := opener.session("s2"); session == nil || !session.isClosed() {
 		t.Fatal("removed server's session is not closed")
@@ -475,7 +583,21 @@ func TestNodeControllerSyncCreatesReusesAndRemoves(t *testing.T) {
 		_ = conn.Close()
 		t.Fatal("removed server's gate still accepts connections")
 	}
-	t.Logf("sync 3: removed %s, port %d refused, %s kept port %d", second.ID, second.GatePort, first.ID, first.GatePort)
+	t.Logf("sync 3: %s marked DOWN, port %d refused, %s kept port %d", second.ID, second.GatePort, first.ID, first.GatePort)
+
+	// Shrinking the capacity to one removes the out-of-cap slot and its node.
+	if _, err := st.SetAccountUseCount(acct.ID, 1); err != nil {
+		t.Fatalf("SetAccountUseCount(1): %v", err)
+	}
+	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
+		t.Fatalf("SyncAccount after capacity shrink: %v", err)
+	}
+	if _, ok := st.Node(second.ID); ok {
+		t.Fatalf("out-of-cap node %s survived the shrink", second.ID)
+	}
+	if slot2, ok := st.Slot(model.SlotKey{AccountID: acct.ID, Index: 2}); !ok || slot2.State != model.SlotDown || slot2.GatePort != 0 {
+		t.Fatalf("disabled slot 2 = %+v/%v, want a DOWN row without ports", slot2, ok)
+	}
 	code, conn = socks5Connect(t, first.GatePort)
 	if code != 0x00 {
 		t.Fatalf("kept gate reply = 0x%02x, want success", code)
@@ -585,7 +707,7 @@ func TestNodeDrainHTTPHookDrivesGate(t *testing.T) {
 
 	post := func(action string) *http.Response {
 		t.Helper()
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/nodes/"+node.ID+"/actions/"+action, nil)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/nodes/"+url.PathEscape(node.ID)+"/actions/"+action, nil)
 		if err != nil {
 			t.Fatalf("new %s request: %v", action, err)
 		}
@@ -652,7 +774,7 @@ func TestNodeDrainHTTPHookDrivesGate(t *testing.T) {
 
 func TestNodeControllerStopClosesGates(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-stop")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -666,6 +788,7 @@ func TestNodeControllerStopClosesGates(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
@@ -705,7 +828,7 @@ func TestNodeControllerStopClosesGates(t *testing.T) {
 
 func TestNodeControllerStopAccount(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	first := newNodeTestAccount(t, st, "node-stop-account-a")
 	second := newNodeTestAccount(t, st, "node-stop-account-b")
 	logins := newFakeLoginResults()
@@ -726,6 +849,7 @@ func TestNodeControllerStopAccount(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, first, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 
 	for _, id := range []string{first.ID, second.ID} {
@@ -797,7 +921,7 @@ func TestNodeControllerStopAccount(t *testing.T) {
 }
 
 func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-stop-account-errors")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -812,6 +936,7 @@ func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
 	closeErr := errors.New("gate close failed")
 	reconcileErr := errors.New("resin unavailable")
 	opener := newFakeSessionOpener()
+	grantSlots(t, st, acct, 2)
 	var built int
 	gates := make([]*fakeGate, 0, 2)
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
@@ -877,7 +1002,7 @@ func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
 // cascade, so the publish sees zero LIVE nodes and no account.
 func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-delete")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -891,6 +1016,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &mutationPanel{st: st, accountID: acct.ID}
+	grantSlots(t, st, acct, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount: %v", err)
@@ -974,7 +1100,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 // LIVE nodes. The other account keeps its gate, session and LIVE node.
 func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	loggedOut := newNodeTestAccount(t, st, "node-logout")
 	kept := newNodeTestAccount(t, st, "node-logout-other")
 	logins := newFakeLoginResults()
@@ -995,6 +1121,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &mutationPanel{st: st, accountID: loggedOut.ID}
+	grantSlots(t, st, loggedOut, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 	for _, id := range []string{loggedOut.ID, kept.ID} {
 		if err := controller.SyncAccount(context.Background(), id); err != nil {
@@ -1116,7 +1243,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 
 func TestNodeControllerPerServerFailure(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-partial")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -1131,6 +1258,7 @@ func TestNodeControllerPerServerFailure(t *testing.T) {
 	opener := newFakeSessionOpener()
 	opener.fail["s2"] = errors.New("fv auth denied")
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
@@ -1157,7 +1285,7 @@ func TestNodeControllerPerServerFailure(t *testing.T) {
 
 func TestNodeControllerNoNodeStarted(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-all-fail")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -1173,13 +1301,14 @@ func TestNodeControllerNoNodeStarted(t *testing.T) {
 	opener.fail["s1"] = errors.New("fv auth denied")
 	opener.fail["s2"] = errors.New("fv auth denied")
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 2)
 	controller := newNodeController(t, st, logins, opener, rec)
 
 	err := controller.SyncAccount(context.Background(), acct.ID)
 	if err == nil {
 		t.Fatal("SyncAccount succeeded with no working server")
 	}
-	for _, id := range []string{acct.ID + ":s1", acct.ID + ":s2"} {
+	for _, id := range []string{slotNodeID(acct.ID, 1, "s1"), slotNodeID(acct.ID, 2, "s2")} {
 		if !strings.Contains(err.Error(), id) {
 			t.Fatalf("aggregate error %q does not name %q", err, id)
 		}
@@ -1332,9 +1461,9 @@ func fiveServers() map[string]apifacade.Server {
 	return servers
 }
 
-func TestNodeControllerMaxServersTruncates(t *testing.T) {
+func TestNodeControllerMaxServersCapsSlots(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-limit")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -1345,6 +1474,7 @@ func TestNodeControllerMaxServersTruncates(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 5)
 	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 2)
 
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
@@ -1352,7 +1482,7 @@ func TestNodeControllerMaxServersTruncates(t *testing.T) {
 	}
 
 	if got := opener.callCount(); got != 2 {
-		t.Fatalf("session opens = %d, want 2", got)
+		t.Fatalf("session opens = %d, want 2 (MaxServers caps the slot capacity)", got)
 	}
 	nodes := st.Nodes()
 	if len(nodes) != 2 {
@@ -1364,10 +1494,13 @@ func TestNodeControllerMaxServersTruncates(t *testing.T) {
 	if first.GatePort != 13000 || second.GatePort != 13001 {
 		t.Fatalf("gate ports = %d/%d, want 13000/13001", first.GatePort, second.GatePort)
 	}
+	if first.Slot != 1 || second.Slot != 2 {
+		t.Fatalf("node slots = %d/%d, want 1/2", first.Slot, second.Slot)
+	}
+	if got := st.SlotCount(acct.ID); got != 2 {
+		t.Fatalf("slot rows = %d, want the capped capacity 2", got)
+	}
 	for _, id := range []string{"s3", "s4", "s5"} {
-		if _, ok := st.Node(acct.ID + ":" + id); ok {
-			t.Fatalf("node for capped-out server %s exists", id)
-		}
 		if requests := opener.requestsFor(id); len(requests) != 0 {
 			t.Fatalf("capped-out server %s got %d session requests, want 0", id, len(requests))
 		}
@@ -1379,13 +1512,13 @@ func TestNodeControllerMaxServersTruncates(t *testing.T) {
 	if got := opener.callCount(); got != 2 {
 		t.Fatalf("session opens after resync = %d, want 2", got)
 	}
-	t.Logf("limit 2 of 5 usable servers: started %s port=%d and %s port=%d, skipped s3/s4/s5",
+	t.Logf("cap 2 of 5 slots: started %s port=%d and %s port=%d, skipped s3/s4/s5",
 		first.ID, first.GatePort, second.ID, second.GatePort)
 }
 
-func TestNodeControllerMaxServersZeroStartsAll(t *testing.T) {
+func TestNodeControllerMaxServersZeroUsesSlotCapacity(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-limit-zero")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -1396,18 +1529,26 @@ func TestNodeControllerMaxServersZeroStartsAll(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 5)
 	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 0)
 
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount: %v", err)
 	}
 	if got := opener.callCount(); got != 5 {
-		t.Fatalf("session opens = %d, want 5 (limit 0 means all)", got)
+		t.Fatalf("session opens = %d, want 5 (limit 0 leaves the slot capacity in charge)", got)
 	}
-	if nodes := st.Nodes(); len(nodes) != 5 {
+	nodes := st.Nodes()
+	if len(nodes) != 5 {
 		t.Fatalf("nodes = %d, want 5", len(nodes))
 	}
-	t.Logf("limit 0 of 5 usable servers: all 5 started")
+	for _, id := range []string{"s1", "s2", "s3", "s4", "s5"} {
+		node := nodeByServer(t, st, acct.ID, id)
+		if node.Slot == 0 {
+			t.Fatalf("node %s has no slot", node.ID)
+		}
+	}
+	t.Logf("limit 0 of 5 slots: all 5 slots started")
 }
 
 func TestNodeControllerMaxServersNegativeRejected(t *testing.T) {
@@ -1431,7 +1572,7 @@ func TestNodeControllerMaxServersNegativeRejected(t *testing.T) {
 
 func TestNodeControllerMaxServersLowerLimitRemovesGates(t *testing.T) {
 	requirePort13000(t)
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "node-limit-lower")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -1442,12 +1583,12 @@ func TestNodeControllerMaxServersLowerLimitRemovesGates(t *testing.T) {
 	})
 	opener := newFakeSessionOpener()
 	rec := &fakeReconciler{}
+	grantSlots(t, st, acct, 3)
 
-	// One controller with all servers running, then the same daemon restarts
+	// One controller with three slots running, then the same daemon restarts
 	// with a lower cap: the old controller is stopped (its gates close) and a
-	// fresh controller over the same store removes the out-of-cap nodes on
-	// the next sync, which is what a resync after a cap change looks like to
-	// the store.
+	// fresh controller over the same store disables the out-of-cap slots on
+	// the next sync, which is what a resync after a cap change looks like.
 	controller := newNodeControllerWithLimit(t, st, logins, opener, rec, 3)
 	if err := controller.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("SyncAccount: %v", err)
@@ -1455,41 +1596,38 @@ func TestNodeControllerMaxServersLowerLimitRemovesGates(t *testing.T) {
 	if got := opener.callCount(); got != 3 {
 		t.Fatalf("session opens = %d, want 3", got)
 	}
-	_, okS1 := st.Node(acct.ID + ":s1")
-	_, okS2 := st.Node(acct.ID + ":s2")
+	s1 := nodeByServer(t, st, acct.ID, "s1")
 	s3 := nodeByServer(t, st, acct.ID, "s3")
-	s3Port := s3.GatePort
-	if !okS1 || !okS2 {
-		t.Fatal("in-cap node s1 or s2 is missing before the resync")
-	}
-	for _, id := range []string{"s4", "s5"} {
-		if _, ok := st.Node(acct.ID + ":" + id); ok {
-			t.Fatalf("node for capped-out server %s exists", id)
-		}
+	s1Port, s3Port := s1.GatePort, s3.GatePort
+	if s1Port != 13000 || s3Port != 13002 {
+		t.Fatalf("gate ports = %d/%d, want 13000/13002", s1Port, s3Port)
 	}
 
 	// The old daemon's gates are gone before the new daemon syncs; the store
-	// keeps the three nodes for the resync to prune.
+	// keeps the three nodes and slot rows for the resync to prune.
 	if err := controller.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	// A resync with a lower cap keeps the in-cap gates and removes the rest:
-	// the out-of-cap gate must be closed and its node deleted.
+	// A resync with a lower cap keeps the in-cap slot and removes the rest.
 	capped := newNodeControllerWithLimit(t, st, logins, opener, rec, 1)
 	if err := capped.SyncAccount(context.Background(), acct.ID); err != nil {
 		t.Fatalf("capped SyncAccount: %v", err)
 	}
-	// s1 is the only in-cap server: it stays LIVE and serving (the port may
-	// move, since the old gate closed and the new one skips the ports the
-	// stale store nodes still hold — the pre-existing restart rebind).
+	// s1 is the only in-cap server: it stays LIVE on its immutable pair.
 	kept := nodeByServer(t, st, acct.ID, "s1")
-	if kept.State != model.NodeLive {
-		t.Fatalf("kept server s1 state = %s, want LIVE", kept.State)
+	if kept.State != model.NodeLive || kept.GatePort != s1Port {
+		t.Fatalf("kept server s1 = %+v, want LIVE on its reserved port %d", kept, s1Port)
 	}
 	for _, id := range []string{"s2", "s3", "s4", "s5"} {
-		if _, ok := st.Node(acct.ID + ":" + id); ok {
+		if _, ok := st.Node(slotNodeID(acct.ID, 2, id)); ok {
 			t.Fatalf("node for out-of-cap server %s survived the resync", id)
+		}
+	}
+	for _, index := range []int{2, 3} {
+		slot, ok := st.Slot(model.SlotKey{AccountID: acct.ID, Index: index})
+		if !ok || slot.State != model.SlotDown || slot.GatePort != 0 {
+			t.Fatalf("disabled slot %d = %+v/%v, want DOWN without ports", index, slot, ok)
 		}
 	}
 	if session := opener.session("s2"); session == nil || !session.isClosed() {

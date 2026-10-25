@@ -37,7 +37,7 @@ func (g *flowGate) Flows(limit int) []gate.FlowRecord {
 func (g *flowGate) Dropped() uint64 { return g.dropped }
 
 func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
-	st := newNodeTestStore(t)
+	st := newNodeTestPoolStore(t)
 	acct := newNodeTestAccount(t, st, "lab-flows")
 	logins := newFakeLoginResults()
 	logins.set(acct.ID, account.LoginResult{
@@ -49,6 +49,8 @@ func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
 			"s2": testServer("s2"),
 		},
 	})
+
+	grantSlots(t, st, acct, 2)
 
 	started := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 	gates := map[string]*flowGate{
@@ -98,7 +100,7 @@ func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
 		MaxServers: 2,
 		PortBase:   13200,
 		Gates: func(cfg gate.Config, _ gate.Session) (runtime.Gate, error) {
-			if cfg.NodeID == acct.ID+":s2" {
+			if cfg.NodeID == slotNodeID(acct.ID, 2, "s2") {
 				return gates["s2"], nil
 			}
 			return gates["s1"], nil
@@ -152,9 +154,9 @@ func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
 		t.Fatalf("flow[2] = %+v, want the open_flow reject", flows.Flows[2])
 	}
 	for _, flow := range flows.Flows {
-		wantNode := acct.ID + ":s1"
+		wantNode := slot1NodeID(acct.ID, "s1")
 		if flow.ID == "stale#3" || flow.ID == "stale#4" {
-			wantNode = acct.ID + ":s2"
+			wantNode = slotNodeID(acct.ID, 2, "s2")
 		}
 		if flow.NodeID != wantNode || flow.AccountID != acct.ID {
 			t.Fatalf("flow was not joined to its node/account: %+v", flow)
@@ -372,7 +374,7 @@ func TestLabViewFlowsFromRealGate(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	flow := flows.Flows[0]
-	if flow.NodeID != acct.ID+":s1" || flow.AccountID != acct.ID {
+	if flow.NodeID != slot1NodeID(acct.ID, "s1") || flow.AccountID != acct.ID {
 		t.Fatalf("flow was not joined to its node/account: %+v", flow)
 	}
 	if flow.TargetHost != "example.com" || flow.TargetPort != 443 || flow.Method != "CONNECT" {

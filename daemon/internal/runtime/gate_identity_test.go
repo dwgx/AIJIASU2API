@@ -342,7 +342,12 @@ func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 				defer cancel()
 				_ = controller.Stop(stopCtx)
 			})
-			if _, _, err := controller.startGateLocked("node-auth", "acc-01", "s1", nil); err != nil {
+			if _, _, err := controller.startGateLocked(
+				model.SlotKey{AccountID: "acc-01", Index: 1},
+				serverRef{id: "s1"},
+				nil,
+				gateAddresses{socks: 13000},
+			); err != nil {
 				t.Fatalf("startGateLocked: %v", err)
 			}
 			if capture.cfg.AuthMode != tc.wantMode {
