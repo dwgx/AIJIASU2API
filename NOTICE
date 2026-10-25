@@ -1,0 +1,221 @@
+LovePlusSpeedToProxy
+Copyright (c) 2026 dwgx
+
+This repository's original code is licensed under the MIT License in LICENSE.
+This NOTICE records the third-party software, icon data and geographic data
+that are included in, or required by, the repository, together with their own
+terms. It does not relicense any third-party component, and it does not grant
+any right to the AJiaSu vendor software or service.
+
+Summary
+-------
+
+| Component | Used in | License | Copyright / attribution |
+| --- | --- | --- | --- |
+| Morphicons | dashboard icon-morph core | MIT | © 2026 Guillermo (guillermolg.com) |
+| Lucide (`lucide-react`) | dashboard icons | ISC | © Lucide Contributors 2022 |
+| Feather (portions of Lucide) | dashboard icons | MIT | © Cole Bemis 2013-2022 |
+| Tabler | not bundled | — | no Tabler icon data is used |
+| DataV GeoAtlas / AMAP data | dashboard map assets and daemon city index | DataV/AMAP terms (not MIT) | data from the AMAP Open Platform |
+| Resin (external) | optional control plane | MIT | © 2026 Resinat and contributors |
+| `golang.org/x/crypto` | daemon | BSD-3-Clause | © 2009 The Go Authors |
+| `golang.org/x/sys` | daemon (indirect) | BSD-3-Clause | © 2009 The Go Authors |
+| React / React DOM | dashboard | MIT | © Meta Platforms, Inc. and affiliates |
+| React Router | dashboard | MIT | © React Training LLC 2015-2019; Remix Software Inc. 2020-2021; Shopify Inc. 2022-2023 |
+| Recharts | dashboard | MIT | © 2015-present recharts |
+| clsx | dashboard | MIT | © Luke Edwards (lukeed.com) |
+| `@fontsource/inter` | dashboard | SIL OFL 1.1 | © 2016 The Inter Project Authors |
+| `@fontsource/jetbrains-mono` | dashboard | SIL OFL 1.1 | © 2020 The JetBrains Mono Project Authors |
+
+1. Morphicons
+-------------
+
+Files:
+
+- `dashboard/src/lib/iconMorph.ts` — the pure icon-morph core.
+- `dashboard/src/components/icons/MorphIcon.tsx` — the React driver.
+
+Source: https://github.com/guillermolg00/morphicons
+
+License: MIT
+
+Copyright (c) 2026 Guillermo (guillermolg.com)
+
+The core is adapted from Morphicons. The adaptation for APC uses a small list
+of single-subpath `d` strings on a 24×24 grid instead of Lucide IconNodes,
+pairs subpaths one-to-one by centroid and length, and collapses leftover
+subpaths into a fading point instead of duplicating a target subpath. The MIT
+license text is reproduced in `MorphIcon.tsx` and in the root LICENSE.
+
+2. Lucide and Feather
+---------------------
+
+Package: `lucide-react`, used throughout `dashboard/src`.
+
+Source: https://lucide.dev and https://github.com/lucide-icons/lucide
+
+License: ISC for Lucide. Portions of Lucide are held by Cole Bemis 2013-2022
+as part of Feather and remain MIT-licensed; all other copyright is held by
+Lucide Contributors 2022.
+
+No Tabler icon data is bundled or used. The in-repository APC glyphs in
+`dashboard/src/components/icons/ApcIcons.tsx` and `morphGlyphs.ts` are part of
+this project's icon set; the Morphicons attribution above covers the morph core
+that animates them.
+
+The full ISC text is reproduced at the end of this NOTICE. For the Feather
+portions, the MIT permission text is in LICENSE.
+
+3. DataV GeoAtlas-derived geography
+-----------------------------------
+
+Files:
+
+- `dashboard/src/assets/geo/cn-provinces.json` — province paths and centroids.
+- `dashboard/src/assets/geo/cn-cities.json` — prefecture lookup and map points.
+- `daemon/internal/catalog/geo_data.go` — generated city index.
+- `scripts/geo/build-cn-geo.mjs` and `scripts/geo/gen-daemon-geo.mjs` — the
+  generators that produce the committed assets and the Go index.
+
+Source: DataV GeoAtlas `areas_v3`, including
+https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json for the national
+boundary and the per-province `_full.json` files for city data. The committed
+`cn-provinces.json` records the source URL and the SHA-256
+`99adfeded5223848bbe37a0a12f8023e11ee12161c7800521c27db42fdeac275` of the
+national boundary file it was derived from.
+
+Terms: Alibaba Cloud's DataV GeoAtlas documentation states that the data in
+the tool comes from the AMAP Open Platform and is for learning and
+communication purposes only; copyright questions should be directed to the
+AMAP Open Platform (https://lbs.amap.com/). The DataV tool page also records
+the dataset version as updated in 2021.5.
+
+These map assets are third-party geographic data, not original code, and are
+not relicensed under the MIT License. The repository uses them as a factual
+geography reference for an offline map; no AMAP tiles, map imagery or API keys
+are included. Anyone redistributing the repository or a built dashboard should
+verify the current DataV and AMAP terms first.
+
+4. Go module dependencies
+-------------------------
+
+The daemon's Go module graph contains:
+
+- `golang.org/x/crypto` v0.58.0 — BSD-3-Clause, © 2009 The Go Authors.
+  Direct dependency, used for `argon2`.
+- `golang.org/x/sys` v0.49.0 — BSD-3-Clause, © 2009 The Go Authors.
+  Indirect dependency.
+- `golang.org/x/net` v0.60.0, `golang.org/x/term` v0.47.0 and
+  `golang.org/x/text` v0.43.0 — BSD-3-Clause, © 2009 The Go Authors.
+  Indirect dependencies in the module graph.
+
+Each module ships its own LICENSE file in the Go module cache. The full
+BSD-3-Clause text is reproduced at the end of this NOTICE.
+
+5. Dashboard runtime dependencies
+---------------------------------
+
+- `react` and `react-dom` 19 — MIT, © Meta Platforms, Inc. and affiliates.
+- `react-router-dom` 7 (`react-router` 7) — MIT, © React Training LLC
+  2015-2019, Remix Software Inc. 2020-2021, Shopify Inc. 2022-2023.
+- `recharts` 2 — MIT, © 2015-present recharts. Recharts pulls in D3 modules
+  (ISC; `d3-ease` is BSD-3-Clause; © 2010-2023 Mike Bostock) and
+  `victory-vendor` (MIT AND ISC); their license files travel with the npm
+  packages.
+- `lucide-react` 0.468 — ISC, with MIT portions from Feather; see section 2.
+- `clsx` 2 — MIT, © Luke Edwards (lukeed.com).
+- `@fontsource/inter` 5 — SIL OFL 1.1, © 2016 The Inter Project Authors.
+- `@fontsource/jetbrains-mono` 5 — SIL OFL 1.1, © 2020 The JetBrains Mono
+  Project Authors.
+
+The SIL OFL 1.1 text is reproduced in each `@fontsource` package's LICENSE
+file and is available at https://openfontlicense.org/. A redistributed
+dashboard bundle or container image should carry a copy of that license with
+the font files.
+
+6. Build and test tooling (not distributed)
+--------------------------------------------
+
+Vite 6 (MIT), TypeScript 5.8 (Apache-2.0), Vitest 3 (MIT), jsdom 26 (MIT),
+Testing Library (MIT) and `@vitejs/plugin-react` (MIT) are development
+dependencies. They are not part of the served dashboard bundle; their license
+texts ship with the npm packages.
+
+7. External components not redistributed
+----------------------------------------
+
+- **Resin** — MIT, © 2026 Resinat and contributors. `deploy/compose.yml`
+  pulls `ghcr.io/resinat/resin:1.3.0` under the optional `resin` profile. Resin
+  is run unmodified and is not included in this repository. If you redistribute
+  Resin or a derived image, include its MIT notice and mark any modifications.
+- **OpenAJS** — Unlicense. Referenced in PLAN.md as prior art for the FV
+  protocol; no code is copied into this repository.
+- **AJiaSu / 爱加速** — proprietary vendor software and service. No vendor
+  binary, driver, installer, packet capture, credential or resource is committed
+  to this repository. The MIT License does not apply to vendor software or to
+  use of the vendor service; that use is governed by the vendor's terms.
+
+All product names, logos and trademarks are the property of their respective
+owners. Mention of a product does not imply endorsement.
+
+8. License texts
+----------------
+
+### MIT License
+
+The MIT permission text is reproduced in full in LICENSE. The copyright notice
+for each MIT-licensed third-party component is listed in the summary table
+above. When redistributing such a component, reproduce its copyright line
+together with the MIT text from LICENSE (or from the component's own package).
+
+### ISC License (Lucide)
+
+```
+ISC License
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+### BSD-3-Clause License (Go Authors)
+
+```
+Copyright (c) 2009 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

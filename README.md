@@ -448,6 +448,7 @@ the M1 spike; see the evidence sections of
 README.md                  this file
 PLAN.md                    campaign plan, slices, acceptance criteria, risks
 LICENSE                    MIT
+NOTICE                     third-party software, icon and map-data attribution
 docs/PANEL.md              control-plane design: ports, API, data model, phases
 docs/openapi.json          OpenAPI 3.1 contract for the daemon route table (P0 served, P1 proposed)
 dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
@@ -497,12 +498,19 @@ Claims that were not directly observed are marked `[INFERENCE]` or `[UNKNOWN]`.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 The LovePlusSpeedToProxy Authors.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 dwgx.
 
-Third-party components keep their own licences. The panel design runs
-[Resin](https://github.com/Resinat/Resin) unmodified under the MIT licence
-(Copyright (c) 2026 Resinat and contributors); no AGPL-licensed or unlicensed code is copied into
-this repository. Details and attribution obligations: `research/70-panel/REPORT.md`.
+Third-party components and data keep their own terms and are attributed in
+[NOTICE](NOTICE): the Morphicons-derived icon-morph core (MIT, © 2026 Guillermo),
+Lucide and Feather icon data (ISC/MIT), the DataV GeoAtlas-derived map assets
+(AMAP/DataV terms, not MIT) and the Go module dependencies. The panel design
+uses [Resin](https://github.com/Resinat/Resin) unmodified under its MIT
+license; it is not redistributed here. No AGPL-licensed or unlicensed code is
+copied into this repository.
+
+Use of the AJiaSu service remains subject to the vendor's terms of service;
+the MIT license on this repository grants no rights to the vendor's software,
+service, data or marks.
 
 ## Use boundary
 
