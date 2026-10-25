@@ -347,6 +347,7 @@ func TestEquivalentSessionLossContainsGenerationMatchedSlot(t *testing.T) {
 	gates := &lossGateFactory{}
 	clock := newSwitchClock()
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:         gate.AuthLoopback,
 		Store:            st,
 		Logins:           logins,
 		Sessions:         opener,
@@ -582,6 +583,7 @@ func TestLoginCompletingDuringLogoutCannotInstallListener(t *testing.T) {
 	opener := newFakeSessionOpener()
 	gates := &lossGateFactory{}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:         gate.AuthLoopback,
 		Store:            st,
 		Logins:           service,
 		Sessions:         opener,

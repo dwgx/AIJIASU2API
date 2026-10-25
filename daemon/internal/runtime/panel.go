@@ -1,8 +1,8 @@
 // Package runtime wires the Resin admin client and publisher into ajs-accountd.
 // It owns the startup reconciliation (probe config, subscription, platform,
 // publish), the on-demand re-render behind POST /v1/reconcile, the read-only
-// view behind GET /v1/topology, and the four runtime mutations: lease rotation
-// and release, node drain and undrain.
+// view behind GET /v1/topology, and the runtime mutations: lease publication,
+// rotation and release, node drain and undrain.
 //
 // Mutations are only routed here when a Resin panel is configured. Without
 // one, the API keeps calling the store directly and the store's synthetic
@@ -46,6 +46,16 @@ var ErrRotationRateLimited = publisher.ErrRotationRateLimit
 type Panel interface {
 	Topology(ctx context.Context) (Topology, error)
 	Reconcile(ctx context.Context) (Topology, error)
+	// PublishLease publishes one committed store lease to Resin before the API
+	// reports it created. Resin has no create-lease endpoint: it allocates a
+	// lease lazily from the subscription it serves, so publication means the
+	// subscription containing the lease's node was reconciled successfully and
+	// the node is still part of the published topology. A failure is returned
+	// unwrapped enough for the API to map it (store.ErrConflict for a
+	// configuration mismatch, store.ErrUpstream for a Resin failure), and the
+	// API then rolls the lease back instead of serving an endpoint Resin
+	// cannot route to.
+	PublishLease(ctx context.Context, lease model.Lease) error
 	RotateLease(ctx context.Context, leaseID string) (model.Lease, error)
 	ReleaseLease(ctx context.Context, leaseID string) error
 	DrainNode(ctx context.Context, nodeID string) (model.ProxyNode, error)
@@ -205,6 +215,36 @@ func (p *ResinPanel) PlatformID() string {
 // (net/http keeps idle connections only), so this is a no-op that exists for
 // the daemon's shutdown sequence.
 func (p *ResinPanel) Close() error { return nil }
+
+// PublishLease makes one committed store lease visible to Resin before the API
+// reports it created.
+//
+// Resin has no create-lease endpoint: it allocates a lease lazily from the
+// subscription it serves, so "publishing a lease" means reconciling the
+// subscription that contains the lease's node and confirming the node is still
+// part of the published topology afterwards. The full reconcile sequence is
+// reused on purpose: it is the only path that makes Resin serve the node's
+// current gate port (probe config, subscription content, platform filters,
+// publish and refresh). It is heavier than a bare PATCH, but lease creates are
+// rare and a lease Resin never saw is exactly the half-published state this
+// call exists to prevent.
+//
+// Errors are wrapped for the API's mapping: store.ErrUpstream for a Resin
+// failure, store.ErrConflict when the node is not (or no longer) publishable.
+// The caller rolls the store row back on any error.
+func (p *ResinPanel) PublishLease(ctx context.Context, lease model.Lease) error {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+
+	if err := p.reconcileLocked(ctx); err != nil {
+		return fmt.Errorf("%w: publish lease %q: %w", store.ErrUpstream, lease.ID, err)
+	}
+	if _, ok := p.nodeTag(lease.NodeID); !ok {
+		return fmt.Errorf("%w: node %s is not in the published topology; lease %q was not published",
+			store.ErrConflict, lease.NodeID, lease.ID)
+	}
+	return nil
+}
 
 // RotateLease moves a leased account off its current node through the
 // M1-proven filter-exclusion path and records the egress IP/expiry Resin

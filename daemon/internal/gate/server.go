@@ -4,9 +4,10 @@
 // optional HTTP CONNECT listener that share one admission pipeline (per-user
 // policy, account quota, one slot limit), one set of byte counters, one drain
 // state machine and one bounded flow ring. It accepts the SOCKS5 CONNECT
-// command after negotiating either the no-auth method (AuthLoopback) or RFC
-// 1929 username/password (AuthUserPass), or the HTTP CONNECT method with Basic
-// proxy credentials, admits at most Limit concurrent flows across both, relays
+// command after negotiating either RFC 1929 username/password (AuthUserPass,
+// the default) or the no-auth method (AuthLoopback, the explicit opt-in
+// compatibility wire), or the HTTP CONNECT method with Basic proxy
+// credentials, admits at most Limit concurrent flows across both, relays
 // bytes between the client and one Session flow, and exposes counters plus a
 // drain/undrain state machine for the node supervisor.
 //
@@ -164,10 +165,12 @@ type Config struct {
 	// slot after the flow finishes. Both nil disables the per-user cap.
 	UserFlowCheck   func(userID string) bool
 	UserFlowRelease func(userID string)
-	// AuthMode selects the SOCKS5 authentication method. An empty value keeps
-	// AuthLoopback. AuthUserPass requires Authenticator and UserPolicy; a nil
-	// one fails closed (01 01 / policy_unavailable) rather than falling back
-	// to no-auth.
+	// AuthMode selects the SOCKS5 authentication method. An empty value selects
+	// DefaultAuthMode (AuthUserPass): the gate fails closed on every flow until
+	// an Authenticator and UserPolicy are wired. AuthUserPass requires both; a
+	// nil one fails closed (01 01 / policy_unavailable) rather than falling back
+	// to no-auth. AuthLoopback is the explicit opt-in compatibility wire and
+	// carries no user identity, allowlist or user quota.
 	AuthMode AuthMode
 	// AuthTimeout bounds the RFC 1929 subnegotiation. Default 3s.
 	AuthTimeout time.Duration

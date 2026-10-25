@@ -50,6 +50,7 @@ func newHTTPGateController(t *testing.T, label string, servers map[string]apifac
 	}
 	meter := runtime.NewFlowMeter(st)
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:       gate.AuthLoopback,
 		Store:          st,
 		Logins:         logins,
 		Sessions:       meterSessionOpener{},
@@ -272,6 +273,7 @@ func TestNodeControllerFailsReservedPairOnHTTPBindFailure(t *testing.T) {
 func TestNodeControllerHTTPOffsetValidation(t *testing.T) {
 	st := newNodeTestStore(t)
 	base := runtime.NodeControllerConfig{
+		GateAuth: gate.AuthLoopback,
 		Store:    st,
 		Logins:   newFakeLoginResults(),
 		Sessions: newFakeSessionOpener(),

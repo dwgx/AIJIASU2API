@@ -26,10 +26,11 @@ successful login with `loginSync`, opens one authenticated FV session and one
 loopback gate per usable vendor server, bounded by `AJS_NODE_LIMIT`
 (default `1`, the vendor's one active data session per account;
 `127.0.0.1:13000` upward, HTTP CONNECT on `+1000`), writes the node, and
-reconciles Resin. Every gate defaults to the no-auth loopback method;
-`AJS_GATE_AUTH=userpass` makes it require RFC 1929 (username =
-`PanelUser.ID`, password = an active API-key secret) and enforce that user's
-allowlist and monthly quota before admitting a flow. The HTTP CONNECT listener
+reconciles Resin. Every gate requires RFC 1929 by default (`AJS_GATE_AUTH` unset):
+the username is `PanelUser.ID`, the password is an active API-key secret, and
+that user's allowlist and monthly quota are enforced before a flow is admitted.
+`AJS_GATE_AUTH=loopback` is the explicit opt-in compatibility wire (no
+credentials, no user identity, no per-user policy). The HTTP CONNECT listener
 reuses that same policy. It also makes
 `POST .../drain|undrain` call the controller before the store, so a running gate
 stops admitting (or reopens) before the node state changes; without the
@@ -692,7 +693,7 @@ Wire contract (RFC 1928 + RFC 1929, CONNECT only):
   controller (`internal/runtime/nodes.go`, B0), which allocates the port and
   reconciles Resin. It is still not wired to the node supervisor, publishes no
   `State` and serves no `GateController` HTTP surface; it binds loopback only.
-  Per-user authentication exists but is off by default (see below).
+  Per-user authentication is on by default (see below).
 
 ### Per-user identity (AJS-266 / DESIGN-GATE-IDENTITY)
 
@@ -700,14 +701,22 @@ Wire contract (RFC 1928 + RFC 1929, CONNECT only):
 method and, on the HTTP CONNECT listener, `Proxy-Authorization: Basic`); unknown values abort
 startup:
 
-- `loopback` (unset default) keeps the pre-RFC-1929 wire: the client offers
-  `00`, the gate trusts every local process, and user fields stay empty. The
-  loopback peer check and the account quota still run. It is not a secure
-  multi-user mode.
-- `userpass` requires RFC 1929 `02`; the username is the exact `PanelUser.ID`
-  and the password is an existing API-key secret (`POST /v1/keys`). Every
-  rejection is one generic `01 01`, so an unknown user, a wrong secret, a
-  revoked key and another user's key are indistinguishable.
+- `userpass` (unset default) requires RFC 1929 `02`; the username is the exact
+  `PanelUser.ID` and the password is an existing API-key secret (`POST /v1/keys`).
+  Every rejection is one generic `01 01`, so an unknown user, a wrong secret, a
+  revoked key and another user's key are indistinguishable. A deployment with no
+  key yet fails closed: every flow is refused until one exists.
+- `loopback` is the explicit opt-in compatibility wire: the client offers `00`,
+  the gate trusts every local process, and user fields stay empty. The loopback
+  peer check and the account quota still run. It is not a secure multi-user mode,
+  so a deployment must select it on purpose.
+
+Both modes bind a literal loopback address only and refuse a non-loopback peer
+before reading a greeting, so the default never widens the bind; the auth
+default is what changed. Migration from the previous release: Resin must present
+the user id and secret in its username/password fields, or the operator sets
+`AJS_GATE_AUTH=loopback` to keep the old wire. Rollback is that same explicit
+setting.
 
 After CONNECT parses and before a slot or `OpenFlow`, the gate evaluates, in
 order: user enabled, the user's allowlist, the user's monthly quota, then the
@@ -739,12 +748,14 @@ existing account quota. A refusal answers `05 02` with its class
   with the identity they authenticated. A key created after startup is
   discovered within one second.
 - Metering attributes accepted flows to `RequestLog.UserID/UserName` and
-  advances the same per-user total the policy reads, so `AJS_GATE_AUTH=userpass`
+  advances the same per-user total the policy reads, so `userpass` (the default)
   requires `AJS_FLOW_METER` (the daemon refuses the combination otherwise).
 - Migration: create an ordinary user and key, set an explicit allowlist and
-  quota, put the user id and one-time secret in Resin's username/password
-  fields, verify attributed flows, then switch `AJS_GATE_AUTH=userpass`.
-  Rollback is `AJS_GATE_AUTH=loopback` while the listener stays loopback.
+  quota, and put the user id and one-time secret in Resin's username/password
+  fields. An upgraded daemon with no key fails closed on every gate flow, which
+  is the intended signal that the Resin side has not been configured yet.
+  Rollback to the old wire is the explicit `AJS_GATE_AUTH=loopback` while the
+  listener stays loopback.
 
 ### HTTP CONNECT listener (AJS-271)
 
@@ -1275,27 +1286,44 @@ answers 201 with `{lease, replayed?, warning?}`.
   `READY` one, and seed order breaks the tie. Without a pin the first active account of the
   platform with spare concurrency and a free node wins. The commit appends one `lease.create`
   audit row and increments the node's `inUse`.
-- **Publish hook.** When the runtime wires `LeasePublishHook`, a hook failure is reported in the
-  201 body as `warning` (and logged as `lease_publish_hook_failed`); the lease stays committed and
-  the request is not rolled back.
+- **Publication (fail-closed).** A create is only reported after its publication
+  succeeded. With a Resin panel the handler calls `Panel.PublishLease`, which runs
+  the reconcile that carries the lease's node (probe config, subscription content,
+  platform filters, publish and refresh) and then requires the node to still be in
+  the published topology; the runtime `LeasePublishHook`, when wired, must also
+  succeed. On any failure the handler calls `store.RollbackLease`: the row is
+  removed, the node's `inUse` is decremented, one error-severity
+  `lease.publish_failed` audit row records the sanitized reason, the debug trace
+  records `lease.create` with state `failed`, and no `lease.created` event is
+  emitted. The answer is 409 `CONFLICT` when the panel refused the configuration
+  (no platform yet, a node that is not published) or 503 `UPSTREAM_UNAVAILABLE`
+  when Resin itself failed, always with reason `lease_publish_failed` and the
+  cause in `message`. The failed create leaves no idempotency record, so the retry
+  the client makes with the same key allocates again instead of replaying a lease
+  that was never published.
 
 **Revoke** (`DELETE /v1/leases/{id}`, body `{confirm:true}`) answers 204; a missing confirm is 400.
 With a Resin panel the store row is read first (missing → 404), then the panel lease is deleted —
 Resin's 404 is treated as already gone, a missing panel platform is 409, and any other panel failure
 is 503 with the store row left in place — and finally the store row is released, the node's `inUse`
 decremented and one `lease.revoke` audit row written. Without a panel the store release is the whole
-path and an unknown id is 404. A hook failure after the commit is returned in the `Warning` header.
+path and an unknown id is 404. Revoke is fail-closed on the panel step (the Resin lease is deleted
+before the store row moves); the optional `LeasePublishHook` runs after the commit, so its failure is
+reported in the `Warning` header rather than rolling back a revoke that already happened.
 
-Both commits emit one webhook event after the store write: `lease.created` (never on an
-idempotent replay, whose original create already emitted it) and `lease.revoked`. The expiry sweep
-has no request handler, so the store calls its expiry hook and the daemon emits `lease.expired`
-once per released row. All three share the payload `{leaseId, userId, platform, accountId,
-expiresAt}` and carry no key, token or credential.
+Only a published create emits `lease.created` (never on an idempotent replay, whose original create
+already emitted it, and never on a rolled-back publication), and a revoke emits `lease.revoked`. The
+expiry sweep has no request handler, so the store calls its expiry hook and the daemon emits
+`lease.expired` once per released row. All three share the payload `{leaseId, userId, platform,
+accountId, expiresAt}` and carry no key, token or credential.
 
 `internal/store/leases_test.go` covers allocation, replay, duplicate user/platform, user quota,
 account concurrency, no capacity, a suspended user, revoke/expire releasing the node and snapshot
 survival; `internal/api/leases_test.go` covers the HTTP retry/conflict contract, both 429 reasons,
-validation, the `confirm` gate, the publish-hook warning and the `leases:write` scope.
+validation, the `confirm` gate, the fail-closed publication rollback (store row, node slot, audit
+row, no event, retry allocates again) and the `leases:write` scope. `internal/runtime/mutations_test.go`
+covers `PublishLease` (rendered node reaches Resin, unpublished node is 409, Resin failure is
+upstream).
 
 ## Supervisor (AJS-43)
 
@@ -1461,12 +1489,12 @@ test binary as the child.
 | `AJS_TIMEZONE` | — | `UTC` | IANA zone for the renewal sweep; each schedule trigger carries its own `timezone` (empty = UTC); an invalid name fails startup |
 | `AJS_RENEWAL_TTL` | — | `6h` | how long a live purchase-page snapshot stays fresh (`time.ParseDuration`); a bad or non-positive value keeps the default. On failure the cache serves its last good snapshot, or the built-in static table on a cold cache |
 | `AJS_FLOW_METER` | — | on | `0` disables gate→request-log metering: every completed gate flow (SOCKS5 or HTTP CONNECT) then stops appending a row, so `GET /v1/usage` and `GET /v1/requests` see only the mutation-lab and seed rows. Any other value keeps metering on. A row is appended only after the gate's success reply, through the same 10,000-row cap as every other writer, carries the listener as `protocol` (`socks5`/`http`) and never a URL, header, session id or credential |
-| `AJS_GATE_AUTH` | — | `loopback` | SOCKS5 gate authentication method: `loopback` keeps the no-auth compatibility path (no user identity, allowlist or user quota; the loopback peer check and the account quota still apply), `userpass` requires RFC 1929 with the username = `PanelUser.ID` and the password = an API-key secret, then enforces the user's allowlist and monthly quota before admission. Any other value fails startup. `userpass` requires `AJS_FLOW_METER` (user quota is metered from the gate's request rows), and Resin needs the user id and secret in its username/password fields |
+| `AJS_GATE_AUTH` | — | `userpass` | SOCKS5 gate authentication method. `userpass` (the unset default) requires RFC 1929 with the username = `PanelUser.ID` and the password = an API-key secret, then enforces the user's allowlist and monthly quota before admission; a deployment with no key fails closed. `loopback` is the explicit opt-in no-auth compatibility path (no user identity, allowlist or user quota; the loopback peer check and the account quota still apply). Any other value fails startup. Both modes bind loopback only and refuse non-loopback peers. `userpass` requires `AJS_FLOW_METER` (user quota is metered from the gate's request rows), and Resin needs the user id and secret in its username/password fields |
 | `AJS_GATE_HTTP` | — | off | `1` starts the per-node HTTP CONNECT listener beside the SOCKS5 gate on `127.0.0.1:<gatePort+offset>`; unset or `0` keeps it off; any other value fails startup. Opt-in so an upgrade never binds an extra port pair by itself. Both listeners share one admission pipeline (RFC 1929 key or loopback trust, allowlist, user and account quota, one slot pool, one flow ring), and metered rows carry `protocol:"http"` |
 | `AJS_GATE_HTTP_OFFSET` | — | `1000` | distance between a node's SOCKS5 gate port and its HTTP CONNECT port, `1`–`65534` (unset = default; `0`, negative, `65535+` and non-integers fail startup). The controller reserves the pair as a unit and retries the next base port when either half is taken |
 | `AJS_HEALTH_PROBE` | — | on | `0` disables the loopback gate sampler and `GET /v1/health/nodes` answers `enabled:false`. Enabled: one TCP connect+close to `127.0.0.1:<gate port>` every 30s with a 3s timeout, at most `AJS_HEALTH_MAX_NODES` watched nodes |
 | `AJS_HEALTH_MAX_NODES` | — | `16` | node rings the sampler retains, clamped to 1–64; a non-integer fails startup when the sampler is enabled (an out-of-range integer is clamped, not rejected; the value is not read under `AJS_HEALTH_PROBE=0`). Beyond the cap the sampler evicts an unwatched ring first; when every ring is watched it evicts the least-recently-used one and records it, and the reconciler re-arms a watched-but-evicted key on its next 15 s sweep (one attempt per key per sweep, one log line per minute) |
-| `AJS_EGRESS_PROBE` | — | off | `1` enables the through-gate egress sampler, so `GET /v1/health/nodes` reports real HTTP egress instead of only a loopback handshake. Every sample is one flow through the node's gate and the vendor session behind it, so it is off by default. Only the exact value `1` enables it, and it needs the loopback sampler (`AJS_HEALTH_PROBE` on) because that watch set is what arms and disarms it. With `AJS_GATE_AUTH=userpass` the gate refuses the probe's no-auth greeting and every sample records `proxy`; the daemon logs `egress_probe_unauthenticated` at startup |
+| `AJS_EGRESS_PROBE` | — | off | `1` enables the through-gate egress sampler, so `GET /v1/health/nodes` reports real HTTP egress instead of only a loopback handshake. Every sample is one flow through the node's gate and the vendor session behind it, so it is off by default. Only the exact value `1` enables it, and it needs the loopback sampler (`AJS_HEALTH_PROBE` on) because that watch set is what arms and disarms it. With `AJS_GATE_AUTH=userpass` (the default) the gate refuses the probe's no-auth greeting and every sample records `proxy`; the daemon logs `egress_probe_unauthenticated` at startup, so the sampler is only useful with the explicit `loopback` opt-in |
 | `AJS_EGRESS_INTERVAL` | — | `60s` | egress probe period (`time.ParseDuration`); must be at least `10s`, and a malformed or shorter value fails startup. The floor is deliberate: each probe spends one vendor flow and the account's budget |
 | `AJS_EGRESS_TARGET` | — | `https://www.gstatic.com/generate_204` | absolute `http(s)` URL fetched through the gate; only a 2xx answer is a success (a redirect or error page records `http` with its status). A malformed URL fails startup, and a URL carrying userinfo is refused so a credential cannot reach the startup log |
 | `AJS_WEBHOOK_ALLOW_HTTP` | — | `0` | `1` allows an `http://` webhook receiver that is not loopback; otherwise plaintext is accepted only for `127.0.0.1`/`::1`/`localhost` |
@@ -2342,7 +2370,7 @@ resin_version}`: `nodes` maps node id → tag for the rendered `LIVE` nodes,
 
 ### Runtime mutations
 
-With a panel configured, the four mutation handlers call `api.Panel` (an alias
+With a panel configured, the mutation handlers call `api.Panel` (an alias
 of `runtime.Panel`) instead of the store; the response bodies are unchanged.
 Without a panel they keep calling the store exactly as before. With
 `AJS_ACCOUNT_LOGIN=1` the two node mutations call `NodeDrainHook` before either
@@ -2353,6 +2381,7 @@ its usual 404/409 status.
 
 | Route | Panel path | Store fallback (no panel) |
 |---|---|---|
+| POST `/v1/leases` | `store.CreateLease` → `PublishLease` (reconcile + node still in the topology); on failure `store.RollbackLease` → 409/503 `lease_publish_failed` | `store.CreateLease` → optional `LeasePublishHook` (also fail-closed) |
 | POST `/v1/leases/{id}/actions/rotate` | read store lease → full tag `<subscription>/<tag>` from the last topology → `pub.Rotate(..., true)` → `GetLease` → `store.ApplyLeaseRotation` | next pool IP, expiry refreshed, requests +17 |
 | DELETE `/v1/leases/{id}` | `DeleteLease` (404 idempotent) → `store.ReleaseLease` | `store.ReleaseLease` |
 | POST `/v1/nodes/{id}/actions/drain` | `NodeDrainHook` (gate close) → `store.DrainNode` → `Reconcile` (publish the LIVE-only set) | `NodeDrainHook` → `store.DrainNode` |
@@ -2383,6 +2412,8 @@ Mutation errors reuse the panel contract:
 | panel not started (no platform id) | 409 | `CONFLICT` |
 | lease's node is not in the published topology | 409 | `CONFLICT` |
 | publisher per-account rotation window (10 s) | 409 | `CONFLICT` |
+| create publication: no platform yet, or the lease's node is not published | 409 | `CONFLICT` + reason `lease_publish_failed` |
+| create publication: Resin call or reconcile failure | 503 | `UPSTREAM_UNAVAILABLE` + reason `lease_publish_failed` |
 | Resin call or reconcile failure | 503 | `UPSTREAM_UNAVAILABLE` |
 
 `resin.ConfigFromEnv()` reads `AJS_RESIN_URL` and `AJS_RESIN_ADMIN_TOKEN` (see
@@ -4155,9 +4186,9 @@ header or credential). No live vendor call was made.
 - The gate is constructed from a login session and allocates `13000` upward
   through the node controller, but it is not wired to the node supervisor,
   publishes no `State` and serves no `GateController` HTTP surface. Per-user
-  authentication is opt-in (`AJS_GATE_AUTH=userpass`: RFC 1929, the user's
-  allowlist and monthly quota); the default stays the no-auth loopback method,
-  and the gate binds loopback only.
+  authentication is the default (`AJS_GATE_AUTH` unset = `userpass`: RFC 1929,
+  the user's allowlist and monthly quota); `AJS_GATE_AUTH=loopback` is the
+  explicit no-auth opt-in, and the gate binds loopback only in both modes.
 - The supervisor is not wired to the runtime: nothing starts an `ajsproxy`
   child, allocates its `12000–12999` port or reacts to its events. Readiness is
   a TCP dial on `ReadyAddr`, not an FV auth check, and a crashed child is
@@ -4169,8 +4200,8 @@ header or credential). No live vendor call was made.
   and `/v1/nodes/{id}/flows` are out of this slice.
 - Account traffic budgets are enforced at the gate: an over-budget account gets SOCKS5 `0x02` with
   the `quota_exceeded` class before a slot or vendor flow is taken, metered from the current UTC
-  month's gate rows. User quotas are enforced only in `AJS_GATE_AUTH=userpass` mode, because the
-  no-auth loopback method carries no user identity. On the SOCKS5 listener both are `05 02`
+  month's gate rows. User quotas are enforced only in `AJS_GATE_AUTH=userpass` mode (the default),
+  because the no-auth loopback method carries no user identity. On the SOCKS5 listener both are `05 02`
   refusals; the HTTP CONNECT listener answers the same refusals with `429 Too Many Requests`
   (quota) or `403 Forbidden` (disabled/allowlist). The HTTP `QUOTA_EXCEEDED` (429) on `/v1/*` is a
   lease create refusal (`quota_exceeded`/`concurrency_exceeded`/`no_capacity`) or the Lab

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -107,16 +108,18 @@ func requireClosedWithoutReply(t *testing.T, c net.Conn) {
 	}
 }
 
-// TestParseAuthMode pins the AJS_GATE_AUTH contract: unset keeps the loopback
-// compatibility mode, both documented values parse, and anything else aborts
-// construction instead of silently weakening the listener.
+// TestParseAuthMode pins the AJS_GATE_AUTH contract: unset selects the
+// fail-closed userpass default, the compatibility wire is an explicit opt-in,
+// both documented values parse, and anything else aborts construction instead
+// of silently weakening the listener.
 func TestParseAuthMode(t *testing.T) {
 	cases := []struct {
 		raw  string
 		want AuthMode
 	}{
-		{"", AuthLoopback},
+		{"", AuthUserPass},
 		{" loopback ", AuthLoopback},
+		{"loopback", AuthLoopback},
 		{"userpass", AuthUserPass},
 	}
 	for _, tc := range cases {
@@ -135,6 +138,38 @@ func TestParseAuthMode(t *testing.T) {
 	}
 	if _, err := NewServer(Config{AuthMode: AuthMode("bogus")}, &fakeSession{}); err == nil {
 		t.Fatal("NewServer accepted an unknown auth mode")
+	}
+}
+
+// TestDefaultAuthModeRefusesNoAuth is acceptance row 20 for the auth default:
+// with AJS_GATE_AUTH unset the gate runs the fail-closed default, so the
+// compatibility greeting an unmodified same-host client sends is refused
+// (05 ff) before any OpenFlow. No authenticator is wired, which is exactly the
+// deployment that forgot to configure keys: it must not relay.
+func TestDefaultAuthModeRefusesNoAuth(t *testing.T) {
+	t.Setenv("AJS_GATE_AUTH", "")
+	mode, err := ParseAuthMode(os.Getenv("AJS_GATE_AUTH"))
+	if err != nil {
+		t.Fatalf("ParseAuthMode(unset): %v", err)
+	}
+	if mode != AuthUserPass {
+		t.Fatalf("unset AJS_GATE_AUTH selects %q, want %q", mode, AuthUserPass)
+	}
+	session := &fakeSession{}
+	srv := startServer(t, Config{NodeID: "node-default", AuthMode: mode}, session)
+
+	c := dialGate(t, srv)
+	if method := greet(t, c, authNone); method != authNoAcceptable {
+		t.Fatalf("default gate selected method %#x for a no-auth client, want 0xff", method)
+	}
+	requireClosedWithoutReply(t, c)
+
+	records := waitFlowRecords(t, srv, func(records []FlowRecord) bool { return len(records) == 1 })
+	if records[0].ErrorClass != FlowErrorAuthMethod {
+		t.Fatalf("errorClass = %q, want %q", records[0].ErrorClass, FlowErrorAuthMethod)
+	}
+	if opens := session.recorded(); len(opens) != 0 {
+		t.Fatalf("OpenFlow calls = %v, want none", opens)
 	}
 }
 
@@ -587,6 +622,76 @@ func TestNonLoopbackPeerRefusedBeforeGreeting(t *testing.T) {
 		t.Fatalf("loopback control method reply = % x, want 05 00", reply)
 	}
 	_ = control.Close()
+}
+
+// nonLoopbackIPv4 returns one local non-loopback IPv4 address, or skips: a
+// host with only loopback interfaces cannot make the dial at all.
+func nonLoopbackIPv4(t *testing.T) net.IP {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("InterfaceAddrs: %v", err)
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() || ipNet.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip := ipNet.IP.To4(); ip != nil {
+			return ip
+		}
+	}
+	t.Skip("no non-loopback IPv4 interface to dial from")
+	return nil
+}
+
+// TestNonLoopbackDialRefused is acceptance row 20 on a real socket: with
+// AJS_GATE_AUTH unset the gate listens on a literal loopback address and a
+// client that dials it from a non-loopback source is closed before a greeting
+// byte, with no OpenFlow. The source bind is what makes the peer non-loopback;
+// the OS routes it to the loopback listener. A platform that refuses such a
+// source for a loopback destination (Windows answers WSAEADDRNOTAVAIL) skips
+// the socket half; TestNonLoopbackPeerRefusedBeforeGreeting covers the same
+// refusal deterministically with an injected peer.
+func TestNonLoopbackDialRefused(t *testing.T) {
+	t.Setenv("AJS_GATE_AUTH", "")
+	mode, err := ParseAuthMode(os.Getenv("AJS_GATE_AUTH"))
+	if err != nil {
+		t.Fatalf("ParseAuthMode(unset): %v", err)
+	}
+	logs := &captureHandler{}
+	session := &fakeSession{}
+	srv := startServer(t, Config{NodeID: "node-dial", AuthMode: mode, Logger: slog.New(logs)}, session)
+
+	bound, ok := srv.Addr().(*net.TCPAddr)
+	if !ok || !bound.IP.IsLoopback() {
+		t.Fatalf("listener = %v, want a loopback address", srv.Addr())
+	}
+
+	dialer := net.Dialer{
+		Timeout:   2 * time.Second,
+		LocalAddr: &net.TCPAddr{IP: nonLoopbackIPv4(t)},
+	}
+	conn, err := dialer.DialContext(context.Background(), "tcp", bound.String())
+	if err != nil {
+		t.Skipf("platform refuses a non-loopback source for a loopback destination: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	if n, err := conn.Read(one[:]); err == nil || n != 0 {
+		t.Fatalf("non-loopback dial read %d byte(s), err %v; want an immediate close", n, err)
+	}
+
+	records := waitFlowRecords(t, srv, func(records []FlowRecord) bool { return len(records) == 1 })
+	if records[0].ErrorClass != FlowErrorNonLoopbackPeer {
+		t.Fatalf("errorClass = %q, want %q", records[0].ErrorClass, FlowErrorNonLoopbackPeer)
+	}
+	if opens := session.recorded(); len(opens) != 0 {
+		t.Fatalf("OpenFlow calls = %v, want none", opens)
+	}
+	waitLog(t, logs, "gate peer rejected")
 }
 
 // TestAllowlistMatching is acceptance rows 9 and 10 at the policy unit: exact

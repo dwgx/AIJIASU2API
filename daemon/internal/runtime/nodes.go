@@ -257,8 +257,11 @@ type NodeControllerConfig struct {
 	// disables the cooldown (tests only).
 	ConnectCooldown time.Duration
 	// GateAuth selects the SOCKS5 authentication mode of every gate. The zero
-	// value keeps the no-auth loopback compatibility mode; userpass requires
-	// GateIdentity (a nil one fails every handshake closed).
+	// value selects gate.DefaultAuthMode (userpass), the fail-closed process
+	// default: a controller that forgot to pass the parsed AJS_GATE_AUTH must
+	// not start no-auth gates. userpass requires GateIdentity (a nil one fails
+	// every handshake closed); gate.AuthLoopback is the explicit opt-in
+	// compatibility wire.
 	GateAuth gate.AuthMode
 	// GateIdentity authenticates RFC 1929 credentials and evaluates the
 	// per-user allowlist and quota in userpass mode. Nil fails closed.

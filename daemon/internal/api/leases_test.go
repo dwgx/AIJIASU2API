@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
 	"ajsaccountd/internal/webhook"
 )
@@ -278,18 +282,185 @@ func TestCreateLeaseValidation(t *testing.T) {
 	}
 }
 
-// TestLeasePublishHookWarningDoesNotRollBack proves the Resin seam: a hook
-// failure is a warning on a committed lease, never a failed create or a
-// rolled-back revoke.
-func TestLeasePublishHookWarningDoesNotRollBack(t *testing.T) {
+// leaseEventSink records the webhook events one test server emitted.
+type leaseEventSink struct {
+	mu     sync.Mutex
+	events []webhook.EventType
+}
+
+func (s *leaseEventSink) Emit(event webhook.EventType, _ map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+}
+
+func (s *leaseEventSink) recorded() []webhook.EventType {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]webhook.EventType(nil), s.events...)
+}
+
+// findAuditAction returns the first audit row with this action.
+func findAuditAction(rows []model.AuditEvent, action string) (model.AuditEvent, bool) {
+	for _, row := range rows {
+		if row.Action == action {
+			return row, true
+		}
+	}
+	return model.AuditEvent{}, false
+}
+
+// TestCreateLeasePublishFailureRollsBack is acceptance row 22: create is
+// fail-closed on publication. A hook failure is not a warning — the lease row
+// is rolled back, the node's slot is free, one error audit row names the
+// reason, no lease.created event is emitted, and the retry allocates again
+// instead of replaying a lease the caller never received.
+func TestCreateLeasePublishFailureRollsBack(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	sink := &leaseEventSink{}
+	fixture := newLeaseHTTPServer(t, Config{
+		Events: sink,
+		LeasePublishHook: func(_ context.Context, action LeaseAction, lease model.Lease) error {
+			if action != LeaseActionCreated {
+				return nil
+			}
+			if lease.ID == "" {
+				t.Errorf("hook received an empty lease")
+			}
+			if fail.Load() {
+				return errors.New("resin is unreachable")
+			}
+			return nil
+		},
+	})
+	ts := fixture.ts
+
+	resp, body := createLeaseCall(t, ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android", "idempotencyKey": "publish-1",
+	}, "")
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+	requireLeaseReason(t, body, "lease_publish_failed")
+	if !strings.Contains(string(body), "resin is unreachable") {
+		t.Fatalf("error body %s does not carry the cause", body)
+	}
+
+	if leases := fixture.st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after a failed publication = %+v, want none", leases)
+	}
+	node, ok := fixture.st.Node("node-live")
+	if !ok {
+		t.Fatal("node-live missing")
+	}
+	if node.InUse != 0 {
+		t.Fatalf("node-live inUse = %d, want 0 after rollback", node.InUse)
+	}
+	row, ok := findAuditAction(fixture.st.Audit(50), "lease.publish_failed")
+	if !ok {
+		t.Fatal("no lease.publish_failed audit row")
+	}
+	if row.Severity != model.SeverityError || row.Meta["leaseId"] == "" || row.Meta["reason"] == "" {
+		t.Fatalf("audit row = %+v, want error severity with leaseId and reason", row)
+	}
+	if events := sink.recorded(); len(events) != 0 {
+		t.Fatalf("events after a failed publication = %v, want none", events)
+	}
+
+	// The retry allocates again: the failed create left no idempotency record,
+	// so the same key is not a replay of a lease the caller never received.
+	fail.Store(false)
+	resp, body = createLeaseCall(t, ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android", "idempotencyKey": "publish-1",
+	}, "")
+	requireStatus(t, resp, http.StatusCreated)
+	created := decodeBody[leaseCreateResult](t, body)
+	if created.Replayed {
+		t.Fatal("the retry replayed the rolled-back lease")
+	}
+	if len(fixture.st.Leases()) != 1 {
+		t.Fatalf("leases after the retry = %d, want 1", len(fixture.st.Leases()))
+	}
+	if events := sink.recorded(); len(events) != 1 || events[0] != webhook.EventLeaseCreated {
+		t.Fatalf("events after the retry = %v, want one lease.created", events)
+	}
+}
+
+// leasePanel is the minimal panel double for the create path: only
+// PublishLease is implemented, so any other panel call panics and fails the
+// test.
+type leasePanel struct {
+	runtime.Panel
+	publishes int
+	leaseIDs  []string
+	err       error
+}
+
+func (p *leasePanel) PublishLease(_ context.Context, lease model.Lease) error {
+	p.publishes++
+	p.leaseIDs = append(p.leaseIDs, lease.ID)
+	return p.err
+}
+
+// TestCreateLeasePanelPublishFailureRollsBack proves the Resin path uses the
+// same fail-closed contract: a publish failure is 503, a panel refusal is 409,
+// both carry lease_publish_failed, and neither leaves a row behind. A healthy
+// publish answers 201 with no warning.
+func TestCreateLeasePanelPublishFailureRollsBack(t *testing.T) {
+	panel := &leasePanel{err: errors.New("resin: publish subscription: 502")}
+	fixture := newLeaseHTTPServer(t, Config{Panel: panel})
+
+	resp, body := createLeaseCall(t, fixture.ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android",
+	}, "")
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+	requireLeaseReason(t, body, "lease_publish_failed")
+	if panel.publishes != 1 || panel.leaseIDs[0] == "" {
+		t.Fatalf("panel publishes = %v, want one publish of a named lease", panel.leaseIDs)
+	}
+	if leases := fixture.st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after a failed panel publish = %+v, want none", leases)
+	}
+
+	// A panel conflict (no platform yet, a node that is not published) keeps
+	// the CONFLICT code and the same reason.
+	panel.err = fmt.Errorf("%w: node node-live is not in the published topology", store.ErrConflict)
+	resp, body = createLeaseCall(t, fixture.ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android",
+	}, "")
+	requireStatus(t, resp, http.StatusConflict)
+	requireErrorCode(t, body, CodeConflict)
+	requireLeaseReason(t, body, "lease_publish_failed")
+	if leases := fixture.st.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after a panel conflict = %+v, want none", leases)
+	}
+
+	panel.err = nil
+	resp, body = createLeaseCall(t, fixture.ts, map[string]any{
+		"userId": fixture.user.ID, "platform": "android",
+	}, "")
+	requireStatus(t, resp, http.StatusCreated)
+	if created := decodeBody[leaseCreateResult](t, body); created.Lease.ID == "" {
+		t.Fatalf("created lease = %+v, want an id", created.Lease)
+	}
+	if len(fixture.st.Leases()) != 1 {
+		t.Fatalf("leases after a healthy publish = %d, want 1", len(fixture.st.Leases()))
+	}
+}
+
+// TestRevokeLeasePublishHookWarns pins the revoke half of the seam: the row is
+// already gone, so a hook failure is reported in the Warning header and the
+// revoke still answers 204.
+func TestRevokeLeasePublishHookWarns(t *testing.T) {
 	var actions []LeaseAction
 	fixture := newLeaseHTTPServer(t, Config{
 		LeasePublishHook: func(_ context.Context, action LeaseAction, lease model.Lease) error {
 			actions = append(actions, action)
-			if lease.ID == "" {
-				t.Errorf("hook received an empty lease for %s", action)
+			if action == LeaseActionRevoked {
+				return errors.New("resin is unreachable")
 			}
-			return errors.New("resin is unreachable")
+			return nil
 		},
 	})
 	ts := fixture.ts
@@ -299,11 +470,8 @@ func TestLeasePublishHookWarningDoesNotRollBack(t *testing.T) {
 	}, "")
 	requireStatus(t, resp, http.StatusCreated)
 	created := decodeBody[leaseCreateResult](t, body)
-	if !strings.Contains(created.Warning, "publish hook failed") {
-		t.Fatalf("warning = %q, want the publish-hook wording", created.Warning)
-	}
-	if leases := fixture.st.Leases(); len(leases) != 1 || leases[0].ID != created.Lease.ID {
-		t.Fatalf("lease was rolled back after a hook failure: %+v", leases)
+	if strings.Contains(created.Warning, "publish hook") {
+		t.Fatalf("create warning = %q, want no publish-hook warning", created.Warning)
 	}
 
 	resp, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/"+created.Lease.ID,

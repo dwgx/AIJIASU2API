@@ -24,7 +24,9 @@ import (
 )
 
 // startHTTPGate builds a server with both listeners on ephemeral loopback
-// ports. The HTTP listener is enabled by setting HTTPListen.
+// ports. The HTTP listener is enabled by setting HTTPListen. Like startServer
+// it pins the compatibility wire when the test does not choose a mode: the
+// process default is AuthUserPass.
 func startHTTPGate(t *testing.T, cfg Config, sess Session) *Server {
 	t.Helper()
 	if cfg.Listen == "" {
@@ -32,6 +34,9 @@ func startHTTPGate(t *testing.T, cfg Config, sess Session) *Server {
 	}
 	if cfg.HTTPListen == "" {
 		cfg.HTTPListen = "127.0.0.1:0"
+	}
+	if cfg.AuthMode == "" {
+		cfg.AuthMode = AuthLoopback
 	}
 	srv, err := NewServer(cfg, sess)
 	if err != nil {

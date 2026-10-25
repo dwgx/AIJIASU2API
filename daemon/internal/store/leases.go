@@ -269,6 +269,50 @@ func (s *Store) ReleaseLease(id string) error {
 	return err
 }
 
+// RollbackLease removes a lease whose publication failed and returns the
+// node's slot. It is the compensating step of a fail-closed create: the API
+// calls it when the external control plane refused the lease, so the customer
+// never sees a row the panel cannot serve and the node is free for the retry.
+//
+// The audit row names the failure (`lease.publish_failed`, error severity) with
+// the sanitized reason, so an audit reader cannot mistake it for a customer
+// revoke; the `lease.create` row written by the commit stays, and the two
+// together record "committed, then rolled back". A missing row is not found.
+func (s *Store) RollbackLease(id, reason string) (model.Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.leaseIndexLocked(id)
+	if idx < 0 {
+		return model.Lease{}, notFoundf("lease %q not found", id)
+	}
+	lease := s.leases[idx]
+	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
+	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
+		s.nodes[nodeIdx].InUse--
+	}
+	detail := clientMessage(reason)
+	if detail == "" {
+		detail = "publication failed"
+	}
+	s.addAuditLocked(model.SeverityError, "system", "lease.publish_failed", lease.UserName,
+		fmt.Sprintf("Lease on %s not created · %s", lease.NodeLabel, detail),
+		map[string]string{
+			"leaseId":    lease.ID,
+			"accountId":  lease.AccountID,
+			"nodeId":     lease.NodeID,
+			"platform":   string(s.leasePlatformLocked(lease)),
+			"slot":       strconv.Itoa(lease.Slot),
+			"generation": strconv.FormatUint(lease.Generation, 10),
+			"reason":     detail,
+		})
+	// The row is not stored; the returned copy only carries attribution to the
+	// caller, which answers an error instead of a lease.
+	lease.Status = model.LeaseRevoked
+	s.normalizeLeaseLocked(&lease)
+	return lease, nil
+}
+
 // NodeLeases returns the active leases that point at nodeID, in store order.
 // The cleanup and audit paths read it so a node that still carries a customer
 // entitlement is never deleted or closed silently.

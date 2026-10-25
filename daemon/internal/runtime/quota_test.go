@@ -372,6 +372,7 @@ func TestFlowMeterGateFactoryEnforcesQuota(t *testing.T) {
 		NodeID:    nodeID(model.SlotKey{AccountID: account.ID, Index: 1}, "s1"),
 		AccountID: account.ID,
 		Listen:    "127.0.0.1:0",
+		AuthMode:  gate.AuthLoopback,
 	}, session)
 	if err != nil {
 		t.Fatalf("GateFactory: %v", err)

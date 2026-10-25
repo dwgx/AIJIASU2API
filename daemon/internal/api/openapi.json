@@ -2456,7 +2456,7 @@
         },
         "responses": {
           "201": {
-            "description": "Lease created, or the original lease replayed for a known Idempotency-Key.",
+            "description": "Lease created (only after its publication succeeded), or the original lease replayed for a known Idempotency-Key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2485,6 +2485,9 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -7828,7 +7831,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "Set when the lease committed but the optional publish hook failed, or to multi_session_unimplemented when display capacity effectiveSlots > 1 (only one FV session per account can actually be served)."
+            "description": "Set to multi_session_unimplemented when display capacity effectiveSlots > 1 (only one FV session per account can actually be served). A publication failure is never a warning: the create is rolled back and answered 409/503 with reason lease_publish_failed."
           },
           "replayed": {
             "type": "boolean",

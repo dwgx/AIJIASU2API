@@ -70,10 +70,17 @@ func (b *blockingSession) OpenFlow(ctx context.Context, host string, port int) (
 	return nil, ctx.Err()
 }
 
+// startServer starts a gate for one test. A test that leaves AuthMode empty
+// opts into the compatibility wire exactly as a deployment does: the process
+// default is AuthUserPass (see TestDefaultAuthModeRefusesNoAuth), so a test
+// that wants no-auth must say AuthLoopback.
 func startServer(t *testing.T, cfg Config, sess Session) *Server {
 	t.Helper()
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:0"
+	}
+	if cfg.AuthMode == "" {
+		cfg.AuthMode = AuthLoopback
 	}
 	srv, err := NewServer(cfg, sess)
 	if err != nil {
@@ -861,7 +868,7 @@ func TestAcceptErrorKeepsServing(t *testing.T) {
 	ln := &flakyListener{Listener: base, errs: []error{errors.New("accept: too many open files")}}
 
 	sess := &fakeSession{}
-	srv, err := NewServer(Config{NodeID: "node-1", AccountID: "acc-1", Limit: 4}, sess)
+	srv, err := NewServer(Config{NodeID: "node-1", AccountID: "acc-1", Limit: 4, AuthMode: AuthLoopback}, sess)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

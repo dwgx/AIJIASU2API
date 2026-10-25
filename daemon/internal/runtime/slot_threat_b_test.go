@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ajsaccountd/internal/account"
+	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/runtime"
 	"ajsaccountd/internal/store"
@@ -63,6 +64,7 @@ func newSlotPairFixture(t *testing.T, slots int) *slotPairFixture {
 	reconciler := &fakeReconciler{}
 	clock := newSwitchClock()
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:         gate.AuthLoopback,
 		Store:            st,
 		Logins:           logins,
 		Sessions:         opener,

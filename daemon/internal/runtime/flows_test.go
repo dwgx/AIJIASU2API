@@ -94,6 +94,7 @@ func TestLabViewFlowsJoinOrderRedactionAndAttribution(t *testing.T) {
 		},
 	}
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   newFakeSessionOpener(),
@@ -241,6 +242,7 @@ func TestLabViewFlowsWithoutRingSkipsGates(t *testing.T) {
 		Servers:         map[string]apifacade.Server{"s1": testServer("s1")},
 	})
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   newFakeSessionOpener(),
@@ -321,6 +323,7 @@ func TestLabViewFlowsFromRealGate(t *testing.T) {
 
 	var gateServer runtime.Gate
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   newFakeSessionOpener(),

@@ -7,15 +7,16 @@ import (
 )
 
 // AuthMode selects the SOCKS5 authentication method one gate negotiates. An
-// empty value is treated as AuthLoopback: the pre-RFC-1929 wire behaviour an
-// unmodified Resin client speaks.
+// empty value selects DefaultAuthMode; every explicit value must parse or
+// construction fails.
 type AuthMode string
 
 const (
 	// AuthLoopback serves the no-auth method (0x00) and trusts every local
-	// process. It preserves the compatibility path: no user identity, no user
-	// allowlist and no user quota. The loopback peer check and the account
-	// quota still apply, so it is not a secure multi-user mode.
+	// process. It is the explicit opt-in compatibility path: no user identity, no
+	// user allowlist and no user quota. The loopback peer check and the account
+	// quota still apply, so it is not a secure multi-user mode and a deployment
+	// must select it on purpose.
 	AuthLoopback AuthMode = "loopback"
 	// AuthUserPass serves RFC 1929 username/password. The username is the
 	// exact PanelUser.ID and the password is one of that user's API-key
@@ -23,15 +24,23 @@ const (
 	AuthUserPass AuthMode = "userpass"
 )
 
+// DefaultAuthMode is what an unset AJS_GATE_AUTH selects. It is the fail-closed
+// default: a deployment that forgets to configure gate authentication must not
+// relay for an unauthenticated same-host process, and the gate cannot
+// distinguish such a process from the operator. The compatibility wire is still
+// available, but only as an explicit AuthLoopback opt-in; the listener stays
+// loopback-only in both modes, so the default never widens the bind.
+const DefaultAuthMode = AuthUserPass
+
 // ParseAuthMode maps the process setting (AJS_GATE_AUTH) onto a typed mode. An
-// empty value selects AuthLoopback, the rolling-release default; every other
-// unrecognised value is an error so a typo aborts construction instead of
-// silently weakening the listener.
+// empty value selects DefaultAuthMode; every other unrecognised value is an
+// error so a typo aborts construction instead of silently weakening the
+// listener.
 func ParseAuthMode(raw string) (AuthMode, error) {
 	mode := AuthMode(strings.TrimSpace(raw))
 	switch mode {
 	case "":
-		return AuthLoopback, nil
+		return DefaultAuthMode, nil
 	case AuthLoopback, AuthUserPass:
 		return mode, nil
 	default:

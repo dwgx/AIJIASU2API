@@ -116,10 +116,13 @@ type Config struct {
 	// logged and answers 500 INTERNAL with no state change; a node the store
 	// does not know is answered 404 without calling the hook.
 	NodeDrainHook func(ctx context.Context, nodeID string, drain bool) error
-	// LeasePublishHook runs after a lease create/revoke commits. It is the
-	// optional Resin seam: a deployment that publishes allocation changes
-	// installs it, and its failure is reported as a warning because the store
-	// mutation already happened and is never rolled back for a publish error.
+	// LeasePublishHook is the publication seam for a deployment that publishes
+	// leases somewhere other than the Resin panel. Create is fail-closed on it:
+	// an error rolls the lease back (store.RollbackLease writes the
+	// lease.publish_failed audit row) and answers 409/503 with the reason
+	// lease_publish_failed, so a lease is never reported created without its
+	// publication. Revoke keeps the warning behaviour: the row is already gone
+	// and the Resin revoke itself fails closed before the store mutation.
 	LeasePublishHook func(ctx context.Context, action LeaseAction, lease model.Lease) error
 	// UpdateRepo is the GitHub "owner/repo" checked by GET
 	// /v1/system/update. Empty keeps the endpoint enabled:false and the

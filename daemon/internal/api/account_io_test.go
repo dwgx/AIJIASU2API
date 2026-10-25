@@ -422,6 +422,9 @@ func (p *fakeAccountIOPanel) Reconcile(ctx context.Context) (runtime.Topology, e
 	p.mu.Unlock()
 	return runtime.Topology{}, nil
 }
+func (p *fakeAccountIOPanel) PublishLease(ctx context.Context, lease model.Lease) error {
+	return nil
+}
 func (p *fakeAccountIOPanel) RotateLease(ctx context.Context, leaseID string) (model.Lease, error) {
 	return model.Lease{}, nil
 }

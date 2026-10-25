@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ajsaccountd/internal/account"
+	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/runtime"
 	"ajsproxy/apifacade"
 )
@@ -62,6 +63,9 @@ func newEgressFixture(t *testing.T, claimed string) (*runtime.NodeController, st
 		Sessions: directSessionOpener{claimed: claimed},
 		PortBase: 13500,
 		Logger:   discardLogger(),
+		// The egress probe speaks the no-auth SOCKS5 greeting, so this fixture
+		// opts into the compatibility wire explicitly.
+		GateAuth: gate.AuthLoopback,
 	})
 	if err != nil {
 		t.Fatalf("NewNodeController: %v", err)

@@ -67,6 +67,7 @@ func newMeterFixture(t *testing.T, label string) *meterFixture {
 	})
 	meter := runtime.NewFlowMeter(st)
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   meterSessionOpener{},

@@ -306,7 +306,9 @@ func (noopSessions) Open(context.Context, account.SessionRequest) (account.FlowS
 
 // TestNodeControllerPassesGateAuthToGates proves the AJS_GATE_AUTH mode and the
 // identity service reach every gate the controller starts, and that an unset
-// mode keeps the loopback compatibility path with no authenticator.
+// mode selects the fail-closed userpass default: a controller that never
+// received the parsed setting starts gates that refuse every handshake instead
+// of falling back to no-auth. The compatibility wire is an explicit choice.
 func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -315,7 +317,9 @@ func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 		wantMode   gate.AuthMode
 		wantWiring bool
 	}{
-		{"unset is loopback", "", true, gate.AuthLoopback, false},
+		{"unset selects userpass and wires identity", "", true, gate.AuthUserPass, true},
+		{"unset without identity fails closed", "", false, gate.AuthUserPass, false},
+		{"loopback is an explicit opt-in", gate.AuthLoopback, true, gate.AuthLoopback, false},
 		{"userpass wires identity", gate.AuthUserPass, true, gate.AuthUserPass, true},
 		{"userpass without identity fails closed", gate.AuthUserPass, false, gate.AuthUserPass, false},
 	}
@@ -630,6 +634,7 @@ func TestGateIdentityLoopbackRowsHaveNoUser(t *testing.T) {
 		NodeID:    "node-loopback",
 		AccountID: account.ID,
 		Listen:    "127.0.0.1:0",
+		AuthMode:  gate.AuthLoopback,
 	}, session)
 	if err != nil {
 		t.Fatalf("GateFactory: %v", err)

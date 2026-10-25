@@ -508,3 +508,84 @@ func TestMutationFallbackWithoutPanel(t *testing.T) {
 		t.Fatalf("fallback undrain state = %q, want LIVE", node.State)
 	}
 }
+
+// TestPublishLeaseRendersNode is acceptance row 22 on the panel side: the
+// publication a lease create depends on is the reconcile that carries the
+// lease's node, so a gate-port change must reach Resin before the lease counts
+// as published.
+func TestPublishLeaseRendersNode(t *testing.T) {
+	st, panel, fake := newStartedPanel(t)
+	lease, ok := st.Lease("lease-01")
+	if !ok {
+		t.Fatal("seed lease-01 missing")
+	}
+	node, ok := st.Node(lease.NodeID)
+	if !ok {
+		t.Fatalf("node %s missing", lease.NodeID)
+	}
+	node.GatePort = 13099
+	if _, err := st.PutNode(node); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+
+	if err := panel.PublishLease(context.Background(), lease); err != nil {
+		t.Fatalf("PublishLease: %v", err)
+	}
+	if got := fake.subscriptionContent(); !strings.Contains(got, "127.0.0.1:13099#cn-zj-01") {
+		t.Fatalf("published content =\n%s\nwant the new gate port", got)
+	}
+	if fake.countExact(http.MethodPatch, "/api/v1/subscriptions/sub-1") == 0 {
+		t.Fatalf("no subscription PATCH: %v", fake.paths())
+	}
+}
+
+// TestPublishLeaseFailsClosed proves the two refusals a create must not
+// survive: a node the render does not contain is a conflict, and a Resin
+// failure is upstream. An unstarted panel still publishes through the same
+// reconcile, so a create recovers a panel whose Start failed instead of
+// silently serving an unpublished lease.
+func TestPublishLeaseFailsClosed(t *testing.T) {
+	t.Run("node not in the published topology", func(t *testing.T) {
+		_, panel, _ := newStartedPanel(t)
+		err := panel.PublishLease(context.Background(), model.Lease{ID: "lease-x", NodeID: "node-404"})
+		if !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("err = %v, want store.ErrConflict", err)
+		}
+	})
+
+	t.Run("resin publish failure", func(t *testing.T) {
+		st, panel, fake := newStartedPanel(t)
+		lease, ok := st.Lease("lease-01")
+		if !ok {
+			t.Fatal("seed lease-01 missing")
+		}
+		node, ok := st.Node(lease.NodeID)
+		if !ok {
+			t.Fatalf("node %s missing", lease.NodeID)
+		}
+		node.GatePort = 13098
+		if _, err := st.PutNode(node); err != nil {
+			t.Fatalf("PutNode: %v", err)
+		}
+		fake.mu.Lock()
+		fake.subscriptionPatchStatus = http.StatusInternalServerError
+		fake.mu.Unlock()
+
+		err := panel.PublishLease(context.Background(), lease)
+		if !errors.Is(err, store.ErrUpstream) {
+			t.Fatalf("err = %v, want store.ErrUpstream", err)
+		}
+	})
+
+	t.Run("unstarted panel publishes through reconcile", func(t *testing.T) {
+		st := store.New()
+		panel, _, _ := newTestPanel(t, st)
+		lease, ok := st.Lease("lease-01")
+		if !ok {
+			t.Fatal("seed lease-01 missing")
+		}
+		if err := panel.PublishLease(context.Background(), lease); err != nil {
+			t.Fatalf("PublishLease on an unstarted panel: %v", err)
+		}
+	})
+}

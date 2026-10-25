@@ -339,6 +339,7 @@ func (p *mutationPanel) Reconcile(context.Context) (runtime.Topology, error) {
 func newNodeController(t *testing.T, st *store.Store, logins runtime.LoginResults, opener runtime.SessionOpener, rec runtime.Reconciler) *runtime.NodeController {
 	t.Helper()
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   opener,
@@ -951,6 +952,7 @@ func TestNodeControllerStopAccountAggregatesErrors(t *testing.T) {
 	var built int
 	gates := make([]*fakeGate, 0, 2)
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   opener,
@@ -1444,6 +1446,7 @@ func TestNodeControllerConcurrentSync(t *testing.T) {
 func newNodeControllerWithLimit(t *testing.T, st *store.Store, logins runtime.LoginResults, opener runtime.SessionOpener, rec runtime.Reconciler, maxServers int) *runtime.NodeController {
 	t.Helper()
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   opener,
@@ -1566,6 +1569,7 @@ func TestNodeControllerMaxServersNegativeRejected(t *testing.T) {
 	st := newNodeTestStore(t)
 	logins := newFakeLoginResults()
 	_, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth:   gate.AuthLoopback,
 		Store:      st,
 		Logins:     logins,
 		Sessions:   newFakeSessionOpener(),
@@ -1697,6 +1701,7 @@ func TestNodeControllerGateFactory(t *testing.T) {
 	injected := &fakeGate{}
 	var built int
 	controller, err := runtime.NewNodeController(runtime.NodeControllerConfig{
+		GateAuth: gate.AuthLoopback,
 		Store:    st,
 		Logins:   logins,
 		Sessions: newFakeSessionOpener(),

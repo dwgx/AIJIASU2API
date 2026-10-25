@@ -257,6 +257,10 @@ func TestFlowRingHTTPServesRealGateRows(t *testing.T) {
 		Sessions:   echoSessionOpener{},
 		MaxServers: 1,
 		PortBase:   13300,
+		// The e2e client speaks the no-auth SOCKS5 wire, so the fixture opts
+		// into the compatibility mode explicitly; the process default is
+		// userpass.
+		GateAuth: gate.AuthLoopback,
 		Gates: func(cfg gate.Config, session gate.Session) (runtime.Gate, error) {
 			srv, err := gate.NewServer(cfg, session)
 			if err == nil {
