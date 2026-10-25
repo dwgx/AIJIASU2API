@@ -112,6 +112,10 @@
       "description": "Admin-only full-panel backup: seal the state directory into an encrypted envelope, inspect it, and restore it."
     },
     {
+      "name": "Payments",
+      "description": "Signed payment provider callbacks; no bearer token."
+    },
+    {
       "name": "Portal",
       "description": "Customer tenant portal (AJS_TENANT_PORTAL=1). Authenticates only the __Host-ajs_portal cookie, requires X-CSRF-Token on unsafe methods, and exposes only the linked user's data."
     },
@@ -5500,6 +5504,76 @@
         }
       }
     },
+    "/v1/portal/orders/{id}/checkout": {
+      "post": {
+        "operationId": "portalCheckoutOrder",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Return the 易支付 hosted checkout URL for one own awaiting_payment order.",
+        "description": "Builds the signed redirect URL with pid, out_trade_no, money, notify_url, return_url and sign_type=MD5. A checkout is not a payment: the order remains awaiting_payment and the provider is recorded only as intent.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderCheckoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed hosted checkout URL. No payment has been taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderCheckoutResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/v1/portal/orders/{id}/cancel": {
       "post": {
         "operationId": "portalCancelOrder",
@@ -6157,6 +6231,107 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/payments/epay/notify": {
+      "post": {
+        "operationId": "epayNotify",
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Verify a 易支付 form callback and record its settlement event.",
+        "description": "No bearer token: the MD5 signature over the form body is the credential. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Answers the plain-text protocol: success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
+        "x-implementation-phase": "P0",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "required": [
+                  "pid",
+                  "trade_no",
+                  "out_trade_no",
+                  "money",
+                  "trade_status",
+                  "sign"
+                ],
+                "properties": {
+                  "pid": {
+                    "type": "string",
+                    "description": "Merchant id; must match AJS_EPAY_PID."
+                  },
+                  "trade_no": {
+                    "type": "string",
+                    "description": "Gateway transaction id; the idempotency key of the settlement event."
+                  },
+                  "out_trade_no": {
+                    "type": "string",
+                    "description": "The order id issued at checkout."
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "alipay",
+                      "wxpay"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Plan name echoed by the gateway."
+                  },
+                  "money": {
+                    "type": "string",
+                    "description": "Decimal amount with two places; must equal the immutable order snapshot."
+                  },
+                  "trade_status": {
+                    "type": "string",
+                    "enum": [
+                      "TRADE_SUCCESS"
+                    ],
+                    "description": "Only a completed trade settles."
+                  },
+                  "sign": {
+                    "type": "string",
+                    "description": "Lowercase hex MD5 of the canonical sorted parameters plus the merchant key."
+                  },
+                  "sign_type": {
+                    "type": "string",
+                    "enum": [
+                      "MD5"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plain-text acknowledgement: success for an accepted or duplicate event, fail for every rejection.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "success",
+                    "fail"
+                  ]
+                }
+              }
+            }
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -12508,7 +12683,8 @@
             "type": "string",
             "enum": [
               "manual",
-              "stripe"
+              "stripe",
+              "epay"
             ]
           },
           "state": {
@@ -12671,6 +12847,36 @@
         },
         "required": [
           "reference"
+        ]
+      },
+      "OrderCheckoutRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "alipay",
+              "wxpay"
+            ],
+            "default": "alipay",
+            "description": "Gateway channel. Omitted means alipay."
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "OrderCheckoutResponse": {
+        "type": "object",
+        "properties": {
+          "payUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Hosted 易支付 checkout URL. Opening it is not a payment fact; the order stays awaiting_payment until a verified notify or reconciliation settles it."
+          }
+        },
+        "required": [
+          "payUrl"
         ]
       }
     }

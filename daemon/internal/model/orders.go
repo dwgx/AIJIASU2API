@@ -74,12 +74,14 @@ func ValidOrderState(state OrderState) bool {
 	}
 }
 
-// Payment provider names. "manual" is the only live provider; "stripe" names
-// the Stripe-compatible webhook adapter and stays disabled until a secret is
-// configured.
+// Payment provider names. "manual" is the offline attestation path; "stripe"
+// names the Stripe-compatible webhook adapter and "epay" the 易支付 redirect +
+// notify adapter. Online providers stay disabled until their configuration is
+// complete.
 const (
 	ProviderManual = "manual"
 	ProviderStripe = "stripe"
+	ProviderEpay   = "epay"
 )
 
 // Order is the customer-visible order. The plan snapshot is immutable; the

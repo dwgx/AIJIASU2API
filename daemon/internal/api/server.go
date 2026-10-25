@@ -218,6 +218,10 @@ type Config struct {
 	// reports itself disabled, answers 503; the webhook never falls back to
 	// manual settlement.
 	StripeWebhooks payment.WebhookProvider
+	// Epay is the 易支付 redirect checkout and signed form notify adapter. Nil,
+	// or an adapter with incomplete configuration, answers 503 on both the
+	// portal checkout route and the notify callback.
+	Epay *payment.Epay
 }
 
 // Server wires the store to an http.Handler.
@@ -462,6 +466,11 @@ func (s *Server) routes(rt *router) {
 	// falls back to manual settlement.
 	rt.handle(http.MethodPost, "/v1/payments/stripe", s.handleStripeWebhook)
 
+	// 易支付 notify callback. Like the Stripe route it is a provider callback,
+	// not a customer route: it is registered regardless of AJS_TENANT_PORTAL
+	// and authenticates the MD5 signature over the form body, never a bearer.
+	rt.handle(http.MethodPost, "/v1/payments/epay/notify", s.handleEpayNotify)
+
 	// Order administration (DESIGN-ORDERS). Plans and orders are operator
 	// surfaces, not portal surfaces: they are registered even when
 	// AJS_TENANT_PORTAL is off, so a deployment can price plans and audit
@@ -500,6 +509,7 @@ func (s *Server) routes(rt *router) {
 		rt.handle(http.MethodGet, "/v1/portal/orders", s.handlePortalListOrders)
 		rt.handle(http.MethodPost, "/v1/portal/orders", s.handlePortalCreateOrder)
 		rt.handle(http.MethodGet, "/v1/portal/orders/{id}", s.handlePortalGetOrder)
+		rt.handle(http.MethodPost, "/v1/portal/orders/{id}/checkout", s.handlePortalCheckoutOrder)
 		rt.handle(http.MethodPost, "/v1/portal/orders/{id}/cancel", s.handlePortalCancelOrder)
 
 		rt.handle(http.MethodGet, "/v1/admin/tenants", s.handleListTenants)
@@ -629,11 +639,11 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 // /healthz stays open, and AllowInsecure disables the check entirely.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The payment webhook is authenticated by its provider signature over
+		// Payment webhooks are authenticated by their provider signature over
 		// the raw body, not by a bearer token: a payment provider cannot send
-		// one. The handler verifies the signature and answers 503 while the
+		// one. The handlers verify the signature and answer 503 while their
 		// adapter is disabled.
-		if r.URL.Path == stripeWebhookPath {
+		if r.URL.Path == stripeWebhookPath || r.URL.Path == epayNotifyPath {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -251,6 +251,58 @@ func (s *Store) TenantOrder(tenantID, orderID string) (model.Order, error) {
 	return cloneOrder(s.orders[idx].Order), nil
 }
 
+// MarkOrderCheckout records the provider a customer chose at checkout. It is
+// an intent marker, never a payment: the state stays awaiting_payment and no
+// grant or payment event is created. Only an owner-scoped awaiting order may
+// change provider, and a repeat of the same provider is a no-op.
+func (s *Store) MarkOrderCheckout(tenantID, orderID, provider string) (model.Order, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	orderID = strings.TrimSpace(orderID)
+	provider = strings.TrimSpace(provider)
+	switch provider {
+	case model.ProviderManual, model.ProviderStripe, model.ProviderEpay:
+	default:
+		return model.Order{}, invalidf("unknown payment provider %q", provider)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 || s.orders[idx].TenantID != tenantID {
+		return model.Order{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if order.State != model.OrderAwaitingPayment {
+		return model.Order{}, conflictf("order %q is %s; only awaiting_payment can be checked out",
+			order.ID, order.State)
+	}
+	if order.Provider == provider {
+		return cloneOrder(*order), nil
+	}
+	order.Provider = provider
+	s.addAuditLocked(model.SeverityInfo, "tenant:"+tenantID, "order.checkout", order.ID,
+		"checkout provider selected",
+		map[string]string{"orderId": order.ID, "provider": provider})
+	return cloneOrder(*order), nil
+}
+
+// PendingEpayOrders returns the awaiting_payment orders a customer checked out
+// through epay, oldest first so the bounded reconciler batch cannot starve an
+// old order behind a stream of new checkouts. An order that was never checked
+// out, or one already quarantined for review, stays out of the queue.
+func (s *Store) PendingEpayOrders() []model.Order {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]model.Order, 0)
+	for i := len(s.orders) - 1; i >= 0; i-- {
+		record := s.orders[i]
+		if record.State == model.OrderAwaitingPayment && record.Provider == model.ProviderEpay &&
+			!record.ReviewRequired {
+			out = append(out, cloneOrder(record.Order))
+		}
+	}
+	return out
+}
+
 // CancelOrder cancels an awaiting_payment order. Cancelling an already
 // cancelled order returns it unchanged (the command is idempotent); every other
 // state is a conflict because paid and terminal orders never resume.
@@ -469,6 +521,10 @@ func (s *Store) applySettlementLocked(idx int, event model.PaymentEvent, actor s
 	switch order.State {
 	case model.OrderAwaitingPayment:
 		order.State = model.OrderPaid
+		// The order's provider records how the money actually arrived. A
+		// checkout intent may be epay while an admin later attests an offline
+		// receipt; the settlement event is the authoritative fact.
+		order.Provider = event.Provider
 		order.ProviderRef = ptrString(event.ProviderRef)
 		order.PaidAt = ptrString(iso(s.now()))
 		s.recordPaymentEventLocked(event, model.PaymentApplied)
@@ -917,7 +973,8 @@ func (snap *Snapshot) validateOrders() error {
 		event.Provider = strings.TrimSpace(event.Provider)
 		event.ID = strings.TrimSpace(event.ID)
 		event.OrderID = strings.TrimSpace(event.OrderID)
-		if (event.Provider != model.ProviderManual && event.Provider != model.ProviderStripe) ||
+		if (event.Provider != model.ProviderManual && event.Provider != model.ProviderStripe &&
+			event.Provider != model.ProviderEpay) ||
 			event.ID == "" || !model.ValidPaymentEventKind(event.Kind) ||
 			event.AmountMinor <= 0 || !validOrderTimestamp(event.OccurredAt) {
 			continue
@@ -953,7 +1010,8 @@ func orderInvalidReason(record orderRecord) string {
 	if !validPlanSnapshot(order.Plan) || order.Plan.ID != order.PlanID {
 		return "invalid plan snapshot"
 	}
-	if order.Provider != model.ProviderManual && order.Provider != model.ProviderStripe {
+	if order.Provider != model.ProviderManual && order.Provider != model.ProviderStripe &&
+		order.Provider != model.ProviderEpay {
 		return "unknown provider"
 	}
 	if !validOrderTimestamp(order.CreatedAt) {

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/payment"
+	"ajsaccountd/internal/store"
 	"ajsaccountd/internal/webhook"
 )
 
@@ -142,6 +145,172 @@ func (s *Server) handlePortalCancelOrder(w http.ResponseWriter, r *http.Request)
 		s.emitOrderEvent(webhook.EventOrderCancelled, order)
 	}
 	writeJSON(w, http.StatusOK, order)
+}
+
+// epayNotifyPath is the 易支付 server callback. It is the second /v1 route that
+// is not bearer-authenticated: the MD5 signature over the form body is the
+// credential, and a disabled adapter answers 503.
+const epayNotifyPath = "/v1/payments/epay/notify"
+
+// epayNotifyLimitPerMin bounds unauthenticated callback attempts per client
+// address, matching the Stripe budget.
+const epayNotifyLimitPerMin = 120
+
+// orderCheckoutRequest is the POST /v1/portal/orders/{id}/checkout body. Type
+// selects the gateway channel; an omitted type defaults to alipay.
+type orderCheckoutRequest struct {
+	Type string `json:"type"`
+}
+
+// orderCheckoutResponse is a hosted payment URL. It is never a payment fact:
+// the order remains awaiting_payment until a verified notify or reconciliation
+// settles it.
+type orderCheckoutResponse struct {
+	PayURL string `json:"payUrl"`
+}
+
+// handlePortalCheckoutOrder returns the 易支付 hosted checkout URL for one own
+// awaiting_payment order. Building the URL changes no payment state; the order
+// records only the chosen provider so the reconciler can find it later.
+func (s *Server) handlePortalCheckoutOrder(w http.ResponseWriter, r *http.Request) {
+	principal, ok := portalPrincipalFrom(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "portal session required")
+		return
+	}
+	if !s.portalLimit(w, "portal:orders:"+principal.Tenant.ID, portalOrderWriteLimitPerMin,
+		"too many order writes for this tenant") {
+		return
+	}
+	var in orderCheckoutRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(in.Type))
+	if kind == "" {
+		kind = payment.EpayTypeAlipay
+	}
+	if kind != payment.EpayTypeAlipay && kind != payment.EpayTypeWxpay {
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument,
+			"type must be alipay or wxpay")
+		return
+	}
+	order, err := s.store.TenantOrder(principal.Tenant.ID, pathParam(r, "id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if order.UserID != principal.User.ID {
+		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
+		return
+	}
+	if order.State != model.OrderAwaitingPayment {
+		writeError(w, http.StatusConflict, CodeConflict,
+			"only awaiting_payment orders can be checked out")
+		return
+	}
+	if s.cfg.Epay == nil || !s.cfg.Epay.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
+			"epay checkout is not configured")
+		return
+	}
+	base := strings.TrimRight(strings.TrimSpace(s.cfg.TenantOrigin), "/")
+	notifyURL := strings.TrimSpace(s.cfg.Epay.NotifyURL())
+	returnURL := strings.TrimSpace(s.cfg.Epay.ReturnURL())
+	if base == "" && (notifyURL == "" || returnURL == "") {
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
+			"epay checkout is not configured")
+		return
+	}
+	if notifyURL == "" {
+		notifyURL = base + epayNotifyPath
+	}
+	if returnURL == "" {
+		returnURL = base + "/portal"
+	}
+	payURL, err := s.cfg.Epay.Checkout(order, kind, notifyURL, returnURL)
+	if err != nil {
+		s.writePaymentError(w, err)
+		return
+	}
+	if _, err := s.store.MarkOrderCheckout(principal.Tenant.ID, order.ID, model.ProviderEpay); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orderCheckoutResponse{PayURL: payURL})
+}
+
+// handleEpayNotify verifies one 易支付 form callback and applies it through the
+// same store settlement path as an admin attestation. The response is the
+// gateway's plain-text protocol: "success" only after an accepted or duplicate
+// event; every rejected callback answers "fail" and changes nothing.
+func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Epay == nil || !s.cfg.Epay.Enabled() {
+		writeEpayAck(w, http.StatusServiceUnavailable, "fail")
+		return
+	}
+	if ok, _, _ := s.tenantLimiter.Allow("webhook:epay:"+s.portalClientIP(r), epayNotifyLimitPerMin); !ok {
+		writeEpayAck(w, http.StatusTooManyRequests, "fail")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
+			"malformed form body")
+		writeEpayAck(w, http.StatusOK, "fail")
+		return
+	}
+	form := r.PostForm
+	orderID := strings.TrimSpace(form.Get("out_trade_no"))
+	order, ok := s.store.Order(orderID)
+	if !ok {
+		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
+			"unknown order")
+		writeEpayAck(w, http.StatusOK, "fail")
+		return
+	}
+	event, err := s.cfg.Epay.VerifyNotify(r.Context(), form, order)
+	if err != nil {
+		reason := "invalid notification"
+		switch {
+		case errors.Is(err, payment.ErrInvalidSignature):
+			reason = "invalid signature"
+		case errors.Is(err, payment.ErrUnsupportedEvent):
+			reason = "unsupported trade status"
+		case errors.Is(err, payment.ErrInvalidEvent):
+			reason = "invalid event"
+		case errors.Is(err, payment.ErrDisabled):
+			writeEpayAck(w, http.StatusServiceUnavailable, "fail")
+			return
+		}
+		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay", reason)
+		writeEpayAck(w, http.StatusOK, "fail")
+		return
+	}
+	before := order
+	after, err := s.store.ApplyPaymentEvent(s.cfg.Epay.Name(), event, "system")
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrInvalid) ||
+			errors.Is(err, store.ErrNotFound) {
+			s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
+				"event rejected by the order state machine")
+			writeEpayAck(w, http.StatusOK, "fail")
+			return
+		}
+		s.logger.Error("epay_notify_apply_failed", "error", err)
+		writeEpayAck(w, http.StatusInternalServerError, "fail")
+		return
+	}
+	s.emitOrderTransition(before, after)
+	writeEpayAck(w, http.StatusOK, "success")
+}
+
+// writeEpayAck writes the gateway's plain-text acknowledgement. Cache-Control
+// keeps an intermediary from replaying a stale success.
+func writeEpayAck(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
 }
 
 // emitOrderEvent publishes one committed order transition to the customer

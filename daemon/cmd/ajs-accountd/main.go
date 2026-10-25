@@ -71,6 +71,12 @@ func run() error {
 	tenantOrigin := flag.String("tenant-origin", os.Getenv("AJS_TENANT_ORIGIN"), "exact browser origin allowed for portal writes (env AJS_TENANT_ORIGIN)")
 	trustedProxies := flag.String("trusted-proxies", os.Getenv("AJS_TRUSTED_PROXIES"), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted (env AJS_TRUSTED_PROXIES)")
 	stripeWebhookSecret := flag.String("stripe-webhook-secret", os.Getenv("AJS_STRIPE_WEBHOOK_SECRET"), "Stripe-compatible webhook signing secret (env AJS_STRIPE_WEBHOOK_SECRET); empty disables online settlement")
+	epayGateway := flag.String("epay-gateway", os.Getenv("AJS_EPAY_GATEWAY"), "易支付 gateway base URL (env AJS_EPAY_GATEWAY); empty disables epay")
+	epayPID := flag.String("epay-pid", os.Getenv("AJS_EPAY_PID"), "易支付 merchant id (env AJS_EPAY_PID)")
+	epayKey := flag.String("epay-key", os.Getenv("AJS_EPAY_KEY"), "易支付 merchant key (env AJS_EPAY_KEY); never logged")
+	epaySignType := flag.String("epay-sign-type", os.Getenv("AJS_EPAY_SIGN_TYPE"), "易支付 signature algorithm (env AJS_EPAY_SIGN_TYPE); must be MD5")
+	epayNotifyURL := flag.String("epay-notify-url", os.Getenv("AJS_EPAY_NOTIFY_URL"), "public 易支付 notify URL (env AJS_EPAY_NOTIFY_URL); empty derives from AJS_TENANT_ORIGIN")
+	epayReturnURL := flag.String("epay-return-url", os.Getenv("AJS_EPAY_RETURN_URL"), "public browser return URL (env AJS_EPAY_RETURN_URL); empty derives from AJS_TENANT_ORIGIN")
 	flag.Parse()
 
 	// The HTTPS admin listener is opt-in (AJS-276): AJS_TLS_CERT and
@@ -513,6 +519,25 @@ func run() error {
 		logger.Info("stripe_webhook_disabled",
 			"reason", "AJS_STRIPE_WEBHOOK_SECRET is not set; POST /v1/payments/stripe answers 503")
 	}
+	// 易支付 is all-or-nothing: the adapter is enabled only when the gateway,
+	// merchant id and key are all present and the sign type is MD5. A partial
+	// configuration is reported by name, never by value, and every epay route
+	// answers 503 instead of falling back to manual settlement.
+	epay := payment.NewEpay(payment.EpayConfig{
+		Gateway:   *epayGateway,
+		PID:       *epayPID,
+		Key:       *epayKey,
+		SignType:  *epaySignType,
+		NotifyURL: *epayNotifyURL,
+		ReturnURL: *epayReturnURL,
+	})
+	if epay.Enabled() {
+		logger.Info("epay_enabled", "gateway_host", epay.GatewayHost())
+	} else if epay.Configured() {
+		logger.Warn("epay_disabled", "reason", epay.DisabledReason())
+	} else {
+		logger.Info("epay_disabled", "reason", "AJS_EPAY_GATEWAY, AJS_EPAY_PID and AJS_EPAY_KEY are not set")
+	}
 	server := api.New(api.Config{
 		AdminToken:           *token,
 		AllowInsecure:        *insecure,
@@ -527,6 +552,7 @@ func run() error {
 		TrustedProxies:       trustedProxyValues,
 		ManualPayments:       manualPayments,
 		StripeWebhooks:       stripeWebhooks,
+		Epay:                 epay,
 		Panel:                panel,
 		LoginService:         loginService,
 		LoginHook:            loginHook,
@@ -550,6 +576,18 @@ func run() error {
 			snapshots.save("account-io")
 		},
 	}, st, logger)
+
+	// 易支付 reconciliation is a bounded, jittered poller over the persisted
+	// pending orders. It starts only when the adapter is fully configured and
+	// stops with the process context; a gateway outage never blocks startup.
+	if reconciler := payment.NewEpayReconciler(payment.EpayReconcilerConfig{
+		Provider: epay,
+		Store:    st,
+		Logger:   logger,
+	}); reconciler != nil {
+		go reconciler.Run(ctx)
+		logger.Info("epay_reconciler_started", "interval", payment.DefaultEpayReconcileInterval.String())
+	}
 
 	httpServer := &http.Server{
 		Addr:              *listen,
