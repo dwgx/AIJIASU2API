@@ -94,6 +94,14 @@ type Snapshot struct {
 	ScheduleSeq   int                           `json:"scheduleSeq,omitempty"`
 	RunSeq        int                           `json:"runSeq,omitempty"`
 
+	// Operations is the durable async-transition history (DESIGN-INTEGRATION
+	// §3.4), newest first and bounded by store.OperationRetention/MaxAge. A
+	// row still queued or running when this document was written is restored
+	// as failed/OPERATION_UNKNOWN, never as success. OperationSeq allocates
+	// the next op-NNNN id without colliding after a restore.
+	Operations   []model.Operation `json:"operations,omitempty"`
+	OperationSeq int               `json:"operationSeq,omitempty"`
+
 	// WebhookEndpoints is the persisted receiver metadata. Signing secrets are
 	// deliberately absent: they live in the sealed secret file (or process
 	// memory when no master key is configured), never in state.json.
@@ -245,6 +253,11 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	snap.ScheduleSeq = s.scheduleSeq
 	snap.RunSeq = s.runSeq
+	snap.Operations = make([]model.Operation, len(s.operations))
+	for i, op := range s.operations {
+		snap.Operations[i] = cloneOperation(op)
+	}
+	snap.OperationSeq = s.operationSeq
 	snap.WebhookEndpoints = make([]model.WebhookEndpoint, len(s.webhookEndpoints))
 	for i, endpoint := range s.webhookEndpoints {
 		snap.WebhookEndpoints[i] = cloneWebhookEndpoint(endpoint)
@@ -348,6 +361,11 @@ func (s *Store) Restore(data []byte) error {
 		slog.Warn("slot_claims_reconciled", "count", repaired)
 	}
 	snap.normalize()
+	// A queued/running row cannot be resumed after a restart: the vendor call
+	// may or may not have happened. Fail it with OPERATION_UNKNOWN before the
+	// document is installed and audit each interrupted id after the audit
+	// collection is in place.
+	interruptedOperations := snap.normalizeOperations(s.now())
 
 	s.mu.Lock()
 	s.accounts = snap.Accounts
@@ -436,6 +454,20 @@ func (s *Store) Restore(data []byte) error {
 	s.scopedKeySeq = snap.ScopedKeySeq
 	s.mutationSeq = snap.MutationSeq
 	s.auditSeq = snap.AuditSeq
+	// Operations are installed after the audit sequence so the interrupted
+	// records can be recorded in the same restore. A terminal record keeps its
+	// timestamps and result; a restored in-flight record was already failed by
+	// normalizeOperations and is never resumed.
+	s.operations = snap.Operations
+	if s.operations == nil {
+		s.operations = []model.Operation{}
+	}
+	s.operationSeq = snap.OperationSeq
+	s.operationWait = make(map[string]chan struct{})
+	for _, id := range interruptedOperations {
+		s.addAuditLocked(model.SeverityWarn, "system", "operation.unknown", id,
+			"Operation interrupted by restart", map[string]string{"code": OperationUnknownCode})
+	}
 	// Portal state is installed after validation quarantined broken rows, so a
 	// malformed tenant or session denies access instead of bricking the panel.
 	s.tenants = snap.Tenants
@@ -717,6 +749,9 @@ func (snap *Snapshot) validate() error {
 		}
 	}
 	if err := snap.validateSchedules(accounts); err != nil {
+		return err
+	}
+	if err := snap.validateOperations(); err != nil {
 		return err
 	}
 	if err := snap.validateWebhooks(); err != nil {

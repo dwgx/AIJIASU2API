@@ -1192,6 +1192,45 @@ Reason mapping: 404 `unknown_server`/`no_target`; 409 `login_required`, `login_d
 429 `connect_cooldown`; 502 `session_open_failed`/`gate_start_failed`; 500 `store_failed`. The
 client-safe message and `details` are serialized; the wrapped cause stays in the log.
 
+## Async operations and select-node
+
+`POST /v1/accounts/{id}/actions/select-node` is the machine-facing primitive: it is declarative
+(ensure the target is the live node), idempotent, and asynchronous. It validates and resolves the
+target synchronously, then queues an `Operation` and runs the same guarded switch as
+`POST .../actions/connect` (`internal/runtime/catalog_connect.go`). It never opens a second switch
+path, so the per-account cooldown, the one-session break-before-make, the slot lock and the
+metadata-only containment on failure all apply unchanged. `wait:true` blocks for the terminal
+result; `wait:false` answers `202` with `Location: /v1/operations/{id}` and `Retry-After: 1`.
+An already-current target is an idempotent `200 {changed:false}` with no operation and no cooldown
+(`ifCurrent: "noop"`, the default; `"error"` answers 409 `ALREADY_CURRENT`, `"reselect"` picks the
+next usable server in the same region). "Current" means the runtime still holds a session: a store
+row that says `LIVE` after a restart (no controller session) is reopened through the same guarded
+switch with the `reconnect` trigger instead of being reported as a no-op, and the result's
+`sessionHealthy` comes from the runtime snapshot.
+
+Targets are `{serverId}`, `{nodeId}` (`<account>:<server>` or `<account>#<slot>:<server>`) or
+`{region, strategy:"next"|"first"}`; omitting the target uses the persisted selection. Every form
+is checked against the retained login result (unknown → 404, ineligible → 409
+`SERVER_UNAVAILABLE`, no login result → 409 `LOGIN_REQUIRED`). `drainSeconds` (0–60, default 30)
+and `rollback` (default true) are accepted for the DESIGN-INTEGRATION contract but are advisory:
+the guarded switch fixes its own drain grace and reports `rollback:"metadata_only"` after a
+break-before-make failure; it does not open a second session to roll back. That is the safe subset
+of the design, not a second implementation.
+
+`GET /v1/operations?account=&accountId=&state=&type=&limit=` lists newest first (default 50, max
+200). `GET /v1/operations/{id}` returns the full record: `state` (`queued|running|succeeded|failed|
+canceled`), `startedAt`/`finishedAt`, `steps`, `result` and `error.code`. `DELETE
+/v1/operations/{id}` cancels a queued record before dispatch; a running record answers 409 because
+the guarded switch is one executor step that may already hold an open vendor session.
+
+Records are durable: terminal rows are written to the state snapshot (newest 200, 24 h) and
+survive a restart. A row still `queued`/`running` when the daemon stopped is restored as `failed`
+with `error.code:"OPERATION_UNKNOWN"` and one `operation.unknown` audit row — the daemon never
+claims a switch it cannot prove. One queued/running operation per account is allowed; a second
+select answers 409 `ACCOUNT_BUSY` with `details.currentOperationId`. Scoped keys use the existing
+matrix: `catalog:write` for select-node and cancel, `catalog:read` for list/get, and an
+account-restricted key sees only its accounts (another account answers 404, not 403).
+
 ## Lease allocation
 
 `internal/store/leases.go` allocates and frees the panel's leases; `internal/api/leases.go` serves
@@ -1742,8 +1781,8 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 |---|---|
 | `accounts:read` | `GET /v1/accounts`, `GET /v1/accounts/{id}`, `GET /v1/accounts/{id}/device`, `GET /v1/accounts/io/capabilities`, `POST /v1/accounts/export` |
 | `accounts:write` | `POST /v1/accounts`, `PATCH`/`DELETE /v1/accounts/{id}`, login/logout, `POST /v1/accounts/import`, `POST /v1/accounts/bulk-delete` |
-| `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology` |
-| `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, node drain/undrain/probe |
+| `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology`, `GET /v1/operations`, `GET /v1/operations/{id}` |
+| `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, select-node, `DELETE /v1/operations/{id}`, node drain/undrain/probe |
 | `leases:read` | `GET /v1/leases` |
 | `leases:write` | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `requests:read` | `GET /v1/requests` |
@@ -2537,8 +2576,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (107 paths, 132 operations,
-  176 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (110 paths, 136 operations,
+  183 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, the portal cookie or webhook
@@ -2589,6 +2628,10 @@ rest of `/v1/*` (401 without the token; `/healthz` stays open).
 | POST | `/v1/accounts/{id}/actions/connect` | `{serverId, snapshotId?, confirm:true}` → `SwitchResult`. Opens the new session before closing the old one, commits one `LIVE` node, rolls back on failure; the current server → 200 `alreadyConnected` without cooldown. 429 `connect_cooldown` + `Retry-After` inside the 5 s per-account window; 409 `switch_in_progress`/`multiple_sessions`/`snapshot_changed`/`server_ineligible`/`login_required`; 502 `session_open_failed`/`gate_start_failed` |
 | POST | `/v1/accounts/{id}/actions/disconnect` | `{confirm:true}` → `DisconnectResult`; drains each gate (10 s), closes it, deletes the account's nodes and leases, keeps the target; a second call → `alreadyDisconnected:true` |
 | POST | `/v1/accounts/{id}/actions/reconnect` | `{snapshotId?, confirm:true}` → `SwitchResult`; always reopens the current server, or the target when nothing runs; no current server and no target → 404 `no_target` |
+| POST | `/v1/accounts/{id}/actions/select-node` | `{target?, drainSeconds?, timeoutSeconds?, ifCurrent?, rollback?, wait?}`; target `{serverId}`/`{nodeId}`/`{region,strategy}` or the persisted selection. Validates synchronously, then queues the same guarded switch → 202 `Operation` + `Location`; already current → 200 `{changed:false}`; `ifCurrent:"error"` → 409 `ALREADY_CURRENT`; `ifCurrent:"reselect"` → next same-region server. `wait:true` returns the terminal `SelectNodeResult` (200) or the mapped 409/503/504 with `details.operationId`. 409 `ACCOUNT_BUSY` while another operation is in flight; 409 `NO_ALTERNATE_SERVER`; 409 `SERVER_UNAVAILABLE`; 409 `LOGIN_REQUIRED`; 400 invalid target/range |
+| GET | `/v1/operations?account=&accountId=&state=&type=&limit=` | newest-first durable operations; `limit` 1–200 (default 50); invalid state/limit → 400; account-restricted keys see only their accounts |
+| GET | `/v1/operations/{id}` | full operation: state, startedAt/finishedAt, steps, result, error.code; unknown or outside the key's allowlist → 404 |
+| DELETE | `/v1/operations/{id}` | cancel a queued operation → 200 `Operation`; running or already terminal → 409 `NOT_CANCELABLE`; unknown → 404 |
 | GET | `/v1/schedules?accountId=&enabled=&limit=&offset=` | list schedules in creation order with refreshed run counts and each schedule's `nextRunAt`/`lastRunAt` |
 | POST | `/v1/schedules` | create; destructive action with `dryRun:false` requires `confirm:"ARM"`; `Location: /v1/schedules/{id}` → 201 |
 | GET/POST | `/v1/schedules/preview` | pure next-run preview (query or body; `count` defaults to 5); no store write and no engine required |

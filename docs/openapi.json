@@ -108,6 +108,10 @@
       "description": "Customer-visible event replay and the server-sent event stream."
     },
     {
+      "name": "Operations",
+      "description": "Durable async transitions (select-node, list/get/cancel). Terminal records survive a restart; an in-flight record is restored as failed/OPERATION_UNKNOWN."
+    },
+    {
       "name": "Backup",
       "description": "Admin-only full-panel backup: seal the state directory into an encrypted envelope, inspect it, and restore it."
     },
@@ -1582,6 +1586,102 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ConnectRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{id}/actions/select-node": {
+      "post": {
+        "operationId": "selectAccountNode",
+        "tags": [
+          "Catalog",
+          "Operations"
+        ],
+        "summary": "Select the account's live node asynchronously (declarative, idempotent).",
+        "x-implementation-phase": "P1",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectNodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The target was already current (changed:false); no operation was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelectNodeResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Operation accepted. Poll Location until it is terminal.",
+            "headers": {
+              "Location": {
+                "description": "Operation URL (/v1/operations/{id}).",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Seconds before the first poll.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          },
+          "504": {
+            "description": "wait:true exceeded timeoutSeconds; details.operationId names the durable record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
               }
             }
           }
@@ -3310,6 +3410,161 @@
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/operations": {
+      "get": {
+        "operationId": "listOperations",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "List async operations newest first.",
+        "x-implementation-phase": "P1",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account id filter. accountId is accepted as an alias."
+          },
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account id filter (DESIGN-INTEGRATION spelling)."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/OperationState"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Operation type, for example account.switch."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operations, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Operation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/operations/{id}": {
+      "get": {
+        "operationId": "getOperation",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "One operation with steps, result and error.",
+        "x-implementation-phase": "P1",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelOperation",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Cancel a queued operation before dispatch.",
+        "x-implementation-phase": "P1",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canceled operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
           }
         }
       }
@@ -6881,7 +7136,10 @@
               "BACKUP_LIVE_NODE",
               "BACKUP_DAEMON_RUNNING",
               "BACKUP_UNAVAILABLE",
-              "CURSOR_EXPIRED"
+              "CURSOR_EXPIRED",
+              "OPERATION_TIMEOUT",
+              "FROZEN",
+              "PRECONDITION_FAILED"
             ]
           },
           "message": {
@@ -9671,6 +9929,239 @@
         "required": [
           "confirm"
         ]
+      },
+      "OperationState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "canceled"
+        ]
+      },
+      "OperationStep": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Stable executor boundary: validate, switch, dispatch or interrupted."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "failed",
+              "canceled"
+            ]
+          },
+          "durationMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "durationMs"
+        ]
+      },
+      "OperationError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable failure class, for example LOGIN_REQUIRED, ACCOUNT_BUSY, UPSTREAM_UNAVAILABLE or OPERATION_UNKNOWN."
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "OperationTarget": {
+        "type": "object",
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "next",
+              "first"
+            ]
+          }
+        }
+      },
+      "SelectNodeResult": {
+        "type": "object",
+        "properties": {
+          "changed": {
+            "type": "boolean"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "serverId": {
+            "type": "string"
+          },
+          "gatePort": {
+            "type": "integer"
+          },
+          "egressIp": {
+            "type": "string"
+          },
+          "sessionHealthy": {
+            "type": "boolean"
+          },
+          "previousNodeId": {
+            "type": "string"
+          },
+          "rollbackAttempted": {
+            "type": "boolean"
+          },
+          "rollback": {
+            "type": "string",
+            "description": "Runtime containment hint (restored or metadata_only). The current guarded switch never performs a reverse switch."
+          },
+          "durationMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "changed",
+          "accountId",
+          "serverId",
+          "sessionHealthy"
+        ]
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "account.switch",
+              "account.connect"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OperationTarget"
+          },
+          "requestedBy": {
+            "type": "string",
+            "description": "admin or key:<prefix>; never a secret."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationStep"
+            }
+          },
+          "result": {
+            "$ref": "#/components/schemas/SelectNodeResult"
+          },
+          "error": {
+            "$ref": "#/components/schemas/OperationError"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "state",
+          "accountId",
+          "target",
+          "requestedBy",
+          "createdAt",
+          "startedAt",
+          "finishedAt",
+          "steps",
+          "result",
+          "error"
+        ]
+      },
+      "SelectNodeRequest": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/OperationTarget"
+          },
+          "drainSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 60,
+            "default": 30,
+            "description": "Advisory: the current guarded switch uses its own bounded drain grace."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 120,
+            "default": 60
+          },
+          "ifCurrent": {
+            "type": "string",
+            "enum": [
+              "noop",
+              "error",
+              "reselect"
+            ],
+            "default": "noop"
+          },
+          "rollback": {
+            "type": "boolean",
+            "default": true,
+            "description": "Advisory: the guarded switch reports metadata_only containment; it never opens a second session to roll back."
+          },
+          "wait": {
+            "type": "boolean",
+            "default": false
+          }
+        }
       },
       "ConnectResult": {
         "type": "object",

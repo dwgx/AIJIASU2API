@@ -35,6 +35,14 @@ var routeScopes = map[string]model.Scope{
 	http.MethodPost + " /v1/accounts/{id}/actions/connect":    model.ScopeCatalogWrite,
 	http.MethodPost + " /v1/accounts/{id}/actions/disconnect": model.ScopeCatalogWrite,
 	http.MethodPost + " /v1/accounts/{id}/actions/reconnect":  model.ScopeCatalogWrite,
+	// select-node is the async wrapper of the same guarded switch, so it uses
+	// the catalog write grant. Operation reads are catalog reads; cancel is a
+	// write because it stops a queued switch. No new scope vocabulary is
+	// introduced by this ticket.
+	http.MethodPost + " /v1/accounts/{id}/actions/select-node": model.ScopeCatalogWrite,
+	http.MethodGet + " /v1/operations":                         model.ScopeCatalogRead,
+	http.MethodGet + " /v1/operations/{id}":                    model.ScopeCatalogRead,
+	http.MethodDelete + " /v1/operations/{id}":                 model.ScopeCatalogWrite,
 
 	http.MethodGet + " /v1/schedules":                   model.ScopeSettingsRead,
 	http.MethodPost + " /v1/schedules":                  model.ScopeSettingsWrite,

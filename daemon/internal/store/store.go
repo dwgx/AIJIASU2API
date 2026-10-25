@@ -178,6 +178,13 @@ type Store struct {
 	scheduleFires []model.ScheduleFire
 	reminderMarks map[string]model.ReminderMark
 
+	// operations is the bounded async-transition history, newest first
+	// (DESIGN-INTEGRATION §3.4). Terminal rows survive a restart; operationWait
+	// is process-only completion signalling for wait:true callers.
+	operations    []model.Operation
+	operationSeq  int
+	operationWait map[string]chan struct{}
+
 	// webhookEndpoints is the persisted receiver metadata. Signing secrets are
 	// not here: they live in secret.Store (or process memory) so a state.json
 	// snapshot never carries a credential.
@@ -314,6 +321,8 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		scheduleRuns:       []model.ScheduleRun{},
 		scheduleFires:      []model.ScheduleFire{},
 		reminderMarks:      make(map[string]model.ReminderMark),
+		operations:         []model.Operation{},
+		operationWait:      make(map[string]chan struct{}),
 		webhookEndpoints:   []model.WebhookEndpoint{},
 		webhookDeliveries:  []model.WebhookDelivery{},
 		webhookOutbox:      []WebhookOutboxEntry{},

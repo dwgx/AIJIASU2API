@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(107)
-    expect(entries).toHaveLength(132)
+    expect(Object.keys(doc.paths)).toHaveLength(110)
+    expect(entries).toHaveLength(136)
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {
@@ -531,6 +531,10 @@ describe('docs/openapi.json', () => {
       ['post', '/v1/accounts/{id}/actions/connect'],
       ['post', '/v1/accounts/{id}/actions/disconnect'],
       ['post', '/v1/accounts/{id}/actions/reconnect'],
+      ['post', '/v1/accounts/{id}/actions/select-node'],
+      ['get', '/v1/operations'],
+      ['get', '/v1/operations/{id}'],
+      ['delete', '/v1/operations/{id}'],
       ['get', '/v1/schedules'],
       ['post', '/v1/schedules'],
       ['get', '/v1/schedules/{id}'],
@@ -547,7 +551,7 @@ describe('docs/openapi.json', () => {
     }
     // The paged catalog read is P0 even though selection/connect are P1.
     expect(byRoute.get('get /v1/accounts/{id}/servers')?.['x-implementation-phase']).toBe('P0')
-    expect(entries.filter(({ operation }) => operation['x-implementation-phase'] === 'P1')).toHaveLength(19)
+    expect(entries.filter(({ operation }) => operation['x-implementation-phase'] === 'P1')).toHaveLength(23)
   })
 
   it('documents the schemas named by the contract', () => {

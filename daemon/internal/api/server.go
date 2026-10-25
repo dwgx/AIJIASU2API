@@ -372,6 +372,15 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/connect", s.handleConnectAccount)
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/disconnect", s.handleDisconnectAccount)
 	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/reconnect", s.handleReconnectAccount)
+	// The async select-node executor reuses the same guarded switch as the
+	// synchronous connect route; it never opens a second switch path.
+	rt.handle(http.MethodPost, "/v1/accounts/{id}/actions/select-node", s.handleSelectNode)
+
+	// Async operation records (DESIGN-INTEGRATION §3.4). List and get are
+	// reads; cancel only stops a queued record before dispatch.
+	rt.handle(http.MethodGet, "/v1/operations", s.handleListOperations)
+	rt.handle(http.MethodGet, "/v1/operations/{id}", s.handleGetOperation)
+	rt.handle(http.MethodDelete, "/v1/operations/{id}", s.handleCancelOperation)
 
 	// Static /v1/schedules/preview must precede /v1/schedules/{id}: the
 	// router is first-match and both patterns have three segments.
