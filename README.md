@@ -59,10 +59,10 @@ As of 2026-10-25:
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
   live calls and holds no credentials.
 - `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
-  Vite 6, TypeScript, 14 pages (Overview, Usage, Accounts, Nodes, Leases, Orders, Device Pool,
-  Users, Requests, Logs, Schedules, Settings, Backup, Lab) in a graphite-and-mint design system with
-  accent themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and command-palette
-  search for accounts and nodes. The sidebar
+  Vite 6, TypeScript, 15 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Orders,
+  Device Pool, Users, Requests, Logs, Schedules, Settings, Backup, Lab) in a graphite-and-mint
+  design system with accent themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts,
+  and command-palette search for accounts and nodes. The sidebar
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
   2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
@@ -99,7 +99,7 @@ As of 2026-10-25:
   offline-settlement fallback and a cancel confirm; the operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  450 Vitest tests in 47 files. The UI is bilingual: a `中` / `EN` switch
+  457 Vitest tests in 50 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -458,7 +458,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (450 tests in 47 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (457 tests in 50 files), `cd daemon && go test ./...`
 (981 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
