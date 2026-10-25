@@ -1415,6 +1415,12 @@ export const WEBHOOK_EVENTS = [
   'schedule.fired',
   'schedule.failed',
   'device.retired',
+  'order.created',
+  'order.cancelled',
+  'order.paid',
+  'order.activated',
+  'order.refunded',
+  'order.charged_back',
   'audit.critical',
 ] as const
 

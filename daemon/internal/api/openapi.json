@@ -5492,6 +5492,7 @@
           "Order Admin"
         ],
         "summary": "List every plan, including inactive rows, newest first.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -5532,6 +5533,7 @@
           "Order Admin"
         ],
         "summary": "Create one plan catalogue entry.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "201": {
@@ -5585,6 +5587,7 @@
           "Order Admin"
         ],
         "summary": "Read one plan catalogue entry.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -5619,6 +5622,7 @@
           "Order Admin"
         ],
         "summary": "Apply a partial plan update; existing order snapshots are immutable.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -5675,6 +5679,7 @@
           "Order Admin"
         ],
         "summary": "Soft-deactivate a plan; the row is retained for order history.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -5707,6 +5712,7 @@
           "Order Admin"
         ],
         "summary": "List orders, newest first, with optional tenant, user and state filters.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -5776,6 +5782,7 @@
           "Order Admin"
         ],
         "summary": "Read one order and its entitlement.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -5812,6 +5819,7 @@
           "Order Admin"
         ],
         "summary": "Record an admin's offline settlement attestation; never claims an online payment.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -5873,6 +5881,7 @@
           "Order Admin"
         ],
         "summary": "Record an already completed full offline refund; never transfers money.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -5931,6 +5940,7 @@
           "Order Admin"
         ],
         "summary": "Record external chargeback evidence; revokes the grant and flags review.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -5989,6 +5999,7 @@
           "Order Admin"
         ],
         "summary": "Cancel an awaiting_payment order as admin; cancelled is terminal.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
         "x-implementation-phase": "P0",
         "parameters": [
           {

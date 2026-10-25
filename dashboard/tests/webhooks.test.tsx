@@ -60,6 +60,29 @@ describe('webhook settings section', () => {
     }
   })
 
+  it('offers the order lifecycle events in the subscription list', async () => {
+    const user = userEvent.setup()
+    await openWebhooks()
+
+    await user.click(screen.getByRole('button', { name: 'New webhook' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New webhook' })
+    await user.click(within(dialog).getByRole('button', { name: 'Events' }))
+    const listbox = await screen.findByRole('listbox', { name: 'Events' })
+
+    // The daemon accepts exactly these six order events; a receiver created
+    // from the panel must be able to subscribe to each of them.
+    for (const event of [
+      'order.created',
+      'order.cancelled',
+      'order.paid',
+      'order.activated',
+      'order.refunded',
+      'order.charged_back',
+    ]) {
+      expect(within(listbox).getByRole('option', { name: event })).toBeInTheDocument()
+    }
+  })
+
   it('creates a receiver and shows the signing secret exactly once', async () => {
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)

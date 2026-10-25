@@ -462,11 +462,29 @@ func (s *Server) routes(rt *router) {
 	// falls back to manual settlement.
 	rt.handle(http.MethodPost, "/v1/payments/stripe", s.handleStripeWebhook)
 
+	// Order administration (DESIGN-ORDERS). Plans and orders are operator
+	// surfaces, not portal surfaces: they are registered even when
+	// AJS_TENANT_PORTAL is off, so a deployment can price plans and audit
+	// orders before the customer portal is enabled. They require the admin
+	// token or an admin-scoped key (isAdminTenantPath) and stay absent from
+	// routeScopes.
+	rt.handle(http.MethodGet, "/v1/admin/plans", s.handleListPlans)
+	rt.handle(http.MethodPost, "/v1/admin/plans", s.handleCreatePlan)
+	rt.handle(http.MethodGet, "/v1/admin/plans/{id}", s.handleGetPlan)
+	rt.handle(http.MethodPatch, "/v1/admin/plans/{id}", s.handlePatchPlan)
+	rt.handle(http.MethodDelete, "/v1/admin/plans/{id}", s.handleDeletePlan)
+	rt.handle(http.MethodGet, "/v1/admin/orders", s.handleListOrders)
+	rt.handle(http.MethodGet, "/v1/admin/orders/{id}", s.handleGetOrder)
+	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/settle", s.handleSettleOrder)
+	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/refund", s.handleRefundOrder)
+	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/chargeback", s.handleChargebackOrder)
+	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/cancel", s.handleAdminCancelOrder)
+
 	// Customer portal chains (DESIGN-TENANT). Both are opt-in: without
 	// AJS_TENANT_PORTAL=1 the routes are not registered and answer 404, and
 	// no identity is synthesized for them. The portal chain authenticates only
-	// its own cookie; the admin chain requires the admin token or the admin
-	// scope and is absent from routeScopes.
+	// its own cookie; the tenant-admin chain requires the admin token or the
+	// admin scope and is absent from routeScopes.
 	if s.cfg.TenantPortal {
 		rt.handle(http.MethodPost, "/v1/portal/signup", s.handlePortalSignup)
 		rt.handle(http.MethodPost, "/v1/portal/login", s.handlePortalLogin)
@@ -487,17 +505,6 @@ func (s *Server) routes(rt *router) {
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/approve", s.handleApproveTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/suspend", s.handleSuspendTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/resume", s.handleResumeTenant)
-		rt.handle(http.MethodGet, "/v1/admin/plans", s.handleListPlans)
-		rt.handle(http.MethodPost, "/v1/admin/plans", s.handleCreatePlan)
-		rt.handle(http.MethodGet, "/v1/admin/plans/{id}", s.handleGetPlan)
-		rt.handle(http.MethodPatch, "/v1/admin/plans/{id}", s.handlePatchPlan)
-		rt.handle(http.MethodDelete, "/v1/admin/plans/{id}", s.handleDeletePlan)
-		rt.handle(http.MethodGet, "/v1/admin/orders", s.handleListOrders)
-		rt.handle(http.MethodGet, "/v1/admin/orders/{id}", s.handleGetOrder)
-		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/settle", s.handleSettleOrder)
-		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/refund", s.handleRefundOrder)
-		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/chargeback", s.handleChargebackOrder)
-		rt.handle(http.MethodPost, "/v1/admin/orders/{id}/cancel", s.handleAdminCancelOrder)
 	}
 }
 
