@@ -5154,3 +5154,243 @@ svg {
   outline: 2px solid var(--mint);
   outline-offset: -2px;
 }
+
+/* ==========================================================================
+   Customer portal (AJS-290)
+
+   A standalone surface for tenants: brand bar, one centered panel, no admin
+   navigation. Auth pages stay narrow; the dashboard widens for tables and the
+   usage chart. All colors come from the shared tokens, so both themes apply.
+   ========================================================================== */
+.portal-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.portal-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px clamp(16px, 4vw, 40px);
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.portal-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.portal-brand__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--mint) 24%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--mint) 12%, transparent);
+  color: var(--mint);
+}
+
+.portal-brand__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.portal-brand__name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.portal-brand__sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.portal-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.portal-main {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  padding: clamp(24px, 5vw, 56px) clamp(16px, 4vw, 40px);
+}
+
+.portal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.portal-main--wide .portal-panel {
+  max-width: 1120px;
+}
+
+.portal-panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.portal-title {
+  margin: 0;
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.portal-subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.portal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.portal-form .btn--primary {
+  width: 100%;
+}
+
+.portal-alert {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.portal-alt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.portal-alt a {
+  color: var(--mint);
+  text-decoration: none;
+}
+
+.portal-alt a:hover {
+  text-decoration: underline;
+}
+
+.portal-note {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.portal-note p {
+  margin: 0;
+}
+
+.portal-note__fine {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.portal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.portal-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.portal-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.portal-lease-node {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.portal-lease-node__region {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.portal-key-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.portal-secret__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.portal-secret {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--sunken);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.portal-foot {
+  padding: 16px clamp(16px, 4vw, 40px);
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .portal-form {
+    padding: 18px;
+  }
+
+  .portal-main {
+    padding: 20px 14px;
+  }
+}
+

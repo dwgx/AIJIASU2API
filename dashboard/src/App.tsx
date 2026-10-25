@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { Skeleton } from './components/primitives'
 import { ToastProvider } from './components/Toast'
@@ -20,6 +20,11 @@ const Settings = lazy(() => import('./pages/Settings'))
 const Usage = lazy(() => import('./pages/Usage'))
 const Users = lazy(() => import('./pages/Users'))
 
+const PortalDashboard = lazy(() => import('./pages/portal/PortalDashboard'))
+const PortalLogin = lazy(() => import('./pages/portal/PortalLogin'))
+const PortalPending = lazy(() => import('./pages/portal/PortalPending'))
+const PortalSignup = lazy(() => import('./pages/portal/PortalSignup'))
+
 function RouteFallback() {
   const { t } = useI18n()
   return (
@@ -30,32 +35,57 @@ function RouteFallback() {
   )
 }
 
+/** Operator console: admin chrome, admin token gate, admin navigation. */
+function AdminLayout() {
+  return (
+    <AppShell>
+      <Suspense fallback={<RouteFallback />}>
+        <Outlet />
+      </Suspense>
+    </AppShell>
+  )
+}
+
+/** Customer portal: standalone shell, never wrapped in admin chrome. */
+function PortalLayout() {
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <Outlet />
+    </Suspense>
+  )
+}
+
 export default function App() {
   return (
     <LanguageProvider>
       <ThemeProvider>
         <ToastProvider>
           <BrowserRouter>
-            <AppShell>
-              <Suspense fallback={<RouteFallback />}>
-                <Routes>
-                  <Route path="/" element={<Overview />} />
-                  <Route path="/usage" element={<Usage />} />
-                  <Route path="/accounts" element={<Accounts />} />
-                  <Route path="/nodes" element={<Nodes />} />
-                  <Route path="/leases" element={<Leases />} />
-                  <Route path="/device-pool" element={<DevicePool />} />
-                  <Route path="/users" element={<Users />} />
-                  <Route path="/requests" element={<Requests />} />
-                  <Route path="/logs" element={<Logs />} />
-                  <Route path="/schedules" element={<Schedules />} />
-                  <Route path="/lab" element={<Lab />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/backup" element={<Backup />} />
-                  <Route path="*" element={<Navigate to="/" replace />} />
-                </Routes>
-              </Suspense>
-            </AppShell>
+            <Routes>
+              <Route element={<PortalLayout />}>
+                <Route path="/portal/login" element={<PortalLogin />} />
+                <Route path="/portal/signup" element={<PortalSignup />} />
+                <Route path="/portal/pending" element={<PortalPending />} />
+                <Route path="/portal" element={<PortalDashboard />} />
+                <Route path="/portal/*" element={<Navigate to="/portal" replace />} />
+              </Route>
+              <Route element={<AdminLayout />}>
+                <Route path="/" element={<Overview />} />
+                <Route path="/usage" element={<Usage />} />
+                <Route path="/accounts" element={<Accounts />} />
+                <Route path="/nodes" element={<Nodes />} />
+                <Route path="/leases" element={<Leases />} />
+                <Route path="/device-pool" element={<DevicePool />} />
+                <Route path="/users" element={<Users />} />
+                <Route path="/requests" element={<Requests />} />
+                <Route path="/logs" element={<Logs />} />
+                <Route path="/schedules" element={<Schedules />} />
+                <Route path="/lab" element={<Lab />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/backup" element={<Backup />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
+            </Routes>
           </BrowserRouter>
         </ToastProvider>
       </ThemeProvider>
