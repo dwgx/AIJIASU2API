@@ -21,6 +21,7 @@ import {
   mockBulkDelete,
   mockCreateBackup,
   mockCreateScopedKey,
+  mockDebugTracePage,
   mockEventsPage,
   mockExportDevicePool,
   mockGenerateDevices,
@@ -50,7 +51,7 @@ import {
   resetOrderMock,
 } from './order-mock'
 import { ApiError, DevicePoolError, UnauthorizedError } from './errors'
-import { WEBHOOK_EVENTS } from './types'
+import { DEBUG_KINDS, WEBHOOK_EVENTS } from './types'
 import type {
   Account,
   AccountExportDownload,
@@ -78,6 +79,9 @@ import type {
   CreateKeyResult,
   CreateLeaseInput,
   CreateLeaseResult,
+  DebugTrace,
+  DebugTracePage,
+  DebugTraceQuery,
   Delivery,
   DeviceExportEnvelope,
   DeviceGenerateInput,
@@ -2535,6 +2539,199 @@ function mockEventStream(options: SubscribeEventsOptions): EventStreamHandle {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * Server-sent events — GET /v1/debug/stream
+ *
+ * Same cursor discipline as the event stream, with two differences: the frame
+ * id is the bare ring sequence and the event name is the trace kind, so the
+ * client subscribes to every kind. A restarted daemon restarts the sequence at
+ * 1; the first frame after a (re)connect that does not advance past the last
+ * delivered sequence is a restart, reported through onRestart instead of
+ * silently mixing two process lifetimes.
+ * ------------------------------------------------------------------------ */
+
+export interface DebugStreamInfo {
+  /** Consecutive failed attempts since the last successful open. */
+  attempt: number
+  /** Delay before the next attempt; absent once the stream is open. */
+  retryInMs?: number
+  /** Sequence the stream would resume from at the time of this state. */
+  lastSeq: number
+}
+
+export interface DebugStreamOptions {
+  /** Sequence to resume after; 0 replays the retained ring from the oldest entry. */
+  since?: number
+  onEntry: (trace: DebugTrace) => void
+  onState?: (state: EventStreamState, info?: DebugStreamInfo) => void
+  /** The daemon restarted and the ring is a new process; drop the old rows. */
+  onRestart?: () => void
+  /** Test seam; defaults to the browser EventSource. */
+  eventSourceFactory?: (url: string) => EventSource
+  /** Defaults to true; false reports `offline` after the first failure. */
+  reconnect?: boolean
+  initialRetryMs?: number
+  maxRetryMs?: number
+}
+
+export interface DebugStreamHandle {
+  close: () => void
+  lastSeq: () => number
+}
+
+export interface SubscribeDebugOptions {
+  since?: number
+  onEntry: (trace: DebugTrace) => void
+  onState?: (state: EventStreamState, info?: DebugStreamInfo) => void
+  onRestart?: () => void
+  /** Test seam; when set, the live EventSource client is used even in mock mode. */
+  eventSourceFactory?: (url: string) => EventSource
+}
+
+function debugStreamUrl(since: number): string {
+  const params = new URLSearchParams()
+  if (since > 0) params.set('since', String(since))
+  const search = params.toString()
+  return `${API_BASE}/v1/debug/stream${search ? `?${search}` : ''}`
+}
+
+/**
+ * Owns one EventSource at a time, like `openEventStream`, but never drops the
+ * cursor: the debug endpoint answers a stale cursor by replaying the retained
+ * window from the oldest entry, so there is nothing to recover from.
+ */
+export function openDebugStream(options: DebugStreamOptions): DebugStreamHandle {
+  const factory = options.eventSourceFactory ?? ((url: string) => new EventSource(url))
+  const reconnect = options.reconnect !== false
+  const initialRetryMs = options.initialRetryMs ?? EVENT_STREAM_INITIAL_RETRY_MS
+  const maxRetryMs = options.maxRetryMs ?? EVENT_STREAM_MAX_RETRY_MS
+  let source: EventSource | null = null
+  let timer: number | null = null
+  let closed = false
+  let lastSeq = Math.max(0, options.since ?? 0)
+  let attempts = 0
+  /** True until the first parsed frame of the current connection. */
+  let firstFrame = true
+
+  const emitState = (state: EventStreamState, info?: Partial<DebugStreamInfo>) => {
+    if (closed) return
+    options.onState?.(state, { attempt: attempts, lastSeq, ...info })
+  }
+
+  const handleMessage = (message: MessageEvent) => {
+    if (closed) return
+    let trace: DebugTrace
+    try {
+      trace = JSON.parse(String(message.data)) as DebugTrace
+    } catch {
+      return
+    }
+    if (!trace || typeof trace.kind !== 'string' || typeof trace.seq !== 'number') return
+    if (trace.seq <= lastSeq) {
+      if (!firstFrame) return
+      // A replay after our cursor always starts above it; a first frame at or
+      // below it means the daemon restarted the sequence.
+      lastSeq = 0
+      options.onRestart?.()
+    }
+    firstFrame = false
+    lastSeq = trace.seq
+    options.onEntry(trace)
+  }
+
+  const detach = () => {
+    if (!source) return
+    source.onopen = null
+    source.onerror = null
+    source.onmessage = null
+    for (const kind of DEBUG_KINDS) {
+      source.removeEventListener(kind, handleMessage as EventListener)
+    }
+    source.close()
+    source = null
+  }
+
+  const scheduleReconnect = () => {
+    if (closed) return
+    if (!reconnect) {
+      emitState('offline')
+      return
+    }
+    attempts += 1
+    const retryInMs = Math.min(initialRetryMs * 2 ** (attempts - 1), maxRetryMs)
+    emitState('reconnecting', { retryInMs })
+    timer = window.setTimeout(() => {
+      timer = null
+      connect(false)
+    }, retryInMs)
+  }
+
+  const connect = (initial: boolean) => {
+    if (closed) return
+    detach()
+    firstFrame = true
+    let next: EventSource
+    try {
+      next = factory(debugStreamUrl(lastSeq))
+    } catch {
+      scheduleReconnect()
+      return
+    }
+    source = next
+    next.onopen = () => {
+      if (closed) return
+      attempts = 0
+      emitState('live')
+    }
+    next.onerror = () => {
+      if (closed) return
+      detach()
+      scheduleReconnect()
+    }
+    next.onmessage = handleMessage
+    for (const kind of DEBUG_KINDS) {
+      next.addEventListener(kind, handleMessage as EventListener)
+    }
+    emitState(initial ? 'connecting' : 'reconnecting')
+  }
+
+  connect(true)
+
+  return {
+    close() {
+      closed = true
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      detach()
+    },
+    lastSeq: () => lastSeq,
+  }
+}
+
+/** Deterministic mock transport: replay the retained ring, then stay open. */
+function mockDebugStream(options: SubscribeDebugOptions): DebugStreamHandle {
+  let closed = false
+  let lastSeq = Math.max(0, options.since ?? 0)
+  const page = mockDebugTracePage({ limit: 0 })
+  for (const trace of page.entries) {
+    if (closed) break
+    if (trace.seq <= lastSeq) continue
+    lastSeq = trace.seq
+    options.onEntry(trace)
+  }
+  if (!closed) {
+    options.onState?.('live', { attempt: 0, lastSeq })
+  }
+  return {
+    close() {
+      closed = true
+    },
+    lastSeq: () => lastSeq,
+  }
+}
+
 export const api = {
   async listAccounts(): Promise<Account[]> {
     if (!USE_MOCK) return http<Account[]>('/v1/accounts')
@@ -3070,6 +3267,42 @@ export const api = {
       })
     }
     return mockEventStream(options)
+  },
+
+  /**
+   * GET /v1/debug/trace — one page of the bounded in-memory runtime trace.
+   * `limit: 0` returns the whole retained window, which is what the Debug page
+   * reads for its ring metadata and first paint.
+   */
+  async getDebugTrace(query: DebugTraceQuery = {}): Promise<DebugTracePage> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.account) params.set('account', query.account)
+      if (query.limit !== undefined) params.set('limit', String(query.limit))
+      const search = params.toString()
+      return http<DebugTracePage>(`/v1/debug/trace${search ? `?${search}` : ''}`)
+    }
+    await wait()
+    return clone(mockDebugTracePage(query))
+  },
+
+  /**
+   * Opens GET /v1/debug/stream. Live mode owns one EventSource and resumes
+   * from the last sequence; mock mode replays the deterministic ring and stays
+   * open. A test may pass `eventSourceFactory` to exercise the live path in
+   * mock mode.
+   */
+  subscribeDebug(options: SubscribeDebugOptions): DebugStreamHandle {
+    if (!USE_MOCK || options.eventSourceFactory) {
+      return openDebugStream({
+        since: options.since,
+        onEntry: options.onEntry,
+        onState: options.onState,
+        onRestart: options.onRestart,
+        eventSourceFactory: options.eventSourceFactory,
+      })
+    }
+    return mockDebugStream(options)
   },
 
   /**

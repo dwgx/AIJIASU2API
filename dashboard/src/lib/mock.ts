@@ -19,6 +19,9 @@ import type {
   BackupRestoreView,
   BulkDeleteItem,
   BulkDeleteResult,
+  DebugTrace,
+  DebugTracePage,
+  DebugTraceQuery,
   DeviceExportEnvelope,
   DeviceGenerateInput,
   DeviceImportConflict,
@@ -67,7 +70,7 @@ import type {
   TrafficPoint,
   WebhookEvent,
 } from './types'
-import { SCOPES, WEBHOOK_EVENTS } from './types'
+import { DEBUG_KINDS, SCOPES, WEBHOOK_EVENTS } from './types'
 import { ApiError, DevicePoolError } from './errors'
 import { regionName } from './regions'
 
@@ -2146,6 +2149,122 @@ export function mockEventsPage(query: EventsQuery = {}): EventsPage {
     nextCursor: page.length > 0 ? page[page.length - 1].id : since,
     oldestCursor: ids[0] ?? '',
     dropped: 0,
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Runtime debug trace — mock of daemon/internal/runtime/debug.go and
+ * GET /v1/debug/trace
+ *
+ * The mock ring is deterministic for a given database: 36 entries spanning
+ * every kind, oldest first, ending at the database clock. The daemon's real
+ * ring holds 500 entries and restarts at sequence 1 with the process; the
+ * mock mirrors the shape and the capacity, not the live instrumentation.
+ * ------------------------------------------------------------------------ */
+
+const MOCK_DEBUG_CAPACITY = 500
+const MOCK_DEBUG_ENTRIES = 36
+const MOCK_DEBUG_PAGE_LIMIT = 200
+const MOCK_DEBUG_STEPS = ['login', 'select-node', 'connect', 'probe'] as const
+
+/** The outcome each kind reports; failures are sprinkled deterministically. */
+function mockDebugState(kind: string, index: number): DebugTrace['state'] {
+  switch (kind) {
+    case 'switch.step':
+      return index % 5 === 4 ? 'failed' : 'ok'
+    case 'switch':
+      return 'ok'
+    case 'gate.open':
+      return 'open'
+    case 'gate.close':
+      return 'closed'
+    case 'session.open':
+      return 'open'
+    case 'session.lost':
+      return 'lost'
+    case 'lease.create':
+      return 'ok'
+    case 'lease.revoke':
+      return 'canceled'
+    default:
+      return index % 7 === 6 ? 'failed' : 'ok'
+  }
+}
+
+function mockDebugDetail(kind: string, step: string, nodeLabel: string): string {
+  switch (kind) {
+    case 'switch.step':
+      return `step=${step} node=${nodeLabel}`
+    case 'switch':
+      return `guarded switch to ${nodeLabel}`
+    case 'gate.open':
+      return `listener opened for ${nodeLabel}`
+    case 'gate.close':
+      return `listener closed for ${nodeLabel}`
+    case 'session.open':
+      return `session opened on ${nodeLabel}`
+    case 'session.lost':
+      return `keepalive missed on ${nodeLabel}`
+    case 'lease.create':
+      return `lease created on ${nodeLabel}`
+    case 'lease.revoke':
+      return `lease revoked on ${nodeLabel}`
+    default:
+      return `slot state on ${nodeLabel}`
+  }
+}
+
+export function mockDebugTracePage(query: DebugTraceQuery = {}): DebugTracePage {
+  const db = getDb()
+  const now = Date.now()
+  const entries: DebugTrace[] = []
+  for (let index = 0; index < MOCK_DEBUG_ENTRIES; index += 1) {
+    const seq = index + 1
+    const kind = DEBUG_KINDS[index % DEBUG_KINDS.length]!
+    const account = db.accounts[index % db.accounts.length]!
+    const node =
+      db.nodes.find((row) => row.accountId === account.id) ??
+      db.nodes[index % db.nodes.length]
+    const step = MOCK_DEBUG_STEPS[index % MOCK_DEBUG_STEPS.length]!
+    const state = mockDebugState(kind, index)
+    entries.push({
+      seq,
+      at: iso(now - (MOCK_DEBUG_ENTRIES - index) * 4_000),
+      kind,
+      accountId: account.id,
+      ...(node ? { nodeId: node.id } : {}),
+      slot: (index % 3) + 1,
+      generation: Math.floor(index / 3) + 1,
+      ...(kind === 'switch.step' ? { step } : {}),
+      state,
+      ...(kind === 'switch.step' || kind === 'switch'
+        ? { durationMs: 40 + ((index * 37) % 420) }
+        : {}),
+      detail: mockDebugDetail(kind, step, node?.label ?? 'unknown'),
+      ...(state === 'failed' ? { errorClass: 'AUTH_EXPIRED' } : {}),
+    })
+  }
+
+  const filtered = query.account
+    ? entries.filter((entry) => entry.accountId === query.account)
+    : entries
+  const retained = filtered.length
+  const limit =
+    query.limit === 0
+      ? retained
+      : query.limit && query.limit > 0
+        ? Math.min(query.limit, MOCK_DEBUG_CAPACITY)
+        : MOCK_DEBUG_PAGE_LIMIT
+  const page = limit > 0 && retained > limit ? filtered.slice(-limit) : filtered
+
+  return {
+    enabled: true,
+    capacity: MOCK_DEBUG_CAPACITY,
+    retained,
+    evicted: 0,
+    ...(page.length > 0 ? { oldestSeq: page[0]!.seq } : {}),
+    nextSeq: entries.at(-1)?.seq ?? 0,
+    entries: page,
   }
 }
 

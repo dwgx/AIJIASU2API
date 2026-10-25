@@ -194,8 +194,52 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(110)
-    expect(entries).toHaveLength(136)
+    expect(Object.keys(doc.paths)).toHaveLength(112)
+    expect(entries).toHaveLength(138)
+  })
+
+  it('documents the real-time debugger trace and stream', () => {
+    const trace = doc.paths['/v1/debug/trace']?.get
+    expect(trace).toBeDefined()
+    if (!trace) return
+    expect(trace['x-implementation-phase']).toBe('P0')
+    expect(trace.tags).toContain('Debug')
+    expect(parameterNames(trace)).toEqual(expect.arrayContaining(['query:account', 'query:limit']))
+    expect(responseSchema(trace, '200')).toEqual({
+      $ref: '#/components/schemas/DebugTracePage',
+    })
+    expect(trace.responses['503']).toEqual({
+      $ref: '#/components/responses/ServiceUnavailable',
+    })
+
+    const stream = doc.paths['/v1/debug/stream']?.get
+    expect(stream).toBeDefined()
+    if (!stream) return
+    expect(stream['x-implementation-phase']).toBe('P0')
+    expect(parameterNames(stream)).toEqual(
+      expect.arrayContaining(['query:account', 'query:since', 'header:Last-Event-ID']),
+    )
+    expect(stream.responses['200']?.content?.['text/event-stream']).toBeDefined()
+    expect(stream.responses['200']?.headers?.['X-Debug-Restarted']).toBeDefined()
+
+    const traceSchema = schema('DebugTrace')
+    expect(traceSchema.required).toEqual(['seq', 'at', 'kind'])
+    expect(traceSchema.properties?.kind?.enum).toEqual(
+      expect.arrayContaining([
+        'switch.step',
+        'switch',
+        'gate.open',
+        'gate.close',
+        'session.open',
+        'session.lost',
+        'lease.create',
+        'lease.revoke',
+        'slot.state',
+      ]),
+    )
+    expect(schema('DebugTracePage').required).toEqual(
+      expect.arrayContaining(['enabled', 'capacity', 'retained', 'evicted', 'nextSeq', 'entries']),
+    )
   })
 
   it('documents idempotent lease creation and confirmed revocation', () => {

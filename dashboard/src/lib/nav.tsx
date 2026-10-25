@@ -112,6 +112,13 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: ApcLogsIcon,
         keywords: 'audit events severity actor action export 审计 事件 级别 操作 导出 日志',
       },
+      {
+        to: '/debug',
+        labelKey: 'nav.debug',
+        icon: ApcRequestsIcon,
+        keywords:
+          'debug trace ring stream switch gate session lease slot sequence in-memory redacted 调试 追踪 环形 流 切换 网关 会话 租约 槽位 序号 内存 脱敏',
+      },
     ],
   },
   {

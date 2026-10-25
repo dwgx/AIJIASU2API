@@ -1591,6 +1591,85 @@ export type SelectNodeResponse =
 /** Connection state of the SSE client, shown next to the event feed. */
 export type EventStreamState = 'connecting' | 'live' | 'reconnecting' | 'paused' | 'offline'
 
+/* --------------------------------------------------------------------------
+ * Runtime debug trace — daemon/internal/model/debug.go
+ *
+ * GET /v1/debug/trace returns the retained in-memory window; GET
+ * /v1/debug/stream replays that window and then streams each entry as an SSE
+ * frame whose event name is the kind and whose data is one DebugTrace. The
+ * ring holds 500 entries and survives no restart: Seq restarts at 1 with the
+ * process, and a client resuming a stale cursor is replayed from the oldest
+ * retained entry instead of failing.
+ * ------------------------------------------------------------------------ */
+
+/** Stable kind vocabulary; the SSE event name equals the kind. */
+export const DEBUG_KINDS = [
+  'switch.step',
+  'switch',
+  'gate.open',
+  'gate.close',
+  'session.open',
+  'session.lost',
+  'lease.create',
+  'lease.revoke',
+  'slot.state',
+] as const
+
+export type DebugKind = (typeof DEBUG_KINDS)[number]
+
+/** Outcome of one runtime boundary; reuses the operation-step vocabulary. */
+export type DebugTraceState = 'ok' | 'failed' | 'lost' | 'open' | 'closed' | 'canceled'
+
+/**
+ * One redacted runtime entry. The daemon's allowlist has no field for a SID,
+ * cookie, token, password or device identity, so nothing here can leak one.
+ * Zero/empty attribution fields mean the entry has no such context.
+ */
+export interface DebugTrace {
+  /** Monotonic for the life of the process; restarts at 1 with the daemon. */
+  seq: number
+  /** RFC 3339 instant. */
+  at: string
+  kind: DebugKind | string
+  accountId?: string
+  nodeId?: string
+  serverId?: string
+  slot?: number
+  generation?: number
+  step?: string
+  state?: DebugTraceState | string
+  durationMs?: number
+  detail?: string
+  errorClass?: string
+}
+
+/** GET /v1/debug/trace — one page of the bounded in-memory ring. */
+export interface DebugTracePage {
+  enabled: boolean
+  /** Why the trace is unavailable, when `enabled` is false. */
+  reason?: string
+  /** Ring capacity; the daemon documents 500 entries. */
+  capacity: number
+  /** Entries currently retained (before the page limit). */
+  retained: number
+  /** Entries overwritten since process start. */
+  evicted: number
+  /** Oldest retained sequence; absent when the ring is empty. */
+  oldestSeq?: number
+  /** Cursor to resume the stream from. */
+  nextSeq: number
+  /** Oldest-first; the page reverses it for a newest-first view. */
+  entries: DebugTrace[]
+}
+
+/** Query for GET /v1/debug/trace; empty fields are omitted. */
+export interface DebugTraceQuery {
+  /** Restrict to one account id; empty means every account. */
+  account?: string
+  /** 0 returns the whole retained window; the daemon defaults to 200. */
+  limit?: number
+}
+
 export type WebhookDeliveryStatus = 'success' | 'failed' | 'dead_letter'
 
 /** One persisted receiver. The signing secret is never part of a read. */
