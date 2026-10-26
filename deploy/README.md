@@ -12,7 +12,7 @@ No credential ships in this tree: everything secret lives in `.env` (gitignored)
 | Service | Image | Network | Endpoint | Role |
 |---|---|---|---|---|
 | `accountd` | built from `../daemon/Dockerfile` (`ajs-accountd:local`), or `ghcr.io/<owner>/ajs-accountd:<tag>` via `compose.release.yml` | host | `127.0.0.1:2261` | panel JSON API, JSON-snapshot persistence in the `accountd-data` volume, live node controller when `AJS_ACCOUNT_LOGIN=1` |
-| `dashboard` | built from `../dashboard/Dockerfile` (`ajs-dashboard:local`), or `ghcr.io/<owner>/ajs-dashboard:<tag>` via `compose.release.yml` | bridge | `127.0.0.1:18081` | nginx serving the SPA; mock data by default, live mode opt-in at build time |
+| `dashboard` | built from `../dashboard/Dockerfile` (`ajs-dashboard:local`), or `ghcr.io/<owner>/ajs-dashboard:<tag>` via `compose.release.yml` | bridge | `127.0.0.1:18081` | nginx serving the SPA; live mode by default, mock builds refused |
 | `resin` | `ghcr.io/resinat/resin:1.3.0` | host | `127.0.0.1:2260` | Resin v1.3.0 admin API + SOCKS5 listener, only with `--profile resin` |
 
 `accountd` and Resin use host networking because both must reach host loopback: Resin's admin API
@@ -68,10 +68,10 @@ Then edit `.env`:
 - `AJS_TLS_CERT` / `AJS_TLS_KEY` / `AJS_TLS_LISTEN` — optional HTTPS admin listener. Leave them
   empty to keep the plaintext loopback listener only; see
   [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276).
-- `VITE_USE_MOCK` — `true` (default) serves deterministic in-browser mock data; `false` builds the
-  dashboard in live mode against `VITE_API_BASE`.
-- `VITE_PANEL_TOKEN` — the token the dashboard sends to the daemon in live mode. It is baked into
-  the JavaScript bundle at image build time, so treat it as public within loopback.
+- `VITE_USE_MOCK` — `false` (default) builds the dashboard in live mode against `VITE_API_BASE`.
+  `true` is refused by the dashboard image; use `npm run dev` for the mock console.
+- `VITE_PANEL_TOKEN` — deliberately not a build argument. A `VITE_*` token would be readable by
+  anyone who can fetch the bundle; the image build fails if it is set.
 - `RESIN_ADMIN_TOKEN` / `RESIN_PROXY_TOKEN` — Resin admin and SOCKS5 credentials, resin profile only.
 - `AJS_GHCR_OWNER` / `AJS_IMAGE_TAG` — the GHCR namespace and tag `compose.release.yml` deploys
   from (`ghcr.io/<owner>/ajs-<service>:<tag>`). Defaults: `dwgx` / `latest`. Only used when the
@@ -91,10 +91,10 @@ file always covers the complete set. Nothing is hard-coded — the images land a
 `ghcr.io/<repository_owner>/ajs-accountd:<tag>` and `ghcr.io/<repository_owner>/ajs-dashboard:<tag>`
 (plus `:latest`), and the release body lists the image tags and the update command.
 
-The release images use the same `VITE_*` build defaults as the local build, so the dashboard
-image ships in **mock mode** unless the workflow is edited to pass live args. A locally built
-`ajs-dashboard:local` (live mode, from `docker compose build dashboard`) remains the way to run
-the dashboard against the real API.
+The release workflow builds the dashboard image with `VITE_USE_MOCK=false` and an empty
+same-origin `VITE_API_BASE`; `dashboard/Dockerfile` refuses a mock build. The image is token-free:
+`VITE_PANEL_TOKEN` is not a build argument and any token-bearing bundle build fails in
+`vite.config.ts`.
 
 ## One-command update and rollback (`update.sh`)
 
@@ -129,15 +129,12 @@ command (read-only check; the daemon never updates itself). See
 ## Start
 
 ```bash
-# accountd + dashboard, mock dashboard (the default)
+# accountd + live dashboard (the image refuses mock builds)
 docker compose up -d --build
-
-# or the live dashboard: rebuild is required because VITE_* is baked in
-sed -i 's/^VITE_USE_MOCK=.*/VITE_USE_MOCK=false/' .env
-docker compose build dashboard && docker compose up -d dashboard
 ```
 
 The `dashboard` service waits for `accountd` to report healthy. Both restart unless stopped.
+For the deterministic mock console use `cd dashboard && npm run dev` instead of a container.
 
 To run the released GHCR images instead of the local builds, use the release override — see
 [Release flow (GHCR)](#release-flow-ghcr) and [`update.sh`](#one-command-update-and-rollback-update.sh):
@@ -299,9 +296,9 @@ cannot be opened. The snapshot is not SQLite and has no migration path yet; see
 - The plaintext listener has no TLS and the API has a single bearer token. The optional HTTPS
   listener (`AJS_TLS_*`, see [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276))
   protects the token on the wire for remote clients; it adds no authentication, revocation or
-  second factor. `VITE_PANEL_TOKEN` is still readable by anyone who can fetch the dashboard
-  bundle, so the dashboard must stay on loopback or behind a BFF/reverse proxy that terminates
-  real authentication.
+  second factor. The dashboard image refuses a `VITE_PANEL_TOKEN` build because it would be
+  readable by anyone who can fetch the bundle, so the dashboard must stay on loopback or behind a
+  BFF/reverse proxy that terminates real authentication.
 - `AJS_MASTER_KEY` and the tokens are the only secrets. They live in `.env` (gitignored) and in the
   container environment; never commit them, never paste them into reports.
 - `accountd` reads `.env`; `resin` does not. The Resin service gets only its two credentials plus
@@ -472,10 +469,9 @@ and `RESIN_PROXY_TOKEN`: no `AJS_*` key reaches that container.
 cd /srv/dwgxhomecloud/scratch/loveplus-deploy
 docker build -f daemon/Dockerfile -t ajs-accountd:test .        # exit 0
 cd dashboard
-docker build -t ajs-dashboard:test .                            # exit 0, default (mock) args
+docker build -t ajs-dashboard:test .                            # exit 0, live default
 docker build --build-arg VITE_USE_MOCK=false \
   --build-arg VITE_API_BASE=http://127.0.0.1:2261 \
-  --build-arg VITE_PANEL_TOKEN=local-test-token \
   -t ajs-dashboard:test-live .                                  # exit 0
 cd ../deploy
 docker compose --env-file .env.example build                    # exit 0, both images
@@ -491,9 +487,9 @@ Image tags and IDs from `docker images`:
 | `ajs-dashboard:test-live` | `20eec80bc7ed` |
 | `ajs-dashboard:local` | `345aad678ad7` |
 
-The dashboard build prints BuildKit `SecretsUsedInArgOrEnv` warnings for `VITE_PANEL_TOKEN`: that
-is the point of a Vite build — the value is compiled into public JavaScript. It is a loopback
-token, not a secret.
+The dashboard build fails if `VITE_PANEL_TOKEN` is set: a Vite `VITE_*` value is compiled into
+public JavaScript, and the production image is token-free. A mock build (`VITE_USE_MOCK=true`)
+is refused for the same reason — the mock console is a development mode, not a release image.
 
 Accountd image metadata (`docker image inspect ajs-accountd:test`):
 
@@ -538,9 +534,11 @@ dashboard_root=200
 dashboard_spa_fallback=200
 ```
 
-Live-mode argument check: `local-test-token` appears in the live bundle's JS assets and not in the
-mock bundle. (The literal `127.0.0.1:2261` exists in both because the UI prints it as static text
-in `Sidebar.tsx` and `Settings.tsx`.)
+Build-mode guard check: `VITE_PANEL_TOKEN=local-test-token npm run build` exits 1 before Vite
+starts, and a plain `npm run build` emits `ajs-build.json` with `mode: mock`. A live build
+(`VITE_USE_MOCK=false`) emits `mode: live`, `mock: false`, `panelToken: false`. (The literal
+`127.0.0.1:2261` exists in both because the UI prints it as static text in `Sidebar.tsx` and
+`Settings.tsx`.)
 
 The compose `dashboard` service itself was built but not started, because the standalone dashboard
 container owns `127.0.0.1:18081` on HMC; see the port-collision note above. The compose `accountd`

@@ -47,15 +47,11 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: dashboard/package.json
+          cache-dependency-path: dashboard/package-lock.json
 
       - name: Install dashboard dependencies
         working-directory: dashboard
-        run: npm install --no-audit --no-fund
-
-      - name: Build dashboard bundle
-        working-directory: dashboard
-        run: npm run build
+        run: npm ci --no-audit --no-fund
 
       - name: Resolve version
         id: version
@@ -73,7 +69,7 @@ jobs:
           bash deploy/package.sh \
             --version "${{ steps.version.outputs.value }}" \
             --out dist \
-            --dashboard-dist dashboard/dist
+            --build-dashboard
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

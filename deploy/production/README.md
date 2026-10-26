@@ -37,7 +37,7 @@ with `deploy/nftables/ajs-panel.nft`.
 | `systemd/ajs-accountd.service` | hardened unit (`ProtectSystem=strict`, empty capability set, syscall filter) |
 | `systemd/ajs-accountd.env.example` | exact daemon environment, placeholders only |
 | `firewall/ajs-production.nft` | standalone nftables table matching the repo-owned LAN block |
-| `build-bundles.sh` | builds the live, same-origin, **token-free** portal and admin bundles |
+| `build-bundles.sh` | builds the live, same-origin, **token-free** portal and admin bundles from a locked `npm ci` tree and verifies `ajs-build.json` |
 | `render-admin-token.sh` | renders the nginx bearer snippet at mode 0600, never prints it |
 | `inventory.example.yml` | non-secret deployment inputs, validated by `check.sh` |
 | `check.sh` | the release-gate check |
@@ -248,6 +248,12 @@ VITE_USE_MOCK=false
 VITE_API_BASE=          # same origin
 VITE_PANEL_TOKEN=       # deliberately empty
 ```
+
+The build requires `dashboard/package-lock.json` and a `node_modules` tree
+installed with `npm ci`. Every build emits `dist/ajs-build.json`; the script
+refuses to copy a bundle unless the manifest says `mode: live`, `mock: false`,
+`panelToken: false` and an empty `apiBase`. A plain `npm run build` is mock
+mode and cannot be packaged.
 
 A Vite `VITE_*` value is compiled into public JavaScript. Shipping
 `VITE_PANEL_TOKEN` would hand the admin bearer to every customer who opens

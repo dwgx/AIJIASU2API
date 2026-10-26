@@ -2,6 +2,11 @@ services:
   dashboard:
     build:
       context: .
+      args:
+        # Local demo image only. Release builds must keep AJS_ALLOW_MOCK_BUILD
+        # unset and VITE_USE_MOCK=false; deploy/package.sh refuses mock bundles.
+        AJS_ALLOW_MOCK_BUILD: "true"
+        VITE_USE_MOCK: "true"
     image: loveplus-dashboard:local
     container_name: loveplus-dashboard
     network_mode: bridge

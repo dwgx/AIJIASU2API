@@ -65,6 +65,9 @@ jobs:
           context: ./dashboard
           file: dashboard/Dockerfile
           push: true
+          build-args: |
+            VITE_USE_MOCK=false
+            VITE_API_BASE=
           tags: |
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest

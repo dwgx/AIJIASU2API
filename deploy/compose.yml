@@ -51,10 +51,10 @@ services:
     build:
       context: ../dashboard
       args:
-        # Baked into the bundle: rebuild the image after changing any of these.
-        VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+        # Baked into the bundle: rebuild the image after changing these.
+        # The image refuses VITE_USE_MOCK=true; the mock console is `npm run dev`.
+        VITE_USE_MOCK: ${VITE_USE_MOCK:-false}
         VITE_API_BASE: ${VITE_API_BASE:-http://127.0.0.1:2261}
-        VITE_PANEL_TOKEN: ${VITE_PANEL_TOKEN:-}
     image: ajs-dashboard:local
     container_name: ajs-dashboard
     network_mode: bridge

@@ -7,7 +7,8 @@
 #   ajs-accountd-linux-amd64      (GOOS=linux   GOARCH=amd64, CGO disabled)
 #   ajs-accountd-windows-amd64.exe (GOOS=windows GOARCH=amd64, CGO disabled)
 #   ajs-accountd-darwin-arm64     (GOOS=darwin  GOARCH=arm64, CGO disabled)
-#   dashboard-dist.tar.gz         (the existing dashboard/dist bundle)
+#   dashboard-dist.tar.gz         (the existing live, token-free dashboard bundle)
+#   deploy-kit.tar.gz             (LF-normalized copy of the deploy/ tree)
 #   MANIFEST.txt                  (version, commit, toolchain, flags, hashes)
 #   SHA256SUMS                    (sha256sum -c compatible)
 #
@@ -15,11 +16,13 @@
 # ../emulator, so both module trees must be present in this checkout.
 #
 # Reproducibility: binaries are built with -trimpath, -buildvcs=false,
-# -ldflags="-s -w -buildid=", -mod=readonly and GOTOOLCHAIN=local. The
-# dashboard tar is staged with normalized mtimes and a sorted file list.
-# SOURCE_DATE_EPOCH defaults to the HEAD commit time, so the same Go
-# toolchain, clean tree and tar implementation produce byte-identical
-# artifacts.
+# -ldflags="-s -w -buildid=", -mod=readonly and GOTOOLCHAIN=local. Both tar
+# archives are staged with normalized mtimes and a sorted file list, and every
+# text file in them is rewritten to LF before the tar is created. That last
+# step matters on Windows: core.autocrlf=true turns .nft/.conf files into
+# CRLF, and nft(8) rejects CRLF line terminators. SOURCE_DATE_EPOCH defaults
+# to the HEAD commit time, so the same Go toolchain, clean tree and tar
+# implementation produce byte-identical artifacts.
 
 set -euo pipefail
 
@@ -41,13 +44,15 @@ usage: deploy/package.sh [options]
                             (default: git describe --tags --always --dirty,
                             else 0.0.0-dev)
   --out <dir>               output directory (default: <repo>/dist)
-  --dashboard-dist <dir>    prebuilt dashboard bundle to package
+  --dashboard-dist <dir>    prebuilt live dashboard bundle to package
                             (default: <repo>/dashboard/dist)
-  --build-dashboard         run `npm run build` in dashboard/ before packaging
+  --build-dashboard         build the live token-free bundle with
+                            deploy/production/build-bundles.sh before packaging
   -h, --help                show this help
 
 Artifacts: ajs-accountd-linux-amd64, ajs-accountd-windows-amd64.exe,
-ajs-accountd-darwin-arm64, dashboard-dist.tar.gz, MANIFEST.txt, SHA256SUMS.
+ajs-accountd-darwin-arm64, dashboard-dist.tar.gz, deploy-kit.tar.gz,
+MANIFEST.txt, SHA256SUMS.
 EOF
 }
 
@@ -56,6 +61,7 @@ OUT_DIR="$ROOT/dist"
 DASHBOARD_DIST=""
 DASHBOARD_DIST_SET=0
 BUILD_DASHBOARD=0
+BUILD_TMP=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -162,6 +168,11 @@ ARTIFACT_NAMES=(
   SHA256SUMS
 )
 
+# The deploy kit is an operator convenience, not one of the six release
+# files. It still gets a digest in MANIFEST.txt so the checksum chain covers
+# it transitively through SHA256SUMS.
+DEPLOY_KIT_NAME=deploy-kit.tar.gz
+
 # Keep the target table in one place: "GOOS GOARCH output-name".
 TARGETS=(
   'linux amd64 ajs-accountd-linux-amd64'
@@ -189,18 +200,80 @@ file_size() {
   wc -c < "$1" | tr -d '[:space:]'
 }
 
-# Build the dashboard when asked, or when the default bundle is absent but
-# its node_modules are already installed. Never runs npm install: a fresh
-# checkout needs the documented install step (packaging.md). An explicit
-# --dashboard-dist is never silently replaced by a build of dashboard/dist.
+# A dashboard bundle is only packageable when it proves it is the live,
+# token-free artifact. Vite treats every VITE_USE_MOCK value except "false"
+# as mock mode, so checking for the string "VITE_USE_MOCK=false" in a build
+# script is not enough: verify the manifest emitted by the build.
+verify_dashboard_bundle() {
+  _dir=$1
+  [ -f "$_dir/index.html" ] || die "dashboard bundle has no index.html: $_dir"
+  _meta="$_dir/ajs-build.json"
+  [ -f "$_meta" ] || die "dashboard bundle has no ajs-build.json; rebuild it with deploy/production/build-bundles.sh (live recipe)"
+  if command -v node >/dev/null 2>&1; then
+    node - "$_meta" <<'NODE' || die "dashboard bundle is not a live, token-free build: $_meta"
+const fs = require('fs')
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+if (manifest.schemaVersion !== 1 ||
+    manifest.mode !== 'live' ||
+    manifest.mock !== false ||
+    manifest.panelToken !== false) {
+  console.error('dashboard manifest: ' + JSON.stringify(manifest))
+  process.exit(1)
+}
+NODE
+  else
+    grep -q '"mode": "live"' "$_meta" \
+      && grep -q '"mock": false' "$_meta" \
+      && grep -q '"panelToken": false' "$_meta" \
+      || die "dashboard bundle is not a live, token-free build: $_meta"
+  fi
+}
+
+# Rewrite CRLF (and any stray CR) to LF for every text file under a staged
+# tree. Binary files are detected with grep -I and skipped, and file modes are
+# preserved so shell scripts stay executable. This is the archive-time
+# guarantee: the checkout may be CRLF because core.autocrlf=true, but the tar
+# that leaves this script is always LF.
+normalize_text_lf() {
+  local _dir=$1 _file _mode _tmp
+  find "$_dir" -type f -print0 | while IFS= read -r -d '' _file; do
+    # Empty files and binaries are not text; grep -I returns non-zero for both.
+    # Text files are rewritten unconditionally: Git Bash's grep treats CRLF as
+    # a line ending, so `grep -q $'\r'` is not a portable CR detector. tr is
+    # byte-oriented and leaves an already-LF file byte-identical.
+    if ! grep -Iq . "$_file" 2>/dev/null; then
+      continue
+    fi
+    _mode=$(stat -c '%a' "$_file" 2>/dev/null || stat -f '%Lp' "$_file" 2>/dev/null || true)
+    _tmp="$_file.lf.$$"
+    if ! tr -d '\r' < "$_file" > "$_tmp"; then
+      rm -f "$_tmp"
+      die "cannot normalize line endings: $_file"
+    fi
+    if [ -n "$_mode" ]; then
+      chmod "$_mode" "$_tmp" 2>/dev/null || true
+    fi
+    mv -f "$_tmp" "$_file"
+  done
+}
+
+# Build the dashboard with the one live production recipe when asked, or when
+# the default bundle is absent but its node_modules are installed. Never runs
+# npm install: a fresh checkout needs `npm ci` from the committed lockfile
+# (packaging.md). An explicit --dashboard-dist is never silently replaced.
 if [ "$BUILD_DASHBOARD" = 1 ] && [ "$DASHBOARD_DIST_SET" = 1 ]; then
-  die "--build-dashboard writes dashboard/dist; use --dashboard-dist only with a prebuilt bundle"
+  die "--build-dashboard and --dashboard-dist are mutually exclusive"
 fi
 
 if [ "$BUILD_DASHBOARD" = 1 ]; then
   command -v npm >/dev/null 2>&1 || die "--build-dashboard needs npm in PATH"
-  printf 'Building dashboard bundle (mock mode unless VITE_* is set)\n'
-  ( cd "$ROOT/dashboard" && npm run build )
+  [ -f "$ROOT/dashboard/package-lock.json" ] || die "dashboard/package-lock.json missing; npm ci cannot run"
+  [ -d "$ROOT/dashboard/node_modules" ] || die "dashboard/node_modules missing; run 'cd dashboard && npm ci'"
+  [ -z "${VITE_PANEL_TOKEN:-}" ] || die "refusing to build with VITE_PANEL_TOKEN set; the bundle must stay token-free"
+  BUILD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/ajs-dashboard-build.XXXXXX") || die "cannot create a temporary build directory"
+  printf 'Building live dashboard bundle via deploy/production/build-bundles.sh\n'
+  bash "$SCRIPT_DIR/production/build-bundles.sh" --out "$BUILD_TMP/bundles" >&2
+  DASHBOARD_DIST="$BUILD_TMP/bundles/portal"
 fi
 
 if [ -z "$DASHBOARD_DIST" ]; then
@@ -212,13 +285,18 @@ if [ ! -f "$DASHBOARD_DIST/index.html" ]; then
     die "no dashboard bundle at $DASHBOARD_DIST; build it first or drop --dashboard-dist"
   fi
   if command -v npm >/dev/null 2>&1 && [ -d "$ROOT/dashboard/node_modules" ]; then
-    printf 'package.sh: %s has no index.html; building the dashboard\n' "$DASHBOARD_DIST" >&2
-    ( cd "$ROOT/dashboard" && npm run build )
+    [ -f "$ROOT/dashboard/package-lock.json" ] || die "dashboard/package-lock.json missing; npm ci cannot run"
+    [ -z "${VITE_PANEL_TOKEN:-}" ] || die "refusing to build with VITE_PANEL_TOKEN set; the bundle must stay token-free"
+    BUILD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/ajs-dashboard-build.XXXXXX") || die "cannot create a temporary build directory"
+    printf 'package.sh: %s has no index.html; building the live bundle\n' "$DASHBOARD_DIST" >&2
+    bash "$SCRIPT_DIR/production/build-bundles.sh" --out "$BUILD_TMP/bundles" >&2
+    DASHBOARD_DIST="$BUILD_TMP/bundles/portal"
   else
-    die "no dashboard bundle at $DASHBOARD_DIST; run 'cd dashboard && npm install && npm run build', pass --dashboard-dist, or use --build-dashboard"
+    die "no dashboard bundle at $DASHBOARD_DIST; run 'cd dashboard && npm ci && npm run build', pass --dashboard-dist, or use --build-dashboard"
   fi
 fi
 DASHBOARD_DIST=$(CDPATH= cd -- "$DASHBOARD_DIST" && pwd)
+verify_dashboard_bundle "$DASHBOARD_DIST"
 
 mkdir -p "$OUT_DIR" || die "cannot create output directory: $OUT_DIR"
 OUT_DIR=$(CDPATH= cd -- "$OUT_DIR" && pwd)
@@ -226,11 +304,15 @@ OUT_DIR=$(CDPATH= cd -- "$OUT_DIR" && pwd)
 for name in "${ARTIFACT_NAMES[@]}"; do
   rm -f "$OUT_DIR/$name"
 done
+rm -f "$OUT_DIR/$DEPLOY_KIT_NAME"
 
 STAGE_DIR=""
 cleanup() {
   if [ -n "$STAGE_DIR" ]; then
     rm -rf "$STAGE_DIR"
+  fi
+  if [ -n "$BUILD_TMP" ]; then
+    rm -rf "$BUILD_TMP"
   fi
 }
 trap cleanup EXIT
@@ -260,6 +342,7 @@ printf 'Packaging dashboard bundle from %s\n' "$DASHBOARD_DIST"
 STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ajs-dashboard.XXXXXX") \
   || die "cannot create a temporary staging directory"
 cp -R "$DASHBOARD_DIST/." "$STAGE_DIR/"
+normalize_text_lf "$STAGE_DIR"
 # Normalize mtimes so the archive does not depend on when the dashboard was
 # built. 1970-01-01 is the SOURCE_DATE_EPOCH convention; tar readers only care
 # that the value is stable.
@@ -275,12 +358,61 @@ esac
   # Empty-array expansion is unsafe under `set -u` on bash 3.2 (macOS), so
   # branch instead of relying on "${TAR_OPTS[@]}" with no elements.
   if [ ${#TAR_OPTS[@]} -gt 0 ]; then
-    find . -print | LC_ALL=C sort | tar -czf "$OUT_DIR/dashboard-dist.tar.gz" "${TAR_OPTS[@]}" -T -
+    find . -type f -print | LC_ALL=C sort | tar -czf "$OUT_DIR/dashboard-dist.tar.gz" "${TAR_OPTS[@]}" -T -
   else
-    find . -print | LC_ALL=C sort | tar -czf "$OUT_DIR/dashboard-dist.tar.gz" -T -
+    find . -type f -print | LC_ALL=C sort | tar -czf "$OUT_DIR/dashboard-dist.tar.gz" -T -
   fi
 )
 [ -s "$OUT_DIR/dashboard-dist.tar.gz" ] || die "dashboard tar is empty"
+rm -rf "$STAGE_DIR"
+STAGE_DIR=""
+
+# Package the operator-facing deploy kit. The archive contains the deploy/
+# tree under a top-level deploy/ directory, so extracting it and running
+# `bash deploy/production/check.sh` works exactly like the checkout. With Git
+# available only tracked files are copied; the fallback excludes local
+# secrets and build output by name, so a deploy/.env, inventory.yml, *.pem or
+# rendered admin-token snippet never leaks into a release artifact.
+printf 'Packaging deploy kit\n'
+STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ajs-deploy-kit.XXXXXX") \
+  || die "cannot create a temporary staging directory"
+KIT_DIR="$STAGE_DIR/deploy"
+mkdir -p "$KIT_DIR"
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  while IFS= read -r -d '' _rel; do
+    [ -f "$ROOT/$_rel" ] || continue
+    _dst="$STAGE_DIR/${_rel}"
+    mkdir -p "$(dirname -- "$_dst")"
+    cp -p "$ROOT/$_rel" "$_dst"
+  done < <(git -C "$ROOT" ls-files -z -- deploy)
+else
+  while IFS= read -r -d '' _rel; do
+    _dst="$STAGE_DIR/${_rel}"
+    mkdir -p "$(dirname -- "$_dst")"
+    cp -p "$ROOT/$_rel" "$_dst"
+  done < <(cd "$ROOT" && find deploy -type f \
+      ! -path 'deploy/dist/*' \
+      ! -path 'deploy/production/dist/*' \
+      ! -name '.env' \
+      ! -name 'inventory.yml' \
+      ! -name '*.pem' \
+      ! -name '*.key' \
+      ! -name 'token-test.conf' \
+      ! -name 'ajs-admin-token.conf' \
+      -print0)
+fi
+[ -n "$(find "$KIT_DIR" -type f -print -quit)" ] || die "deploy kit is empty"
+normalize_text_lf "$KIT_DIR"
+find "$KIT_DIR" -exec touch -t 197001010000.00 {} +
+(
+  cd "$STAGE_DIR"
+  if [ ${#TAR_OPTS[@]} -gt 0 ]; then
+    find . -type f -print | LC_ALL=C sort | tar -czf "$OUT_DIR/$DEPLOY_KIT_NAME" "${TAR_OPTS[@]}" -T -
+  else
+    find . -type f -print | LC_ALL=C sort | tar -czf "$OUT_DIR/$DEPLOY_KIT_NAME" -T -
+  fi
+)
+[ -s "$OUT_DIR/$DEPLOY_KIT_NAME" ] || die "deploy kit tar is empty"
 rm -rf "$STAGE_DIR"
 STAGE_DIR=""
 
@@ -295,6 +427,9 @@ STAGE_DIR=""
   printf 'built_utc: %s\n' "$(format_epoch "$SOURCE_DATE_EPOCH")"
   printf 'go: %s\n' "$GO_VERSION"
   printf 'dashboard_version: %s\n' "$DASHBOARD_VERSION"
+  printf 'dashboard_mode: live\n'
+  printf 'dashboard_manifest: ajs-build.json %s bytes %s\n' \
+    "$(file_size "$DASHBOARD_DIST/ajs-build.json")" "$(hash_file "$DASHBOARD_DIST/ajs-build.json")"
   printf 'build_flags: %s -ldflags="%s"\n' "$BUILD_FLAGS" "$LDFLAGS"
   printf 'targets:\n'
   for target in "${TARGETS[@]}"; do
@@ -303,6 +438,8 @@ STAGE_DIR=""
     printf '  %s: GOOS=%s GOARCH=%s CGO_ENABLED=0\n' "$3" "$1" "$2"
   done
   printf 'dashboard_dist: %s\n' "$DASHBOARD_DIST"
+  printf 'deploy_kit: %s %s bytes %s\n' \
+    "$DEPLOY_KIT_NAME" "$(file_size "$OUT_DIR/$DEPLOY_KIT_NAME")" "$(hash_file "$OUT_DIR/$DEPLOY_KIT_NAME")"
   printf 'artifacts:\n'
   for name in "${ARTIFACT_NAMES[@]}"; do
     case "$name" in
@@ -331,4 +468,5 @@ printf '\nPackaged %s into %s\n' "$VERSION" "$OUT_DIR"
 for name in "${ARTIFACT_NAMES[@]}"; do
   printf '  %-32s %s bytes\n' "$name" "$(file_size "$OUT_DIR/$name")"
 done
+printf '  %-32s %s bytes\n' "$DEPLOY_KIT_NAME" "$(file_size "$OUT_DIR/$DEPLOY_KIT_NAME")"
 printf '\nVerify with: (cd %q && %s)\n' "$OUT_DIR" "$CHECK_CMD"

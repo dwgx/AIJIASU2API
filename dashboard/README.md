@@ -22,7 +22,7 @@ The mode is fixed at build time; there is no runtime switch.
 | Mode | Build trigger | Data source | Reset |
 |---|---|---|---|
 | Mock (default) | `VITE_USE_MOCK` unset or `true` | deterministic in-browser store (`src/lib/mock.ts`), seeded on page load | **Settings → Reset dataset**, or a full reload |
-| Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` optional (otherwise the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
+| Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` must be unset (the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
 
 The shell reports the active mode with the topbar pill (`mock data` or `live API`); the sidebar
 shows the APC mark, the full name and the language/theme controls, and a desktop toggle collapses
@@ -72,9 +72,9 @@ The console ships in English and Chinese. Both switches are always visible:
 ## Quick start
 
 ```bash
-npm install
+npm ci             # installs exactly the committed package-lock.json
 npm run dev        # http://127.0.0.1:5173
-npm run build      # tsc -b && vite build → dist/
+npm run build      # tsc -b && vite build → dist/ (mock mode unless VITE_USE_MOCK=false)
 npm run preview    # http://127.0.0.1:4173, serves dist/
 npm test           # Vitest, 457 tests in 50 files
 npm run typecheck  # tsc -b
@@ -86,7 +86,10 @@ needs no backend for any page.
 ## Live mode
 
 The live build points the SPA at `ajs-accountd`. Vite reads these variables at build time, so the
-daemon URL and token are baked into `dist/`.
+daemon URL is baked into `dist/`. The admin token is never baked into a bundle: `vite.config.ts`
+aborts any build with `VITE_PANEL_TOKEN` set. The console prompts for a token on the first `401`
+and keeps it in `sessionStorage` for that tab; a production deployment should instead terminate
+auth in a BFF or reverse proxy.
 
 ```bash
 # 1. daemon, loopback only (from the repo root; leave it running)
@@ -96,9 +99,7 @@ AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 \
   go run ./cmd/ajs-accountd
 
 # 2. live build (from dashboard/, in a second shell). No VITE_PANEL_TOKEN:
-#    the insecure daemon ignores the bearer header. For a real token,
-#    export AJS_ADMIN_TOKEN=$(openssl rand -hex 32) and build with
-#    VITE_PANEL_TOKEN="$AJS_ADMIN_TOKEN".
+#    the insecure daemon ignores the bearer header.
 VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 npm run build
 
 # 3. serve the static build
@@ -115,10 +116,11 @@ console only needs the URL, and that listener sends HSTS on every response.
 **Token:** `AJS_ALLOW_INSECURE=1` is a loopback-only lab switch (startup refuses it on any other
 bind) and leaves the daemon without bearer auth. For a real token, generate one with
 `openssl rand -hex 32` — startup refuses documented placeholders and anything shorter than 32
-characters — and pass the same value as `AJS_ADMIN_TOKEN` and `VITE_PANEL_TOKEN`. Every `VITE_*`
-value is readable in the shipped bundle, so production must terminate auth in a BFF or reverse
-proxy and keep `ajs-accountd` bound to `127.0.0.1`. The LAN build below takes the other route: it
-bakes no token and collects one per tab through the runtime token gate.
+characters — and set it only as `AJS_ADMIN_TOKEN` on the daemon. `vite.config.ts` refuses any
+bundle build with `VITE_PANEL_TOKEN` set: every `VITE_*` value is readable in the shipped bundle,
+so production must terminate auth in a BFF or reverse proxy and keep `ajs-accountd` bound to
+`127.0.0.1`. The LAN build below takes the other route: it bakes no token and collects one per tab
+through the runtime token gate.
 
 ## Lab page
 
@@ -632,7 +634,7 @@ The HMC build host serves three endpoints; the live pair is also published on th
 
 | Endpoint | Role | How it runs |
 |---|---|---|
-| `127.0.0.1:18081` | mock dashboard | `docker compose up -d` in `dashboard/`; nginx image built from the default (mock) source, rebuilt after the live/mock copy fixes |
+| `127.0.0.1:18081` | mock dashboard | `docker compose up -d` in `dashboard/`; local demo image built with the explicit `AJS_ALLOW_MOCK_BUILD=true` opt-in, rebuilt after the live/mock copy fixes |
 | `127.0.0.1:18082` · `http://192.168.11.4:18082` | live dashboard | `npx vite preview --host 0.0.0.0 --port 18082` over a `dist/` built with `VITE_USE_MOCK=false` and `VITE_API_BASE=http://192.168.11.4:2261`, **without** `VITE_PANEL_TOKEN` |
 | `127.0.0.1:2261` · `http://192.168.11.4:2261` | `ajs-accountd` | `go build -o ajs-accountd ./cmd/ajs-accountd` then `./ajs-accountd` with `AJS_LISTEN=0.0.0.0:2261` and the LAN origin in `AJS_CORS_ORIGINS`; JSON snapshot store (`AJS_STATE_FILE`) |
 
@@ -703,7 +705,7 @@ Build and test were executed on the HMC build host, not on the Windows product t
 # copy only dashboard/ source to the HMC scratch tree (node_modules stays on the host)
 cd dashboard && tar -czf - --exclude=./node_modules --exclude=./dist --exclude=./dist-mock . \
   | ssh hmc 'mkdir -p /srv/dwgxhomecloud/scratch/loveplus-dashboard && tar -xzf - -C /srv/dwgxhomecloud/scratch/loveplus-dashboard'
-ssh hmc 'cd /srv/dwgxhomecloud/scratch/loveplus-dashboard && npm install && npm run build && npm test'
+ssh hmc 'cd /srv/dwgxhomecloud/scratch/loveplus-dashboard && npm ci && npm run build && npm test'
 ```
 
 Both modes were built from the same source on HMC (Accounts view slice included):
@@ -711,7 +713,7 @@ Both modes were built from the same source on HMC (Accounts view slice included)
 | Build | Command | Result |
 |---|---|---|
 | Mock (default) | `npm run build -- --outDir dist-mock` | exit 0, `✓ built in 2.58s`, `dist-mock/assets/index-DmnOxSn9.js` |
-| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 VITE_PANEL_TOKEN=$AJS_ADMIN_TOKEN npm run build` | exit 0, `✓ built in 2.51s`, `dist/assets/index-Bx_6YADv.js` |
+| Live | `VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 npm run build` | exit 0, `ajs-build.json` with `mode: live`, `mock: false` |
 | Typecheck | `npm run typecheck` | exit 0 |
 
 `npm test` — exit 0, `Test Files 10 passed (10)`, `Tests 65 passed (65)` (palette data search
@@ -1356,12 +1358,13 @@ authoritative.
 |---|---|---|
 | `VITE_USE_MOCK` | `true` | Use the deterministic in-browser store |
 | `VITE_API_BASE` | empty (same origin) | Base URL for `ajs-accountd` |
-| `VITE_PANEL_TOKEN` | unset | Optional bearer token for the live client |
+| `VITE_PANEL_TOKEN` | unset | Must stay unset: the build aborts if it is set |
 
-**Security note:** a Vite `VITE_*` value is embedded in the client bundle. A live build that sets
-`VITE_PANEL_TOKEN` embeds it; do not ship a real admin token that way. The LAN build embeds no
-token and relies on the runtime token gate instead, and production should still terminate auth in
-a BFF or reverse proxy. The default build remains mock-only and embeds no token.
+**Security note:** a Vite `VITE_*` value is embedded in the client bundle. `vite.config.ts`
+refuses any bundle build with `VITE_PANEL_TOKEN` set, because that would ship the shared admin
+bearer to every browser. The runtime token gate keeps a token in `sessionStorage` per tab
+instead, and production should still terminate auth in a BFF or reverse proxy. The default build
+remains mock-only and embeds no token.
 
 Live paths implemented by the client (`[SPEC]` = in `docs/PANEL.md`, `[PROPOSED]` = dashboard
 contract only):
@@ -1641,10 +1644,10 @@ and reports healthy on `/healthz`.
 - Live mode is verified against the local daemon; the tests use fakes and contact no vendor
   endpoint.
 - The live build hides the mock reset action entirely — the daemon has no reset endpoint.
-- `VITE_PANEL_TOKEN` is build-time and readable from the bundle. The runtime token gate avoids
-  baking one (it keeps the value in `sessionStorage` per tab), but the token is still one shared
-  admin bearer over plain HTTP; there is no per-operator auth, role model or server-side session,
-  so production needs a BFF or reverse proxy.
+- `VITE_PANEL_TOKEN` is refused at build time because it would be readable from the bundle. The
+  runtime token gate keeps a token in `sessionStorage` per tab instead, but the token is still one
+  shared admin bearer over plain HTTP; there is no per-operator auth, role model or server-side
+  session, so production needs a BFF or reverse proxy.
 - The Lab page only reads daemon state; the daemon's one POST (`/v1/lab/egress-check`) runs an
   explicit egress probe through the node's gate and returns the result without storing it. The
   client keeps that observation per node for the life of the tab (polls and manual refreshes keep

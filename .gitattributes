@@ -1,3 +1,35 @@
-*.sh text eol=lf
-*.py text eol=lf
-*.bpf text eol=lf
+# Keep text files LF-only in the index, the working tree and `git archive`
+# output.  A Windows checkout with core.autocrlf=true would otherwise hand
+# CRLF to nft(8), which rejects it with "syntax error, unexpected CRLF line
+# terminators" before it evaluates a single rule.
+#
+# `text=auto` still lets Git detect binary files (images, archives), so they
+# are left byte-for-byte untouched.  The explicit patterns cover the file
+# types that matter to the deploy kit and that the heuristic can miss.
+* text=auto eol=lf
+
+*.sh       text eol=lf
+*.py       text eol=lf
+*.bpf      text eol=lf
+*.nft      text eol=lf
+*.conf     text eol=lf
+*.service  text eol=lf
+*.md       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+*.go       text eol=lf
+*.css      text eol=lf
+*.html     text eol=lf
+*.js       text eol=lf
+*.mjs      text eol=lf
+*.ts       text eol=lf
+*.tsx      text eol=lf
+*.jsx      text eol=lf
+*.svg      text eol=lf
+*.txt      text eol=lf
+*.tsv      text eol=lf
+*.log      text eol=lf
+*.java     text eol=lf
+*.template text eol=lf
+*.example  text eol=lf

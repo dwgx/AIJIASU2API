@@ -1,16 +1,16 @@
 # CI: run the full test suites on every push and pull request.
 #
 # go  — daemon + emulator: go vet and go test -race in both Go modules.
-# web — dashboard: install, vitest run, production build.
+# web — dashboard: npm ci, vitest run, live production build.
+# kit — production deploy-kit gate on Ubuntu with real nginx, systemd and nft.
 #
 # - daemon/go.mod and emulator/go.mod pin the same toolchain (go 1.26.0),
 #   so one setup-go with go-version-file: daemon/go.mod covers both modules.
 # - setup-go cache is disabled: neither module has a go.sum (zero external
 #   dependencies), and the action's default cache: true fails hard when the
 #   dependency file is missing. There is nothing to cache anyway.
-# - The dashboard has no committed lockfile, so `npm ci` cannot run on a
-#   fresh checkout; `npm install` resolves from package.json (same approach
-#   as release.yml). The npm cache is keyed on dashboard/package.json.
+# - The dashboard lockfile is committed; every install uses `npm ci` so a
+#   fresh checkout resolves exactly the reviewed dependency tree.
 
 name: ci
 
@@ -68,15 +68,31 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
-          cache-dependency-path: dashboard/package.json
+          cache-dependency-path: dashboard/package-lock.json
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Test
-        run: npm test -- --run
+        run: npm test -- --pool=forks --maxWorkers=1
 
-      - name: Build
-        run: npm run build
+      - name: Build (live mode)
+        run: VITE_USE_MOCK=false VITE_API_BASE= npm run build
+
+  prod-kit:
+    name: Production deploy kit (real nginx -t)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install gate tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nginx nftables python3-yaml
+          sudo systemctl stop nginx || true
+
+      - name: Run production gate
+        run: bash deploy/production/check.sh

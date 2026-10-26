@@ -391,7 +391,7 @@ The Windows kernel component shipped with the client is the stock OpenVPN TAP-Wi
 
 ```bash
 # 1. Mock dashboard — deterministic in-browser data, no backend, no network
-cd dashboard && npm install && npm run dev        # http://127.0.0.1:5173
+cd dashboard && npm ci && npm run dev          # http://127.0.0.1:5173
 
 # 2. Daemon, loopback only (from daemon/). go.mod replaces ajsproxy => ../emulator,
 #    so the two trees must be sibling directories in the same checkout.
@@ -403,8 +403,8 @@ AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 go run ./cmd/ajs-accountd
 
 # 3. Live dashboard build and static serve (from dashboard/, in a second shell)
 #    With no VITE_PANEL_TOKEN the bundle sends no Authorization header, which
-#    the insecure daemon ignores; a real-token build sets VITE_PANEL_TOKEN to
-#    the same AJS_ADMIN_TOKEN.
+#    the insecure daemon ignores. VITE_PANEL_TOKEN is refused at build time;
+#    production terminates auth in a BFF or reverse proxy.
 VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 npm run build
 npx vite preview --host 127.0.0.1 --port 18082   # http://127.0.0.1:18082
 
@@ -422,11 +422,11 @@ resin`, health checks, backup/restore and the honest limitations are in
 `AJS_ALLOW_INSECURE=1` is a loopback-only lab switch: startup refuses it unless `AJS_LISTEN` is
 loopback, and the daemon then accepts `/v1/*` without a bearer token. For a real deployment,
 generate a token with `openssl rand -hex 32` — startup refuses the documented placeholders and
-anything shorter than 32 characters — and pass the same value as `AJS_ADMIN_TOKEN` and
-`VITE_PANEL_TOKEN`. `VITE_*` values are baked into `dist/` at build time, so a live token in the
-bundle is readable by anyone who can fetch it: either keep `ajs-accountd` bound to `127.0.0.1`
-and terminate real authentication in a BFF or reverse proxy, or serve a token-free bundle and
-let the runtime token gate collect the token per browser tab.
+anything shorter than 32 characters — and set it only as `AJS_ADMIN_TOKEN` on the daemon.
+`VITE_PANEL_TOKEN` is refused at build time because every `VITE_*` value is baked into `dist/`
+and readable by anyone who can fetch it. Keep `ajs-accountd` bound to `127.0.0.1` and terminate
+real authentication in a BFF or reverse proxy, or serve a token-free bundle and let the runtime
+token gate collect the token per browser tab.
 
 The HMC build host serves the mock dashboard on loopback `18081`
 (`docker compose up -d` in `dashboard/`) and the live pair on the LAN:
@@ -482,8 +482,9 @@ It writes `ajs-accountd-linux-amd64`, `ajs-accountd-windows-amd64.exe`,
 `dist/`. The three binaries are built with `CGO_ENABLED=0` (the Linux output is statically
 linked) and `-trimpath -buildvcs=false -mod=readonly -ldflags="-s -w -buildid="`;
 `MANIFEST.txt` records the version, commit, Go toolchain, per-target flags and artifact hashes.
-`dashboard/dist` must exist or be supplied with `--dashboard-dist`; `--build-dashboard` rebuilds
-it in mock mode unless `VITE_USE_MOCK=false` is exported.
+`dashboard/dist` must be a live, token-free bundle, or use `--build-dashboard` to run the single
+live recipe in `deploy/production/build-bundles.sh`. A mock `dashboard/dist` is refused; a build
+with `VITE_PANEL_TOKEN` set fails in `vite.config.ts`.
 
 The same script runs in [`.github/workflows/package.yml`](.github/workflows/package.yml) on a
 `v*` tag and attaches the six files to the GitHub Release. The image workflow

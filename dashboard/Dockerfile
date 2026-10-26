@@ -3,25 +3,30 @@
 FROM node:24-alpine AS build
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
 COPY public ./public
 COPY src ./src
 COPY tests ./tests
 
-# Vite inlines every VITE_* value into the bundle at build time. The mock build
-# is the default; live mode is opt-in and its token is readable by anyone who
-# can fetch the bundle, so it belongs on loopback only.
-ARG VITE_USE_MOCK=true
+# This image is the production dashboard: it must be live and token-free.
+# Vite inlines every VITE_* value into public JavaScript, so VITE_PANEL_TOKEN
+# is deliberately not a build argument. The mock console is a development
+# mode (`npm run dev`, or dashboard/compose.yml with the explicit
+# AJS_ALLOW_MOCK_BUILD=true opt-in), not a release artifact.
+ARG VITE_USE_MOCK=false
 ARG VITE_API_BASE=
-ARG VITE_PANEL_TOKEN=
+ARG AJS_ALLOW_MOCK_BUILD=false
 ENV VITE_USE_MOCK=${VITE_USE_MOCK} \
-    VITE_API_BASE=${VITE_API_BASE} \
-    VITE_PANEL_TOKEN=${VITE_PANEL_TOKEN}
+    VITE_API_BASE=${VITE_API_BASE}
 
-RUN npm run build
+RUN if [ "$VITE_USE_MOCK" != "false" ] && [ "$AJS_ALLOW_MOCK_BUILD" != "true" ]; then \
+      echo "dashboard image refuses a mock build; set VITE_USE_MOCK=false (release) or AJS_ALLOW_MOCK_BUILD=true (local demo only)" >&2; \
+      exit 1; \
+    fi \
+ && npm run build
 
 FROM nginx:1.29-alpine AS runtime
 
