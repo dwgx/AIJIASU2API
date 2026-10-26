@@ -501,9 +501,10 @@ func TestScopedEventsScopeMatrix(t *testing.T) {
 
 	// Another read scope must not reach the ring.
 	other, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": "u-01",
-		"label":  "account reader",
-		"scopes": []string{string(model.ScopeAccountsRead)},
+		"userId":     "u-01",
+		"label":      "account reader",
+		"scopes":     []string{string(model.ScopeAccountsRead)},
+		"accountIds": []string{"acc-01"},
 	})
 	for _, path := range []string{"/v1/events", "/v1/events/stream"} {
 		resp, body := scopedCall(t, ts, other.Secret, http.MethodGet, path, nil)

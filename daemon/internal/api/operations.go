@@ -88,8 +88,8 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A scoped key restricted to other accounts never reaches this handler:
-	// scopedKeyDeniesRequest refuses the account path in the auth middleware
-	// with 403 scoped_key_restricted, before any operation is queued.
+	// scopedKeyDenial refuses the account path in the auth middleware with 403
+	// scoped_key_restricted, before any operation is queued.
 	if s.cfg.Catalog == nil {
 		writeErrorReason(w, http.StatusConflict, CodeConflict, runtime.ReasonLoginDisabled,
 			"account login is disabled (AJS_ACCOUNT_LOGIN=0)", nil)

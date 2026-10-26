@@ -552,9 +552,10 @@ func TestLeaseScopes(t *testing.T) {
 	fixture := newLeaseHTTPServer(t, Config{})
 	ts := fixture.ts
 	readKey, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": fixture.user.ID,
-		"label":  "lease read",
-		"scopes": []string{"leases:read"},
+		"userId":     fixture.user.ID,
+		"label":      "lease read",
+		"scopes":     []string{"leases:read"},
+		"accountIds": []string{fixture.account.ID},
 	})
 	resp, body := scopedCall(t, ts, readKey.Secret, http.MethodGet, "/v1/leases", nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -562,17 +563,18 @@ func TestLeaseScopes(t *testing.T) {
 		t.Fatalf("empty store listed leases: %+v", leases)
 	}
 	resp, body = scopedCall(t, ts, readKey.Secret, http.MethodPost, "/v1/leases",
-		map[string]any{"userId": fixture.user.ID, "platform": "android"})
+		map[string]any{"userId": fixture.user.ID, "platform": "android", "accountId": fixture.account.ID})
 	requireStatus(t, resp, http.StatusForbidden)
 	requireErrorCode(t, body, CodeForbidden)
 
 	writeKey, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": fixture.user.ID,
-		"label":  "lease write",
-		"scopes": []string{"leases:read", "leases:write"},
+		"userId":     fixture.user.ID,
+		"label":      "lease write",
+		"scopes":     []string{"leases:read", "leases:write"},
+		"accountIds": []string{fixture.account.ID},
 	})
 	resp, body = scopedCall(t, ts, writeKey.Secret, http.MethodPost, "/v1/leases",
-		map[string]any{"userId": fixture.user.ID, "platform": "android"})
+		map[string]any{"userId": fixture.user.ID, "platform": "android", "accountId": fixture.account.ID})
 	requireStatus(t, resp, http.StatusCreated)
 	created := decodeBody[leaseCreateResult](t, body)
 	resp, _ = scopedCall(t, ts, writeKey.Secret, http.MethodDelete,

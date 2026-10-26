@@ -99,8 +99,8 @@ var routeScopes = map[string]model.Scope{
 
 	// Customer-facing platform reads. Each is a separate read grant, so a
 	// monitoring key can reach usage, renewal or health without an accounts,
-	// settings or admin scope. Account-scoped keys are still narrowed to their
-	// accountIds/regions by scopedKeyDeniesRequest and the handlers.
+	// settings or admin scope. A key that names accounts or regions is still
+	// narrowed to them by scopedKeyDenial and the handlers.
 	http.MethodGet + " /v1/usage":                 model.ScopeUsageRead,
 	http.MethodGet + " /v1/renewal/plans":         model.ScopeRenewalRead,
 	http.MethodGet + " /v1/renewal/accounts/{id}": model.ScopeRenewalRead,
@@ -187,128 +187,130 @@ func hasScope(scopes []model.Scope, scope model.Scope) bool {
 	return false
 }
 
-// scopedKeyDeniesRequest enforces accountIds/regions on every account-scoped
-// route, read or write. The scopes decide which verbs a key may use; this
-// restriction decides which accounts those verbs may reach, so a key scoped to
-// acc-A cannot delete, connect, lease, drain, rotate or cancel on acc-B.
-// It covers the account path (including the action sub-routes), the renewal
-// account path, the account_id/accountId query, the usage page's account
-// filter, and the lease, node and operation paths, which are resolved to their
-// account through the store. The lease create body carries its own accountId,
-// so that handler calls denyScopedKeyAccountTarget before it allocates.
-func (s *Server) scopedKeyDeniesRequest(key model.ScopedKey, r *http.Request) bool {
-	if len(key.AccountIDs) == 0 && len(key.Regions) == 0 {
-		return false
+// scopedKeyDenial returns the 403 message for a request a scoped key may not
+// make, or "" when it may proceed.
+//
+// A non-admin key that carries an account, catalog or lease scope must name at
+// least one account or region: creation rejects that shape, so a key that still
+// has no grant was minted before the rule and fails closed on every non-admin
+// route until it is reissued.
+//
+// Otherwise accountIds/regions narrow every account-shaped route, read or
+// write. The scopes decide which verbs a key may use; this restriction decides
+// which accounts those verbs may reach, so a key scoped to acc-A cannot delete,
+// connect, lease, drain, rotate or cancel on acc-B. It covers the account path
+// (including the action sub-routes), the renewal account path, the
+// account_id/accountId query, the usage page's account filter, and the node and
+// operation paths, which are resolved to their account through the store. Lease
+// create and lease mutations carry their own subject/account check in the
+// handlers, before any side effect.
+func (s *Server) scopedKeyDenial(key model.ScopedKey, r *http.Request) string {
+	if key.RequiresAccountGrant() && !key.HasAccountGrant() {
+		return "scoped key has no accountIds or regions; reissue it with an explicit account grant"
+	}
+	if !key.HasAccountGrant() {
+		return ""
 	}
 	// The admin grant already covers every account, so a list on an
 	// admin-scoped key narrows nothing. restrictedKey applies the same rule to
 	// the handlers; this keeps the middleware in agreement with them.
 	if hasScope(key.Scopes, model.ScopeAdmin) {
-		return false
+		return ""
 	}
 	read := r.Method == http.MethodGet || r.Method == http.MethodHead
 	// The schedule list applies its own key filter before the accountId
 	// filter, so an outside or unknown account answers an empty list instead of
 	// 403. Every other route keeps the query denial below.
 	if r.URL.Path == "/v1/schedules" {
-		return false
+		return ""
 	}
 	for _, name := range []string{"account_id", "accountId"} {
 		if value := strings.TrimSpace(r.URL.Query().Get(name)); value != "" {
 			if !s.keyAllowsAccountID(key, value) {
-				return true
+				return "scoped key is not allowed to use this account"
 			}
 		}
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 2 || parts[0] != "v1" {
-		return false
+		return ""
 	}
 	if len(parts) == 2 && parts[1] == "usage" {
 		// The usage filter accepts an account id or its exact label; only a
 		// value that names an account outside the key is refused, so an
 		// unknown label still answers an empty summary instead of 403.
 		if value := strings.TrimSpace(r.URL.Query().Get("account")); value != "" {
-			if account, ok := s.accountByIDOrLabel(value); ok && !keyAllowsAccount(key, account) {
-				return true
+			if account, ok := s.accountByIDOrLabel(value); ok && !key.AllowsAccount(account) {
+				return "scoped key is not allowed to use this account"
 			}
 		}
-		return false
+		return ""
 	}
 	if len(parts) < 3 {
-		return false
+		return ""
 	}
 	switch parts[1] {
 	case "accounts":
 		switch parts[2] {
 		case "io", "export", "import", "bulk-delete":
-			return false
+			return ""
 		}
-		return s.deniesAccountTarget(key, parts[2], read)
+		if s.deniesAccountTarget(key, parts[2], read) {
+			return "scoped key is not allowed to use this account"
+		}
 	case "renewal":
 		if len(parts) < 4 || parts[2] != "accounts" {
-			return false
+			return ""
 		}
-		return s.deniesAccountTarget(key, parts[3], read)
-	case "leases":
-		// A lease read is filtered by the handler; a revoke or rotate is
-		// resolved through the lease's account so it cannot free another
-		// tenant's node.
-		if read {
-			return false
+		if s.deniesAccountTarget(key, parts[3], read) {
+			return "scoped key is not allowed to use this account"
 		}
-		lease, ok := s.store.Lease(parts[2])
-		if !ok {
-			return true
-		}
-		return s.deniesAccountTarget(key, lease.AccountID, false)
 	case "nodes":
 		if read {
-			return false
+			return ""
 		}
 		node, ok := s.store.Node(parts[2])
-		if !ok {
-			return true
+		if !ok || s.deniesAccountTarget(key, node.AccountID, false) {
+			return "scoped key is not allowed to use this account"
 		}
-		return s.deniesAccountTarget(key, node.AccountID, false)
 	case "operations":
 		// A read keeps the handler's 404 for an operation the key cannot see;
 		// a cancel is a write and is refused here.
 		if read {
-			return false
+			return ""
 		}
 		operation, ok := s.store.Operation(parts[2])
-		if !ok {
-			return true
+		if !ok || s.deniesAccountTarget(key, operation.AccountID, false) {
+			return "scoped key is not allowed to use this account"
 		}
-		return s.deniesAccountTarget(key, operation.AccountID, false)
 	}
-	return false
+	return ""
 }
 
 // deniesAccountTarget reports whether a restricted key must be refused one
 // account id. A write that names an account the store cannot resolve is
 // refused with the same 403 as a foreign account, so a mutation cannot be used
-// to probe whether another tenant's account, lease or node exists. A read
-// keeps the handler's 404, which is the documented answer for an unknown id.
+// to probe whether another tenant's account or node exists. A read keeps the
+// handler's 404, which is the documented answer for an unknown id.
 func (s *Server) deniesAccountTarget(key model.ScopedKey, accountID string, read bool) bool {
 	account, ok := s.store.Account(accountID)
 	if !ok {
 		return !read
 	}
-	return !keyAllowsAccount(key, account)
+	return !key.AllowsAccount(account)
 }
 
 // scopedKeyAllowsAccount reports whether the caller may act on one account id.
-// It is true for admin callers and unrestricted keys. A restricted key must
-// name an account the store resolves and the key's accountIds/regions allow.
+// It is true for admin callers and for a key without an account grant (its
+// scopes are all global). A key with a grant must name an account the store
+// resolves and the key's accountIds/regions allow.
 func (s *Server) scopedKeyAllowsAccount(r *http.Request, accountID string) bool {
 	key, restricted := s.restrictedKey(r)
 	if !restricted {
 		return true
 	}
 	account, ok := s.store.Account(strings.TrimSpace(accountID))
-	return ok && keyAllowsAccount(key, account)
+	return ok && key.AllowsAccount(account)
 }
 
 // denyScopedKeyAccountTarget answers 403 when a restricted key names an account
@@ -324,15 +326,19 @@ func (s *Server) denyScopedKeyAccountTarget(w http.ResponseWriter, r *http.Reque
 	return true
 }
 
+// keyAllowsAccountID resolves an account reference from a query or path and
+// applies the shared model predicate. An id the store cannot resolve is
+// refused only when the key names explicit ids; a region-only key keeps the
+// handler's empty result, which is the pre-existing query-filter contract.
 func (s *Server) keyAllowsAccountID(key model.ScopedKey, id string) bool {
-	if len(key.AccountIDs) == 0 && len(key.Regions) == 0 {
+	if !key.HasAccountGrant() {
 		return true
 	}
 	account, ok := s.store.Account(id)
 	if !ok {
 		return len(key.AccountIDs) == 0 || containsString(key.AccountIDs, id)
 	}
-	return keyAllowsAccount(key, account)
+	return key.AllowsAccount(account)
 }
 
 // accountByIDOrLabel resolves an account reference the way the usage filter
@@ -349,26 +355,6 @@ func (s *Server) accountByIDOrLabel(value string) (model.Account, bool) {
 	return model.Account{}, false
 }
 
-// keyAllowsAccount reports whether the key may act on account. An account
-// matches when the id list is empty or contains it, and the region list is
-// empty or overlaps the account's regions. Reads and writes use the same
-// predicate, so a key that may read an account is exactly the key that may
-// mutate it.
-func keyAllowsAccount(key model.ScopedKey, account model.Account) bool {
-	if len(key.AccountIDs) > 0 && !containsString(key.AccountIDs, account.ID) {
-		return false
-	}
-	if len(key.Regions) == 0 {
-		return true
-	}
-	for _, region := range account.Regions {
-		if containsString(key.Regions, region) {
-			return true
-		}
-	}
-	return false
-}
-
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -378,17 +364,29 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// restrictedKey returns the scoped key installed by the auth middleware when it
-// narrows the key to named accounts or regions. Admin tokens and admin-scoped
-// keys never restrict, even when they carry accountIds/regions: the admin grant
-// already covers every account. The bool is false for unrestricted callers, so
-// handlers skip filtering entirely.
-func (s *Server) restrictedKey(r *http.Request) (model.ScopedKey, bool) {
+// customerKey returns the non-admin scoped key that is the caller, if any.
+// Admin tokens and keys carrying the admin scope are operator callers: they
+// keep the unfiltered, unscoped-by-user view. Handlers use this to bind a
+// customer request to the key's user subject (key.UserID), which is the
+// resource owner for leases; accounts and nodes remain operator assets.
+func customerKey(r *http.Request) (model.ScopedKey, bool) {
 	key, ok := scopedKeyFromRequest(r)
 	if !ok || hasScope(key.Scopes, model.ScopeAdmin) {
 		return model.ScopedKey{}, false
 	}
-	if len(key.AccountIDs) == 0 && len(key.Regions) == 0 {
+	return key, true
+}
+
+// restrictedKey returns the scoped key installed by the auth middleware when it
+// narrows the key to named accounts or regions. Admin tokens and admin-scoped
+// keys never restrict, even when they carry accountIds/regions: the admin grant
+// already covers every account. The bool is false for callers without a grant,
+// so handlers skip account filtering entirely; a non-admin key whose scopes are
+// account-bound always has a grant (creation enforces it and the middleware
+// fails closed on a legacy key without one).
+func (s *Server) restrictedKey(r *http.Request) (model.ScopedKey, bool) {
+	key, ok := customerKey(r)
+	if !ok || !key.HasAccountGrant() {
 		return model.ScopedKey{}, false
 	}
 	return key, true
@@ -416,7 +414,7 @@ func (s *Server) visibleAccountIDs(r *http.Request) (map[string]struct{}, bool) 
 	}
 	ids := make(map[string]struct{}, len(key.AccountIDs))
 	for _, account := range s.store.Accounts() {
-		if keyAllowsAccount(key, account) {
+		if key.AllowsAccount(account) {
 			ids[account.ID] = struct{}{}
 		}
 	}
@@ -430,7 +428,7 @@ func (s *Server) filterAccountsForRequest(r *http.Request, accounts []model.Acco
 	}
 	filtered := make([]model.Account, 0, len(accounts))
 	for _, account := range accounts {
-		if keyAllowsAccount(key, account) {
+		if key.AllowsAccount(account) {
 			filtered = append(filtered, account)
 		}
 	}

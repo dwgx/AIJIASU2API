@@ -87,6 +87,19 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	// A customer scoped key is bound to its own user subject: an empty userId
+	// becomes the key's user, and any other id is refused before the store can
+	// allocate a lease for someone else. Admin callers keep the explicit
+	// userId contract.
+	subject, customer := customerKey(r)
+	if customer {
+		if requested := strings.TrimSpace(body.UserID); requested != "" && requested != subject.UserID {
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+				"scoped key is bound to its own userId; userId must match it", nil)
+			return
+		}
+		body.UserID = subject.UserID
+	}
 	// A restricted key must name an account it may use: an empty accountId
 	// would let the store allocate on any free account, which the key's
 	// accountIds/regions cannot cover.
@@ -123,9 +136,15 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	}
 	// The store answers an idempotent replay before it looks at the requested
 	// accountId, so the lease that actually came back is checked again: a
-	// restricted key must neither see nor republish a lease on an account it
-	// may not use. A fresh create is already pinned to the checked account, so
-	// this can only fire on a replay, where nothing was mutated.
+	// customer key must neither see nor republish a lease for another user or
+	// on an account it may not use. A fresh create is already pinned to the
+	// checked subject and account, so this can only fire on a replay, where
+	// nothing was mutated.
+	if replayed && customer && lease.UserID != subject.UserID {
+		writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+			"scoped key is bound to its own userId; the replayed lease belongs to another user", nil)
+		return
+	}
 	if replayed && !s.scopedKeyAllowsAccount(r, lease.AccountID) {
 		writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
 			"scoped key is restricted to named accounts; the replayed lease belongs to another account", nil)
@@ -158,10 +177,18 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
-// handleRevokeLease frees a lease after an explicit confirm. In panel mode the
-// Resin lease is deleted first: a Resin failure answers 503 and leaves the
-// store row in place instead of reporting a revoke that did not happen.
+// handleRevokeLease frees a lease after an explicit confirm. The lease is
+// resolved and bound to the caller first, so a customer key cannot revoke
+// another user's lease and never reaches the panel or the store with one. In
+// panel mode the Resin lease is deleted before the store row: a Resin failure
+// answers 503 and leaves the store row in place instead of reporting a revoke
+// that did not happen.
 func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
+	id := pathParam(r, "id")
+	lease, denied := s.authorizeLeaseMutation(w, r, id)
+	if denied {
+		return
+	}
 	var body leaseRevokeRequest
 	if !decodeJSON(w, r, &body) {
 		return
@@ -171,27 +198,25 @@ func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
 			"confirm must be true to revoke a lease")
 		return
 	}
-	id := pathParam(r, "id")
 
 	var revoked model.Lease
 	if s.cfg.Panel != nil {
-		// Read the row before the panel deletes it: the publish hook needs the
-		// account/node it addressed even though the store row is gone after.
-		if lease, ok := s.store.Lease(id); ok {
-			revoked = lease
-		}
+		// The row was read before the panel deletes it: the publish hook needs
+		// the account/node it addressed even though the store row is gone
+		// after.
+		revoked = lease
 		if err := s.cfg.Panel.ReleaseLease(r.Context(), id); err != nil {
 			s.writePanelError(w, err)
 			return
 		}
 		revoked.Status = model.LeaseRevoked
 	} else {
-		lease, err := s.store.RevokeLease(id, s.auditActor(r))
+		revokedLease, err := s.store.RevokeLease(id, s.auditActor(r))
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-		revoked = lease
+		revoked = revokedLease
 	}
 
 	if revoked.ID != "" {

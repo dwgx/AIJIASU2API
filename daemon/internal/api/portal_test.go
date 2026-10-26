@@ -594,6 +594,7 @@ func TestPortalIdentityBoundaries(t *testing.T) {
 	// the admin scope can.
 	resp, body = apiCall(t, ts, http.MethodPost, "/v1/scoped-keys", model.ScopedKeyCreateRequest{
 		UserID: "u-01", Label: "leases reader", Scopes: []model.Scope{model.ScopeLeasesRead},
+		AccountIDs: []string{"acc-01"},
 	})
 	requireStatus(t, resp, http.StatusCreated)
 	reader := decodeBody[model.ScopedKeyCreated](t, body)
@@ -694,6 +695,7 @@ func TestPortalRateLimitsAreIsolated(t *testing.T) {
 	// Portal saturation never spends a legacy credential's budget.
 	resp, body = apiCall(t, ts, http.MethodPost, "/v1/scoped-keys", model.ScopedKeyCreateRequest{
 		UserID: "u-01", Label: "legacy", Scopes: []model.Scope{model.ScopeLeasesRead},
+		AccountIDs: []string{"acc-01"},
 	})
 	requireStatus(t, resp, http.StatusCreated)
 	legacy := decodeBody[model.ScopedKeyCreated](t, body)

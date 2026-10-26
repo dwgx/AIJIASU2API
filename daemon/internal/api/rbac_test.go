@@ -148,7 +148,7 @@ func TestAJS412OperatorIdentityComesFromToken(t *testing.T) {
 
 func TestAJS412ScopedKeyAndPortalIsolation(t *testing.T) {
 	ts := newStrictRBACServer(t)
-	createReq := newRequest(t, http.MethodPost, ts.URL+"/v1/scoped-keys", map[string]any{"userId": "u-01", "label": "RBAC isolation", "scopes": []string{"accounts:read"}})
+	createReq := newRequest(t, http.MethodPost, ts.URL+"/v1/scoped-keys", map[string]any{"userId": "u-01", "label": "RBAC isolation", "scopes": []string{"accounts:read"}, "accountIds": []string{"acc-01"}})
 	createReq.Header.Set("Authorization", "Bearer carol-admin-token-0123456789012345678901234567890")
 	createReq.Header.Set(adminCSRFHeader, adminCSRFValue)
 	createResp, createBody := doRequest(t, ts, createReq)

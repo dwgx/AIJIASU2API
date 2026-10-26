@@ -571,6 +571,7 @@ func TestBackupRoutesAreAdminOnly(t *testing.T) {
 			"leases:read", "leases:write", "requests:read", "audit:read",
 			"metrics:read", "lab:read", "settings:read", "settings:write",
 		},
+		"accountIds": []string{"acc-01"},
 	})
 	calls := []struct {
 		path string

@@ -28,7 +28,7 @@ RBAC tokens are a third, separate world — see [`RBAC.md`](RBAC.md)):
 | Credential | Format | Authority |
 |---|---|---|
 | Admin token | `AJS_ADMIN_TOKEN` (at least 32 characters, not a documented placeholder) | Full admin: every route |
-| Scoped key | `ajs_sk_...`, returned once by `POST /v1/scoped-keys` | Only the routes its scopes name, optionally narrowed to accounts/regions |
+| Scoped key | `ajs_sk_...`, returned once by `POST /v1/scoped-keys` | Only the routes its scopes name, bound to its `userId` and narrowed to its account/region grants |
 
 In a strict-RBAC deployment (`AJS_RBAC_STRICT=1`) the shared `AJS_ADMIN_TOKEN` is retired; use an
 operator `admin` token from [`RBAC.md`](RBAC.md) instead. Scoped keys keep their own policy.
@@ -64,6 +64,10 @@ curl -sS -X POST "$BASE/v1/scoped-keys" \
 The response is `{"key": {...}, "secret": "ajs_sk_..."}`. The secret is shown exactly once; only
 its SHA-256 is persisted. Revoke with `DELETE /v1/scoped-keys/{id}` (204), also admin-only.
 
+The key is bound to `userId` and must name at least one `accountIds` or `regions` entry when its
+scopes include an `accounts:*`, `catalog:*` or `leases:*` grant; without one the create answers
+`400 INVALID_ARGUMENT`. See [Key subject and grants](#key-subject-and-grants).
+
 ## Scopes
 
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the
@@ -75,8 +79,8 @@ table, and the admin token bypasses it by definition. Routes absent from the tab
 | `accounts:write` | Create/patch/delete accounts; login/logout | `POST /v1/accounts`, `PATCH /v1/accounts/{id}`, `POST /v1/accounts/{id}/actions/login` |
 | `catalog:read` | Read catalog, nodes, operations, topology, debug trace | `GET /v1/accounts/{id}/servers`, `GET /v1/nodes`, `GET /v1/operations`, `GET /v1/topology` |
 | `catalog:write` | Selection and guarded switch; node drain/probe; operation cancel | `PUT /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/connect`, `POST .../select-node`, `POST /v1/nodes/{id}/actions/drain` |
-| `leases:read` | List leases | `GET /v1/leases` |
-| `leases:write` | Create/rotate/revoke leases | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
+| `leases:read` | List the key user's leases | `GET /v1/leases` |
+| `leases:write` | Create/rotate/revoke the key user's leases | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `requests:read` | Read the request log | `GET /v1/requests` |
 | `audit:read` | Read and export the audit log | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics | `GET /metrics`, `GET /v1/metrics` |
@@ -97,11 +101,42 @@ administration, reconciliation, `GET /v1/whoami`, `GET /v1/openapi.json` and
 still discloses credentials, a filtered bulk-delete is destructive with partial success, and a
 customer key has no business enumerating the daemon's outbound receivers or sealed files.
 
+## Key subject and grants
+
+A scoped key has two boundaries: the user it belongs to (`userId`) and the accounts it may reach
+(`accountIds`/`regions`).
+
+**The subject is the lease owner.** A non-admin scoped key is bound to its own `userId`:
+
+- `GET /v1/leases` returns only leases whose `userId` equals the key's user. Naming another
+  `user_id`/`userId` answers `403 FORBIDDEN` with `reason: "scoped_key_restricted"` and does not
+  reveal whether that user holds a lease.
+- `POST /v1/leases` fills an empty `userId` with the key's user; a different `userId` is refused
+  with the same `403` before anything is allocated. An `Idempotency-Key` replay is re-checked
+  against both the user and the account grant, so a retry never returns another user's lease.
+- `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner before any
+  panel or store side effect. A missing id and another user's lease answer the same `404
+  NOT_FOUND`; the key's own lease on an account outside its grant answers `403`.
+- Accounts and nodes are operator assets: they are filtered by the key's grants, never by
+  `userId`, and no customer key owns them.
+
+**An account-bound key must name a grant.** A new non-admin key carrying an `accounts:*`,
+`catalog:*` or `leases:*` scope must name at least one `accountIds` or `regions` entry;
+`POST /v1/scoped-keys` answers `400 INVALID_ARGUMENT` otherwise. A key whose scopes are all
+global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`,
+`lab:read`, `renewal:read`, `health:read`) may omit both lists, which then means "not narrowed by
+account".
+A key carrying the `admin` scope ignores both lists. A key minted before this rule with an
+account/catalog/lease scope and no grant fails closed with `403` on every non-admin route until it
+is reissued.
+
 ## Narrowing with `accountIds` / `regions`
 
-Both lists are optional and narrow **reads and writes**:
+Both lists narrow **reads and writes**; for an account-bound key at least one of them is required
+(see above):
 
-- Empty `accountIds` and empty `regions` = unrestricted.
+- Empty `accountIds` and empty `regions` mean "not narrowed by account". A non-admin key with an
+  account, catalog or lease scope cannot be minted that way.
 - An account matches when the id list is empty or contains its id, **and** the region list is
   empty or overlaps the account's `regions`.
 - The filter covers the account path, the renewal account path and the `account_id`/`accountId`
@@ -114,9 +149,11 @@ Both lists are optional and narrow **reads and writes**:
   selection routes, `POST /v1/leases`, lease rotate and revoke, node drain/undrain/probe and
   operation cancel. `POST /v1/leases` must name an allowed `accountId`; a restricted key that
   omits it is refused, because the store would otherwise pick any free account.
-- A write that names an id the store cannot resolve answers the same `403` as a foreign account,
-  so a mutation cannot be used to probe whether an account, lease, node or operation exists. Reads
-  keep `404` for an unknown id and `403` for a known account outside the key.
+- A write that names an account-shaped id the store cannot resolve answers the same `403` as a
+  foreign account, so a mutation cannot be used to probe whether an account, node or operation
+  exists. Lease ids are different: a missing id and another user's lease both answer `404`, so a
+  lease id cannot be probed either. Reads keep `404` for an unknown id and `403` for a known
+  account outside the key.
 - Global, unattributed surfaces are refused to a restricted key rather than guessed:
   `GET /v1/requests`, `GET /v1/usage`, `GET /v1/audit`, `GET /metrics` and the event stream.
   `/v1/topology` is projected to the key's visible nodes, and `/v1/health/nodes` is filtered.
@@ -220,11 +257,15 @@ curl -sS -X DELETE "$BASE/v1/leases/$LEASE_ID" \
 ```
 
 Create answers `201 {"lease": {...}, "warning"?: "...", "replayed"?: true}`. `accountId` is an
-optional pin (must be active and match the platform); `ttlSeconds` is 60–604800, and `0`/absent
-uses the user's sticky TTL then the panel lease TTL. One active lease per user and platform; a
-second is `409`, an exhausted quota or account slot is `429`. An `Idempotency-Key` (header or body
-`idempotencyKey`, max 128 characters, both must agree) replays the original lease. Revoke answers
-`204`. A lease on an account whose display capacity is above one carries
+optional pin for an operator caller (must be active and match the platform); a non-admin scoped
+key must name one, and it must be an account the key names. `ttlSeconds` is 60–604800, and
+`0`/absent uses the user's sticky TTL then the panel lease TTL. One active lease per user and
+platform; a second is `409`, an exhausted quota or account slot is `429`. An `Idempotency-Key`
+(header or body `idempotencyKey`, max 128 characters, both must agree) replays the original lease.
+A non-admin scoped key is bound to its own `userId`: an empty `userId` becomes the key's user, a
+different id is `403`, `GET /v1/leases` returns only that user's leases, and revoke/rotate answer
+`404` for a missing id and for another user's lease alike. Revoke answers `204`. A lease on an
+account whose display capacity is above one carries
 `warning: "multi_session_unimplemented"`; the live account has `useCount=1`, so this archive admits
 one slot.
 
@@ -354,8 +395,8 @@ Status mapping and stable reasons:
 |---|---|---|
 | 400 | `INVALID_ARGUMENT` | `invalid_argument`, `INVALID_ARGUMENT` (bad body, missing `confirm`, bad `limit`/window) |
 | 401 | `UNAUTHORIZED` | missing/invalid bearer, revoked key |
-| 403 | `FORBIDDEN` | `scope_required` (key lacks the route scope), `scoped_key_restricted` (accountIds/regions exclude the read) |
-| 404 | `NOT_FOUND` | `unknown_server`, `no_target`, unknown account/user/lease/operation |
+| 403 | `FORBIDDEN` | `scope_required` (key lacks the route scope), `scoped_key_restricted` (accountIds/regions exclude the target, a lease or `user_id` belongs to another user, or the key predates the account-grant rule) |
+| 404 | `NOT_FOUND` | `unknown_server`, `no_target`, unknown account/user/lease/operation; a lease owned by another user answers as unknown |
 | 409 | `CONFLICT` | `login_disabled`, `login_required`, `account_state`, `snapshot_changed`, `server_ineligible`, `switch_in_progress`, `slot_multiple_sessions`, `port_unavailable`, `ALREADY_CURRENT`, `SERVER_UNAVAILABLE`, `NO_ALTERNATE_SERVER`, `lease_publish_failed` |
 | 429 | `QUOTA_EXCEEDED` / `RATE_LIMITED` | `account_slots_exhausted`, user quota, `connect_cooldown` (with `Retry-After`), scoped-key rate limit |
 | 500 | `INTERNAL` | `store_failed`, unclassified internal failure |

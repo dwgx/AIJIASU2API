@@ -6,6 +6,8 @@
 // type.
 package model
 
+import "slices"
+
 // Platform is the account platform vocabulary from types.ts.
 type Platform string
 
@@ -268,9 +270,9 @@ const (
 // unlimited and must be requested explicitly.
 const DefaultScopedKeyRateLimitPerMin = 60
 
-// ScopedKey is a least-privilege API key. AccountIDs and Regions are
-// restrictions on the accounts the key may read; empty means every account or
-// every region. The secret is never part of this type.
+// ScopedKey is a least-privilege API key bound to one user subject
+// (UserID). AccountIDs and Regions are the accounts the key may act on; the
+// secret is never part of this type.
 type ScopedKey struct {
 	ID              string   `json:"id"`
 	UserID          string   `json:"userId"`
@@ -285,6 +287,66 @@ type ScopedKey struct {
 	ExpiresAt       *string  `json:"expiresAt"`
 	LastUsedAt      *string  `json:"lastUsedAt"`
 	RevokedAt       *string  `json:"revokedAt"`
+}
+
+// isAccountBoundScope reports whether a scope reaches an account-shaped
+// surface: the account, catalog/node/operation or lease routes. Those routes
+// resolve a concrete account, so a non-admin key carrying one of them is
+// narrowed by its accountIds/regions and must name at least one grant.
+func isAccountBoundScope(scope Scope) bool {
+	switch scope {
+	case ScopeAccountsRead, ScopeAccountsWrite,
+		ScopeCatalogRead, ScopeCatalogWrite,
+		ScopeLeasesRead, ScopeLeasesWrite:
+		return true
+	}
+	return false
+}
+
+// HasAccountGrant reports whether the key names at least one account or
+// region. It is the shape check; AllowsAccount is the matching predicate.
+func (k ScopedKey) HasAccountGrant() bool {
+	return len(k.AccountIDs) > 0 || len(k.Regions) > 0
+}
+
+// RequiresAccountGrant reports whether the key shape must name an account or
+// region grant: a key without the admin scope that carries an account-bound
+// scope. A key whose scopes are all global (usage, requests, metrics, events,
+// settings, ...) is not account-bound, so an empty grant list simply means "not
+// narrowed by account". The admin grant already covers every account and is
+// never narrowed.
+func (k ScopedKey) RequiresAccountGrant() bool {
+	bound := false
+	for _, scope := range k.Scopes {
+		if scope == ScopeAdmin {
+			return false
+		}
+		if isAccountBoundScope(scope) {
+			bound = true
+		}
+	}
+	return bound
+}
+
+// AllowsAccount is the single account-grant predicate shared by the API and
+// the runtime: an account matches when the id list is empty or contains its id,
+// and the region list is empty or overlaps the account's regions. Reads and
+// writes use the same predicate, so a key that may read an account is exactly
+// the key that may mutate it. Callers decide the admin bypass; a key that
+// requires a grant but names none is refused before this predicate is asked.
+func (k ScopedKey) AllowsAccount(account Account) bool {
+	if len(k.AccountIDs) > 0 && !slices.Contains(k.AccountIDs, account.ID) {
+		return false
+	}
+	if len(k.Regions) == 0 {
+		return true
+	}
+	for _, region := range account.Regions {
+		if slices.Contains(k.Regions, region) {
+			return true
+		}
+	}
+	return false
 }
 
 // ScopedKeyCreateRequest is the POST /v1/scoped-keys body. ExpiresAt is an

@@ -105,9 +105,10 @@ func TestScopedKeyEnforcementMatrix(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	readKey, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": "u-01",
-		"label":  "accounts reader",
-		"scopes": []string{"accounts:read"},
+		"userId":     "u-01",
+		"label":      "accounts reader",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
 	})
 	resp, body := scopedCall(t, ts, readKey.Secret, http.MethodGet, "/v1/accounts", nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -143,9 +144,10 @@ func TestScopedKeyAdminScopeCanManageKeys(t *testing.T) {
 	resp, body := scopedCall(t, ts, adminKey.Secret, http.MethodGet, "/v1/users", nil)
 	requireStatus(t, resp, http.StatusOK)
 	resp, body = scopedCall(t, ts, adminKey.Secret, http.MethodPost, "/v1/scoped-keys", map[string]any{
-		"userId": "u-02",
-		"label":  "issued by admin key",
-		"scopes": []string{"accounts:read"},
+		"userId":     "u-02",
+		"label":      "issued by admin key",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
 	})
 	requireStatus(t, resp, http.StatusCreated)
 	if !strings.HasPrefix(decodeBody[model.ScopedKeyCreated](t, body).Secret, "ajs_sk_") {
@@ -171,10 +173,11 @@ func TestScopedKeyExpiryAnswers401(t *testing.T) {
 	ts, _ := newTestServer(t)
 	expires := time.Now().Add(2 * time.Second).UTC().Format(time.RFC3339)
 	created, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId":    "u-01",
-		"label":     "short lived",
-		"scopes":    []string{"accounts:read"},
-		"expiresAt": expires,
+		"userId":     "u-01",
+		"label":      "short lived",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
+		"expiresAt":  expires,
 	})
 	resp, _ := scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/accounts", nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -240,9 +243,10 @@ func TestScopedKeyAccountRestrictions(t *testing.T) {
 func TestScopedKeyRecordsLastUsedAt(t *testing.T) {
 	ts, _ := newTestServer(t)
 	created, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": "u-01",
-		"label":  "used key",
-		"scopes": []string{"accounts:read"},
+		"userId":     "u-01",
+		"label":      "used key",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
 	})
 	// Start with enough room before the minute rolls so both requests land in
 	// the same throttle window. The store-level test proves the minute reset.
@@ -500,13 +504,14 @@ func TestScopedKeyRestrictedPanelTopology(t *testing.T) {
 		t.Fatalf("projected panel metadata = %+v", topology)
 	}
 
-	// An unrestricted scoped key keeps the raw panel view.
-	open := mustIssueScopedKey(t, ts, []string{"catalog:read"}, nil, nil)
-	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/topology", nil)
+	// The admin token keeps the raw panel view. A non-admin catalog key cannot
+	// be issued without an account grant, so there is no unbounded customer
+	// view to compare against.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/topology", nil)
 	requireStatus(t, resp, http.StatusOK)
 	raw := decodeBody[runtime.Topology](t, body)
 	if raw.Nodes["node-04"] != "jp-tyo-01" || !strings.Contains(raw.Content, "jp-tyo-01") {
-		t.Fatalf("unrestricted panel topology = %+v", raw)
+		t.Fatalf("admin panel topology = %+v", raw)
 	}
 }
 
@@ -795,8 +800,6 @@ func TestScopedKeyRestrictedWritesAreAccountScoped(t *testing.T) {
 		{http.MethodDelete, "/v1/accounts/acc-02/selection", nil},
 		{http.MethodPost, "/v1/leases", map[string]any{"userId": "u-01", "platform": "ios", "accountId": "acc-02"}},
 		{http.MethodPost, "/v1/leases", map[string]any{"userId": "u-01", "platform": "ios"}},
-		{http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true}},
-		{http.MethodPost, "/v1/leases/lease-03/actions/rotate", nil},
 		{http.MethodPost, "/v1/nodes/node-04/actions/drain", nil},
 		{http.MethodPost, "/v1/nodes/node-04/actions/undrain", nil},
 		{http.MethodPost, "/v1/nodes/node-04/actions/probe", nil},
@@ -811,6 +814,31 @@ func TestScopedKeyRestrictedWritesAreAccountScoped(t *testing.T) {
 			t.Fatalf("%s %s refusal leaked the foreign tenant: %s", tc.method, tc.path, body)
 		}
 	}
+
+	// A lease owned by another user is answered exactly like a missing id: 404,
+	// before the panel or the store is touched. A same-user lease on a foreign
+	// account stays 403 (the account grant), which is the only lease the key's
+	// own subject can address.
+	leaseDenied := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true}},
+		{http.MethodPost, "/v1/leases/lease-03/actions/rotate", nil},
+		{http.MethodDelete, "/v1/leases/lease-99", map[string]any{"confirm": true}},
+		{http.MethodPost, "/v1/leases/lease-99/actions/rotate", nil},
+	}
+	for _, tc := range leaseDenied {
+		resp, body := scopedCall(t, ts, key.Secret, tc.method, tc.path, tc.body)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	}
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-02",
+		map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorCode(t, body, CodeForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
 
 	// Nothing was mutated by a refused write.
 	if account, ok := st.Account("acc-02"); !ok || account.Label != "Field Lab" {
@@ -832,7 +860,7 @@ func TestScopedKeyRestrictedWritesAreAccountScoped(t *testing.T) {
 	}
 
 	// The same key still acts on its own account.
-	resp, body := scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-01",
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-01",
 		map[string]any{"label": "Northwind Ops (restricted write)"})
 	requireStatus(t, resp, http.StatusOK)
 	if updated := decodeBody[model.Account](t, body); updated.Label != "Northwind Ops (restricted write)" {
@@ -860,26 +888,31 @@ func TestScopedKeyRestrictedWritesAreAccountScoped(t *testing.T) {
 	if _, ok := st.Lease("lease-01"); ok {
 		t.Fatal("lease-01 survived its own key's revoke")
 	}
-	// The account has one serving slot in the seed and both are taken; free
-	// the second lease so the same key can allocate on its own account.
-	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-06", map[string]any{"confirm": true})
-	requireStatus(t, resp, http.StatusNoContent)
+	// The account has one serving slot in the seed and both are taken. The
+	// second row belongs to u-03, so the key cannot free it; the operator does,
+	// and the same key then allocates for its own subject.
+	if _, err := st.RevokeLease("lease-06"); err != nil {
+		t.Fatalf("RevokeLease(lease-06): %v", err)
+	}
 	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/leases", map[string]any{
-		"userId": "u-02", "platform": "android", "accountId": "acc-01",
+		"userId": "u-01", "platform": "android", "accountId": "acc-01",
 	})
 	requireStatus(t, resp, http.StatusCreated)
-	if created := decodeBody[leaseCreateResult](t, body); created.Lease.AccountID != "acc-01" {
+	if created := decodeBody[leaseCreateResult](t, body); created.Lease.AccountID != "acc-01" || created.Lease.UserID != "u-01" {
 		t.Fatalf("own-account lease = %+v", created.Lease)
 	}
 }
 
 // TestScopedKeyRegionRestrictedWrites pins the region dimension on writes: a
-// key restricted to de-fra may mutate acc-04 and nothing else.
+// key restricted to de-fra may mutate acc-04 and nothing else, and only for its
+// own user subject.
 func TestScopedKeyRegionRestrictedWrites(t *testing.T) {
 	ts, st := newTestServer(t)
 	key := restrictedWriteKey(t, ts, nil, []string{"de-fra"})
 
-	resp, body := scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true})
+	// lease-01 belongs to the key's user but sits on acc-01 (cn-zj), so the
+	// region grant refuses it with the account reason.
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-01", map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusForbidden)
 	requireErrorReason(t, body, ReasonScopedKeyRestricted)
 	resp, body = scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-02", map[string]any{"label": "hijacked"})
@@ -887,8 +920,8 @@ func TestScopedKeyRegionRestrictedWrites(t *testing.T) {
 	requireErrorReason(t, body, ReasonScopedKeyRestricted)
 	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-04/actions/drain", nil)
 	requireStatus(t, resp, http.StatusForbidden)
-	if _, ok := st.Lease("lease-03"); !ok {
-		t.Fatal("a region-refused revoke removed lease-03")
+	if _, ok := st.Lease("lease-01"); !ok {
+		t.Fatal("a region-refused revoke removed lease-01")
 	}
 
 	// acc-04 is in de-fra, so the same verbs succeed there.
@@ -897,14 +930,30 @@ func TestScopedKeyRegionRestrictedWrites(t *testing.T) {
 	requireStatus(t, resp, http.StatusOK)
 	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-09/actions/drain", nil)
 	requireStatus(t, resp, http.StatusOK)
-	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-07", map[string]any{"confirm": true})
+
+	// The seed has no lease for this key's user on acc-04, so the operator frees
+	// the two u-04 rows and creates one for u-01. The region key may then revoke
+	// its own subject's lease on its own region.
+	for _, id := range []string{"lease-07", "lease-08"} {
+		if _, err := st.RevokeLease(id); err != nil {
+			t.Fatalf("RevokeLease(%s): %v", id, err)
+		}
+	}
+	resp, body = apiCall(t, ts, http.MethodPost, "/v1/leases", map[string]any{
+		"userId": "u-01", "platform": "windows", "accountId": "acc-04",
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	regional := decodeBody[leaseCreateResult](t, body).Lease
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/"+regional.ID, map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
 }
 
 // TestScopedKeyRestrictedWriteUnknownTargetIsIndistinguishable pins the probe
-// rule on writes: an id that does not exist and an id owned by another tenant
-// answer the same 403 byte for byte, so a mutation cannot be used to learn
-// whether a lease, node or account exists. An admin token keeps its 404.
+// rule on writes: an id that does not exist and an id the caller may not act on
+// answer the same body byte for byte, so a mutation cannot be used to learn
+// whether a lease, node or account exists. A lease id is answered 404 (unknown
+// and another user's lease are the same); an account-shaped id is answered 403
+// scoped_key_restricted. An admin token keeps its 404.
 func TestScopedKeyRestrictedWriteUnknownTargetIsIndistinguishable(t *testing.T) {
 	ts, st := newTestServer(t)
 	key := restrictedWriteKey(t, ts, []string{"acc-01"}, nil)
@@ -916,32 +965,39 @@ func TestScopedKeyRestrictedWriteUnknownTargetIsIndistinguishable(t *testing.T) 
 		t.Fatalf("BeginOperation: busy=%+v err=%v", busy, err)
 	}
 
-	cases := []struct{ method, unknown, foreign string }{
-		{http.MethodDelete, "/v1/leases/lease-99", "/v1/leases/lease-03"},
-		{http.MethodPost, "/v1/leases/lease-99/actions/rotate", "/v1/leases/lease-03/actions/rotate"},
-		{http.MethodPost, "/v1/nodes/node-99/actions/drain", "/v1/nodes/node-04/actions/drain"},
-		{http.MethodPost, "/v1/nodes/node-99/actions/probe", "/v1/nodes/node-04/actions/probe"},
-		{http.MethodDelete, "/v1/accounts/acc-99", "/v1/accounts/acc-02"},
-		{http.MethodPatch, "/v1/accounts/acc-99", "/v1/accounts/acc-02"},
-		{http.MethodDelete, "/v1/operations/op-9999", "/v1/operations/" + queued.ID},
+	cases := []struct {
+		method         string
+		unknown, other string
+		status         int
+		reason         string
+	}{
+		{http.MethodDelete, "/v1/leases/lease-99", "/v1/leases/lease-03", http.StatusNotFound, ""},
+		{http.MethodPost, "/v1/leases/lease-99/actions/rotate", "/v1/leases/lease-03/actions/rotate", http.StatusNotFound, ""},
+		{http.MethodPost, "/v1/nodes/node-99/actions/drain", "/v1/nodes/node-04/actions/drain", http.StatusForbidden, ReasonScopedKeyRestricted},
+		{http.MethodPost, "/v1/nodes/node-99/actions/probe", "/v1/nodes/node-04/actions/probe", http.StatusForbidden, ReasonScopedKeyRestricted},
+		{http.MethodDelete, "/v1/accounts/acc-99", "/v1/accounts/acc-02", http.StatusForbidden, ReasonScopedKeyRestricted},
+		{http.MethodPatch, "/v1/accounts/acc-99", "/v1/accounts/acc-02", http.StatusForbidden, ReasonScopedKeyRestricted},
+		{http.MethodDelete, "/v1/operations/op-9999", "/v1/operations/" + queued.ID, http.StatusForbidden, ReasonScopedKeyRestricted},
 	}
 	for _, tc := range cases {
 		var body any
-		if tc.method == http.MethodDelete && strings.HasPrefix(tc.foreign, "/v1/leases/") {
+		if tc.method == http.MethodDelete && strings.HasPrefix(tc.other, "/v1/leases/") {
 			body = map[string]any{"confirm": true}
 		}
 		if tc.method == http.MethodPatch {
 			body = map[string]any{"label": "hijacked"}
 		}
 		respUnknown, unknownBody := scopedCall(t, ts, key.Secret, tc.method, tc.unknown, body)
-		requireStatus(t, respUnknown, http.StatusForbidden)
-		requireErrorReason(t, unknownBody, ReasonScopedKeyRestricted)
-		respForeign, foreignBody := scopedCall(t, ts, key.Secret, tc.method, tc.foreign, body)
-		requireStatus(t, respForeign, http.StatusForbidden)
-		requireErrorReason(t, foreignBody, ReasonScopedKeyRestricted)
-		if !bytes.Equal(unknownBody, foreignBody) {
+		requireStatus(t, respUnknown, tc.status)
+		respOther, otherBody := scopedCall(t, ts, key.Secret, tc.method, tc.other, body)
+		requireStatus(t, respOther, tc.status)
+		if tc.reason != "" {
+			requireErrorReason(t, unknownBody, tc.reason)
+			requireErrorReason(t, otherBody, tc.reason)
+		}
+		if !bytes.Equal(unknownBody, otherBody) {
 			t.Fatalf("%s %s and %s answer differently: %s vs %s",
-				tc.method, tc.unknown, tc.foreign, unknownBody, foreignBody)
+				tc.method, tc.unknown, tc.other, unknownBody, otherBody)
 		}
 	}
 	if operation, ok := st.Operation(queued.ID); !ok || operation.State != model.OperationQueued {
@@ -1002,30 +1058,27 @@ func TestScopedKeyRestrictedLeaseReplayIsRefused(t *testing.T) {
 	}
 }
 
-// TestScopedKeyUnrestrictedAndAdminWritesStillWork pins the compatibility side
-// of AJS-447: admin tokens, admin-scoped keys (even when they carry a list) and
-// unrestricted scoped keys keep writing across every account.
-func TestScopedKeyUnrestrictedAndAdminWritesStillWork(t *testing.T) {
-	ts, _ := newTestServer(t)
+// TestScopedKeyAdminWritesStillWork pins the compatibility side of AJS-448:
+// admin tokens and admin-scoped keys (even when they carry a list) keep writing
+// across every account, and an operator may still mutate another user's lease.
+// An unbounded non-admin key cannot be issued any more, so there is no
+// customer-side unrestricted write to preserve.
+func TestScopedKeyAdminWritesStillWork(t *testing.T) {
+	ts, st := newTestServer(t)
 
 	resp, _ := apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
-
-	open := restrictedWriteKey(t, ts, nil, nil)
-	resp, _ = scopedCall(t, ts, open.Secret, http.MethodPatch, "/v1/accounts/acc-02",
-		map[string]any{"label": "Field Lab (unrestricted)"})
-	requireStatus(t, resp, http.StatusOK)
-	resp, _ = scopedCall(t, ts, open.Secret, http.MethodDelete, "/v1/leases/lease-04", map[string]any{"confirm": true})
+	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-04", map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
-	resp, body := scopedCall(t, ts, open.Secret, http.MethodPost, "/v1/leases", map[string]any{
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/leases", map[string]any{
 		"userId": "u-02", "platform": "ios", "accountId": "acc-02",
 	})
 	requireStatus(t, resp, http.StatusCreated)
 	if created := decodeBody[leaseCreateResult](t, body); created.Lease.AccountID != "acc-02" {
-		t.Fatalf("unrestricted lease = %+v", created.Lease)
+		t.Fatalf("admin lease = %+v", created.Lease)
 	}
 	// Draining removes a serving slot, so it runs after the create.
-	resp, _ = scopedCall(t, ts, open.Secret, http.MethodPost, "/v1/nodes/node-05/actions/drain", nil)
+	resp, _ = apiCall(t, ts, http.MethodPost, "/v1/nodes/node-05/actions/drain", nil)
 	requireStatus(t, resp, http.StatusOK)
 
 	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, []string{"acc-01"}, nil)
@@ -1033,4 +1086,11 @@ func TestScopedKeyUnrestrictedAndAdminWritesStillWork(t *testing.T) {
 	requireStatus(t, resp, http.StatusNoContent)
 	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodPost, "/v1/nodes/node-06/actions/drain", nil)
 	requireStatus(t, resp, http.StatusOK)
+	// The admin grant is not narrowed by the list it carries.
+	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodPatch, "/v1/accounts/acc-02",
+		map[string]any{"label": "Field Lab (admin key)"})
+	requireStatus(t, resp, http.StatusOK)
+	if account, ok := st.Account("acc-02"); !ok || account.Label != "Field Lab (admin key)" {
+		t.Fatalf("admin-key patch = %+v (exists=%v)", account, ok)
+	}
 }

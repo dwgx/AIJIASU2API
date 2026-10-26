@@ -100,9 +100,10 @@ func TestScopedPlatformReadScopeMatrix(t *testing.T) {
 	// A neighbouring read scope must not leak onto the platform routes.
 	t.Run("catalog:read stays on the catalog routes", func(t *testing.T) {
 		created, _ := mustCreateScopedKey(t, ts, map[string]any{
-			"userId": "u-01",
-			"label":  "catalog reader",
-			"scopes": []string{"catalog:read"},
+			"userId":     "u-01",
+			"label":      "catalog reader",
+			"scopes":     []string{"catalog:read"},
+			"accountIds": []string{"acc-01"},
 		})
 		for _, route := range routes {
 			resp, body := scopedCall(t, ts, created.Secret, route.method, route.path, nil)

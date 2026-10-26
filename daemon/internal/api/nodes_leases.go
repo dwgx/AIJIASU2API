@@ -141,10 +141,23 @@ func (s *Server) handleProbeNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, node)
 }
 
+// handleListLeases lists active leases. A customer scoped key is bound to its
+// own subject: the list is filtered by lease.UserID == key.UserID before the
+// account grant, and a query naming another user is refused without revealing
+// whether that user holds a lease. Operator callers (admin token or admin-scope
+// key) keep the unfiltered list and the optional user_id filter.
 func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
 		userID = r.URL.Query().Get("userId")
+	}
+	if key, ok := customerKey(r); ok {
+		if userID != "" && userID != key.UserID {
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+				"scoped key is bound to its own userId; user_id must match it", nil)
+			return
+		}
+		userID = key.UserID
 	}
 	leases := s.store.Leases()
 	filtered := make([]model.Lease, 0, len(leases))
@@ -167,8 +180,37 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filtered[start:end])
 }
 
+// authorizeLeaseMutation resolves the lease a revoke or rotate addresses and
+// binds it to the caller before any side effect. Operator callers (admin token
+// or admin-scope key) keep the stored row and their existing contract. A
+// customer scoped key may only mutate its own subject: an unknown id and
+// another user's lease answer the same 404, so a mutation cannot probe for
+// lease ids, and a lease on an account outside the key's grant answers 403
+// before the store or the panel is touched. It reports whether the response was
+// written.
+func (s *Server) authorizeLeaseMutation(w http.ResponseWriter, r *http.Request, id string) (model.Lease, bool) {
+	lease, found := s.store.Lease(id)
+	key, customer := customerKey(r)
+	if !customer {
+		return lease, false
+	}
+	if !found || lease.UserID != key.UserID {
+		writeError(w, http.StatusNotFound, CodeNotFound, "lease not found")
+		return model.Lease{}, true
+	}
+	if !s.scopedKeyAllowsAccount(r, lease.AccountID) {
+		writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+			"scoped key is restricted to named accounts; the lease belongs to another account", nil)
+		return model.Lease{}, true
+	}
+	return lease, false
+}
+
 func (s *Server) handleRotateLease(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
+	if _, denied := s.authorizeLeaseMutation(w, r, id); denied {
+		return
+	}
 	if s.cfg.Panel != nil {
 		lease, err := s.cfg.Panel.RotateLease(r.Context(), id)
 		if err != nil {

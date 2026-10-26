@@ -2527,7 +2527,8 @@
         "tags": [
           "Leases"
         ],
-        "summary": "List leases, optionally for one user.",
+        "summary": "List leases. A non-admin scoped key sees only its own user's leases.",
+        "description": "A non-admin scoped key is bound to its own userId: the list is filtered by lease.userId == key.userId before the account grant, and a user_id/userId naming another user answers 403 with error.reason=scoped_key_restricted without revealing whether that user holds a lease. Admin tokens and admin-scope keys keep the unfiltered list and the optional user filter.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2548,6 +2549,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2635,6 +2639,7 @@
           "Leases"
         ],
         "summary": "Rotate a lease to a new egress IP and restart its TTL.",
+        "description": "A non-admin scoped key may only rotate a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2652,6 +2657,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2683,6 +2691,7 @@
           "Leases"
         ],
         "summary": "Revoke a lease and free its node.",
+        "description": "A non-admin scoped key may only revoke a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any panel or store side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted.",
         "x-implementation-phase": "P0",
         "requestBody": {
           "required": true,
@@ -2711,6 +2720,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -7541,7 +7553,7 @@
         }
       },
       "Forbidden": {
-        "description": "FORBIDDEN: the scoped key lacks the route scope, the account is outside its accountIds/regions, a portal request failed its origin, CSRF or tenant-status check, or an admin request failed the X-AJS-CSRF header or exact Origin allowlist check.",
+        "description": "FORBIDDEN: the scoped key lacks the route scope, the account is outside its accountIds/regions, a lease or user_id belongs to another user, the key predates the account-grant requirement and names no grant, a portal request failed its origin, CSRF or tenant-status check, or an admin request failed the X-AJS-CSRF header or exact Origin allowlist check.",
         "content": {
           "application/json": {
             "schema": {
@@ -7685,7 +7697,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Filter by user id. userId is accepted as an alias."
+        "description": "Filter by user id. userId is accepted as an alias. On /v1/leases a non-admin scoped key may only name its own user; another id answers 403 with error.reason=scoped_key_restricted without revealing whether that user holds a lease."
       },
       "EventSince": {
         "name": "since",
@@ -8503,16 +8515,18 @@
       },
       "CreateLeaseInput": {
         "type": "object",
+        "description": "A non-admin scoped key is bound to its own userId: an empty userId becomes the key's user, a different id is refused with 403 and error.reason=scoped_key_restricted before anything is allocated, and accountId is required and must name an account the key may use. An operator caller (admin token or admin-scope key) keeps the explicit userId contract.",
         "properties": {
           "userId": {
-            "type": "string"
+            "type": "string",
+            "description": "Lease owner. Required for an operator caller; a non-admin scoped key fills it with its own user and refuses any other id."
           },
           "platform": {
             "$ref": "#/components/schemas/Platform"
           },
           "accountId": {
             "type": "string",
-            "description": "Optional account pin. It must be active and match platform."
+            "description": "Optional account pin for an operator caller. It must be active and match platform. Required for a non-admin scoped key, and it must be an account the key's accountIds/regions name."
           },
           "ttlSeconds": {
             "type": "integer",
@@ -12676,14 +12690,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Empty means every account. A non-empty list narrows both reads and writes to these accounts; a mutation of any other account is refused with 403 and error.reason=scoped_key_restricted."
+            "description": "Empty means not narrowed by account. A non-admin key whose scopes include an accounts, catalog or leases grant must name at least one accountIds or regions entry at creation; a key with only global scopes may leave both empty. A non-empty list narrows both reads and writes to these accounts; a mutation of any other account is refused with 403 and error.reason=scoped_key_restricted."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Empty means every region. A non-empty list narrows both reads and writes to accounts with an overlapping region."
+            "description": "Empty means not narrowed by region. A non-admin key whose scopes include an accounts, catalog or leases grant must name at least one accountIds or regions entry at creation. A non-empty list narrows both reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",
@@ -12746,7 +12760,7 @@
       },
       "ScopedKeyCreateRequest": {
         "type": "object",
-        "description": "accountIds and regions narrow the key to the named accounts on every account-scoped route, reads and writes alike: the same list that filters GET /v1/accounts also refuses PATCH/DELETE /v1/accounts/{id}, the login/logout/connect/disconnect/reconnect/select-node actions, lease create/rotate/revoke, node drain/undrain/probe and operation cancel on any account outside it, with 403 and error.reason=scoped_key_restricted. POST /v1/leases must name an allowed accountId; a restricted key that omits it is refused because the store would otherwise pick any free account. A key carrying the admin scope ignores both lists.",
+        "description": "The key is bound to userId, which is the lease owner: GET /v1/leases returns only that user's leases, POST /v1/leases fills an empty userId with it and refuses a different one, and lease revoke/rotate answer 404 for another user's lease. accountIds and regions narrow the key to the named accounts on every account-scoped route, reads and writes alike: the same list that filters GET /v1/accounts also refuses PATCH/DELETE /v1/accounts/{id}, the login/logout/connect/disconnect/reconnect/select-node actions, lease create/rotate/revoke, node drain/undrain/probe and operation cancel on any account outside it, with 403 and error.reason=scoped_key_restricted. A non-admin key carrying an accounts, catalog or leases scope must name at least one accountIds or regions entry; without one the create answers 400 INVALID_ARGUMENT. POST /v1/leases must name an allowed accountId; a restricted key that omits it is refused because the store would otherwise pick any free account. A key carrying the admin scope ignores both lists and may leave them empty. A key minted before the grant rule with an accounts, catalog or leases scope and no grant fails closed with 403 and error.reason=scoped_key_restricted on every non-admin route until it is reissued.",
         "properties": {
           "userId": {
             "type": "string"
@@ -12765,14 +12779,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Empty means every account. A non-empty list narrows reads and writes."
+            "description": "Empty means not narrowed by account. A non-admin key with an accounts, catalog or leases scope must name at least one accountIds or regions entry."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Empty means every region. A non-empty list narrows reads and writes to accounts with an overlapping region."
+            "description": "Empty means not narrowed by region. A non-admin key with an accounts, catalog or leases scope must name at least one accountIds or regions entry. A non-empty list narrows reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",

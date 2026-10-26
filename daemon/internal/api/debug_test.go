@@ -126,6 +126,7 @@ func TestDebugTraceScopeMatrix(t *testing.T) {
 
 	catalogRead, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId": "u-01", "label": "debug reader", "scopes": []string{"catalog:read"},
+		"accountIds": []string{"acc-01"},
 	})
 	resp, body := scopedCall(t, ts, catalogRead.Secret, http.MethodGet, "/v1/debug/trace", nil)
 	requireStatus(t, resp, http.StatusOK)
@@ -153,6 +154,7 @@ func TestDebugTraceScopeMatrix(t *testing.T) {
 	for _, scopes := range [][]string{{"catalog:write"}, {"accounts:read"}, {"events:read"}, {"leases:read"}} {
 		key, _ := mustCreateScopedKey(t, ts, map[string]any{
 			"userId": "u-01", "label": "wrong scope", "scopes": scopes,
+			"accountIds": []string{"acc-01"},
 		})
 		resp, body := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/debug/trace", nil)
 		requireStatus(t, resp, http.StatusForbidden)

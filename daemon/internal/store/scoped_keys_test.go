@@ -99,6 +99,14 @@ func TestScopedKeyValidation(t *testing.T) {
 		{"malformed expiry", func(in *model.ScopedKeyCreateRequest) { in.ExpiresAt = "tomorrow" }, ErrInvalid},
 		{"past expiry", func(in *model.ScopedKeyCreateRequest) { in.ExpiresAt = past }, ErrInvalid},
 		{"negative rate limit", func(in *model.ScopedKeyCreateRequest) { negative := -1; in.RateLimitPerMin = &negative }, ErrInvalid},
+		{"accounts scope without grant", func(in *model.ScopedKeyCreateRequest) {
+			in.AccountIDs, in.Regions = nil, nil
+			in.Scopes = []model.Scope{model.ScopeAccountsRead}
+		}, ErrInvalid},
+		{"leases scope with empty grant lists", func(in *model.ScopedKeyCreateRequest) {
+			in.AccountIDs, in.Regions = []string{}, []string{}
+			in.Scopes = []model.Scope{model.ScopeLeasesWrite}
+		}, ErrInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,6 +119,56 @@ func TestScopedKeyValidation(t *testing.T) {
 	}
 	if got := len(st.ScopedKeys()); got != 0 {
 		t.Fatalf("invalid creates left %d keys", got)
+	}
+}
+
+// TestScopedKeyGrantRequirement pins AJS-448's creation rule: an account-bound
+// scope needs at least one account or region grant, while a global-only or
+// admin key keeps the empty-list meaning "not narrowed by account".
+func TestScopedKeyGrantRequirement(t *testing.T) {
+	st := New()
+
+	for _, scopes := range [][]model.Scope{
+		{model.ScopeAccountsRead}, {model.ScopeCatalogRead}, {model.ScopeLeasesRead},
+		{model.ScopeLeasesWrite}, {model.ScopeUsageRead, model.ScopeCatalogWrite},
+	} {
+		in := model.ScopedKeyCreateRequest{UserID: "u-01", Label: "unbounded", Scopes: scopes}
+		if _, _, err := st.CreateScopedKey(in); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("CreateScopedKey(%v) error = %v, want ErrInvalid", scopes, err)
+		}
+	}
+
+	for _, scopes := range [][]model.Scope{
+		{model.ScopeUsageRead, model.ScopeRequestsRead, model.ScopeEventsRead},
+		{model.ScopeAdmin},
+	} {
+		in := model.ScopedKeyCreateRequest{UserID: "u-01", Label: "global", Scopes: scopes}
+		key, _, err := st.CreateScopedKey(in)
+		if err != nil {
+			t.Fatalf("CreateScopedKey(%v): %v", scopes, err)
+		}
+		if key.RequiresAccountGrant() || key.HasAccountGrant() {
+			t.Fatalf("global key %v = %+v, want no grant requirement", scopes, key)
+		}
+	}
+
+	// A single region satisfies the rule, and the predicate then matches only
+	// the accounts that overlap it.
+	regional, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: "u-01", Label: "regional", Scopes: []model.Scope{model.ScopeLeasesRead},
+		Regions: []string{"cn-zj"},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey regional: %v", err)
+	}
+	if !regional.RequiresAccountGrant() || !regional.HasAccountGrant() {
+		t.Fatalf("regional key = %+v, want an account grant", regional)
+	}
+	if !regional.AllowsAccount(model.Account{ID: "acc-01", Regions: []string{"cn-zj", "hk"}}) {
+		t.Fatal("regional key does not allow an account with an overlapping region")
+	}
+	if regional.AllowsAccount(model.Account{ID: "acc-02", Regions: []string{"jp-tyo"}}) {
+		t.Fatal("regional key allows an account without an overlapping region")
 	}
 }
 

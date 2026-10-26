@@ -561,6 +561,7 @@ func TestJournalPersistedMutationsCommitExactlyOnce(t *testing.T) {
 	}
 	scopedKey, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
 		UserID: fixture.user.ID, Label: "wire-key", Scopes: []model.Scope{model.ScopeAccountsRead},
+		AccountIDs: []string{"acc-01"},
 	}, "operator")
 	if err != nil {
 		t.Fatalf("CreateScopedKey: %v", err)
@@ -691,6 +692,7 @@ func TestJournalPersistedStateSurvivesReplay(t *testing.T) {
 	}
 	scopedKey, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
 		UserID: fixture.user.ID, Label: "replay-key", Scopes: []model.Scope{model.ScopeAccountsRead},
+		AccountIDs: []string{"acc-01"},
 	}, "operator")
 	if err != nil {
 		t.Fatalf("CreateScopedKey: %v", err)
@@ -996,12 +998,14 @@ func TestScopedKeySameMinuteThrottleRefusesPoisonedStore(t *testing.T) {
 	}
 	first, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
 		UserID: user.ID, Label: "wire-a", Scopes: []model.Scope{model.ScopeAccountsRead},
+		AccountIDs: []string{"acc-01"},
 	})
 	if err != nil {
 		t.Fatalf("CreateScopedKey first: %v", err)
 	}
 	second, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
 		UserID: user.ID, Label: "wire-b", Scopes: []model.Scope{model.ScopeAccountsRead},
+		AccountIDs: []string{"acc-01"},
 	})
 	if err != nil {
 		t.Fatalf("CreateScopedKey second: %v", err)

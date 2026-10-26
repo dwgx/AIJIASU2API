@@ -835,9 +835,9 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		if !s.allowScopedKeyRequest(w, key) {
 			return
 		}
-		if s.scopedKeyDeniesRequest(key, r) {
+		if message := s.scopedKeyDenial(key, r); message != "" {
 			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
-				"scoped key is not allowed to use this account", nil)
+				message, nil)
 			return
 		}
 		if err := s.store.MarkScopedKeyUsed(key.ID); err != nil {

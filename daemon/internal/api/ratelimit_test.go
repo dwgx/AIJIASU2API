@@ -65,6 +65,7 @@ func TestScopedKeyRateLimitHeadersAnd429(t *testing.T) {
 		"userId":          "u-01",
 		"label":           "two per minute",
 		"scopes":          []string{"accounts:read"},
+		"accountIds":      []string{"acc-01"},
 		"rateLimitPerMin": 2,
 	})
 
@@ -97,9 +98,10 @@ func TestScopedKeyRateLimitHeadersOnForbidden(t *testing.T) {
 	clock := newRateLimitClock()
 	ts, _ := newRateLimitTestServer(t, clock)
 	created, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": "u-01",
-		"label":  "accounts reader",
-		"scopes": []string{"accounts:read"},
+		"userId":     "u-01",
+		"label":      "accounts reader",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
 	})
 
 	resp, body := scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/settings", nil)
@@ -116,12 +118,14 @@ func TestScopedKeyRateLimitIsPerKey(t *testing.T) {
 		"userId":          "u-01",
 		"label":           "first",
 		"scopes":          []string{"accounts:read"},
+		"accountIds":      []string{"acc-01"},
 		"rateLimitPerMin": 1,
 	})
 	second, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId":          "u-01",
 		"label":           "second",
 		"scopes":          []string{"accounts:read"},
+		"accountIds":      []string{"acc-01"},
 		"rateLimitPerMin": 1,
 	})
 
@@ -159,6 +163,7 @@ func TestScopedKeyRateLimitZeroIsUnlimited(t *testing.T) {
 		"userId":          "u-01",
 		"label":           "unlimited",
 		"scopes":          []string{"accounts:read"},
+		"accountIds":      []string{"acc-01"},
 		"rateLimitPerMin": 0,
 	})
 	if created.Key.RateLimitPerMin != 0 {
@@ -183,6 +188,7 @@ func TestRevokedScopedKeyAnswers401BeforeRateLimit(t *testing.T) {
 		"userId":          "u-01",
 		"label":           "revoked",
 		"scopes":          []string{"accounts:read"},
+		"accountIds":      []string{"acc-01"},
 		"rateLimitPerMin": 1,
 	})
 	resp, _ := apiCall(t, ts, http.MethodDelete, "/v1/scoped-keys/"+created.Key.ID, nil)
@@ -216,9 +222,10 @@ func TestScopedKeyRateLimitCreateDefaultsAndValidation(t *testing.T) {
 	ts, _ := newRateLimitTestServer(t, clock)
 
 	defaulted, _ := mustCreateScopedKey(t, ts, map[string]any{
-		"userId": "u-01",
-		"label":  "default budget",
-		"scopes": []string{"accounts:read"},
+		"userId":     "u-01",
+		"label":      "default budget",
+		"scopes":     []string{"accounts:read"},
+		"accountIds": []string{"acc-01"},
 	})
 	if defaulted.Key.RateLimitPerMin != model.DefaultScopedKeyRateLimitPerMin {
 		t.Fatalf("default rateLimitPerMin = %d, want %d", defaulted.Key.RateLimitPerMin, model.DefaultScopedKeyRateLimitPerMin)

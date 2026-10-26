@@ -69,7 +69,7 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 
 	// A key with the wrong scope is refused by the router before the handler
 	// runs, and the reason names the missing grant.
-	scopeless := mustIssueScopedKey(t, ts, []string{"accounts:read"}, nil, nil)
+	scopeless := mustIssueScopedKey(t, ts, []string{"accounts:read"}, []string{"acc-01"}, nil)
 	for _, path := range globalReads {
 		resp, body := scopedCall(t, ts, scopeless.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)

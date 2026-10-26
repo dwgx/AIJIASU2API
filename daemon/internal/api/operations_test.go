@@ -832,7 +832,7 @@ func TestOperationsListFiltersAndScopedKeys(t *testing.T) {
 
 	accountsOnly, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId": user.ID, "label": "accounts only",
-		"scopes": []string{"accounts:read"},
+		"scopes": []string{"accounts:read"}, "accountIds": []string{account.ID},
 	})
 	resp, _ = scopedCall(t, ts, accountsOnly.Secret, http.MethodGet, "/v1/operations", nil)
 	requireStatus(t, resp, http.StatusForbidden)
