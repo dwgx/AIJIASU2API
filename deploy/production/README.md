@@ -22,11 +22,13 @@ AJS-412 renderer proof creates root-owned `0640`/`0600` artifacts, and the
 gate switches to the nginx worker identity to prove that identity can read
 them. A non-root production invocation exits 1 before any checks, prints the
 exact `sudo -E` command, and never prints `check: PASS`. Production also
-requires a real host `nginx -t`, `openssl`, `systemd-analyze`, `nft`, and a
-daemon binary for the `/readyz` proof (`AJS_ACCOUNTD_BIN`, `ajs-accountd` on
-`PATH`, `daemon/ajs-accountd`, or `go build`); a missing required tool is a
-`FAIL`, not a `SKIP`. For a workstation without those tools, or for a non-root
-static run, use the explicitly non-production mode:
+requires a real host `nginx -t`, `openssl`, `systemd-analyze`, `nft`, a
+Chromium-family browser for the CSP browser boot (`AJS_CHROMIUM_BIN`, or
+chromium/chrome on `PATH`), and a daemon binary for the `/readyz` proof
+(`AJS_ACCOUNTD_BIN`, `ajs-accountd` on `PATH`, `daemon/ajs-accountd`, or
+`go build`); a missing required tool is a `FAIL`, not a `SKIP`. For a
+workstation without those tools, or for a non-root static run, use the
+explicitly non-production mode:
 
 ```bash
 bash deploy/production/check.sh --dev
@@ -37,7 +39,9 @@ bash deploy/production/check.sh --dev
 a generated self-signed certificate and a dummy token, pins the nginx PID and
 all temp paths inside that directory, runs a real `nginx -t` as the invoking
 user, starts that staged config to prove unknown Hosts are refused on :80/:443
-and the portal redirect is canonical, validates the YAML inventory, scans the
+and the portal redirect is canonical, asserts the Content-Security-Policy on
+the staged responses and boots `/portal/login` in headless Chromium against a
+loopback fixture of the same vhosts, validates the YAML inventory, scans the
 kit for committed secrets, starts a daemon binary to prove `/readyz` fails on
 an unwritable state directory, verifies the systemd unit, and compares the
 production firewall rule with `deploy/nftables/ajs-panel.nft`.
@@ -48,11 +52,11 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 |---|---|
 | `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the site configs |
 | `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
-| `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, portal-only routes |
+| `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, CSP, portal-only routes |
 | `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, per-operator Basic auth, proxy-injected bearer |
 | `nginx/snippets/ajs-tls.conf` | shared TLS 1.2+/1.3 policy |
 | `nginx/snippets/ajs-proxy-common.conf` | `X-Forwarded-For` overwrite + trusted-proxy note |
-| `nginx/snippets/ajs-security-headers.conf` | HSTS and the other response headers |
+| `nginx/snippets/ajs-security-headers.conf` | HSTS, the Content-Security-Policy and the other response headers |
 | `nginx/snippets/ajs-admin-token.conf.template` | template for the root-only bearer snippet |
 | `nginx/snippets/ajs-admin-operator.conf` | forwards `$remote_user` as `X-AJS-Operator` to the daemon |
 | `systemd/ajs-accountd.service` | hardened unit (`ProtectSystem=strict`, empty capability set, syscall filter) |
@@ -65,6 +69,7 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 | `admin-operators.example` | template for `username:role:token:password` root-only inventory |
 | `inventory.example.yml` | non-secret deployment inputs, validated by `check.sh` |
 | `check.sh` | the release-gate check |
+| `csp-smoke.sh` | headless-browser CSP smoke helper used by the gate; never starts nginx |
 
 ## Owner inputs
 
@@ -495,6 +500,72 @@ The nginx zone is intentionally slightly looser so the daemon's JSON error is
 the authority for portal clients. The admin zone protects the single bearer
 from brute-force/accidental loops.
 
+### Content-Security-Policy
+
+`nginx/snippets/ajs-security-headers.conf` carries exactly one CSP header, and
+it is the only CSP header in the kit. Two CSP headers intersect, so a stale
+duplicate would silently break the bundle; never add a second one.
+
+```text
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+It is one line in the snippet and is emitted with `always`, so it is also
+present on nginx-generated `401`/`404`/`502` responses.
+
+- `script-src 'self'` — `dashboard/index.html` loads one external module and
+  has no inline script, so inline script and `eval` stay forbidden. Never add
+  `'unsafe-inline'`, `'unsafe-eval'` or a CDN origin to `script-src`.
+- `style-src 'self' 'unsafe-inline'` is the one deliberate exception. The
+  existing React components pass `style={{ ... }}` props
+  (`dashboard/src/components/Sidebar.tsx` and the other pages), which render as
+  `style` attributes and are refused by a strict `style-src`. It is a
+  style-only allowance; it does not permit inline script, and the browser gate
+  below fails if Chrome refuses either an inline style or an external module.
+- `img-src 'self' data:` keeps images same-origin while allowing the data-URI
+  marks the bundle uses; `connect-src 'self'` keeps every XHR and the SSE
+  stream same-origin.
+- `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'` and
+  `form-action 'self'` close plugin, `<base>`, framing and cross-origin form
+  targets; `default-src 'self'` is the fallback for everything not listed.
+- No directive names a remote origin and there is no wildcard, so the policy
+  cannot be widened by a stray hostname.
+
+Coverage is structural: the snippet is included at server level in all three
+vhosts and in every location that declares its own `add_header`, because nginx
+drops the inherited header set as soon as a location adds one. The portal's
+HTTP redirect server includes it too (HSTS is ignored over plain HTTP and ACME
+clients ignore headers, so it is inert there, but no response path can then
+lose the policy). `ajs-default.conf` serves no content — it answers only `444`
+(connection closed before any response) and `421` — and carries the same
+include so its `421` is not the one response without a policy. `check.sh`
+enforces all of that, then asserts the exact policy on the staged responses:
+portal HTML, portal assets, the portal deep link and 404, admin HTML, the admin
+`401`, an admin API error (`502` from an upstream pinned to a closed port), and
+the default-deny `421`; it also proves an unknown Host is closed on the
+fixture's HTTP port.
+
+The browser gate is the last step. `check.sh` starts the shipped vhosts on
+unprivileged loopback ports with a disposable document root and runs
+`csp-smoke.sh`, which drives headless Chromium
+(`--dump-dom --virtual-time-budget=5000`) at
+`https://panel.example.com:<port>/portal/login`. The fixture's login form is
+rendered by an external module, so a blocked script is a missing marker, and
+any `Refused to …`/`violates the following Content Security Policy` console
+line fails the gate. `csp-smoke.sh` never starts or reloads nginx, adds no npm
+dependency, requires `--resolve` to a `127.x` loopback address with the URL
+naming that same fixture host, and pins its certificate exception to the
+fixture certificate's SPKI (`--cert`, forwarded as
+`--ignore-certificate-errors-spki-list`), so a real origin can never be
+trusted; the unpinned loopback fallback exists only for a caller that omits
+`--cert` and can be disabled with `AJS_CSP_STRICT_TLS=1`. It exits `0`
+(rendered), `1` (broken page, CSP refusal, or a browser that could not reach
+the fixture) or `3` (no usable browser: absent or unable to start). Without a
+browser, dev mode reports an explicit `SKIP` and never claims a boot;
+production mode turns that skip into a required `FAIL`.
+Set `AJS_CHROMIUM_BIN` when chromium/chrome is not on `PATH` or in the usual
+absolute locations.
+
 ## Operations
 
 ```bash
@@ -587,16 +658,34 @@ state directory.
 8. static nginx assertions: portal terminal 404, no generic `/v1/` proxy on
    the portal origin, admin token include, allow/deny, default-deny `444`/`421`,
    canonical redirect, `/readyz` proxy, HSTS, rate-limit zones,
-   `X-Forwarded-For $remote_addr`;
-9. token-free bundle assertions on `build-bundles.sh`, the committed
-   `dashboard/package-lock.json`, and the `ajs-build.json` live/mock manifest;
-10. `systemd-analyze verify` plus the hardening directives;
-11. the production firewall rule exactly matching `deploy/nftables/ajs-panel.nft`
+   `X-Forwarded-For $remote_addr`, and the CSP set: exactly one CSP header
+   directive anywhere in the kit (case-insensitive, including two directives on
+   one line), the exact acceptance policy on the snippet, `script-src 'self'`
+   with no `unsafe-*`, the documented `style-src` exception, no remote or
+   wildcard origin, no other snippet adding headers, the policy reaching every
+   server and location of all three vhosts (a duplicate include is a failure),
+   and the named portal/admin response paths; the default-deny vhost must stay
+   content-free (no root/alias/index/try_files/proxy_* and only `444`/`421`);
+9. the CSP runtime fixture: the shipped vhosts staged on `127.0.0.1` ephemeral
+   ports with a disposable document root and an upstream pinned to a closed
+   port, asserting exactly one CSP header with the exact policy on portal HTML,
+   portal assets, the portal SPA deep link, the portal `404`, admin HTML, the
+   admin `401`, the admin `502` and the default-deny `421`, plus a closed
+   connection for an unknown Host on the fixture's HTTP port; then a
+   headless-browser boot of `https://panel.example.com:<port>/portal/login`
+   through `csp-smoke.sh`, which requires a loopback `--resolve` mapping, the
+   rendered login form (an external module has to execute) and fails on any CSP
+   `Refused to …` console line or unreachable fixture. A missing browser is a
+   dev `SKIP` and a production `FAIL`;
+10. token-free bundle assertions on `build-bundles.sh`, the committed
+    `dashboard/package-lock.json`, and the `ajs-build.json` live/mock manifest;
+11. `systemd-analyze verify` plus the hardening directives;
+12. the production firewall rule exactly matching `deploy/nftables/ajs-panel.nft`
     and `nft -c` (direct, `unshare -Urn`, or `sudo -n` fallback);
-12. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
+13. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
     `AJS_TRUSTED_PROXIES`, `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, `X-AJS-Operator`,
     `render-admin-htpasswd`, `admin-operators`, DNS, TLS);
-13. the AJS-412 production renderer acceptance: a valid inventory produces
+14. the AJS-412 production renderer acceptance: a valid inventory produces
     separate Basic/bearer/hash artifacts with the documented ownership and
     modes (`root:<nginx group>` `0640` htpasswd, `root:root` `0600` bearer
     map, `root:<daemon group>` `0640` hash file), the unit's own daemon
@@ -615,6 +704,45 @@ to a late required-skip failure. `--dev` reports absent tools and the root-only
 ownership proof as `SKIP` and ends with `check: DEV-PASS`, never `check: PASS`.
 A missing YAML parser is always a failure because YAML validation is a gate
 requirement.
+
+## Recorded verification (2026-10-27)
+
+- **WSL2 Ubuntu development host, nginx 1.24.0 (Ubuntu), Google Chrome
+  154.0.8037.57:** `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS (121 checks, 1 skipped; not a production gate)`. The only
+  skip is the root-only AJS-412 ownership proof. The CSP gate ran end to end:
+  exactly one CSP header directive anywhere in the kit, the exact acceptance
+  policy with `always`, `script-src 'self'`, the documented `style-src`
+  exception, no remote or wildcard origin, no other snippet adding headers,
+  coverage of all 25 locations and all three server blocks, the named response
+  paths, and a content-free default-deny vhost. The runtime fixture staged the
+  shipped vhosts on `127.0.0.1` ephemeral ports with the upstream pinned to a
+  closed port, and observed exactly one exact policy on portal HTML (`200`),
+  the portal asset (`200`), `/portal/login` (`200`), the portal `404`, admin
+  HTML (`200`), the admin `401`, the admin `502` and the default-deny `421`,
+  with the unknown-Host HTTP probe closed (`000`). Headless Chrome then
+  rendered the fixture login form (`id="ajs-portal-login"`) with no CSP
+  refusal.
+- **CSP helper controls (manual, not part of the gate):** an inline script
+  under `script-src 'self'` exited `1` quoting Chrome's `Executing inline
+  script violates the following Content Security Policy directive`; the same
+  page with `'unsafe-inline'` exited `0`; a loopback URL with nothing listening
+  exited `1` (`net::ERR_CONNECTION_REFUSED`), not `3`; and an executable that
+  cannot start exited `3`. Duplicate-detection controls also failed closed: a
+  canonical plus an uppercase CSP on one line counted three directives
+  statically and two header values at runtime, and a synthetic default vhost
+  with `location = /healthz { return 200 "ok"; }` was rejected by the
+  content-free guard.
+- **Defect found by the gate:** `location /portal/` used
+  `try_files $uri /index.html`, whose last argument is an internal redirect to
+  `/index.html`; the portal's terminal `location /` then answered `404`, so
+  every portal deep link (`/portal/login`, `/portal/signup`, ...) was broken
+  even though the router and this README document them. The fallback is now
+  the file test `try_files $uri /index.html =404;`.
+- **Still required before release:** `sudo -E bash deploy/production/check.sh`
+  on the release host with `AJS_CHROMIUM_BIN` (or chromium/chrome on `PATH`).
+  Production mode treats a missing browser as a required `FAIL`; this
+  workstation run is a dev result only.
 
 ## Recorded verification (2026-10-26)
 
