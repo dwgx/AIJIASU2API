@@ -60,9 +60,10 @@ type leaseRevokeRequest struct {
 }
 
 // leaseSlotWarning returns the honest display-capacity warning for a lease on
-// an account whose effective slot capacity is above one. The store admits
-// exactly one lease; this only tells the caller that only the first FV
-// session can actually be served until multi-session is implemented.
+// an account whose effective slot capacity is above one. Admission counts
+// verified, listener-bound serving slots; the live account has UseCount=1 and
+// two-slot coexistence is unproven, so the warning is retained for API
+// compatibility.
 func (s *Server) leaseSlotWarning(accountID string) string {
 	acct, ok := s.store.Account(accountID)
 	if !ok {

@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 473 tests in 52 files.
+- Tests: Vitest + React Testing Library + jsdom, 480 tests in 54 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -76,7 +76,7 @@ npm ci             # installs exactly the committed package-lock.json
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/ (mock mode unless VITE_USE_MOCK=false)
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 473 tests in 52 files
+npm test           # Vitest, 480 tests in 54 files
 npm run typecheck  # tsc -b
 ```
 
@@ -539,10 +539,11 @@ and seed rows — so the numbers reset with the request log's 10 000-row retenti
   (advisory)**, and the account table adds a monthly meter (`trafficBudgetBytes` against
   `usedBytes`) with the remaining headroom. `usedBytes` is the daemon's durable current-month
   counter, not a sum over the retained rows, so evicting old request rows never lowers the meter
-  or renews a budget. User quotas are advisory under the default no-auth
-  loopback gate, because such a flow carries no user identity; with `AJS_GATE_AUTH=userpass` the
-  gate authenticates the panel user, refuses a flow at the user's monthly quota, and the metered
-  row advances the same per-user total.
+  or renews a budget. The gate defaults to `AJS_GATE_AUTH=userpass` (RFC 1929, loopback bind), so
+  a flow carries a panel user identity; user quotas are enforced at the gate, which refuses a flow
+  at the user's monthly quota, and the metered row advances the same per-user total. Only the
+  explicit `AJS_GATE_AUTH=loopback` opt-in makes user quotas advisory, because that wire carries no
+  user identity.
 - **Chart and tables.** A per-day bar/area chart fills missing days with zeros across the returned
   `from`–`to` window; the account and user tables are sortable and the user rows show the monthly
   quota meter (`quotaBytesMonth` against `usedBytes`, labelled advisory as above); a top-targets
@@ -895,7 +896,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 473 Vitest tests in 52 files (65 at the 2026-10-23 record; see
+- 480 Vitest tests in 54 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -1296,11 +1297,11 @@ render as `<article role="listitem">` inside
 
 The 同时连接数 metric is the vendor's purchased `useCount`, not an APC setting. The daemon
 reports `effectiveSlots = min(useCount, AJS_ACCOUNT_SLOTS, 8)` as display capacity, with
-`AJS_ACCOUNT_SLOTS` defaulting to `1`; a card above one shows the `Multi-slot pending` note
-because APC still serves only one FV session per account. Lease admission is hard-capped at one
-until the multi-slot runtime lands, so a second lease on the same account is refused as 429
-`account_slots_exhausted` even when display capacity is above one, and the first lease returns
-`warning: multi_session_unimplemented`.
+`AJS_ACCOUNT_SLOTS` defaulting to `1`. Lease admission counts verified, listener-bound serving
+slots, so a second lease on the same account is admitted only when a second slot is live;
+otherwise it is refused as 429 `account_slots_exhausted`. The live account has `useCount=1`, so
+`effectiveSlots=1`; a card above one still shows the `Multi-slot pending` note and its lease
+carries `warning: multi_session_unimplemented` until live two-slot coexistence is proven.
 
 The grid is `repeat(auto-fill, minmax(280px, 1fr))` with a 12 px gap and collapses to one column
 below 760 px; card actions wrap and the card body never forces horizontal scroll. Selected cards get

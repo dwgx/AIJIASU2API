@@ -10,13 +10,13 @@ import (
 )
 
 // MaxServiceSlots is the design ceiling on independently operated slots per
-// account once the multi-slot runtime lands. The vendor's UseCount may be as
-// high as 2000, but the daemon will never serve more than eight concurrent FV
-// sessions for one account (DESIGN-MULTISLOT; MULTISLOT-PLAN §1).
+// account. The vendor's UseCount may be as high as 2000, but the daemon serves
+// at most eight concurrent FV sessions for one account (DESIGN-MULTISLOT;
+// MULTISLOT-PLAN §1).
 //
 // This file is step 1 of MULTISLOT-PLAN: it only models and persists slots.
-// It opens no session and starts no gate, so the runtime's current one-gate
-// invariant is unchanged. Slot-aware session start is a later step.
+// It opens no session and starts no gate; slot-aware session start lives in the
+// runtime.
 const MaxServiceSlots = 8
 
 // maxServiceSlots is the package-local spelling used by tests and display

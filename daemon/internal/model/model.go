@@ -109,8 +109,8 @@ type Account struct {
 	UseCount int `json:"useCount"`
 	// EffectiveSlots is the display capacity derived for API responses from
 	// UseCount, AJS_ACCOUNT_SLOTS and MaxServiceSlots (min, default 1). It is
-	// never persisted and stays zero on store rows; lease admission is
-	// hard-capped at one until the multi-slot runtime exists.
+	// never persisted and stays zero on store rows; lease admission counts
+	// verified, listener-bound serving slots instead.
 	EffectiveSlots int `json:"effectiveSlots,omitempty"`
 	// Slots is the derived per-account slot view for API responses. It is
 	// never persisted; cloneAccount clears it so a state snapshot cannot

@@ -2077,15 +2077,25 @@ commands: neither an order-create response nor a checkout redirect is evidence o
 - **易支付 (epay).** `POST /v1/portal/orders/{id}/checkout` returns `{payUrl}` for an own
   `awaiting_payment` order: `pid`, `type=alipay|wxpay`, `out_trade_no`, `money` (two decimals),
   `name` (the plan name), `sign_type=MD5` and, when configured, `notify_url`/`return_url` are
-  signed with `md5(canonical-sorted-querystring + KEY)`. A checkout records provider intent only;
-  it never settles. Two deployment modes share the adapter: **public callback** sets
-  `AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL` (or derives them from `AJS_TENANT_ORIGIN`) so the
-  gateway can send the signed notify (GET query parameters or a POST form), while **poll-only** leaves both empty, checkout signs
-  without them, and the 60-second query reconciler settles pending orders. The second
+  signed with `md5(canonical-sorted-querystring + KEY)`. `return_url` is cleaned before signing:
+  query and fragment are stripped and the value must be an absolute http(s) URL, because the
+  canonical string is unescaped `key=value` pairs and a client-supplied query could otherwise be
+  signed into the notify vocabulary. A configured `AJS_EPAY_RETURN_URL` with a stale query is
+  normalized at startup instead of disabling the adapter; only a non-absolute or non-http(s)
+  value stays fatal. A checkout records provider intent only; it never settles. Two deployment
+  modes share the adapter: **public callback** sets `AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL`
+  (or derives them from `AJS_TENANT_ORIGIN`) so the gateway can send the signed notify (GET query
+  parameters or a POST form), while **poll-only** leaves both empty, checkout signs without them,
+  and the 60-second query reconciler settles pending orders. The second
   unauthenticated route, `GET`/`POST /v1/payments/epay/notify`, verifies the MD5 signature, `pid`,
   `trade_status=TRADE_SUCCESS` and `money ==` the immutable snapshot before
-  applying the same store settlement path, keyed by `trade_no` for idempotency. It answers the
-  plain-text protocol (`success` only for accepted/duplicate, otherwise `fail`). A 60-second,
+  applying the same store settlement path, keyed by `trade_no` for idempotency. Once the signature
+  verifies, only the documented notify vocabulary is accepted — `pid`, `trade_no`, `out_trade_no`,
+  `api_trade_no`, `type`, `trade_status`, `addtime`, `endtime`, `name`, `money`, `param`, `buyer`,
+  `timestamp`, `sign`, `sign_type` — and any other key (`notify_url`, `return_url`, a checkout-only
+  field or a case variant) is rejected before a single value is trusted, because checkout signs
+  overlapping fields with the same merchant key. It answers the plain-text protocol (`success`
+  only for accepted/duplicate, otherwise `fail`). A 60-second,
   ±10%-jittered poller queries `api.php?act=order` for pending epay orders, settles
   `status=1` (or `TRADE_SUCCESS`) rows and audits `epay.reconcile`; it is bounded to 50 orders per pass and starts
   only when `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID` and `AJS_EPAY_KEY` are all set. The merchant key,
@@ -2750,9 +2760,10 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (110 paths, 136 operations,
-  183 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
-  today, `P1` marks the proposed next-phase interfaces. `dashboard/tests/openapi.test.ts` fails
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (117 paths, 144 operations,
+  194 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+  today, `P1` marks the interfaces added after P0 (registered in this build; the scheduler engine
+  stays off unless `AJS_SCHEDULES=1`). `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
   undeclared, the bearer requirement is missing outside `/healthz`, the portal cookie or webhook
   signature chain, or the route table in `internal/api/server.go` and the contract drift apart.
@@ -2850,8 +2861,9 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **981 `func Test` functions across 131 `_test.go` files** (`TestMain` excluded;
-recounted 2026-10-25); the emulator module adds 41 functions in 13 files. Every suite runs offline.
+The tree holds **1235 `func Test*` functions across 160 `_test.go` files** (one `TestMain`
+included; recounted 2026-10-26); the emulator module adds 46 functions in 14 files. Every suite
+runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
 200, seed counts and exact field names, account create/409/delete, node

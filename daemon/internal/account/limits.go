@@ -8,10 +8,11 @@ import (
 )
 
 // Account slot limits. The vendor sells a per-account simultaneous-connection
-// allowance (UseCount, 同时连接数) between 1 and 2000. The daemon can serve
-// only one FV session per account today, so AJS_ACCOUNT_SLOTS defaults to the
-// safe value of one lease per account; raising it records extra leases that
-// the runtime cannot serve yet and therefore carries MultiSessionWarning.
+// allowance (UseCount, 同时连接数) between 1 and 2000. The daemon serves one
+// FV session per live, listener-bound slot, so AJS_ACCOUNT_SLOTS defaults to
+// the safe value of one lease per account. The live account has UseCount=1 and
+// two-slot coexistence is unproven, so a lease on a higher display capacity
+// carries MultiSessionWarning.
 const (
 	// DefaultAccountSlots is the safe per-account lease cap when
 	// AJS_ACCOUNT_SLOTS is unset or invalid.
@@ -23,8 +24,9 @@ const (
 	AccountSlotsEnv = "AJS_ACCOUNT_SLOTS"
 	// MultiSessionWarning is the machine-readable warning returned when a
 	// lease is created on an account whose effective slot cap is above one.
-	// The lease is real, but only the first FV session can be served until
-	// per-slot device identities and multiple sessions are implemented.
+	// The per-slot runtime is implemented and offline-tested, but live
+	// two-slot coexistence is unproven, so the warning is retained for API
+	// compatibility.
 	MultiSessionWarning = "multi_session_unimplemented"
 	// MaxServiceSlots is the hard ceiling on independently operated slots per
 	// account. Vendor UseCount can reach 2000, but the daemon serves at most
@@ -104,7 +106,7 @@ func SlotCapacity(useCount, accountSlots int) int {
 
 // EffectiveSlots is the legacy name for SlotCapacity. It returns the same
 // min(UseCount, AJS_ACCOUNT_SLOTS, 8) display capacity exposed to the panel;
-// the store's lease guard is hard-capped at one independently.
+// lease admission counts verified, listener-bound serving slots separately.
 func EffectiveSlots(useCount, accountSlots int) int {
 	return SlotCapacity(useCount, accountSlots)
 }

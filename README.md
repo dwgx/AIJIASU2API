@@ -12,9 +12,11 @@ records what is known about the AJiaSu client — its installer payload, its Win
 binaries, its `FV*` protocol stack, its login/node-selection flow — and implements the parts that
 do not require a vendor account.
 
-It is **not** a client, not a proxy service, and not a distribution of vendor software. No vendor
-binaries, drivers, installers, packet captures, or memory dumps are committed here; `.gitignore`
-blocks them at the repository root. Live vendor contact has happened on two days only
+It is **not** a client, not an anonymous public proxy service (it is an operator console and an
+authorized tenant gateway), and not a distribution of vendor software. No vendor binaries,
+drivers, installers, live packet captures, or memory dumps are committed here (the lab captures
+under `research/60-dynamic/captures/` are redacted/synthetic); `.gitignore` blocks them at the
+repository root. Live vendor contact has happened on two days only
 (2026-10-23, two logins; 2026-10-24, one login after the rebuild — all on one Owner-supplied
 account; the 2026-10-23 run is in
 [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md)), and no vendor
@@ -56,7 +58,7 @@ boot. Panel state survives a restart only as a versioned JSON snapshot, not SQLi
 The FV carrier is obfuscation, not encryption; the two-time-pad properties and their consequences
 are described in [FV carrier confidentiality](#fv-carrier-confidentiality).
 
-As of 2026-10-25:
+As of 2026-10-26:
 
 - `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
   and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
@@ -65,10 +67,10 @@ As of 2026-10-25:
   operations, leases, usage, events) with typed errors and retry/backoff; see
   [`sdk/README.md`](sdk/README.md).
 - `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
-  Vite 6, TypeScript, 15 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Orders,
-  Device Pool, Users, Requests, Logs, Schedules, Settings, Backup, Lab) in a graphite-and-mint
-  design system with accent themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts,
-  and command-palette search for accounts and nodes. The sidebar
+  Vite 6, TypeScript, 17 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Orders,
+  Device Pool, Users, Tenants, Requests, Logs, Debug, Schedules, Settings, Backup, Lab) in a
+  graphite-and-mint design system with accent themes (Mint/Indigo/Violet/Orange), a table/cards
+  switch for Accounts, and command-palette search for accounts and nodes. The sidebar
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
   2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
@@ -107,7 +109,7 @@ As of 2026-10-25:
   second order, grant or charge. The operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  473 Vitest tests in 52 files. The UI is bilingual: a `中` / `EN` switch
+  480 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -175,10 +177,13 @@ As of 2026-10-25:
   and platform is a 409, and quota/concurrency/capacity refusals are 429 — revoke needs
   `confirm:true` and, with a Resin panel, deletes the panel lease before the store row). Each
   account reports the vendor's 同时连接数 (`useCount`) and a display capacity `effectiveSlots =
-  min(useCount, AJS_ACCOUNT_SLOTS, 8)`; lease admission stays hard-capped at one until the
-  multi-slot runtime lands, so a second lease on the same account is 429
-  `account_slots_exhausted` even when display capacity is above 1, and that first lease carries
-  `warning: multi_session_unimplemented` because only one FV session per account is served.
+  min(useCount, AJS_ACCOUNT_SLOTS, 8)`. Lease admission counts verified, listener-bound serving
+  slots (one per live gate), so a second lease is admitted only when a second slot is actually
+  live; otherwise it is 429 `account_slots_exhausted`. The live account has `useCount=1`, so
+  `effectiveSlots=1` and only one lease can be admitted. The per-slot runtime is implemented and
+  offline-tested, but two-slot coexistence has not been proven against the vendor (0/2 authorized
+  coexisting flows), so a lease on a display capacity above 1 still carries
+  `warning: multi_session_unimplemented` for API compatibility.
   `/v1/device-pool` (list, generate, assign/release/retire/quarantine/purge with
   confirm tokens, passphrase export/import), `/v1/scoped-keys` (`ajs_sk_` least-privilege keys
   with a per-route scope table, account/region read restrictions and `usage:read`/`renewal:read`/
@@ -225,10 +230,12 @@ As of 2026-10-25:
   After a successful login the node controller starts one loopback gate per usable server and
   reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
   live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. Each gate defaults
-  to the no-auth loopback method; `AJS_GATE_AUTH=userpass` switches it to RFC 1929, where the
-  username is a panel user id and the password an active API-key secret, and the gate then enforces
-  that user's allowlist and monthly quota before admitting a flow (it requires `AJS_FLOW_METER`).
+  a second login on the same account) and again on 2026-10-24 after the rebuild. Every gate binds
+  `127.0.0.1` and requires RFC 1929 by default (`AJS_GATE_AUTH` unset = `userpass`): the username
+  is a panel user id and the password an active API-key secret, and the gate enforces that user's
+  allowlist and monthly quota before admitting a flow (it requires `AJS_FLOW_METER`).
+  `AJS_GATE_AUTH=loopback` is the explicit no-auth compatibility opt-in; a deployment with no key
+  fails closed.
   `AJS_GATE_HTTP=1` adds an HTTP CONNECT listener on the gate port plus `AJS_GATE_HTTP_OFFSET`
   (default 1000) with Basic proxy credentials and the same admission pipeline, answering `200`,
   `407` (challenge), `403` (policy), `429` (quota, with `Retry-After`) or `405` (non-CONNECT);
@@ -239,8 +246,8 @@ As of 2026-10-25:
   persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
   egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
   no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 1022 `func Test`
-  functions — 981 in `daemon/`, 41 in `emulator/` — mostly `httptest` fakes; the tests use no
+  accounts once per process, pausing a jittered 60 s after a failed login. 1281 `func Test`
+  functions — 1235 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -365,23 +372,25 @@ As of 2026-10-25:
   the review quarantine have store and HTTP coverage only, and the operator and portal order
   surfaces have run against the deterministic mock store, not a browser against a live order.
 
-The remaining product layer — multi-account sessions on one daemon — is designed but not
-implemented. Lease allocation (`POST /v1/leases`, one active lease per user and platform) and
+The remaining product layer — live multi-account coexistence on one daemon — is designed but not
+proven; per-account multi-slot is implemented and offline-tested, and the live account still has
+one slot. Lease allocation (`POST /v1/leases`, one active lease per user and platform) and
 per-user gate access (`AJS_GATE_AUTH=userpass` with an allowlist and monthly quota) are served and
 offline-tested but have never run against the live vendor. See [`docs/PANEL.md`](docs/PANEL.md)
 for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the
 candidate analysis behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (107 paths, 132 operations, 176 schemas at the last sync): every route registered in
+surface (117 paths, 144 operations, 194 schemas at the last sync): every route registered in
 `daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
 schedules, scoped keys, the platform views (renewal, usage, health, webhooks), plans and orders,
 the Stripe-compatible and 易支付 payment callbacks, the customer tenant portal and tenant
 administration,
-panel backup and the Lab — plus the proposed P1 interfaces.
+panel backup and the Lab. The `P1` interfaces (account IO, catalog selection/connect, schedules)
+are registered in this build too; the scheduler engine stays off unless `AJS_SCHEDULES=1`.
 Scoped API keys (`ajs_sk_`, least privilege with per-route scopes and account/region restrictions)
 are served as P0. Each operation carries
-`x-implementation-phase` (`P0` is served today, `P1` is the proposed next phase).
+`x-implementation-phase` (`P0` is served today, `P1` marks the interfaces added after P0).
 `dashboard/tests/openapi.test.ts` fails when the document stops parsing, a `$ref` dangles, an
 `operationId` repeats, or the route table and the contract drift apart.
 
@@ -469,8 +478,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (473 tests in 52 files), `cd daemon && go test ./...`
-(981 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
+Tests: `cd dashboard && npm test` (480 tests in 54 files), `cd daemon && go test ./...`
+(1235 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
@@ -511,7 +520,8 @@ PLAN.md                    campaign plan, slices, acceptance criteria, risks
 LICENSE                    MIT
 NOTICE                     third-party software, icon and map-data attribution
 docs/PANEL.md              control-plane design: ports, API, data model, phases
-docs/openapi.json          OpenAPI 3.1 contract for the daemon route table (P0 served, P1 proposed)
+docs/openapi.json          OpenAPI 3.1 contract (P0 served; P1 marks interfaces added after P0,
+                           registered in this build, scheduler gated by AJS_SCHEDULES=1)
 dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
 daemon/                    ajs-accountd control-plane skeleton (Go 1.26); see daemon/README.md
 deploy/                    Docker Compose control plane (accountd + dashboard, Resin profile); see deploy/README.md
@@ -536,9 +546,9 @@ This work is reverse engineering for interoperability research. Before any use o
 
 - The vendor's terms of service, and the terms of any account used for testing, govern what is
   permitted. Automated or programmatic use of the service may violate them.
-- Do not use this research to bypass account limits, resell access, or hide the identity of
-  abusive traffic. The egress-IP selection described here is a technical capability, not a
-  licence to misuse the service.
+- Do not use this research to bypass account limits, resell access without vendor authorization,
+  or hide the identity of abusive traffic. The egress-IP selection described here is a technical
+  capability, not a licence to misuse the service.
 - Reverse engineering is restricted by law in some jurisdictions. Check your own.
 - Any published code must carry a licence compatible with the obligations above.
 
@@ -579,8 +589,11 @@ service, data or marks.
 
 ## Use boundary
 
-This project is for a single operator driving **accounts they own or are explicitly authorized to
-use**, for their own traffic. It is **not** a public proxy service: no resale, no sharing of
-access, no published endpoints, no bypassing vendor account limits, and no use to hide the origin
-of abusive traffic. The operator is responsible for the vendor's terms of service and for local
-law. The same boundary is restated in `PLAN.md` and `docs/PANEL.md`.
+This project is for operators driving accounts they own or are explicitly authorized to use.
+Commercial resale or automation is permitted only under a separate written authorization from the
+vendor that covers the operator's accounts, the service being resold, and the jurisdictions
+involved; keep that authorization on file. Without it, the project is single-operator self-use
+only: no resale, no sharing of access, no published endpoints, no bypassing vendor account limits,
+and no use to hide the origin of abusive traffic. The operator is responsible for the vendor's
+terms of service and for local law. The same boundary is restated in `PLAN.md` and
+`docs/PANEL.md`.

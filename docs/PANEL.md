@@ -1,6 +1,6 @@
 # PANEL — implementation design for `ajs-accountd` + Resin
 
-Status: design, implementation not started · Date: 2026-10-23 · License: MIT
+Status: historical design baseline (2026-10-23); current implementation status is in README.md (JSON snapshot, direct per-node gates, no ajsproxy child) · Date: 2026-10-23 · License: MIT
 Companion research: `research/70-panel/REPORT.md` (evidence, candidate matrix, falsification)
 
 This document is the build sheet: components, API surface, data model, phases, and acceptance
@@ -122,7 +122,7 @@ socks5://127.0.0.1:<gate_port>#<cc>-<subdiv>-<seq>
 
 Examples: `socks5://127.0.0.1:13007#cn-zj-03`, `socks5://127.0.0.1:13011#hk-01`.
 Resin renders the tag as `ajs-live/cn-zj-03`, which is what Platform `regex_filters` match.
-No credentials in the line: the gate is loopback-only and no-auth (same trust boundary as Resin).
+No credentials in the line: the gate is loopback-only and defaults to `AJS_GATE_AUTH=userpass`; Resin carries the panel user id and API-key secret in its username/password fields. `AJS_GATE_AUTH=loopback` is the explicit no-auth opt-in.
 
 Tag derivation: country and subdivision come from the vendor server title/label, normalised to
 lowercase ASCII; `seq` is a stable per-`(account, server)` counter so tags do not churn when the
@@ -263,9 +263,13 @@ Evidence: [`../research/71-panel-alt/REPORT.md`](../research/71-panel-alt/REPORT
 - Resin: MIT, `Copyright (c) 2026 Resinat and contributors`. Run unmodified from the upstream
   image or release; if redistributed, ship its licence text and mark any modifications.
 - No AGPL (`remnawave/panel`) and no unlicensed (`ProxyPoolHub`, `go_proxy_pool`) code is copied.
-- **Self-use only:** accounts the operator owns or is explicitly authorized to use, for their own
-  traffic. No public proxy service, no resale or sharing, no bypassing vendor limits, no hiding
-  abusive traffic. The operator answers for the vendor's terms of service and for local law.
+- **Boundary:** accounts the operator owns or is explicitly authorized to use. Commercial resale
+  or automation only under a separate written vendor authorization covering the operator's
+  accounts, the service being resold and the jurisdictions involved, kept on file; without it,
+  single-operator self-use only — no resale, no sharing of access, no published endpoints, no
+  bypassing vendor account limits, no hiding the origin of abusive traffic. The operator answers
+  for the vendor's terms of service and for local law. Restated in README `## Use boundary` and
+  `PLAN.md` §6 item 5.
 
 ## 12. Test plan
 

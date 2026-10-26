@@ -1,7 +1,7 @@
 # PLAN — AJiaSu reverse engineering → egress-selectable proxy API
 
-Status: **research baseline, wave 1** · Date: 2026-10-23 · Owner: project Owner
-Repo: `D:/Project/LovePlusSpeedToProxy` (branch `main`, no remote)
+Status: **historical research baseline (wave 1); current implementation status is in README.md** · Date: 2026-10-23 · Owner: project Owner
+Repo: `D:/Project/LovePlusSpeedToProxy` (branch `panel-design`, no remote)
 
 ## 1. North star
 
@@ -109,11 +109,17 @@ Criteria 1–7 are unverified and will remain so until an account exists; see §
 4. **Egress policy** — should the API expose node *selection by IP*, by *region*, or both, and
    does it need sticky sessions per client key?
 5. **Compliance boundary** — personal use of the Owner's own account, or a multi-account pool /
-   outward-facing service? Default if unanswered: **own account only, no resale**.
+   outward-facing service? **Answered 2026-10-26:** accounts the operator owns or is explicitly
+   authorized to use. Commercial resale or automation only under a separate written vendor
+   authorization that covers the operator's accounts, the service being resold and the
+   jurisdictions involved, kept on file; without it, single-operator self-use only — no resale, no
+   sharing of access, no published endpoints, no bypassing vendor account limits, no hiding the
+   origin of abusive traffic. The operator answers for the vendor's terms of service and for local
+   law.
 
 **Defaults in force while unanswered** (alignment doc, 2026-10-23): no account → static and mock
-verification only, every live criterion `[UNVERIFIED]`; proxy-only (no TUN); MIT; self-use only;
-Linux/Docker as the target runtime.
+verification only, every live criterion `[UNVERIFIED]`; proxy-only (no TUN); MIT; self-use only
+unless a written vendor authorization is on file; Linux/Docker as the target runtime.
 
 ## 7. Working rules for every slice
 
@@ -143,9 +149,12 @@ evidenced in `research/70-panel/REPORT.md` (sources in `research/70-panel/source
 Third-party obligations are stated in `research/70-panel/REPORT.md`; no AGPL or unlicensed code is
 copied.
 
-**Use boundary:** self-use with accounts the operator owns or is explicitly **authorized** to use.
-No public proxy service, no resale or sharing of access, no bypassing vendor account limits. The
-operator is responsible for the vendor's terms of service and for local law.
+**Use boundary:** accounts the operator owns or is explicitly **authorized** to use. Commercial
+resale or automation only under a separate written vendor authorization covering the operator's
+accounts, the service being resold and the jurisdictions involved, kept on file; without it,
+single-operator self-use only — no resale, no sharing of access, no published endpoints, no
+bypassing vendor account limits, no hiding the origin of abusive traffic. The operator is
+responsible for the vendor's terms of service and for local law.
 
 ### Decision update — competitive evaluation (2026-10-23)
 

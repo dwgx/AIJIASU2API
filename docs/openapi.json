@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the interfaces added after P0. The daemon binds 127.0.0.1 by default; a token-authenticated deployment may widen AJS_LISTEN, and the production kit publishes only the customer portal through nginx TLS while keeping the admin vhost private. The gate data plane stays loopback-only, so a remote tenant needs an operator-provided tunnel or ingress. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz, GET /readyz, the signed payment callbacks and the portal entry points; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 marks the interfaces added after P0; they are registered in this build (the scheduler itself stays off unless AJS_SCHEDULES=1). See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -7346,7 +7346,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz and /readyz are unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback. Every unsafe admin request also requires X-AJS-CSRF: 1, and an Origin header must exactly match AJS_ADMIN_ORIGINS. The production admin vhost adds per-operator HTTP Basic auth and forwards the authenticated username as X-AJS-Operator; the daemon uses it only as the audit actor on admin mutations (falling back to operator when absent), never as an authentication factor."
+        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Unauthenticated: GET /healthz, GET /readyz, the signed payment callbacks POST /v1/payments/stripe and GET/POST /v1/payments/epay/notify, and the portal entry points POST /v1/portal/signup, POST /v1/portal/login, GET /v1/portal/invites/{code} and POST /v1/portal/invites/{code}/activate. Every other route, including /metrics, needs the bearer or a scoped key. AJS_ALLOW_INSECURE=1 disables the check on loopback. Every unsafe admin request also requires X-AJS-CSRF: 1, and an Origin header must exactly match AJS_ADMIN_ORIGINS. The production admin vhost adds per-operator HTTP Basic auth and forwards the authenticated username as X-AJS-Operator; the daemon uses it only as the audit actor on admin mutations (falling back to operator when absent), never as an authentication factor."
       },
       "portalCookie": {
         "type": "apiKey",
@@ -7417,7 +7417,7 @@
         }
       },
       "RateLimited": {
-        "description": "RATE_LIMITED or QUOTA_EXCEEDED: retry later. A lease create carries reason account_slots_exhausted when the account already holds its one admission slot (lease admission is hard-capped at one until the multi-slot runtime exists; display capacity may be higher).",
+        "description": "RATE_LIMITED or QUOTA_EXCEEDED: retry later. A lease create carries reason account_slots_exhausted when every verified, listener-bound serving slot of the account is already leased; display capacity may be higher than the number of live slots.",
         "content": {
           "application/json": {
             "schema": {
@@ -7995,7 +7995,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 2000,
-            "description": "Display capacity for the account: min(useCount, AJS_ACCOUNT_SLOTS, 8, default 1). Lease admission is hard-capped at one until the multi-slot runtime exists; above 1 a lease create also returns the multi_session_unimplemented warning because only one FV session per account can be served."
+            "description": "Display capacity for the account: min(useCount, AJS_ACCOUNT_SLOTS, 8, default 1). Lease admission counts verified, listener-bound serving slots; a create is refused with account_slots_exhausted when no live slot is free. The live account has useCount=1, so effectiveSlots=1. A lease on a display capacity above 1 carries the multi_session_unimplemented warning until live two-slot coexistence is proven."
           },
           "regions": {
             "type": "array",
@@ -8357,7 +8357,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "Set to multi_session_unimplemented when display capacity effectiveSlots > 1 (only one FV session per account can actually be served). A publication failure is never a warning: the create is rolled back and answered 409/503 with reason lease_publish_failed."
+            "description": "Set to multi_session_unimplemented when display capacity effectiveSlots > 1; the per-slot runtime is implemented and offline-tested, but live two-slot coexistence is unproven, so the warning is retained for API compatibility. A publication failure is never a warning: the create is rolled back and answered 409/503 with reason lease_publish_failed."
           },
           "replayed": {
             "type": "boolean",
@@ -13148,7 +13148,7 @@
             "type": "number",
             "format": "double",
             "minimum": 0,
-            "description": "SOCKS5 handshake, TLS and response, end to end."
+            "description": "SOCKS5 handshake, optional TLS (when AJS_EGRESS_TARGET is https) and response, end to end."
           },
           "ok": {
             "type": "boolean"
