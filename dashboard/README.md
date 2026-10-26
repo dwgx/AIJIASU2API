@@ -1660,10 +1660,11 @@ and reports healthy on `/healthz`.
   endpoint.
 - The live build hides the mock reset action entirely — the daemon has no reset endpoint.
 - `VITE_PANEL_TOKEN` is refused at build time because it would be readable from the bundle. The
-  runtime token gate keeps a token in `sessionStorage` per tab instead, but the console itself still
-  speaks one shared admin bearer. The production kit puts per-operator HTTP Basic auth at the nginx
-  admin edge and forwards `X-AJS-Operator` for audit; the console has no role model or server-side
-  session, so that edge is the multi-user boundary rather than the SPA.
+  runtime token gate keeps a token in `sessionStorage` per tab instead. In the
+  production kit nginx maps each Basic-authenticated operator to an independent
+  bearer; the daemon enforces that token's viewer/operator/admin role. The SPA
+  has no server-side session or role-aware menu: server-side denials, not UI
+  hiding, are the boundary.
 - The Lab page only reads daemon state; the daemon's one POST (`/v1/lab/egress-check`) runs an
   explicit egress probe through the node's gate and returns the result without storing it. The
   client keeps that observation per node for the life of the tab (polls and manual refreshes keep

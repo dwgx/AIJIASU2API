@@ -90,6 +90,7 @@ check.sh
 build-bundles.sh
 render-admin-token.sh
 render-admin-htpasswd.sh
+render-admin-operators.sh
 admin-operators.example
 inventory.example.yml
 nginx/nginx.conf
@@ -98,6 +99,7 @@ nginx/snippets/ajs-tls.conf
 nginx/snippets/ajs-proxy-common.conf
 nginx/snippets/ajs-security-headers.conf
 nginx/snippets/ajs-admin-token.conf.template
+nginx/snippets/ajs-admin-operator-token.conf
 nginx/snippets/ajs-admin-operator.conf
 nginx/sites-available/ajs-portal.conf
 nginx/sites-available/ajs-admin.conf
@@ -123,7 +125,7 @@ for rel in check.sh build-bundles.sh; do
         fail "bash -n $rel"
     fi
 done
-for rel in render-admin-token.sh render-admin-htpasswd.sh; do
+for rel in render-admin-token.sh render-admin-htpasswd.sh render-admin-operators.sh; do
     if sh -n "$kit/$rel" 2>/dev/null; then
         pass "sh -n $rel"
     else
@@ -158,6 +160,8 @@ if not data["admin"].get("operators_file"):
     raise SystemExit("admin.operators_file is required")
 if not data["admin"].get("htpasswd_file"):
     raise SystemExit("admin.htpasswd_file is required")
+if not data["admin"].get("strict_rbac") or not data["admin"].get("daemon_hash_file"):
+    raise SystemExit("strict RBAC and daemon_hash_file are required")
 PY
         then
             pass "YAML parses and has the required keys: $(basename "$f")"
@@ -336,8 +340,10 @@ if [ -n "$nginx_mode" ]; then
 
             # Throwaway token: 64 'a' characters, never a committed literal.
             dummy_token=$(printf 'a%.0s' {1..64})
-            sed "s|\${AJS_ADMIN_TOKEN}|$dummy_token|" \
-                "$kit/nginx/snippets/ajs-admin-token.conf.template" > "$nginx_tmp/snippets/ajs-admin-token.conf"
+            # Per-operator map: only authenticated check-operator receives a
+            # credential; there is no shared/default Authorization value.
+            printf '"check-operator" "Bearer %s";\n' "$dummy_token" > "$nginx_tmp/snippets/ajs-admin-tokens.map"
+            chmod 600 "$nginx_tmp/snippets/ajs-admin-tokens.map"
 
             openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
                 -subj "/CN=panel.example.com" \
@@ -566,10 +572,12 @@ if grep -qE '^[[:space:]]*location[[:space:]]+/v1/[[:space:]]*\{' "$kit/nginx/si
 else
     pass "portal vhost proxies only /v1/portal/ and payment callbacks"
 fi
-if grep -q 'ajs-admin-token.conf' "$kit/nginx/sites-available/ajs-admin.conf"; then
-    pass "admin vhost includes the rendered bearer snippet"
+if grep -q 'ajs-admin-operator-token.conf' "$kit/nginx/sites-available/ajs-admin.conf" && \
+   grep -q 'ajs-admin-tokens.map' "$kit/nginx/nginx.conf" && \
+   grep -qE 'proxy_set_header[[:space:]]+Authorization[[:space:]]+\$ajs_operator_authorization;' "$kit/nginx/snippets/ajs-admin-operator-token.conf"; then
+    pass "admin vhost injects the authenticated operator's mapped bearer"
 else
-    fail "admin vhost does not include the rendered bearer snippet"
+    fail "admin vhost is missing per-operator bearer injection"
 fi
 if grep -qE '^[[:space:]]*auth_basic[[:space:]]+"AJS admin";' "$kit/nginx/sites-available/ajs-admin.conf" && \
    grep -qE '^[[:space:]]*auth_basic_user_file[[:space:]]+/etc/nginx/ajs-admin.htpasswd;' "$kit/nginx/sites-available/ajs-admin.conf"; then
@@ -1114,8 +1122,67 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+section "AJS-412 production renderer"
+# TestAJS412ProductionRenderer (shell acceptance): valid inventory produces
+# separate Basic/bearer/hash artifacts; no plaintext reaches the daemon file.
+if [ "$(id -u)" -ne 0 ]; then
+    skip "TestAJS412ProductionRenderer needs root for ownership checks"
+elif ! command -v openssl >/dev/null 2>&1 || ! command -v getent >/dev/null 2>&1; then
+    skip "TestAJS412ProductionRenderer needs openssl and getent"
+else
+    rbac_tmp=$(mktemp -d)
+    chmod 0711 "$rbac_tmp"
+    rbac_token=$(openssl rand -hex 32)
+    rbac_digest=$(printf '%s' "$rbac_token" | openssl dgst -sha256 -r | awk '{print $1}')
+    printf 'alice:viewer:%s:alice-runtime-password\n' "$rbac_token" > "$rbac_tmp/inventory"
+    chmod 0600 "$rbac_tmp/inventory"
+    if AJS_OPERATOR_HASH_FILE="$rbac_tmp/operators.hashes" \
+       AJS_OPERATOR_MAP_FILE="$rbac_tmp/operators.map" \
+       AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
+       AJS_DAEMON_GROUP="$(id -gn)" AJS_HTPASSWD_GROUP="$(id -gn)" \
+       sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/render.log" 2>&1; then
+        if [ "$(stat -c '%a' "$rbac_tmp/operators.hashes")" = 640 ] && \
+           [ "$(stat -c '%a' "$rbac_tmp/operators.map")" = 600 ] && \
+           [ "$(stat -c '%a' "$rbac_tmp/htpasswd")" = 640 ] && \
+           grep -qx "alice:viewer:$rbac_digest" "$rbac_tmp/operators.hashes" && \
+           grep -q '\$apr1\$' "$rbac_tmp/htpasswd"; then
+            pass "TestAJS412ProductionRenderer: roles, hashes, map and ownership modes"
+        else
+            fail "TestAJS412ProductionRenderer: invalid artifacts or modes"
+        fi
+        if ! grep -q "$rbac_token" "$rbac_tmp/operators.hashes" && \
+           ! grep -q "$rbac_token" "$rbac_tmp/render.log" && \
+           ! grep -q 'alice-runtime-password' "$rbac_tmp/render.log"; then
+            pass "TestAJS412ProductionRenderer: daemon hashes and log contain no plaintext"
+        else
+            fail "TestAJS412ProductionRenderer: plaintext token/password leaked"
+        fi
+        # Two hashes may overlap during rotation, but nginx must have exactly
+        # one current key for the person, not a duplicate-key syntax error.
+        next_token=$(openssl rand -hex 32)
+        printf 'alice:viewer:%s:alice-runtime-password\nalice:viewer:%s:alice-runtime-password\n' "$rbac_token" "$next_token" > "$rbac_tmp/inventory"
+        if AJS_OPERATOR_HASH_FILE="$rbac_tmp/operators.hashes" \
+           AJS_OPERATOR_MAP_FILE="$rbac_tmp/operators.map" \
+           AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
+           AJS_DAEMON_GROUP="$(id -gn)" AJS_HTPASSWD_GROUP="$(id -gn)" \
+           sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/rotate.log" 2>&1 && \
+           [ "$(wc -l < "$rbac_tmp/operators.hashes")" -eq 2 ] && \
+           [ "$(wc -l < "$rbac_tmp/operators.map")" -eq 1 ] && \
+           [ "$(wc -l < "$rbac_tmp/htpasswd")" -eq 1 ] && \
+           grep -q "$next_token" "$rbac_tmp/operators.map"; then
+            pass "TestAJS412ProductionRenderer: two-generation rotation has one current nginx token"
+        else
+            fail "TestAJS412ProductionRenderer: two-generation rendering failed"
+        fi
+    else
+        fail "TestAJS412ProductionRenderer: $(tr '\n' ' ' < "$rbac_tmp/render.log" | cut -c1-300)"
+    fi
+    rm -rf "$rbac_tmp"
+fi
+
+# ---------------------------------------------------------------------------
 section "README inputs"
-for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd admin-operators DNS TLS; do
+for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_RBAC_STRICT AJS_ADMIN_OPERATORS_FILE AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd render-admin-operators admin-operators DNS TLS; do
     if grep -q "$token" "$kit/README.md"; then
         pass "README documents: $token"
     else

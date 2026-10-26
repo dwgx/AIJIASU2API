@@ -220,6 +220,18 @@ passwords), so that directory is gitignored and excluded from the Docker build
 context; point `AJS_STATE_DIR` outside the tree for anything that is not a throwaway
 local run.
 
+## Operator RBAC (AJS-412)
+
+Production uses `AJS_RBAC_STRICT=1` and
+`AJS_ADMIN_OPERATORS_FILE=/etc/ajs/admin-operators.hashes`. Each independent
+operator bearer maps to a `viewer`, `operator` or `admin` role and an audit
+identity. `GET /v1/whoami` returns that non-secret metadata. Strict mode never
+accepts the legacy shared bearer or anonymous insecure admin requests, and
+`AJS_ADMIN_TOKEN` may be removed entirely. Scoped-key scopes and portal cookie
+authentication remain separate. Credential revocation requires a daemon
+restart; the production nginx map also needs a reload. The role matrix,
+migration and threat model are in [`docs/RBAC.md`](../docs/RBAC.md).
+
 ## FV protocol seam
 
 The daemon reuses the emulator's tested FV protocol core instead of

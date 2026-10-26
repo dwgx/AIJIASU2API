@@ -63,6 +63,9 @@ func sanitizeOperator(raw string) string {
 // fallback preserves the historical actor for requests that do not carry the
 // proxy-authenticated header (CLI clients, tests, older deployments).
 func (s *Server) auditActor(r *http.Request) string {
+	if identity, ok := authIdentityFrom(r); ok && identity.rbac {
+		return identity.operator
+	}
 	if identity, ok := authIdentityFrom(r); ok && identity.admin && identity.operator != "" {
 		return identity.operator
 	}

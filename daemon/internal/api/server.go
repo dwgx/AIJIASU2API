@@ -80,7 +80,12 @@ type LoginService interface {
 type Config struct {
 	AdminToken    string
 	AllowInsecure bool
-	CORSOrigins   []string
+	// Operators enables per-operator bearer authentication when non-nil.
+	// StrictRBAC disables the legacy shared bearer and anonymous insecure
+	// mode for admin routes. main rejects a partial strict configuration.
+	Operators   *OperatorSet
+	StrictRBAC  bool
+	CORSOrigins []string
 	// AdminOrigins is the exact browser-origin allowlist for unsafe admin
 	// requests (AJS_ADMIN_ORIGINS). Empty falls back to CORSOrigins; an Origin
 	// header that is present but not allowlisted is refused. Requests without
@@ -380,6 +385,7 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodGet, "/readyz", s.handleReadyz)
 	rt.handle(http.MethodGet, "/metrics", s.handlePrometheusMetrics)
 	rt.handle(http.MethodGet, "/v1/metrics", s.handleMetrics)
+	rt.handle(http.MethodGet, "/v1/whoami", s.handleWhoami)
 
 	rt.handle(http.MethodGet, "/v1/accounts", s.handleListAccounts)
 	rt.handle(http.MethodPost, "/v1/accounts", s.handleCreateAccount)
@@ -732,7 +738,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		// AJS_ALLOW_INSECURE keeps its legacy effect on the dashboard routes,
 		// but tenant administration is never anonymous: it needs the admin
 		// token or a scoped admin principal even in insecure mode.
-		if s.cfg.AllowInsecure && !adminTenant {
+		if s.cfg.AllowInsecure && !adminTenant && !s.cfg.StrictRBAC {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -748,11 +754,16 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimPrefix(header, prefix)
-		if s.cfg.AdminToken != "" &&
+		if entry, ok := s.cfg.Operators.authenticate(token); ok {
+			// Identity and role come from the token lookup only. In strict mode
+			// X-AJS-Operator is ignored, including duplicate or malformed values.
+			next.ServeHTTP(w, withAuthIdentity(r, authIdentity{admin: true, operator: entry.name, role: entry.role, rbac: true}))
+			return
+		}
+		if !s.cfg.StrictRBAC && s.cfg.AdminToken != "" &&
 			subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) == 1 {
-			// The production admin proxy authenticates each operator with HTTP
-			// Basic auth and forwards the username here. It is an audit label,
-			// not a second credential: the bearer above is still required.
+			// Compatibility only: the proxy header is an audit label, never a
+			// role. StrictRBAC removes this path and its shared authority.
 			next.ServeHTTP(w, withAuthIdentity(r, authIdentity{admin: true, operator: requestOperator(r)}))
 			return
 		}
@@ -886,7 +897,12 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if identity, ok := authIdentityFrom(r); ok && !identity.allowsRoute(candidate.method, candidate.pattern) {
 			writeError(w, http.StatusForbidden, CodeForbidden,
-				"scoped key lacks the scope required by this route")
+				"credential lacks the permission required by this route")
+			return
+		}
+		if identity, ok := authIdentityFrom(r); ok && identity.rbac && !identity.role.permits(routeRole(candidate.method, candidate.pattern)) {
+			writeError(w, http.StatusForbidden, CodeForbidden,
+				"operator role cannot perform this action")
 			return
 		}
 		ctx := context.WithValue(r.Context(), paramsKey{}, params)

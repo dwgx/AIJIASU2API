@@ -21,6 +21,7 @@ research/**/pseudocode/
 .env
 *.key
 *.pem
+*.htpasswd
 
 # Credential/PII files the documented dev runs write inside the tree (S1):
 # daemon/data/state.json (account usernames, device identities, audit) and

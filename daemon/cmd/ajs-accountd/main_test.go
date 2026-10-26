@@ -119,6 +119,20 @@ func TestNodeLimitRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+// TestAJS412StrictAllowsLegacyTokenRemoval proves the final migration state
+// needs no dummy shared bearer; strict authentication never consults it.
+func TestAJS412StrictAllowsLegacyTokenRemoval(t *testing.T) {
+	if err := validateLegacyAdminToken("", false, true); err != nil {
+		t.Fatalf("strict mode without legacy token: %v", err)
+	}
+	if err := validateLegacyAdminToken("", false, false); err == nil {
+		t.Fatal("compatibility mode accepted missing shared bearer")
+	}
+	if err := validateLegacyAdminToken("", true, false); err != nil {
+		t.Fatalf("legacy loopback lab: %v", err)
+	}
+}
+
 // TestValidateAdminTokenRejectsPlaceholders pins the S2 guard: a documented
 // placeholder is a working admin API whose secret is printed in the
 // repository, so startup must refuse it. The value never reaches the error.

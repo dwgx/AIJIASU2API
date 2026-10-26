@@ -8,3 +8,7 @@ token-test.conf
 
 # Rendered on the host; never commit
 nginx/snippets/ajs-admin-token.conf
+nginx/snippets/ajs-admin-tokens.map
+*.htpasswd
+admin-operators
+admin-operators.hashes

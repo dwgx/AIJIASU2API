@@ -57,7 +57,9 @@ func main() {
 func run() error {
 	started := time.Now()
 	listen := flag.String("listen", envOr("AJS_LISTEN", "127.0.0.1:2261"), "listen address")
-	token := flag.String("token", os.Getenv("AJS_ADMIN_TOKEN"), "admin bearer token (env AJS_ADMIN_TOKEN)")
+	token := flag.String("token", os.Getenv("AJS_ADMIN_TOKEN"), "legacy shared admin bearer token (env AJS_ADMIN_TOKEN; migration only with strict RBAC)")
+	operators := flag.String("operators-file", os.Getenv("AJS_ADMIN_OPERATORS_FILE"), "hashed per-operator credentials file (env AJS_ADMIN_OPERATORS_FILE)")
+	strictRBAC := flag.Bool("strict-rbac", os.Getenv("AJS_RBAC_STRICT") == "1", "require per-operator tokens and enforce roles (env AJS_RBAC_STRICT=1)")
 	insecure := flag.Bool("insecure", os.Getenv("AJS_ALLOW_INSECURE") == "1", "disable bearer auth (env AJS_ALLOW_INSECURE=1)")
 	corsOrigins := flag.String("cors-origins", envOr("AJS_CORS_ORIGINS", strings.Join(api.DefaultCORSOrigins, ",")), "comma-separated allowed CORS origins")
 	adminOrigins := flag.String("admin-origins", os.Getenv("AJS_ADMIN_ORIGINS"), "comma-separated exact browser origins allowed on unsafe admin requests (env AJS_ADMIN_ORIGINS; default AJS_CORS_ORIGINS)")
@@ -103,8 +105,20 @@ func run() error {
 	// S2: a placeholder token is a working admin API whose value is printed in
 	// the repository — including the one .env.example ships — so startup
 	// refuses those values. The insecure lab mode is the explicit opt-out.
-	if err := validateAdminToken(*token, *insecure); err != nil {
+	// RBAC is opt-in during migration. Strict mode requires a valid operator
+	// file before any state is opened; an absent file cannot silently restore
+	// the shared bearer or anonymous insecure mode.
+	if err := validateLegacyAdminToken(*token, *insecure, *strictRBAC); err != nil {
 		return err
+	}
+	var operatorSet *api.OperatorSet
+	if strings.TrimSpace(*operators) != "" {
+		operatorSet, err = api.LoadOperatorSet(*operators)
+		if err != nil {
+			return fmt.Errorf("AJS_ADMIN_OPERATORS_FILE: %w", err)
+		}
+	} else if *strictRBAC {
+		return errors.New("AJS_RBAC_STRICT=1 requires AJS_ADMIN_OPERATORS_FILE")
 	}
 	// AJS_TENANT_PORTAL is the opt-in. Enabling it without an exact browser
 	// origin would leave every signup/login/mutation unchecked, so that
@@ -155,6 +169,12 @@ func run() error {
 	logRing := lablog.NewRing(lablog.DefaultCapacity)
 	logger := slog.New(logRing.Handler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(logger)
+	if *strictRBAC && *insecure {
+		logger.Warn("insecure_mode_ignored", "reason", "strict RBAC requires an operator credential")
+	}
+	if operatorSet != nil && !*strictRBAC {
+		logger.Warn("rbac_compatibility_mode", "reason", "per-operator tokens enabled but legacy shared bearer remains accepted; set AJS_RBAC_STRICT=1 after migrating clients")
+	}
 	st, secrets, deviceSecrets, err := openStore(logger)
 	if err != nil {
 		return err
@@ -564,6 +584,8 @@ func run() error {
 	}
 	server := api.New(api.Config{
 		AdminToken:           *token,
+		Operators:            operatorSet,
+		StrictRBAC:           *strictRBAC,
 		AllowInsecure:        *insecure,
 		CORSOrigins:          splitList(*corsOrigins),
 		AdminOrigins:         adminOriginValues,
@@ -1490,6 +1512,13 @@ func tenantPortalConfig(enabled bool, originRaw, proxyRaw string) (string, []str
 // The insecure mode keeps the old behaviour: it exists for local lab runs,
 // where requireLoopback has already proved the listener is not routable.
 // The token value never reaches the error text.
+func validateLegacyAdminToken(token string, insecure, strict bool) error {
+	if strict {
+		return nil // the shared token is never consulted by strict auth
+	}
+	return validateAdminToken(token, insecure)
+}
+
 func validateAdminToken(token string, insecure bool) error {
 	if insecure {
 		return nil

@@ -1,20 +1,18 @@
 # AJS admin operator inventory — TEMPLATE, never commit real values.
 #
-# Copy this file to /etc/ajs/admin-operators (root-owned, mode 0600), replace
-# every placeholder password, then render the nginx htpasswd file:
+# Strict RBAC format (one person per line):
+#   username:viewer|operator|admin:token:password
 #
-#   sudo sh deploy/production/render-admin-htpasswd.sh
+# token: independent random API secret, >=32 chars (`openssl rand -hex 32`).
+# password: independent Basic-login secret, >=12 chars; not the API token.
+# Neither secret may contain ':'. The daemon receives only SHA-256(token).
+# Render with `sudo sh deploy/production/render-admin-operators.sh`, then
+# reload nginx and restart ajs-accountd. Password-only edits do not revoke a
+# copied API token; remove/rotate its hash and restart the daemon to revoke it.
 #
-# Format: one `username:password` pair per line. Blank lines and lines whose
-# first non-space character is `#` are ignored. The username becomes the HTTP
-# Basic username and is forwarded to the daemon as X-AJS-Operator, so it must
-# use only A-Z a-z 0-9 . _ - @ + and be at most 64 characters. Passwords are
-# plaintext only in this root-only inventory; the rendered htpasswd stores an
-# apr1 hash as root:<nginx worker group> mode 0640 (the nginx worker must be
-# able to read it; never make it world-readable). Rotate one operator by
-# editing this file and re-rendering.
-#
-# Keep one line per person. Do not share a username: the audit trail cannot
-# tell two people apart when they use the same operator name.
-alice:replace-me-with-a-long-unique-password
-bob:replace-me-with-another-long-unique-password
+# Migration rotation: a second row for the same name+role with a new token is
+# accepted. Reload nginx with only the new mapped token, verify it, restart the
+# daemon with both hashes, then remove the retired hash and restart again.
+alice:viewer:replace-me-with-openssl-rand-hex-32:replace-me-with-a-long-unique-password
+bob:operator:replace-me-with-another-openssl-rand-hex-32:replace-me-with-another-long-unique-password
+carol:admin:replace-me-with-a-third-openssl-rand-hex-32:replace-me-with-a-third-long-password

@@ -27,15 +27,15 @@ admin:
     - 127.0.0.1
     - ::1
     - 10.8.0.0/24
-  # Per-operator HTTP Basic auth inputs. Both paths are host-local and are
-  # never copied into the repository: operators_file is the root-only 0600
-  # username:password inventory (copy admin-operators.example), and
-  # htpasswd_file is the rendered root:<nginx worker group> 0640 nginx file.
-  # Rotate by editing the inventory and re-running render-admin-htpasswd.sh.
-  # The renderer detects the worker group from nginx.conf; set
-  # AJS_HTPASSWD_GROUP to override it.
+  # Strict per-operator authentication. Source inventory fields are
+  # username:viewer|operator|admin:token:password; the combined renderer
+  # produces htpasswd_file, token_map_file and daemon_hash_file.
+  # Role/token revocation requires nginx reload AND daemon restart.
   operators_file: /etc/ajs/admin-operators
   htpasswd_file: /etc/nginx/ajs-admin.htpasswd
+  token_map_file: /etc/nginx/snippets/ajs-admin-tokens.map
+  daemon_hash_file: /etc/ajs/admin-operators.hashes
+  strict_rbac: true
 
 tls:
   # Directory layout: /etc/ajs/tls/<domain>/{fullchain.pem,privkey.pem}

@@ -7311,6 +7311,34 @@
         },
         "security": []
       }
+    },
+    "/v1/whoami": {
+      "get": {
+        "operationId": "whoami",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Return the authenticated operator or scoped-key identity without any credential material.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Identity metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoamiResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -14513,6 +14541,40 @@
         },
         "required": [
           "password"
+        ]
+      },
+      "WhoamiResponse": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Operator name, key:<name>, or the legacy fallback."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "viewer",
+              "operator",
+              "admin"
+            ],
+            "description": "Present for an operator identity."
+          },
+          "strictRbac": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "scoped-key",
+              "legacy"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "strictRbac",
+          "kind"
         ]
       }
     }

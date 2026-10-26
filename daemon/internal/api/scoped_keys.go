@@ -119,10 +119,11 @@ var routeScopes = map[string]model.Scope{
 // the router then skips scope checks.
 type authIdentity struct {
 	admin bool
-	// operator is the proxy-authenticated admin username from X-AJS-Operator.
-	// It is empty for a bare bearer without the header and always empty for a
-	// scoped key, which has its own principal prefix.
+	// operator is the token-authenticated name in strict mode. The legacy
+	// proxy header remains an audit label only when RBAC is not strict.
 	operator string
+	role     AdminRole
+	rbac     bool
 	key      model.ScopedKey
 }
 
