@@ -30,6 +30,7 @@ import {
   mockImportDevicePool,
   mockInspectBackup,
   mockListDevicePool,
+  mockListRequests,
   mockPatchDevicePoolRecord,
   mockPurgeDevice,
   mockQuarantineDevice,
@@ -37,6 +38,7 @@ import {
   mockRestoreBackup,
   mockRetireDevice,
   mockRevokeScopedKey,
+  mockWhoami,
   resetMockDb,
   syncAccountCounts,
 } from './mock'
@@ -130,6 +132,7 @@ import type {
   RenewalPlan,
   RenewalPlansView,
   RequestLog,
+  RequestsQuery,
   Schedule,
   ScheduleCreateInput,
   ScheduleGuard,
@@ -164,6 +167,7 @@ import type {
   WebhookEndpoint,
   WebhookEvent,
   WebhookPatch,
+  Whoami,
 } from './types'
 import {
   SYSTEM_SCHEDULE_ID,
@@ -225,6 +229,22 @@ export function apiEndpointLabel(): string {
   if (API_BASE) return API_BASE.replace(/^https?:\/\//, '')
   if (typeof window !== 'undefined') return window.location.origin.replace(/^https?:\/\//, '')
   return 'same origin'
+}
+
+/**
+ * The absolute API base the console talks to: `VITE_API_BASE` when set,
+ * otherwise this origin. Used by the Access snippets and the OpenAPI link, so
+ * a copy-paste example targets exactly the daemon the console is reading.
+ */
+export function apiBaseUrl(): string {
+  if (API_BASE) return API_BASE
+  if (typeof window !== 'undefined') return window.location.origin
+  return 'http://127.0.0.1:2261'
+}
+
+/** Absolute URL of the served OpenAPI document (`GET /v1/openapi.json`). */
+export function openApiSpecUrl(): string {
+  return `${apiBaseUrl()}/v1/openapi.json`
 }
 
 async function wait(): Promise<void> {
@@ -3405,10 +3425,28 @@ export const api = {
     if (key) key.revokedAt = new Date().toISOString()
   },
 
-  async listRequests(): Promise<RequestLog[]> {
-    if (!USE_MOCK) return http<RequestLog[]>('/v1/requests')
+  /**
+   * GET /v1/requests — the durable request log, newest first. The daemon
+   * pages with `limit`/`offset` and sends no total, so callers treat a short
+   * page as the end of the log.
+   */
+  async listRequests(query: RequestsQuery = {}): Promise<RequestLog[]> {
+    if (!USE_MOCK) {
+      const params = new URLSearchParams()
+      if (query.limit !== undefined) params.set('limit', String(query.limit))
+      if (query.offset !== undefined) params.set('offset', String(query.offset))
+      const search = params.toString()
+      return http<RequestLog[]>(`/v1/requests${search ? `?${search}` : ''}`)
+    }
     await wait()
-    return clone(getDb().requests)
+    return mockListRequests(query)
+  },
+
+  /** GET /v1/whoami — identity metadata for the current bearer. */
+  async whoami(): Promise<Whoami> {
+    if (!USE_MOCK) return http<Whoami>('/v1/whoami')
+    await wait()
+    return mockWhoami()
   },
 
   async createMutationRequest(input: MutationLabInput): Promise<RequestLog> {

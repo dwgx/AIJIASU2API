@@ -60,6 +60,7 @@ import type {
   ProfileView,
   ProxyNode,
   RequestLog,
+  RequestsQuery,
   ScopedKey,
   ScopedKeyCreateInput,
   ScopedKeyCreated,
@@ -69,6 +70,7 @@ import type {
   SessionView,
   TrafficPoint,
   WebhookEvent,
+  Whoami,
 } from './types'
 import { DEBUG_KINDS, SCOPES, WEBHOOK_EVENTS } from './types'
 import { ApiError, DevicePoolError } from './errors'
@@ -405,6 +407,29 @@ function buildRequests(now: number, users: PanelUser[], nodes: ProxyNode[]): Req
       source: 'proxy',
     }
   })
+}
+
+/**
+ * GET /v1/requests in mock mode: the durable log, newest first, paged with
+ * limit/offset. The daemon clamps an omitted limit to 200 and sends no total,
+ * so a short page is the only end-of-log signal.
+ */
+export function mockListRequests(query: RequestsQuery = {}): RequestLog[] {
+  const limit = query.limit === undefined ? 200 : Math.max(0, Math.trunc(query.limit))
+  const offset = query.offset === undefined ? 0 : Math.max(0, Math.trunc(query.offset))
+  const rows = [...getDb().requests].sort(
+    (left, right) => right.ts.localeCompare(left.ts) || right.id.localeCompare(left.id),
+  )
+  return structuredClone(rows.slice(offset, offset + limit))
+}
+
+/**
+ * GET /v1/whoami in mock mode: the same shape the daemon returns for a
+ * compatibility admin bearer. The demo has no real credential, so it reports
+ * the legacy kind with full admin authority and no scope list.
+ */
+export function mockWhoami(): Whoami {
+  return { name: 'ada.ops', role: 'admin', strictRbac: false, kind: 'legacy' }
 }
 
 function buildAudit(now: number): AuditEvent[] {

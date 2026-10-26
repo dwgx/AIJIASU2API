@@ -47,7 +47,17 @@ describe('runtime token gate', () => {
             headers: { 'Content-Type': 'application/json' },
           })
         }
-        const body = url.endsWith('/v1/lab/overview') ? LAB_OVERVIEW : LIVE_SETTINGS
+        const body = url.endsWith('/v1/lab/overview')
+          ? LAB_OVERVIEW
+          : url.endsWith('/v1/whoami')
+            ? {
+                name: 'operator-1',
+                role: 'admin',
+                kind: 'operator',
+                strictRbac: true,
+                scopes: ['settings:read'],
+              }
+            : LIVE_SETTINGS
         return new Response(JSON.stringify(body), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -73,6 +83,8 @@ describe('runtime token gate', () => {
       expect(screen.queryByRole('dialog', { name: 'Panel token required' })).not.toBeInTheDocument(),
     )
     expect(screen.getByText('set (session)')).toBeInTheDocument()
+    expect(await screen.findByText('operator-1')).toBeInTheDocument()
+    expect(screen.getByText('strict RBAC')).toBeInTheDocument()
     expect(screen.queryByText('test-token')).not.toBeInTheDocument()
     expect(screen.queryByText(/v9\.9\.9/)).not.toBeInTheDocument()
     expect(screen.queryByText('127.0.0.1:2261')).not.toBeInTheDocument()

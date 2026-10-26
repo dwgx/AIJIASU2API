@@ -283,16 +283,17 @@ describe('lab egress check', () => {
 })
 
 describe('honesty fixes', () => {
-  it('labels the Requests table as real gate flows, not a simulated dataset', async () => {
+  it('labels the Requests table as the durable log, not the lab ring', async () => {
     window.history.pushState({}, '', '/requests')
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Requests', level: 1 })
-    expect(screen.getByText('gate flow ring')).toBeInTheDocument()
-    expect(screen.getByText('Captured by the gate, not the vendor')).toBeInTheDocument()
-    const table = await screen.findByRole('table', { name: 'Finished gate flows' })
-    expect(within(table).getAllByText('gate flow').length).toBeGreaterThan(0)
-    expect(screen.queryByText('simulated dataset')).not.toBeInTheDocument()
+    expect(screen.getByText('durable log')).toBeInTheDocument()
+    expect(screen.getByText('Stored requests, paged by the daemon')).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: 'Request log' })
+    expect(within(table).getAllByText('proxy').length).toBeGreaterThan(0)
+    expect(screen.queryByText('gate flow ring')).not.toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'Finished gate flows' })).not.toBeInTheDocument()
   })
 
   it('relabels the node probe as a timestamp touch', async () => {

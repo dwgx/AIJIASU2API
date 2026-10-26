@@ -170,13 +170,14 @@ describe('mobile table mode', () => {
   })
 })
 
-describe('requests', () => {
-  it('adds a labeled mutation-lab row with a host-only target', async () => {
+describe('lab mutation lab', () => {
+  it('records a labeled mutation-lab row in the durable request log', async () => {
     const user = userEvent.setup()
-    window.history.pushState({}, '', '/requests')
+    window.history.pushState({}, '', '/lab')
     render(<App />)
 
-    await screen.findByRole('heading', { name: 'Requests', level: 1 })
+    await screen.findByRole('heading', { name: 'Lab', level: 1 })
+    await user.click(screen.getByRole('tab', { name: 'Flows' }))
     await user.click(await screen.findByRole('button', { name: 'Open mutation lab' }))
     const drawer = await screen.findByRole('dialog', { name: 'Mutation lab' })
     const target = within(drawer).getByLabelText('Target host:port')
@@ -185,7 +186,9 @@ describe('requests', () => {
     await user.click(within(drawer).getByRole('button', { name: 'Send request' }))
 
     expect(await screen.findByText(/Mutation lab request completed/)).toBeInTheDocument()
-    const table = await screen.findByRole('table', { name: 'Finished gate flows' })
+
+    await user.click(screen.getByRole('link', { name: 'Requests' }))
+    const table = await screen.findByRole('table', { name: 'Request log' })
     await waitFor(() => {
       expect(within(table).getAllByText('mutation lab').length).toBeGreaterThan(0)
     })

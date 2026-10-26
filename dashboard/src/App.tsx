@@ -15,20 +15,12 @@ const Leases = lazy(() => import('./pages/Leases'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Nodes = lazy(() => import('./pages/Nodes'))
 const Operations = lazy(() => import('./pages/Operations'))
-const Orders = lazy(() => import('./pages/Orders'))
 const Overview = lazy(() => import('./pages/Overview'))
 const Requests = lazy(() => import('./pages/Requests'))
 const Schedules = lazy(() => import('./pages/Schedules'))
 const Settings = lazy(() => import('./pages/Settings'))
-const Tenants = lazy(() => import('./pages/Tenants'))
 const Usage = lazy(() => import('./pages/Usage'))
 const Users = lazy(() => import('./pages/Users'))
-
-const PortalActivate = lazy(() => import('./pages/portal/PortalActivate'))
-const PortalDashboard = lazy(() => import('./pages/portal/PortalDashboard'))
-const PortalLogin = lazy(() => import('./pages/portal/PortalLogin'))
-const PortalPending = lazy(() => import('./pages/portal/PortalPending'))
-const PortalSignup = lazy(() => import('./pages/portal/PortalSignup'))
 
 function RouteFallback() {
   const { t } = useI18n()
@@ -51,15 +43,6 @@ function AdminLayout() {
   )
 }
 
-/** Customer portal: standalone shell, never wrapped in admin chrome. */
-function PortalLayout() {
-  return (
-    <Suspense fallback={<RouteFallback />}>
-      <Outlet />
-    </Suspense>
-  )
-}
-
 export default function App() {
   return (
     <LanguageProvider>
@@ -67,14 +50,6 @@ export default function App() {
         <ToastProvider>
           <BrowserRouter>
             <Routes>
-              <Route element={<PortalLayout />}>
-                <Route path="/portal/login" element={<PortalLogin />} />
-                <Route path="/portal/signup" element={<PortalSignup />} />
-                <Route path="/portal/pending" element={<PortalPending />} />
-                <Route path="/portal/activate" element={<PortalActivate />} />
-                <Route path="/portal" element={<PortalDashboard />} />
-                <Route path="/portal/*" element={<Navigate to="/portal" replace />} />
-              </Route>
               <Route element={<AdminLayout />}>
                 <Route path="/" element={<Overview />} />
                 <Route path="/usage" element={<Usage />} />
@@ -82,10 +57,8 @@ export default function App() {
                 <Route path="/nodes" element={<Nodes />} />
                 <Route path="/operations" element={<Operations />} />
                 <Route path="/leases" element={<Leases />} />
-                <Route path="/orders" element={<Orders />} />
                 <Route path="/device-pool" element={<DevicePool />} />
                 <Route path="/users" element={<Users />} />
-                <Route path="/tenants" element={<Tenants />} />
                 <Route path="/requests" element={<Requests />} />
                 <Route path="/logs" element={<Logs />} />
                 <Route path="/debug" element={<Debug />} />

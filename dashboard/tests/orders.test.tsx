@@ -1,7 +1,7 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import App from '../src/App'
+import { renderArchivedApp } from './support/archived-app'
 import { api } from '../src/lib/api'
 import { ApiError } from '../src/lib/errors'
 import {
@@ -42,7 +42,7 @@ async function signIn(): Promise<void> {
 
 async function openPortal(tab: 'Plans' | 'Orders') {
   window.history.pushState({}, '', '/portal')
-  const view = render(<App />)
+  const view = renderArchivedApp()
   await screen.findByRole('heading', { name: 'My portal', level: 1 })
   const user = userEvent.setup()
   await user.click(await screen.findByRole('tab', { name: tab }))
@@ -51,7 +51,7 @@ async function openPortal(tab: 'Plans' | 'Orders') {
 
 async function openAdmin() {
   window.history.pushState({}, '', '/orders')
-  const view = render(<App />)
+  const view = renderArchivedApp()
   await screen.findByRole('heading', { name: 'Orders', level: 1 })
   return { user: userEvent.setup(), unmount: view.unmount }
 }
@@ -274,7 +274,7 @@ describe('portal plans and orders', () => {
     await signIn()
     const order = await portalApi.createOrder('plan-01', 'zh-portal-pay')
     window.history.pushState({}, '', '/portal')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: '客户中心', level: 1 })
     const user = userEvent.setup()
     await user.click(await screen.findByRole('tab', { name: '订单' }))
@@ -419,7 +419,7 @@ describe('portal plans and orders', () => {
     localStorage.setItem('ajs.lang', 'zh')
     await signIn()
     window.history.pushState({}, '', '/portal')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: '客户中心', level: 1 })
     const user = userEvent.setup()
     await user.click(await screen.findByRole('tab', { name: '订单' }))
@@ -719,7 +719,7 @@ describe('admin orders', () => {
     localStorage.setItem('ajs.lang', 'zh')
     await signIn()
     window.history.pushState({}, '', '/portal')
-    const portalView = render(<App />)
+    const portalView = renderArchivedApp()
     await screen.findByRole('heading', { name: '客户中心', level: 1 })
     const user = userEvent.setup()
     await user.click(screen.getByRole('tab', { name: '套餐' }))
@@ -733,7 +733,7 @@ describe('admin orders', () => {
 
     await portalApi.createOrder('plan-01', 'zh-admin-flow')
     window.history.pushState({}, '', '/orders')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: '订单', level: 1 })
     expect(await screen.findByText('标记已收到线下付款')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '按状态筛选' })).toBeInTheDocument()
@@ -748,7 +748,7 @@ describe('admin orders', () => {
 describe('account capacity', () => {
   it('shows the vendor 同时连接数 allowance on the account card with an honest note', async () => {
     window.history.pushState({}, '', '/accounts')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Accounts', level: 1 })
     const user = userEvent.setup()
 

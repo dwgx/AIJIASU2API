@@ -9,6 +9,7 @@ import {
   ScrollText,
   Server,
   Stethoscope,
+  Waypoints,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -21,17 +22,28 @@ import { Badge, Button, Card, EmptyState, PageHeader, Select, Tabs } from '../co
 import { DiagnosticsTab } from '../components/lab/DiagnosticsTab'
 import { EgressTab } from '../components/lab/EgressTab'
 import { DeviceTab } from '../components/lab/DeviceTab'
+import { FlowsTab } from '../components/lab/FlowsTab'
 import { LogsTab } from '../components/lab/LogsTab'
 import { OverviewTab } from '../components/lab/OverviewTab'
 import { ProtocolTab } from '../components/lab/ProtocolTab'
 import { ServersTab } from '../components/lab/ServersTab'
 import { SessionsTab } from '../components/lab/SessionsTab'
 
-type LabTab = 'overview' | 'sessions' | 'egress' | 'servers' | 'protocol' | 'device' | 'logs' | 'diagnostics'
+type LabTab =
+  | 'overview'
+  | 'sessions'
+  | 'flows'
+  | 'egress'
+  | 'servers'
+  | 'protocol'
+  | 'device'
+  | 'logs'
+  | 'diagnostics'
 
 const TAB_OPTIONS: Array<{ value: LabTab; labelKey: string; icon: ReactNode }> = [
   { value: 'overview', labelKey: 'lab.tab.overview', icon: <LayoutDashboard size={13} /> },
   { value: 'sessions', labelKey: 'lab.tab.sessions', icon: <Gauge size={13} /> },
+  { value: 'flows', labelKey: 'lab.tab.flows', icon: <Waypoints size={13} /> },
   { value: 'egress', labelKey: 'lab.tab.egress', icon: <Network size={13} /> },
   { value: 'servers', labelKey: 'lab.tab.servers', icon: <Server size={13} /> },
   { value: 'protocol', labelKey: 'lab.tab.protocol', icon: <Cpu size={13} /> },
@@ -154,6 +166,8 @@ export default function Lab() {
       ) : null}
 
       {tab === 'sessions' ? <SessionsTab /> : null}
+
+      {tab === 'flows' ? <FlowsTab /> : null}
 
       {tab === 'egress' ? <EgressTab /> : null}
 

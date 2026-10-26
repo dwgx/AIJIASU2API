@@ -1,7 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
-import App from '../src/App'
+import { renderArchivedApp } from './support/archived-app'
 import {
   MOCK_PORTAL_INVITE_CODE,
   MOCK_PORTAL_INVITE_EMAIL,
@@ -18,7 +18,7 @@ beforeEach(async () => {
 describe('portal activation page', () => {
   it('activates an invited tenant and leaves it pending approval', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
 
     expect(await screen.findByRole('heading', { name: 'Activate your account', level: 1 })).toBeInTheDocument()
     expect(await screen.findByLabelText('Email')).toHaveValue(MOCK_PORTAL_INVITE_EMAIL)
@@ -44,7 +44,7 @@ describe('portal activation page', () => {
 
   it('refuses a wrong or already-used code with one stable message', async () => {
     window.history.pushState({}, '', '/portal/activate?code=not-a-real-code')
-    render(<App />)
+    renderArchivedApp()
     expect(await screen.findByRole('heading', { name: 'Activate your account', level: 1 })).toBeInTheDocument()
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'This invitation is invalid, expired, or already used.',
@@ -53,7 +53,7 @@ describe('portal activation page', () => {
 
   it('validates the password locally before calling the daemon', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Activate your account', level: 1 })
     await screen.findByLabelText('Password')
 
@@ -67,7 +67,7 @@ describe('portal activation page', () => {
 
   it('renders the activation page in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
-    render(<App />)
+    renderArchivedApp()
     expect(await screen.findByRole('heading', { name: '激活账户', level: 1 })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '激活账户' })).toBeInTheDocument()
   })

@@ -183,36 +183,36 @@ describe('pagination footer', () => {
 })
 
 describe('paginated pages', () => {
-  it('paginates Requests, preserves the search across pages and resets on a filter change', async () => {
+  it('pages the durable request log by offset and keeps page filters', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/requests')
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Requests', level: 1 })
-    const table = await screen.findByRole('table', { name: 'Finished gate flows' })
-    const nav = await screen.findByRole('navigation', { name: 'Requests pagination' })
+    const table = await screen.findByRole('table', { name: 'Request log' })
+    const nav = await screen.findByRole('navigation', { name: 'Request log pagination' })
 
-    // The gate ring is capped at 200 rows, so the default page shows all of it.
-    expect(within(nav).getByText('1–200 of 200')).toBeInTheDocument()
+    // The mock log holds 40 stored rows; the default page is 50.
+    expect(within(nav).getByText('Rows 1–40')).toBeInTheDocument()
     expect(within(nav).getByRole('button', { name: 'Next page' })).toBeDisabled()
 
-    await user.click(within(nav).getByRole('combobox', { name: 'Rows per page' }))
-    await user.click(screen.getByRole('option', { name: '50' }))
-    await waitFor(() => expect(within(nav).getByText('1–50 of 200')).toBeInTheDocument())
-    expect(within(table).getAllByRole('row')).toHaveLength(51)
+    await user.click(screen.getByRole('combobox', { name: 'Rows per page' }))
+    await user.click(screen.getByRole('option', { name: '25' }))
+    await waitFor(() => expect(within(nav).getByText('Rows 1–25')).toBeInTheDocument())
+    expect(within(table).getAllByRole('row')).toHaveLength(26)
 
-    const search = screen.getByRole('textbox', { name: 'Search flows' })
+    const search = screen.getByRole('textbox', { name: 'Search this page' })
     await user.type(search, 'example')
-    await waitFor(() => expect(within(nav).getByText(/^1–50 of \d+$/)).toBeInTheDocument())
-    expect(within(nav).getByText(/^Page 1 of \d+$/)).toBeInTheDocument()
+    expect(within(nav).getByText('Rows 1–25')).toBeInTheDocument()
 
     await user.click(within(nav).getByRole('button', { name: 'Next page' }))
-    await waitFor(() => expect(within(nav).getByText(/^51–100 of \d+$/)).toBeInTheDocument())
+    await waitFor(() => expect(within(nav).getByText('Rows 26–40')).toBeInTheDocument())
     expect(search).toHaveValue('example')
+    expect(within(nav).getByRole('button', { name: 'Next page' })).toBeDisabled()
 
     await user.click(screen.getByRole('combobox', { name: 'Filter by status' }))
     await user.click(screen.getByRole('option', { name: 'rejected' }))
-    await waitFor(() => expect(within(nav).getByText(/^1–\d+ of \d+$/)).toBeInTheDocument())
+    expect(within(nav).getByText('Rows 26–40')).toBeInTheDocument()
     expect(search).toHaveValue('example')
   })
 

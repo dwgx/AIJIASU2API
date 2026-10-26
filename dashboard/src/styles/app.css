@@ -762,6 +762,17 @@ svg {
   line-height: 17px;
 }
 
+/* A note that sits directly under a card toolbar, aligned with its padding. */
+.page-note--inset {
+  padding: 8px 12px 0;
+}
+
+.callout__link {
+  color: var(--mint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 /* ==========================================================================
    Layout grids
    ========================================================================== */

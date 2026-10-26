@@ -88,6 +88,33 @@ describe('app shell', () => {
   })
 })
 
+describe('archived surfaces', () => {
+  it('keeps portal, orders and tenants out of the sidebar', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Overview', level: 1 })
+    const sidebar = screen.getByRole('complementary', { name: 'Primary navigation' })
+
+    expect(within(sidebar).queryByRole('link', { name: 'Orders' })).toBeNull()
+    expect(within(sidebar).queryByRole('link', { name: 'Tenants' })).toBeNull()
+    expect(within(sidebar).queryByRole('link', { name: /portal/i })).toBeNull()
+    expect(within(sidebar).getByRole('link', { name: 'Requests' })).toBeInTheDocument()
+    expect(within(sidebar).getByRole('link', { name: 'Lab' })).toBeInTheDocument()
+  })
+
+  it.each(['/orders', '/tenants', '/portal', '/portal/login'])(
+    'redirects the unmounted %s route to the overview',
+    async (path) => {
+      window.history.pushState({}, '', path)
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: 'Overview', level: 1 })).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: 'Orders', level: 1 })).toBeNull()
+      expect(screen.queryByRole('heading', { name: 'Tenants', level: 1 })).toBeNull()
+      expect(screen.queryByRole('heading', { name: 'My portal', level: 1 })).toBeNull()
+    },
+  )
+})
+
 describe('environment labels', () => {
   it('marks the default build as mock and keeps the dataset reset', async () => {
     const user = userEvent.setup()

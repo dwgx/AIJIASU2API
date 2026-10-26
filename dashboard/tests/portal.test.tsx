@@ -1,7 +1,7 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import App from '../src/App'
+import { renderArchivedApp } from './support/archived-app'
 import { formatNumber } from '../src/lib/format'
 import { setMockEpayEnabled } from '../src/lib/order-mock'
 import {
@@ -51,7 +51,7 @@ async function signInMockTenant(): Promise<void> {
 
 async function openDashboard() {
   window.history.pushState({}, '', '/portal')
-  render(<App />)
+  renderArchivedApp()
   return screen.findByRole('heading', { name: 'My portal', level: 1 })
 }
 
@@ -281,7 +281,7 @@ describe('portal client — mock parity', () => {
 describe('portal UI — authentication', () => {
   it('signs in with the cookie session and writes nothing to Web Storage', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
     expect(
       await screen.findByRole('heading', { name: 'Sign in to your portal', level: 1 }),
     ).toBeInTheDocument()
@@ -303,7 +303,7 @@ describe('portal UI — authentication', () => {
 
   it('rejects bad credentials with one uniform message', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Sign in to your portal', level: 1 })
 
     await user.type(screen.getByLabelText('Email'), MOCK_PORTAL_EMAIL)
@@ -316,7 +316,7 @@ describe('portal UI — authentication', () => {
 
   it('refuses a pending application at login', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Sign in to your portal', level: 1 })
 
     await user.type(screen.getByLabelText('Email'), MOCK_PENDING_EMAIL)
@@ -331,7 +331,7 @@ describe('portal UI — authentication', () => {
   it('submits a signup application and shows the pending state', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/portal/signup')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Apply for portal access', level: 1 })
 
     await user.type(screen.getByLabelText('Display name'), 'New Customer')
@@ -351,7 +351,7 @@ describe('portal UI — authentication', () => {
   it('validates the signup form before calling the daemon', async () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/portal/signup')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: 'Apply for portal access', level: 1 })
 
     await user.type(screen.getByLabelText('Display name'), 'New Customer')
@@ -368,7 +368,7 @@ describe('portal UI — authentication', () => {
 
   it('redirects a visitor without a session to the login page', async () => {
     window.history.pushState({}, '', '/portal')
-    render(<App />)
+    renderArchivedApp()
     expect(
       await screen.findByRole('heading', { name: 'Sign in to your portal', level: 1 }),
     ).toBeInTheDocument()
@@ -440,7 +440,7 @@ describe('portal UI — own data', () => {
 
   it('renders the portal in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
-    render(<App />)
+    renderArchivedApp()
     expect(
       await screen.findByRole('heading', { name: '登录客户中心', level: 1 }),
     ).toBeInTheDocument()
@@ -524,7 +524,7 @@ describe('portal UI — payment channel', () => {
     await signInMockTenant()
     const order = await portalApi.createOrder('plan-01', 'channel-zh')
     window.history.pushState({}, '', '/portal')
-    render(<App />)
+    renderArchivedApp()
     await screen.findByRole('heading', { name: '客户中心', level: 1 })
     const user = userEvent.setup()
     await user.click(await screen.findByRole('tab', { name: '订单' }))

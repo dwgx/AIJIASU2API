@@ -1,7 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import App from '../src/App'
+import { renderArchivedApp } from './support/archived-app'
 import {
   MOCK_PORTAL_EMAIL,
   MOCK_PORTAL_PASSWORD,
@@ -50,7 +50,7 @@ async function signIn(): Promise<void> {
 
 async function openPortal(tab: string, heading = 'My portal') {
   window.history.pushState({}, '', '/portal')
-  const view = render(<App />)
+  const view = renderArchivedApp()
   await screen.findByRole('heading', { name: heading, level: 1 })
   const user = userEvent.setup()
   await user.click(await screen.findByRole('tab', { name: tab }))

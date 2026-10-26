@@ -141,3 +141,81 @@
     flex-direction: column;
   }
 }
+
+/* API surface: resolved base URL, served contract and copy-paste examples. */
+.api-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.api-surface__value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-surface__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--mint);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.api-surface__link:hover {
+  text-decoration-color: var(--mint);
+}
+
+.api-surface__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.api-snippets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.api-snippets__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.api-snippets__code {
+  max-height: 320px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 17px;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.api-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-identity__name {
+  color: var(--text);
+  font-size: 13px;
+}

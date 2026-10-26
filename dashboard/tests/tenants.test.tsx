@@ -1,7 +1,7 @@
-import { render, screen, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
-import App from '../src/App'
+import { renderArchivedApp } from './support/archived-app'
 import { api } from '../src/lib/api'
 
 beforeEach(async () => {
@@ -13,7 +13,7 @@ beforeEach(async () => {
 describe('tenants admin — one-time invitations', () => {
   it('creates an invite and shows the activation code exactly once', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    renderArchivedApp()
 
     expect(await screen.findByRole('heading', { name: 'Tenants', level: 1 })).toBeInTheDocument()
     expect(await screen.findByText('pending@example.com')).toBeInTheDocument()
@@ -50,7 +50,7 @@ describe('tenants admin — one-time invitations', () => {
 
   it('renders the tenant page in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
-    render(<App />)
+    renderArchivedApp()
     expect(await screen.findByRole('heading', { name: '租户', level: 1 })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '邀请租户' })).toBeInTheDocument()
     expect(screen.getByText('待审核')).toBeInTheDocument()

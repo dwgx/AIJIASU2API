@@ -1,9 +1,21 @@
 import { useId, useMemo, useState } from 'react'
-import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
-import { api } from '../../lib/api'
+import {
+  ExternalLink,
+  Fingerprint,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react'
+import { api, apiBaseUrl, openApiSpecUrl } from '../../lib/api'
+import { apiSnippet } from '../../lib/apiSnippets'
+import type { SnippetLanguage } from '../../lib/apiSnippets'
 import { ApiError } from '../../lib/errors'
 import { formatDate, formatRelative } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
+import type { TranslationKey } from '../../lib/i18n'
+import { regionName } from '../../lib/regions'
 import { SCOPES } from '../../lib/types'
 import type {
   Account,
@@ -12,6 +24,7 @@ import type {
   ScopedKeyCreateInput,
   ScopedKeyCreated,
   Scope,
+  Whoami,
 } from '../../lib/types'
 import { useAsync } from '../../lib/useAsync'
 import { CopyButton } from '../CopyButton'
@@ -28,6 +41,7 @@ import {
   Input,
   Select,
   Skeleton,
+  Tabs,
 } from '../primitives'
 import './AccessSection.css'
 
@@ -43,10 +57,182 @@ const STATUS_LABEL = {
   revoked: 'access.statusRevoked',
 } as const
 
+const IDENTITY_KIND_LABEL: Record<Whoami['kind'], TranslationKey> = {
+  operator: 'access.identityKind.operator',
+  'scoped-key': 'access.identityKind.scoped-key',
+  legacy: 'access.identityKind.legacy',
+}
+
 function statusOf(key: ScopedKey): keyof typeof STATUS_LABEL {
   if (key.revokedAt) return 'revoked'
   if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) return 'expired'
   return 'active'
+}
+
+/** Comma-separated grants; the daemon stores trimmed, de-duplicated codes. */
+function parseRegionList(raw: string): string[] {
+  const regions: string[] = []
+  for (const part of raw.split(',')) {
+    const code = part.trim()
+    if (!code) continue
+    if (!regions.includes(code)) regions.push(code)
+  }
+  return regions
+}
+
+/**
+ * One snippet at a time, generated from the resolved base URL. `secret` is
+ * only passed by the one-time create dialog; the card leaves it undefined so
+ * every example reads the key from the environment instead.
+ */
+function ApiSnippetPanel({ secret }: { secret?: string }) {
+  const { t } = useI18n()
+  const [language, setLanguage] = useState<SnippetLanguage>('curl')
+  const snippet = apiSnippet(language, { baseUrl: apiBaseUrl(), secret })
+
+  return (
+    <div className="api-snippets">
+      <div className="api-snippets__head">
+        <Tabs
+          label={t('access.snippetLanguage')}
+          value={language}
+          onChange={setLanguage}
+          options={[
+            { value: 'curl', label: 'cURL' },
+            { value: 'go', label: 'Go' },
+            { value: 'ts', label: 'TypeScript' },
+          ]}
+        />
+        <CopyButton
+          value={snippet}
+          label={t('access.snippetCopy')}
+          toastMessage={t('access.snippetCopied')}
+          withLabel
+        />
+      </div>
+      <pre className="api-snippets__code" tabIndex={0}>
+        <code>{snippet}</code>
+      </pre>
+    </div>
+  )
+}
+
+/** Base URL, the served contract and the key→nodes→lease→usage examples. */
+function ApiAccessCard() {
+  const { t } = useI18n()
+  const base = apiBaseUrl()
+  return (
+    <Card title={t('access.apiTitle')} subtitle={t('access.apiSubtitle')}>
+      <div className="api-surface">
+        <dl className="facts facts--compact">
+          <div>
+            <dt>{t('access.apiBase')}</dt>
+            <dd className="api-surface__value">
+              <code className="mono">{base}</code>
+              <CopyButton value={base} label={t('access.apiBaseCopy')} />
+            </dd>
+          </div>
+          <div>
+            <dt>{t('access.apiSpec')}</dt>
+            <dd className="api-surface__value">
+              <a
+                className="api-surface__link"
+                href={openApiSpecUrl()}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <code className="mono">/v1/openapi.json</code>
+                <ExternalLink size={12} aria-hidden="true" />
+              </a>
+              <span className="cell-sub">{t('access.apiSpecHint')}</span>
+            </dd>
+          </div>
+        </dl>
+        <p className="api-surface__note">{t('access.snippetNote')}</p>
+        <ApiSnippetPanel />
+      </div>
+    </Card>
+  )
+}
+
+/**
+ * GET /v1/whoami: which credential the console is using and what it may do.
+ * The daemon reports a scope list only for identities that have one; a legacy
+ * admin bearer keeps full authority without a list, which is stated plainly
+ * instead of inventing grants.
+ */
+function IdentityCard() {
+  const { t } = useI18n()
+  const whoami = useAsync<Whoami>(() => api.whoami(), [])
+
+  return (
+    <Card
+      title={t('access.identityTitle')}
+      subtitle={t('access.identitySubtitle')}
+      actions={
+        <IconButton
+          label={t('access.identityRefresh')}
+          icon={<RefreshCw size={15} />}
+          onClick={whoami.reload}
+        />
+      }
+    >
+      {whoami.status === 'loading' && !whoami.data ? (
+        <div className="api-surface" aria-busy="true">
+          <Skeleton width={220} height={16} />
+          <Skeleton width={320} height={12} />
+        </div>
+      ) : whoami.status === 'error' && !whoami.data ? (
+        <ErrorState
+          message={whoami.error ?? t('access.identityFailed')}
+          onRetry={whoami.reload}
+        />
+      ) : whoami.data ? (
+        <div className="api-surface">
+          <div className="api-identity">
+            <Fingerprint size={18} aria-hidden="true" />
+            <code className="api-identity__name mono">{whoami.data.name}</code>
+            <Badge
+              tone={
+                whoami.data.kind === 'scoped-key'
+                  ? 'info'
+                  : whoami.data.kind === 'operator'
+                    ? 'mint'
+                    : 'warning'
+              }
+            >
+              {t(IDENTITY_KIND_LABEL[whoami.data.kind] ?? 'access.identityKind.legacy')}
+            </Badge>
+            {whoami.data.role ? (
+              <Badge tone="neutral">
+                {t('access.identityRole', { role: whoami.data.role })}
+              </Badge>
+            ) : null}
+            <Badge tone={whoami.data.strictRbac ? 'success' : 'neutral'}>
+              {whoami.data.strictRbac
+                ? t('access.identityStrict')
+                : t('access.identityLegacyMode')}
+            </Badge>
+          </div>
+          {whoami.data.scopes && whoami.data.scopes.length > 0 ? (
+            <div className="scoped-row__chips" aria-label={t('access.identityScopes')}>
+              {whoami.data.scopes.map((scope) => (
+                <span className="scoped-chip" key={scope}>
+                  {scope}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="page-note">
+              {whoami.data.kind === 'legacy'
+                ? t('access.identityNoScopesLegacy')
+                : t('access.identityNoScopes')}
+            </p>
+          )}
+        </div>
+      ) : null}
+    </Card>
+  )
 }
 
 /**
@@ -108,179 +294,195 @@ export function AccessSection() {
   }
 
   return (
-    <Card
-      title={t('access.cardTitle')}
-      subtitle={t('access.cardSubtitle')}
-      actions={
-        <div className="scoped-head-actions">
-          {data.data ? (
-            <span className="scoped-count">
-              {t(keys.length === 1 ? 'access.countOne' : 'access.count', {
-                count: keys.length,
-              })}
-            </span>
-          ) : null}
-          <IconButton
-            label={t('access.refresh')}
-            icon={<RefreshCw size={15} />}
-            onClick={data.reload}
-          />
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<Plus size={14} />}
-            onClick={() => setCreateOpen(true)}
-            disabled={!data.data || data.data.users.length === 0}
-          >
-            {t('access.new')}
-          </Button>
-        </div>
-      }
-    >
-      {data.status === 'loading' && !data.data ? (
-        <div className="scoped-skeleton" aria-busy="true">
-          <Skeleton height={76} />
-          <Skeleton height={76} />
-          <Skeleton height={76} />
-        </div>
-      ) : data.status === 'error' && !data.data ? (
-        <ErrorState message={data.error ?? t('access.loadFailed')} onRetry={data.reload} />
-      ) : keys.length === 0 ? (
-        <EmptyState
-          title={t('access.emptyTitle')}
-          description={t('access.emptyDesc')}
-          icon={<KeyRound size={20} aria-hidden="true" />}
-          action={
+    <>
+      <ApiAccessCard />
+      <IdentityCard />
+      <Card
+        title={t('access.cardTitle')}
+        subtitle={t('access.cardSubtitle')}
+        actions={
+          <div className="scoped-head-actions">
+            {data.data ? (
+              <span className="scoped-count">
+                {t(keys.length === 1 ? 'access.countOne' : 'access.count', {
+                  count: keys.length,
+                })}
+              </span>
+            ) : null}
+            <IconButton
+              label={t('access.refresh')}
+              icon={<RefreshCw size={15} />}
+              onClick={data.reload}
+            />
             <Button
+              size="sm"
               variant="primary"
               icon={<Plus size={14} />}
               onClick={() => setCreateOpen(true)}
-              disabled={(data.data?.users.length ?? 0) === 0}
+              disabled={!data.data || data.data.users.length === 0}
             >
               {t('access.new')}
             </Button>
-          }
-        />
-      ) : (
-        <>
-          {data.error ? (
-            <p className="form-error" role="alert">
-              {data.error}
-            </p>
-          ) : null}
-          <ul className="scoped-list" aria-label={t('access.cardTitle')}>
-            {keys.map((key) => {
-              const status = statusOf(key)
-              const accounts =
-                key.accountIds.length === 0
-                  ? t('access.allAccounts')
-                  : t(
-                      key.accountIds.length === 1
-                        ? 'access.accountCountOne'
-                        : 'access.accountCount',
-                      { count: key.accountIds.length },
-                    )
-              return (
-                <li className="scoped-row" key={key.id}>
-                  <div className="scoped-row__main">
-                    <div className="scoped-row__head">
-                      <span className="scoped-row__label">{key.label}</span>
-                      <Badge
-                        tone={
-                          status === 'active' ? 'success' : status === 'expired' ? 'warning' : 'danger'
-                        }
-                      >
-                        {t(STATUS_LABEL[status])}
-                      </Badge>
-                      <code className="scoped-row__prefix mono">{key.prefix}…</code>
-                    </div>
-                    <p className="scoped-row__user">
-                      {key.userName} · {accounts}
-                    </p>
-                    <div className="scoped-row__chips">
-                      {key.scopes.map((scope) => (
-                        <span className="scoped-chip" key={scope}>
-                          {scope}
-                        </span>
-                      ))}
-                    </div>
-                    <dl className="scoped-row__facts">
-                      <div>
-                        <dt>{t('access.rateLimit')}</dt>
-                        <dd className="mono">
-                          {key.rateLimitPerMin === 0
-                            ? t('access.unlimited')
-                            : t('access.perMin', { count: key.rateLimitPerMin })}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>{t('access.expiry')}</dt>
-                        <dd>{key.expiresAt ? formatDate(key.expiresAt) : t('access.neverExpires')}</dd>
-                      </div>
-                      <div>
-                        <dt>{t('access.lastUsed')}</dt>
-                        <dd>
-                          {key.lastUsedAt
-                            ? formatRelative(key.lastUsedAt, Date.now(), lang)
-                            : t('common.never')}
-                        </dd>
-                      </div>
-                    </dl>
-                    {key.accountIds.length > 0 ? (
-                      <p className="scoped-row__accounts">
-                        {key.accountIds
-                          .map((id) => accountLabels.get(id) ?? id)
-                          .join(' · ')}
-                      </p>
-                    ) : null}
-                  </div>
-                  {key.revokedAt ? null : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<Trash2 size={14} />}
-                      aria-label={t('access.revokeFor', { label: key.label })}
-                      onClick={() => setRevokeTarget(key)}
-                    >
-                      {t('access.revoke')}
-                    </Button>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        </>
-      )}
-
-      {createOpen && data.data ? (
-        <ScopedKeyDialog
-          users={data.data.users}
-          accounts={data.data.accounts}
-          onClose={() => setCreateOpen(false)}
-          onCreated={data.reload}
-        />
-      ) : null}
-
-      <ConfirmDialog
-        open={revokeTarget !== null}
-        title={t('access.revokeTitle')}
-        description={
-          revokeTarget
-            ? t('access.revokeDesc', {
-                label: revokeTarget.label,
-                prefix: revokeTarget.prefix,
-                user: revokeTarget.userName,
-              })
-            : ''
+          </div>
         }
-        confirmLabel={t('access.revokeConfirm')}
-        requireText={revokeTarget?.prefix}
-        requireTextLabel={t('access.prefix')}
-        busy={revoking}
-        onConfirm={() => void confirmRevoke()}
-        onCancel={() => setRevokeTarget(null)}
-      />
-    </Card>
+      >
+        {data.status === 'loading' && !data.data ? (
+          <div className="scoped-skeleton" aria-busy="true">
+            <Skeleton height={76} />
+            <Skeleton height={76} />
+            <Skeleton height={76} />
+          </div>
+        ) : data.status === 'error' && !data.data ? (
+          <ErrorState message={data.error ?? t('access.loadFailed')} onRetry={data.reload} />
+        ) : keys.length === 0 ? (
+          <EmptyState
+            title={t('access.emptyTitle')}
+            description={t('access.emptyDesc')}
+            icon={<KeyRound size={20} aria-hidden="true" />}
+            action={
+              <Button
+                variant="primary"
+                icon={<Plus size={14} />}
+                onClick={() => setCreateOpen(true)}
+                disabled={(data.data?.users.length ?? 0) === 0}
+              >
+                {t('access.new')}
+              </Button>
+            }
+          />
+        ) : (
+          <>
+            {data.error ? (
+              <p className="form-error" role="alert">
+                {data.error}
+              </p>
+            ) : null}
+            <ul className="scoped-list" aria-label={t('access.cardTitle')}>
+              {keys.map((key) => {
+                const status = statusOf(key)
+                const accounts =
+                  key.accountIds.length === 0
+                    ? t('access.allAccounts')
+                    : t(
+                        key.accountIds.length === 1
+                          ? 'access.accountCountOne'
+                          : 'access.accountCount',
+                        { count: key.accountIds.length },
+                      )
+                return (
+                  <li className="scoped-row" key={key.id}>
+                    <div className="scoped-row__main">
+                      <div className="scoped-row__head">
+                        <span className="scoped-row__label">{key.label}</span>
+                        <Badge
+                          tone={
+                            status === 'active'
+                              ? 'success'
+                              : status === 'expired'
+                                ? 'warning'
+                                : 'danger'
+                          }
+                        >
+                          {t(STATUS_LABEL[status])}
+                        </Badge>
+                        <code className="scoped-row__prefix mono">{key.prefix}…</code>
+                      </div>
+                      <p className="scoped-row__user">
+                        {key.userName} · {accounts}
+                      </p>
+                      <div className="scoped-row__chips">
+                        {key.scopes.map((scope) => (
+                          <span className="scoped-chip" key={scope}>
+                            {scope}
+                          </span>
+                        ))}
+                      </div>
+                      <dl className="scoped-row__facts">
+                        <div>
+                          <dt>{t('access.rateLimit')}</dt>
+                          <dd className="mono">
+                            {key.rateLimitPerMin === 0
+                              ? t('access.unlimited')
+                              : t('access.perMin', { count: key.rateLimitPerMin })}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t('access.expiry')}</dt>
+                          <dd>
+                            {key.expiresAt ? formatDate(key.expiresAt) : t('access.neverExpires')}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t('access.lastUsed')}</dt>
+                          <dd>
+                            {key.lastUsedAt
+                              ? formatRelative(key.lastUsedAt, Date.now(), lang)
+                              : t('common.never')}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>{t('access.regions')}</dt>
+                          <dd>
+                            {key.regions.length === 0
+                              ? t('access.allRegions')
+                              : key.regions.join(' · ')}
+                          </dd>
+                        </div>
+                      </dl>
+                      {key.accountIds.length > 0 ? (
+                        <p className="scoped-row__accounts">
+                          {key.accountIds.map((id) => accountLabels.get(id) ?? id).join(' · ')}
+                        </p>
+                      ) : null}
+                    </div>
+                    {key.revokedAt ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={<Trash2 size={14} />}
+                        aria-label={t('access.revokeFor', { label: key.label })}
+                        onClick={() => setRevokeTarget(key)}
+                      >
+                        {t('access.revoke')}
+                      </Button>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        )}
+
+        {createOpen && data.data ? (
+          <ScopedKeyDialog
+            users={data.data.users}
+            accounts={data.data.accounts}
+            onClose={() => setCreateOpen(false)}
+            onCreated={data.reload}
+          />
+        ) : null}
+
+        <ConfirmDialog
+          open={revokeTarget !== null}
+          title={t('access.revokeTitle')}
+          description={
+            revokeTarget
+              ? t('access.revokeDesc', {
+                  label: revokeTarget.label,
+                  prefix: revokeTarget.prefix,
+                  user: revokeTarget.userName,
+                })
+              : ''
+          }
+          confirmLabel={t('access.revokeConfirm')}
+          requireText={revokeTarget?.prefix}
+          requireTextLabel={t('access.prefix')}
+          busy={revoking}
+          onConfirm={() => void confirmRevoke()}
+          onCancel={() => setRevokeTarget(null)}
+        />
+      </Card>
+    </>
   )
 }
 
@@ -295,13 +497,14 @@ function ScopedKeyDialog({
   onClose: () => void
   onCreated: () => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const { push } = useToast()
   const baseId = useId()
   const [userId, setUserId] = useState(users[0]?.id ?? '')
   const [label, setLabel] = useState('')
   const [scopes, setScopes] = useState<Scope[]>([])
   const [accountIds, setAccountIds] = useState<string[]>([])
+  const [regions, setRegions] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
   const [rateLimit, setRateLimit] = useState('60')
   const [formError, setFormError] = useState<string | null>(null)
@@ -321,6 +524,13 @@ function ScopedKeyDialog({
       })),
     [accounts],
   )
+  // Existing account regions are suggestions only: a grant may name a region
+  // the vendor catalog has not published yet.
+  const knownRegions = useMemo(() => {
+    const codes = new Set<string>()
+    for (const account of accounts) for (const region of account.regions) codes.add(region)
+    return [...codes].sort((left, right) => left.localeCompare(right))
+  }, [accounts])
 
   const submit = async () => {
     if (!label.trim()) {
@@ -346,11 +556,17 @@ function ScopedKeyDialog({
       }
       expires = parsed.toISOString()
     }
+    const regionGrants = parseRegionList(regions)
+    if (regionGrants.some((region) => region.length > 64)) {
+      setFormError(t('access.regionsInvalid'))
+      return
+    }
     const input: ScopedKeyCreateInput = {
       userId,
       label: label.trim(),
       scopes,
       accountIds,
+      regions: regionGrants,
       ...(rateValue === undefined ? {} : { rateLimitPerMin: rateValue }),
       ...(expires ? { expiresAt: expires } : {}),
     }
@@ -422,7 +638,17 @@ function ScopedKeyDialog({
               <dt>{t('access.prefix')}</dt>
               <dd className="mono">{created.key.prefix}</dd>
             </div>
+            <div>
+              <dt>{t('access.regions')}</dt>
+              <dd>
+                {created.key.regions.length === 0
+                  ? t('access.allRegions')
+                  : created.key.regions.join(' · ')}
+              </dd>
+            </div>
           </dl>
+          <p className="api-surface__note">{t('access.secretSnippetNote')}</p>
+          <ApiSnippetPanel secret={created.secret} />
         </div>
       ) : (
         <form
@@ -494,6 +720,27 @@ function ScopedKeyDialog({
               placeholder={t('access.accountsPlaceholder')}
               onChange={setAccountIds}
             />
+          </Field>
+          <Field
+            label={t('access.regions')}
+            htmlFor={`${baseId}-regions`}
+            hint={t('access.regionsHint')}
+          >
+            <Input
+              id={`${baseId}-regions`}
+              list={`${baseId}-region-codes`}
+              value={regions}
+              placeholder={t('access.regionsPlaceholder')}
+              autoComplete="off"
+              onChange={(event) => setRegions(event.target.value)}
+            />
+            <datalist id={`${baseId}-region-codes`}>
+              {knownRegions.map((code) => (
+                <option key={code} value={code}>
+                  {regionName(code, lang)}
+                </option>
+              ))}
+            </datalist>
           </Field>
           <div className="form-grid">
             <Field

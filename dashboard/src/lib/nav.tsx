@@ -76,13 +76,6 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: 'sticky egress ip ttl rotate release 固定 出口 轮换 释放 租约',
       },
       {
-        to: '/orders',
-        labelKey: 'nav.orders',
-        icon: ApcLeasesIcon,
-        keywords:
-          'orders plans settlement offline receipt payment refund entitlement activation 订单 套餐 结算 收款 退款 权益 开通',
-      },
-      {
         to: '/device-pool',
         labelKey: 'nav.devicePool',
         icon: ApcDevicePoolIcon,
@@ -99,13 +92,6 @@ export const NAV_SECTIONS: NavSection[] = [
         labelKey: 'nav.users',
         icon: ApcUsersIcon,
         keywords: 'api keys allowlist quota platform 密钥 白名单 配额 平台 用户',
-      },
-      {
-        to: '/tenants',
-        labelKey: 'nav.tenants',
-        icon: ApcUsersIcon,
-        keywords:
-          'tenants customers invitations onboarding activation portal 租户 客户 邀请 激活 开通 门户',
       },
       {
         to: '/requests',

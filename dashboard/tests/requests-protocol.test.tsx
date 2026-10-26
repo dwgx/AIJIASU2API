@@ -7,16 +7,19 @@ import type { FlowView } from '../src/lib/types'
 
 beforeEach(async () => {
   localStorage.clear()
-  window.history.pushState({}, '', '/requests')
+  window.history.pushState({}, '', '/lab')
   await api.resetMock()
 })
 
-async function openRequests(lang: 'en' | 'zh' = 'en') {
+async function openFlows(lang: 'en' | 'zh' = 'en') {
+  const user = userEvent.setup()
   render(<App />)
-  await screen.findByRole('heading', { name: lang === 'zh' ? '请求' : 'Requests', level: 1 })
-  return screen.findByRole('table', {
+  await screen.findByRole('heading', { name: lang === 'zh' ? '实验室' : 'Lab', level: 1 })
+  await user.click(screen.getByRole('tab', { name: lang === 'zh' ? '流' : 'Flows' }))
+  const table = await screen.findByRole('table', {
     name: lang === 'zh' ? '已完成的网关流' : 'Finished gate flows',
   })
+  return { table, user }
 }
 
 /** One bare flow with no protocol and no attribution, as an old daemon emits. */
@@ -34,13 +37,13 @@ const BARE_FLOW: FlowView = {
   bytesOut: 20,
 }
 
-describe('requests protocol and user attribution', () => {
+describe('lab flow protocol and user attribution', () => {
   it('renders protocol badges and user names from the mock ring', async () => {
     const view = await api.getLabFlows(200)
     expect(new Set(view.flows.map((flow) => flow.protocol))).toEqual(new Set(['socks5', 'http']))
     expect(view.flows.some((flow) => flow.userName === 'ada.ops')).toBe(true)
 
-    const table = await openRequests()
+    const { table } = await openFlows()
 
     expect(within(table).getByRole('columnheader', { name: 'Protocol' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'User' })).toBeInTheDocument()
@@ -55,11 +58,9 @@ describe('requests protocol and user attribution', () => {
       dropped: 0,
       flows: [{ ...BARE_FLOW, protocol: 'http', userId: 'u-7', userName: 'ada.ops' }],
     })
-    vi.spyOn(api, 'listRequests').mockResolvedValue([])
 
-    const table = await openRequests()
+    const { table } = await openFlows()
     const row = within(table).getAllByRole('row')[1]
-    expect(within(row).getByText('gate flow')).toBeInTheDocument()
     expect(within(row).getByText('ada.ops')).toBeInTheDocument()
     expect(within(row).getByText('http')).toBeInTheDocument()
     // The row shows the display name; the id stays in the title attribute.
@@ -67,8 +68,7 @@ describe('requests protocol and user attribution', () => {
   })
 
   it('filters rows by protocol and restores them', async () => {
-    const user = userEvent.setup()
-    const table = await openRequests()
+    const { table, user } = await openFlows()
 
     await user.click(screen.getByRole('combobox', { name: 'Filter by protocol' }))
     await user.click(screen.getByRole('option', { name: 'http' }))
@@ -85,12 +85,10 @@ describe('requests protocol and user attribution', () => {
     await waitFor(() => expect(within(table).getAllByText('socks5').length).toBeGreaterThan(0))
   })
 
-  it('filters rows by the attributed user', async () => {
-    const user = userEvent.setup()
-    const table = await openRequests()
+  it('searches rows by the attributed user', async () => {
+    const { table, user } = await openFlows()
 
-    await user.click(screen.getByRole('combobox', { name: 'Filter by user' }))
-    await user.click(screen.getByRole('option', { name: 'field.lab' }))
+    await user.type(screen.getByRole('textbox', { name: 'Search gate flows' }), 'field.lab')
 
     await waitFor(() => {
       const rows = within(table).getAllByRole('row').slice(1)
@@ -105,12 +103,8 @@ describe('requests protocol and user attribution', () => {
       dropped: 0,
       flows: [BARE_FLOW],
     })
-    vi.spyOn(api, 'listRequests').mockResolvedValue([])
 
-    const table = await openRequests()
-    expect(screen.getByRole('combobox', { name: 'Filter by protocol' })).toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: 'Filter by user' })).not.toBeInTheDocument()
-
+    const { table } = await openFlows()
     const cells = within(within(table).getAllByRole('row')[1]).getAllByRole('cell')
     expect(cells[2]).toHaveTextContent('—')
     expect(cells[4]).toHaveTextContent('—')
@@ -122,25 +116,19 @@ describe('requests protocol and user attribution', () => {
       dropped: 0,
       flows: [{ ...BARE_FLOW, protocol: 'http', userId: 'u-42' }],
     })
-    vi.spyOn(api, 'listRequests').mockResolvedValue([])
 
-    const user = userEvent.setup()
-    const table = await openRequests()
+    const { table } = await openFlows()
     const row = within(table).getAllByRole('row')[1]
     expect(within(row).getByText('u-42')).toBeInTheDocument()
     expect(within(row).getByText('http')).toBeInTheDocument()
-
-    await user.click(screen.getByRole('combobox', { name: 'Filter by user' }))
-    expect(screen.getByRole('option', { name: 'u-42' })).toBeInTheDocument()
   })
 
   it('shows protocol and user in the detail drawer', async () => {
-    const user = userEvent.setup()
     const view = await api.getLabFlows(200)
     const flow = view.flows.find((row) => row.userName && row.protocol === 'http')
     expect(flow).toBeDefined()
     if (!flow) throw new Error('mock must include an http flow with a user')
-    await openRequests()
+    const { user } = await openFlows()
 
     await user.click(screen.getByRole('button', { name: `View flow ${flow.id}` }))
     const drawer = await screen.findByRole('dialog', { name: 'Flow detail' })
@@ -148,13 +136,13 @@ describe('requests protocol and user attribution', () => {
     expect(within(drawer).getByText('http')).toBeInTheDocument()
   })
 
-  it('translates the new columns and filters', async () => {
+  it('translates the flow columns and filters', async () => {
     localStorage.setItem('ajs.lang', 'zh')
-    const table = await openRequests('zh')
+    const { table } = await openFlows('zh')
 
     expect(within(table).getByRole('columnheader', { name: '用户' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: '协议' })).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '按协议筛选' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: '按用户筛选' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '搜索网关流' })).toBeInTheDocument()
   })
 })

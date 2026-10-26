@@ -146,7 +146,8 @@ describe('scoped key settings', () => {
     expect(Date.parse(submitted.expiresAt ?? '')).toBeGreaterThan(Date.now())
 
     const secretDialog = await screen.findByRole('dialog', { name: 'Scoped key created' })
-    expect(within(secretDialog).getByText(created.secret)).toBeInTheDocument()
+    // The secret appears in the one-time field and in the one-time snippets.
+    expect(within(secretDialog).getAllByText(created.secret).length).toBeGreaterThan(0)
     expect(within(secretDialog).getByRole('alert')).toHaveTextContent(
       'keeps only its SHA-256',
     )
@@ -244,6 +245,92 @@ describe('scoped key settings', () => {
     expect(screen.queryByRole('dialog', { name: 'Revoke scoped key?' })).toBeNull()
   })
 
+  it('shows the resolved API base, the OpenAPI link and runnable examples', async () => {
+    const user = userEvent.setup()
+    const section = await openAccess()
+
+    expect(within(section).getAllByText(window.location.origin).length).toBeGreaterThan(0)
+    const spec = within(section).getByRole('link', { name: /\/v1\/openapi\.json/ })
+    expect(spec).toHaveAttribute('href', `${window.location.origin}/v1/openapi.json`)
+
+    const snippet = section.querySelector('.api-snippets__code')
+    expect(snippet?.textContent).toContain('AJS_API_KEY')
+    expect(snippet?.textContent).toContain('/v1/nodes')
+    expect(snippet?.textContent).toContain('/v1/leases')
+    expect(snippet?.textContent).toContain('/v1/usage')
+
+    await user.click(within(section).getByRole('tab', { name: 'Go' }))
+    expect(section.querySelector('.api-snippets__code')?.textContent).toContain('http.NewRequest')
+    await user.click(within(section).getByRole('tab', { name: 'TypeScript' }))
+    expect(section.querySelector('.api-snippets__code')?.textContent).toContain('fetch(')
+  })
+
+  it('shows the current identity and scope posture from /v1/whoami', async () => {
+    const whoami = vi.spyOn(api, 'whoami')
+    const section = await openAccess()
+
+    expect(whoami).toHaveBeenCalled()
+    expect(within(section).getByText('ada.ops')).toBeInTheDocument()
+    expect(within(section).getByText('legacy bearer')).toBeInTheDocument()
+    expect(within(section).getByText('role: admin')).toBeInTheDocument()
+    expect(within(section).getByText('legacy mode')).toBeInTheDocument()
+    expect(
+      within(section).getByText(/full admin authority without a scope list/),
+    ).toBeInTheDocument()
+  })
+
+  it('renders a scope list when the daemon reports one', async () => {
+    vi.spyOn(api, 'whoami').mockResolvedValue({
+      name: 'key:build-bot',
+      kind: 'scoped-key',
+      strictRbac: true,
+      scopes: ['requests:read', 'usage:read'],
+    })
+    const section = await openAccess()
+
+    expect(within(section).getByText('key:build-bot')).toBeInTheDocument()
+    expect(within(section).getByText('scoped key')).toBeInTheDocument()
+    expect(within(section).getByText('strict RBAC')).toBeInTheDocument()
+    expect(within(section).getAllByText('requests:read').length).toBeGreaterThan(0)
+    expect(within(section).getAllByText('usage:read').length).toBeGreaterThan(0)
+  })
+
+  it('sends region grants, displays them and embeds the secret in the one-time examples', async () => {
+    const user = userEvent.setup()
+    const create = vi.spyOn(api, 'createScopedKey')
+    await openAccess()
+
+    await user.click(screen.getByRole('button', { name: 'New scoped key' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New scoped key' })
+    await user.type(within(dialog).getByLabelText('Label'), 'Regional monitor')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Scopes' }))
+    const scopeList = await screen.findByRole('listbox', { name: 'Scopes' })
+    await user.click(within(scopeList).getByRole('option', { name: 'accounts:read' }))
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+
+    await user.type(within(dialog).getByLabelText('Region grants'), 'hk, jp-tyo, hk')
+    await user.click(within(dialog).getByRole('button', { name: 'Create key' }))
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'Regional monitor', regions: ['hk', 'jp-tyo'] }),
+    )
+    const created = (await create.mock.results[0]?.value) as ScopedKeyCreated
+    const secretDialog = await screen.findByRole('dialog', { name: 'Scoped key created' })
+    expect(
+      secretDialog.querySelector('.api-snippets__code')?.textContent,
+    ).toContain(created.secret)
+
+    await user.click(within(secretDialog).getByRole('button', { name: 'Done' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Scoped key created' })).toBeNull(),
+    )
+    expect(screen.queryByText(created.secret)).toBeNull()
+
+    const row = accessRow('Regional monitor')
+    expect(within(row).getByText('hk · jp-tyo')).toBeInTheDocument()
+  })
+
   it('renders the Access section in Chinese', async () => {
     localStorage.setItem('ajs.lang', 'zh')
     window.history.pushState({}, '', '/settings')
@@ -257,6 +344,8 @@ describe('scoped key settings', () => {
     expect(within(section).getAllByText('速率限制')).toHaveLength(3)
     expect(within(section).getByText('已撤销')).toBeInTheDocument()
     expect(within(section).getByText('不限制')).toBeInTheDocument()
+    expect(within(section).getByText('API 基础地址')).toBeInTheDocument()
+    expect(within(section).getByText('当前身份')).toBeInTheDocument()
   })
 })
 

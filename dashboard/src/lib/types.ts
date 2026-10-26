@@ -346,6 +346,29 @@ export interface RequestLog {
   source: RequestSource
 }
 
+/**
+ * GET /v1/requests query. The durable log is ordered newest-first and paged
+ * with `offset`; the daemon answers at most `limit` rows (default 200) and
+ * sends no total, so the console pages forward until a short page.
+ */
+export interface RequestsQuery {
+  limit?: number
+  offset?: number
+}
+
+/**
+ * GET /v1/whoami — identity metadata for the bearer. The token and its hash
+ * are never part of this payload. `scopes` is present only when the daemon
+ * reports the key's grants; a legacy/admin bearer carries none.
+ */
+export interface Whoami {
+  name: string
+  role?: string
+  strictRbac: boolean
+  kind: 'operator' | 'scoped-key' | 'legacy'
+  scopes?: string[]
+}
+
 export interface AuditEvent {
   id: string
   ts: string
