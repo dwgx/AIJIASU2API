@@ -278,6 +278,7 @@ function defaultHttpError(context: HttpErrorContext): ApiError {
     context.status,
     `${context.status} ${context.statusText}${suffix}`,
     context.code,
+    context.reason,
   )
 }
 

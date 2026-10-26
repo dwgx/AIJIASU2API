@@ -135,24 +135,29 @@ describe('useAsync polling', () => {
   })
 
   it('keeps last-good data and marks it stale when a poll fails', async () => {
+    const failure = new Error('network down')
     const loader = vi
       .fn<() => Promise<{ count: number }>>()
       .mockResolvedValueOnce({ count: 1 })
-      .mockRejectedValueOnce(new Error('network down'))
+      .mockRejectedValueOnce(failure)
       .mockResolvedValueOnce({ count: 2 })
     const { result } = renderHook(() => useAsync(loader, [], { intervalMs: 1_000 }))
     await settle()
     expect(result.current.data).toEqual({ count: 1 })
+    expect(result.current.failure).toBeUndefined()
 
     await advance(1_000)
     expect(result.current.status).toBe('ready')
     expect(result.current.data).toEqual({ count: 1 })
     expect(result.current.error).toBe('network down')
+    // The raw cause stays available so a page can branch on its type/reason.
+    expect(result.current.failure).toBe(failure)
     expect(result.current.staleAt).toBeTypeOf('number')
 
     await advance(1_000)
     expect(result.current.data).toEqual({ count: 2 })
     expect(result.current.error).toBeUndefined()
+    expect(result.current.failure).toBeUndefined()
     expect(result.current.staleAt).toBeUndefined()
   })
 

@@ -4,6 +4,8 @@ export interface AsyncState<T> {
   status: 'loading' | 'ready' | 'error'
   data: T | undefined
   error: string | undefined
+  /** The raw rejection cause behind `error`; undefined on success/initial. */
+  failure: unknown
   /** Epoch ms of the last successful load; undefined before the first success. */
   updatedAt: number | undefined
   /** Epoch ms of the first failed refresh after a success; undefined while the data is fresh. */
@@ -29,6 +31,7 @@ interface Snapshot<T> {
   status: AsyncState<T>['status']
   data: T | undefined
   error: string | undefined
+  failure: unknown
   updatedAt: number | undefined
   staleAt: number | undefined
 }
@@ -37,6 +40,7 @@ const INITIAL_SNAPSHOT: Snapshot<never> = {
   status: 'loading',
   data: undefined,
   error: undefined,
+  failure: undefined,
   updatedAt: undefined,
   staleAt: undefined,
 }
@@ -142,6 +146,7 @@ export function useAsync<T>(
               status: 'ready',
               data: result,
               error: undefined,
+              failure: undefined,
               updatedAt: Date.now(),
               staleAt: undefined,
             })
@@ -151,8 +156,14 @@ export function useAsync<T>(
             const message = cause instanceof Error ? cause.message : String(cause)
             setSnapshot((prev) =>
               prev.data === undefined
-                ? { ...prev, status: 'error', error: message }
-                : { ...prev, status: 'ready', error: message, staleAt: prev.staleAt ?? Date.now() },
+                ? { ...prev, status: 'error', error: message, failure: cause }
+                : {
+                    ...prev,
+                    status: 'ready',
+                    error: message,
+                    failure: cause,
+                    staleAt: prev.staleAt ?? Date.now(),
+                  },
             )
           },
         )

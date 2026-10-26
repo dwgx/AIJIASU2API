@@ -4,9 +4,13 @@ import { DataTable } from '../components/DataTable'
 import type { Column } from '../components/DataTable'
 import { ConfirmDialog, Modal } from '../components/Overlay'
 import {
+  FULFILMENT_TONES,
+  FulfilmentBadge,
   OrderStateBadge,
   formatLeaseTerm,
   formatOrderMoney,
+  fulfilmentDetail,
+  fulfilmentLabelKey,
 } from '../components/orders/OrderState'
 import { useToast } from '../components/Toast'
 import {
@@ -30,6 +34,19 @@ import { summarizeRefresh, useAsync } from '../lib/useAsync'
 
 type OrderFilter = 'all' | 'review_required' | OrderState
 
+/**
+ * `cleanup_pending` is a modifier on a publishing job, not a state, so it is
+ * matched on the flag rather than on `job.state`.
+ */
+type FulfilmentFilter = 'all' | 'queued' | 'publishing' | 'dead_letter' | 'cleanup_pending'
+
+const FULFILMENT_FILTERS: Exclude<FulfilmentFilter, 'all'>[] = [
+  'queued',
+  'publishing',
+  'dead_letter',
+  'cleanup_pending',
+]
+
 const ORDER_STATES: OrderState[] = [
   'awaiting_payment',
   'paid',
@@ -38,6 +55,12 @@ const ORDER_STATES: OrderState[] = [
   'refunded',
   'charged_back',
 ]
+
+function matchesFulfilment(order: Order, filter: FulfilmentFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'cleanup_pending') return order.fulfilment?.cleanupPending === true
+  return order.fulfilment?.state === filter
+}
 
 interface PlanTarget {
   plan: Plan
@@ -56,6 +79,7 @@ export default function Orders() {
   const plans = useAsync(() => api.listPlans(), [])
   const payment = useAsync(() => api.providerStatus(), [])
   const [filter, setFilter] = useState<OrderFilter>('all')
+  const [fulfilmentFilter, setFulfilmentFilter] = useState<FulfilmentFilter>('all')
   const [busy, setBusy] = useState<string | null>(null)
   const [attestTarget, setAttestTarget] = useState<Order | null>(null)
   const [reference, setReference] = useState('')
@@ -70,10 +94,15 @@ export default function Orders() {
 
   const visible = useMemo(() => {
     const rows = orders.data ?? []
-    if (filter === 'all') return rows
-    if (filter === 'review_required') return rows.filter((order) => order.reviewRequired)
-    return rows.filter((order) => order.state === filter)
-  }, [orders.data, filter])
+    return rows.filter((order) => {
+      if (filter === 'review_required') {
+        if (!order.reviewRequired) return false
+      } else if (filter !== 'all' && order.state !== filter) {
+        return false
+      }
+      return matchesFulfilment(order, fulfilmentFilter)
+    })
+  }, [orders.data, filter, fulfilmentFilter])
 
   const filterOptions = useMemo(
     () => [
@@ -82,6 +111,17 @@ export default function Orders() {
       ...ORDER_STATES.map((state) => ({
         value: state,
         label: t(`order.state.${state}`),
+      })),
+    ],
+    [t],
+  )
+
+  const fulfilmentFilterOptions = useMemo(
+    () => [
+      { value: 'all', label: t('orders.fulfilmentAll') },
+      ...FULFILMENT_FILTERS.map((state) => ({
+        value: state,
+        label: t(`order.fulfilment.${state}`),
       })),
     ],
     [t],
@@ -255,6 +295,27 @@ export default function Orders() {
       ),
     },
     {
+      key: 'fulfilment',
+      label: t('orders.fulfilment'),
+      render: (order) => {
+        const job = order.fulfilment
+        if (!job) return t('common.none')
+        const stateKey = `order.fulfilment.${job.state}`
+        return (
+          <div className="order-state">
+            <FulfilmentBadge job={job} />
+            {fulfilmentLabelKey(job) === stateKey ? null : (
+              <Badge tone={FULFILMENT_TONES[job.state]}>{t(stateKey)}</Badge>
+            )}
+            <span className="order-hint">{fulfilmentDetail(job, t, lang)}</span>
+            {job.blocked ? (
+              <span className="order-hint">{t('orders.fulfilmentBlockedHint')}</span>
+            ) : null}
+          </div>
+        )
+      },
+    },
+    {
       key: 'created',
       label: t('orders.created'),
       render: (order) => formatDate(order.createdAt),
@@ -292,9 +353,11 @@ export default function Orders() {
           ) : null}
           {order.state === 'paid' ? (
             <>
-              <Button variant="primary" onClick={() => openAttest(order)}>
-                {t('orders.retryActivation')}
-              </Button>
+              {order.fulfilment ? null : (
+                <Button variant="primary" onClick={() => openAttest(order)}>
+                  {t('orders.retryActivation')}
+                </Button>
+              )}
               <Button variant="ghost" onClick={() => openRefund(order)}>
                 {t('orders.refund')}
               </Button>
@@ -383,17 +446,26 @@ export default function Orders() {
         <Card
           title={t('orders.listTitle')}
           actions={
-            <Select
-              aria-label={t('orders.filter')}
-              variant="filter"
-              options={filterOptions}
-              value={filter}
-              onChange={(value) => setFilter(value as OrderFilter)}
-            />
+            <div className="order-actions">
+              <Select
+                aria-label={t('orders.filter')}
+                variant="filter"
+                options={filterOptions}
+                value={filter}
+                onChange={(value) => setFilter(value as OrderFilter)}
+              />
+              <Select
+                aria-label={t('orders.fulfilmentFilter')}
+                variant="filter"
+                options={fulfilmentFilterOptions}
+                value={fulfilmentFilter}
+                onChange={(value) => setFulfilmentFilter(value as FulfilmentFilter)}
+              />
+            </div>
           }
         >
           {orders.status === 'loading' ? (
-            <TableSkeleton rows={5} columns={10} />
+            <TableSkeleton rows={5} columns={11} />
           ) : orders.status === 'error' ? (
             <ErrorState message={t('orders.loadFailed')} onRetry={orders.reload} />
           ) : (
@@ -406,7 +478,9 @@ export default function Orders() {
                 <EmptyState
                   title={t('orders.empty')}
                   description={
-                    filter === 'all' ? t('orders.emptyHint') : t('orders.emptyFiltered')
+                    filter === 'all' && fulfilmentFilter === 'all'
+                      ? t('orders.emptyHint')
+                      : t('orders.emptyFiltered')
                   }
                 />
               }

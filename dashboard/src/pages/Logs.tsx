@@ -1,6 +1,7 @@
 import { Download, RefreshCw, ScrollText, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { api } from '../lib/api'
+import { scopeDenial } from '../lib/errors'
 import { formatDate, formatDateTime, formatRelative } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import type { TranslationParams } from '../lib/i18n'
@@ -95,7 +96,8 @@ export default function Logs() {
       )
     } catch (cause) {
       push(
-        cause instanceof Error ? cause.message : t('audit.exportFailed'),
+        scopeDenial(cause, t, 'surface.audit', 'audit:read') ??
+          (cause instanceof Error ? cause.message : t('audit.exportFailed')),
         'danger',
       )
     } finally {
@@ -216,7 +218,14 @@ export default function Logs() {
         ) : null}
 
         {audit.status === 'error' ? (
-          <ErrorState message={audit.error ?? t('common.unknownError')} onRetry={audit.reload} />
+          <ErrorState
+            message={
+              scopeDenial(audit.failure, t, 'surface.audit', 'audit:read') ??
+              audit.error ??
+              t('common.unknownError')
+            }
+            onRetry={audit.reload}
+          />
         ) : audit.status === 'loading' && !audit.data ? (
           <TableSkeleton rows={10} columns={6} />
         ) : (

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { api } from '../src/lib/api'
+import { ApiError } from '../src/lib/errors'
 import type { UsageQuery, UsageSummary } from '../src/lib/types'
 
 const DAY_MS = 86_400_000
@@ -394,6 +395,25 @@ describe('usage page', () => {
       'title',
       '网关暂未强制执行流量额度',
     )
+  })
+
+  it('explains a scoped-key 403 instead of the raw status', async () => {
+    vi.spyOn(api, 'getUsage').mockRejectedValue(
+      new ApiError(
+        403,
+        '403 Forbidden — scoped key is restricted to named accounts',
+        'FORBIDDEN',
+        'scoped_key_restricted',
+      ),
+    )
+    await openUsage()
+
+    expect(
+      await screen.findByText(
+        'This token cannot read usage. A scoped key needs the usage:read scope; sign in with an admin token or use a key that has it.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/403 Forbidden/)).not.toBeInTheDocument()
   })
 
   it('renders the in-browser mock data without fabricating URLs', async () => {

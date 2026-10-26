@@ -179,6 +179,52 @@ export type OrderState =
   | 'refunded'
   | 'charged_back'
 
+/** How a durable publication job was created: the first one, or a reissue. */
+export type FulfilmentMode = 'initial' | 'reissue'
+
+/**
+ * Closed job vocabulary. A completed job is removed from its order, so there
+ * is deliberately no "done" state; `cleanup_pending` is a modifier on a
+ * publishing job (`FulfilmentJob.cleanupPending`), never a fourth state.
+ */
+export type FulfilmentState = 'queued' | 'publishing' | 'dead_letter'
+
+/**
+ * Closed refusal vocabulary. It is deliberately not free text: a payment
+ * reference, signed URL or credential must never reach the job.
+ */
+export type FulfilmentReason =
+  | 'capacity'
+  | 'tenant_suspended'
+  | 'target_changed'
+  | 'publish_failed'
+  | 'timeout'
+  | 'internal'
+  | 'interrupted'
+  | 'entitlement_expired'
+
+/**
+ * Durable publication work one order owns. The daemon's attempt/published
+ * lease and account ids are fencing tokens for the publisher and are
+ * deliberately not modelled here: they must never reach the DOM.
+ */
+export interface FulfilmentJob {
+  orderId: string
+  mode: FulfilmentMode
+  state: FulfilmentState
+  attempts: number
+  entitlementExpiresAt: string
+  /** Absent while an attempt is in flight and for a dead-lettered job. */
+  nextAttemptAt?: string | null
+  lastReason?: FulfilmentReason
+  lastError?: string
+  /** A dead-lettered job that needs an operator; false while it may still run. */
+  blocked?: boolean
+  /** A published attempt whose external withdrawal failed; the worker retries. */
+  cleanupPending?: boolean
+  updatedAt: string
+}
+
 /** Admin catalog plan; `amountMinor` is integer minor units of `currency`. */
 export interface Plan {
   id: string
@@ -255,6 +301,8 @@ export interface Order {
   cancelledAt: string | null
   refundedAt: string | null
   grant: EntitlementGrant | null
+  /** Durable publication work; absent or null means no job exists. */
+  fulfilment?: FulfilmentJob | null
 }
 
 export interface PanelUser {

@@ -12,6 +12,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api } from '../lib/api'
+import { scopeDenial } from '../lib/errors'
 import {
   formatBytes,
   formatDateTime,
@@ -829,7 +830,14 @@ export default function Requests() {
         </div>
 
         {flows.status === 'error' && !flows.data ? (
-          <ErrorState message={flows.error ?? t('common.unknownError')} onRetry={flows.reload} />
+          <ErrorState
+            message={
+              scopeDenial(flows.failure, t, 'surface.requests', 'requests:read') ??
+              flows.error ??
+              t('common.unknownError')
+            }
+            onRetry={flows.reload}
+          />
         ) : flows.status === 'loading' && !flows.data ? (
           <TableSkeleton rows={9} columns={11} />
         ) : (

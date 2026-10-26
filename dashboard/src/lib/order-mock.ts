@@ -228,6 +228,77 @@ function seedOrders(now: number, plans: Plan[]): Order[] {
       cancelledAt: null,
       refundedAt: null,
       grant: null,
+      // Queued durable work: the admin table must show the schedule and must
+      // not offer the legacy settlement replay beside it.
+      fulfilment: {
+        orderId: 'ord-03',
+        mode: 'initial',
+        state: 'queued',
+        attempts: 0,
+        entitlementExpiresAt: iso(now - DAY_MS + 3_600_000 + starter.leaseTtlSeconds * 1000),
+        nextAttemptAt: iso(now + 60_000),
+        lastReason: 'capacity',
+        updatedAt: iso(now - 60_000),
+      },
+    },
+    {
+      id: 'ord-09',
+      tenantId: 'tenant-03',
+      userId: 'u-02',
+      planId: starter.id,
+      plan: starter,
+      provider: 'epay',
+      state: 'paid',
+      providerRef: 'EPAY-2026-1018-09',
+      reviewRequired: false,
+      createdAt: iso(now - 3 * DAY_MS),
+      paidAt: iso(now - 3 * DAY_MS + 3_600_000),
+      activatedAt: null,
+      cancelledAt: null,
+      refundedAt: null,
+      grant: null,
+      // Terminal dead letter: no automatic retry, so an operator must resolve
+      // it offline. The portal tenant never sees this row.
+      fulfilment: {
+        orderId: 'ord-09',
+        mode: 'initial',
+        state: 'dead_letter',
+        attempts: 8,
+        entitlementExpiresAt: iso(now - 3 * DAY_MS + 3_600_000 + starter.leaseTtlSeconds * 1000),
+        lastReason: 'publish_failed',
+        blocked: true,
+        updatedAt: iso(now - 2 * DAY_MS),
+      },
+    },
+    {
+      id: 'ord-10',
+      tenantId: 'tenant-03',
+      userId: 'u-02',
+      planId: starter.id,
+      plan: starter,
+      provider: 'epay',
+      state: 'paid',
+      providerRef: 'EPAY-2026-1026-10',
+      reviewRequired: true,
+      createdAt: iso(now - 2 * DAY_MS),
+      paidAt: iso(now - 2 * DAY_MS + 3_600_000),
+      activatedAt: null,
+      cancelledAt: null,
+      refundedAt: null,
+      grant: null,
+      // A published attempt whose withdrawal failed: cleanup pending outranks
+      // the publishing state in the badge.
+      fulfilment: {
+        orderId: 'ord-10',
+        mode: 'initial',
+        state: 'publishing',
+        attempts: 2,
+        entitlementExpiresAt: iso(now - 2 * DAY_MS + 3_600_000 + starter.leaseTtlSeconds * 1000),
+        nextAttemptAt: iso(now + 120_000),
+        lastReason: 'publish_failed',
+        cleanupPending: true,
+        updatedAt: iso(now - 60_000),
+      },
     },
     {
       id: 'ord-02',
@@ -555,6 +626,9 @@ export function mockRefundOrder(id: string, reference: string): Order {
     order.state = 'refunded'
     order.refundedAt = iso(now)
     order.reviewRequired = false
+    // Mirrors cancelFulfilmentLocked: a reversal removes the durable work so a
+    // later poll can never resurrect a publication for a refunded order.
+    order.fulfilment = null
     if (order.grant && order.grant.revokedAt === null) order.grant.revokedAt = iso(now)
   } else if (order.state === 'awaiting_payment') {
     // Refund evidence without a recorded payment quarantines the order.

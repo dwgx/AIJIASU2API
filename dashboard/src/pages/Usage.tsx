@@ -19,6 +19,7 @@ import {
   TableSkeleton,
 } from '../components/primitives'
 import { api } from '../lib/api'
+import { scopeDenial } from '../lib/errors'
 import { formatBytes, formatNumber } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import type { TranslationKey, TranslationParams } from '../lib/i18n'
@@ -456,7 +457,14 @@ export default function Usage() {
 
       {usage.status === 'error' && !usage.data ? (
         <Card>
-          <ErrorState message={usage.error ?? t('common.unknownError')} onRetry={reload} />
+          <ErrorState
+            message={
+              scopeDenial(usage.failure, t, 'surface.usage', 'usage:read') ??
+              usage.error ??
+              t('common.unknownError')
+            }
+            onRetry={reload}
+          />
         </Card>
       ) : usage.status === 'loading' && !usage.data ? (
         <UsageSkeleton />

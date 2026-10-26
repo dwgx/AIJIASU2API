@@ -1,4 +1,4 @@
-import { Activity, ArrowUpRight, Plus, RefreshCw, ScrollText, Server, Ticket, Waypoints } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowUpRight, Plus, RefreshCw, ScrollText, Server, Ticket, Waypoints } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
@@ -11,6 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '../lib/api'
+import { scopeDenial } from '../lib/errors'
 import { formatBytes, formatCompact, formatDateTime, formatNumber, formatRelative, formatTime } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import { ACCOUNT_STATE, SEVERITY } from '../lib/labels'
@@ -149,7 +150,14 @@ export default function Overview() {
   const audit = useAsync(() => api.listAudit(4), [], { intervalMs: 15_000 })
 
   const states = [metrics, accounts, nodes, leases, audit]
-  const failure = states.find((state) => state.status === 'error')
+  // A scoped key that may read metrics/accounts/nodes/leases but not the audit
+  // log must not blank the dashboard: only the Activity card degrades.
+  const auditDenial = scopeDenial(audit.failure, t, 'surface.audit', 'audit:read')
+  const failure = states.find(
+    (state) =>
+      state.status === 'error' &&
+      scopeDenial(state.failure, t, 'surface.audit', 'audit:read') === null,
+  )
   const loading = states.some((state) => state.status === 'loading')
 
   const reloadAll = () => {
@@ -325,18 +333,30 @@ export default function Overview() {
                 </Link>
               }
             >
-              <ul className="activity-list">
-                {audit.data?.map((event) => (
-                  <li key={event.id} className="activity-row">
-                    <StatusDot tone={SEVERITY[event.severity].tone} />
-                    <div className="activity-row__body">
-                      <span className="activity-row__action mono">{event.action}</span>
-                      <span className="activity-row__target">{event.target}</span>
-                    </div>
-                    <span className="activity-row__time">{formatRelative(event.ts, Date.now(), lang)}</span>
-                  </li>
-                ))}
-              </ul>
+              {auditDenial ? (
+                <div className="callout callout--warning" role="note">
+                  <span className="callout__icon">
+                    <AlertTriangle size={18} aria-hidden="true" />
+                  </span>
+                  <div>
+                    <p className="callout__title">{t('common.couldNotLoad')}</p>
+                    <p className="callout__text">{auditDenial}</p>
+                  </div>
+                </div>
+              ) : (
+                <ul className="activity-list">
+                  {audit.data?.map((event) => (
+                    <li key={event.id} className="activity-row">
+                      <StatusDot tone={SEVERITY[event.severity].tone} />
+                      <div className="activity-row__body">
+                        <span className="activity-row__action mono">{event.action}</span>
+                        <span className="activity-row__target">{event.target}</span>
+                      </div>
+                      <span className="activity-row__time">{formatRelative(event.ts, Date.now(), lang)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Card>
 
             <Card

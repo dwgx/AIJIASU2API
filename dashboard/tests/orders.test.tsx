@@ -301,6 +301,79 @@ describe('portal plans and orders', () => {
     ).not.toBeInTheDocument()
     expect(await screen.findByText(/易支付 is not enabled/)).toBeInTheDocument()
   })
+  it('shows provisioning copy for a paid order with a job', async () => {
+    await signIn()
+    const paid: Order = {
+      id: 'ord-queued',
+      tenantId: 'tenant-01',
+      userId: 'u-01',
+      planId: 'plan-01',
+      plan: {
+        id: 'plan-01',
+        name: 'Starter',
+        amountMinor: 4_900,
+        currency: 'CNY',
+        leaseTtlSeconds: 2_592_000,
+        quotaBytes: 50 * GIB,
+      },
+      provider: 'epay',
+      state: 'paid',
+      providerRef: 'EPAY-QUEUED-01',
+      reviewRequired: false,
+      createdAt: '2026-10-26T00:00:00Z',
+      paidAt: '2026-10-26T00:01:00Z',
+      activatedAt: null,
+      cancelledAt: null,
+      refundedAt: null,
+      grant: null,
+      fulfilment: {
+        orderId: 'ord-queued',
+        mode: 'initial',
+        state: 'queued',
+        attempts: 3,
+        entitlementExpiresAt: '2026-11-25T00:01:00Z',
+        nextAttemptAt: '2026-10-27T00:02:00Z',
+        lastReason: 'capacity',
+        updatedAt: '2026-10-26T00:01:00Z',
+      },
+    }
+    const orders = vi.spyOn(portalApi, 'orders').mockResolvedValue([paid])
+
+    const queued = await openPortal('Orders')
+    expect(
+      await screen.findByText(
+        'Payment received — we are provisioning your service. No further payment is needed.',
+      ),
+    ).toBeInTheDocument()
+    // A customer never sees attempts, the reason, the schedule or a job id.
+    expect(screen.queryByText(/Attempts/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No automatic retry/)).not.toBeInTheDocument()
+    expect(screen.queryByText('No free capacity')).not.toBeInTheDocument()
+    queued.unmount()
+
+    orders.mockResolvedValue([
+      {
+        ...paid,
+        fulfilment: {
+          ...paid.fulfilment!,
+          state: 'dead_letter',
+          attempts: 8,
+          blocked: true,
+          lastReason: 'publish_failed',
+          nextAttemptAt: null,
+        },
+      },
+    ])
+    await openPortal('Orders')
+    expect(
+      await screen.findByText(
+        'Provisioning is delayed and support has been notified. No further payment is needed.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Attempts/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Dead letter/)).not.toBeInTheDocument()
+  })
+
   it('shows an ended-lease reason and restores service from the order row', async () => {
     await signIn()
     const { user } = await openPortal('Orders')
@@ -395,6 +468,36 @@ describe('admin orders', () => {
     expect(await screen.findByText('Epay enabled')).toBeInTheDocument()
     expect(within(await findRow('ord-03')).getByText('易支付')).toBeInTheDocument()
     expect(within(await findRow('ord-01')).getByText('Manual (offline)')).toBeInTheDocument()
+  })
+
+  it('shows durable fulfilment states and filters dead-lettered work', async () => {
+    const { user } = await openAdmin()
+
+    const queued = await findRow('ord-03')
+    expect(within(queued).getByText('Queued')).toBeInTheDocument()
+    expect(within(queued).getByText(/Next attempt/)).toBeInTheDocument()
+    // The legacy settlement replay would race the durable publisher.
+    expect(
+      within(queued).queryByRole('button', { name: 'Retry activation' }),
+    ).not.toBeInTheDocument()
+
+    const dead = await findRow('ord-09')
+    expect(within(dead).getByText('Dead letter')).toBeInTheDocument()
+    expect(within(dead).getByText(/No automatic retry/)).toBeInTheDocument()
+    expect(
+      within(dead).getByText(/Publication is dead-lettered; no automatic retry will run/),
+    ).toBeInTheDocument()
+
+    const cleanup = await findRow('ord-10')
+    expect(within(cleanup).getByText('Cleanup pending')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Filter by fulfilment' }))
+    const listbox = await screen.findByRole('listbox')
+    await user.click(within(listbox).getByRole('option', { name: 'Dead letter' }))
+
+    await waitFor(() => expect(screen.queryByText('ord-03')).not.toBeInTheDocument())
+    expect(screen.getByText('ord-09')).toBeInTheDocument()
+    expect(screen.queryByText('ord-10')).not.toBeInTheDocument()
   })
 
   it('marks 易支付 disabled when the adapter is off', async () => {
@@ -537,6 +640,10 @@ describe('admin orders', () => {
     expect(await screen.findByText('标记已收到线下付款')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '按状态筛选' })).toBeInTheDocument()
     expect(screen.getByText('全部订单')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '投递状态' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '按投递状态筛选' })).toBeInTheDocument()
+    expect(screen.getAllByText('死信').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('需人工处理').length).toBeGreaterThan(0)
   })
 })
 

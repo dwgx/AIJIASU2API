@@ -181,6 +181,15 @@ export default function PortalOrders() {
           {order.state === 'awaiting_payment' && !order.reviewRequired ? (
             <span className="order-hint">{t('portal.orders.pendingHint')}</span>
           ) : null}
+          {order.state === 'paid' && order.fulfilment ? (
+            <span className="order-hint">
+              {t(
+                order.fulfilment.blocked
+                  ? 'portal.orders.fulfilmentDelayed'
+                  : 'portal.orders.fulfilmentQueued',
+              )}
+            </span>
+          ) : null}
         </div>
       ),
     },
