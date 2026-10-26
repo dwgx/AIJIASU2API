@@ -12,6 +12,7 @@ export type NodeState = "LIVE" | "READY" | "STARTING" | "DRAINING" | "DOWN" | "S
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type LeaseStatus = "active" | "expired" | "revoked";
 export type OperationStepState = "ok" | "failed" | "canceled";
+export type RequestSource = "proxy" | "mutation-lab" | "gate";
 
 export interface Account {
   id: string;
@@ -91,6 +92,27 @@ export interface ServersView {
   hasMore: boolean;
   regions: RegionCount[];
   servers: ServerView[];
+}
+
+/** One proxy node. serverId is absent for seeded skeleton nodes. */
+export interface ProxyNode {
+  id: string;
+  accountId: string;
+  accountLabel: string;
+  label: string;
+  region: string;
+  country: string;
+  city: string;
+  state: NodeState;
+  latencyMs: number;
+  successRate: number;
+  inUse: number;
+  capacity: number;
+  egressIp: string;
+  protocol: ProxyProtocol;
+  gatePort: number;
+  lastProbeAt: string;
+  serverId?: string;
 }
 
 export interface OperationTarget {
@@ -189,6 +211,26 @@ export interface CreateLeaseResult {
   replayed?: boolean;
 }
 
+/**
+ * The loopback gate a lease currently points at. The scoped-key secret is
+ * never part of this object: credentialKind only names the credential shape,
+ * and the password is the caller's own ajs_sk_ key carrying proxy:connect.
+ */
+export interface LeaseConnection {
+  host: "127.0.0.1";
+  port: number;
+  protocol: ProxyProtocol;
+  /** Panel user id; the RFC 1929 username for the gate handshake. */
+  username: string;
+  credentialKind: "ajs_sk";
+}
+
+/** GET /v1/leases/{id}: the entitlement plus the endpoint to dial. */
+export interface LeaseDetail {
+  lease: Lease;
+  connection: LeaseConnection;
+}
+
 export interface UsageBucket {
   day: string;
   requests: number;
@@ -240,6 +282,26 @@ export interface UsageSummary {
   quotaEnforced: boolean;
 }
 
+/**
+ * One recorded request row. A non-admin scoped key is served only its own
+ * userId, so a customer never sees another tenant's rows.
+ */
+export interface RequestLog {
+  id: string;
+  ts: string;
+  userId: string;
+  userName: string;
+  accountLabel: string;
+  nodeLabel: string;
+  region: string;
+  method: string;
+  target: string;
+  status: number;
+  bytes: number;
+  latencyMs: number;
+  source: RequestSource;
+}
+
 export interface Event {
   id: string;
   type: string;
@@ -278,6 +340,25 @@ export interface ListOperationsOptions {
 }
 
 export interface ListLeasesOptions {
+  userId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Filters GET /v1/nodes. A scoped key only sees nodes of its granted accounts. */
+export interface ListNodesOptions {
+  accountId?: string;
+  state?: NodeState;
+  region?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Filters GET /v1/requests. An omitted limit uses the daemon's 200-row page;
+ * `limit: 0` explicitly asks for every retained row.
+ */
+export interface ListRequestsOptions {
   userId?: string;
   limit?: number;
   offset?: number;

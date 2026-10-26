@@ -7,6 +7,9 @@ import {
   OperationFailure,
   OperationTimeoutError,
   isApiErrorCode,
+  isApiErrorReason,
+  isScopeRequired,
+  isScopedKeyRestricted,
 } from "../dist/index.js";
 
 const token = "ts-test-token-not-a-secret";
@@ -202,6 +205,177 @@ test("createLease generates a matching key and retries safely", async () => {
   assert.equal(calls.length, 2);
   assert.equal(result.lease.id, "lease-1");
   assert.equal(result.lease.gatePort, 19001);
+});
+
+test("getLease decodes the connection without a secret", async () => {
+  const { client, calls } = stubClient(() =>
+    json({
+      lease: {
+        id: "lease-1",
+        userId: "usr-1",
+        userName: "u",
+        accountId: "acc-1",
+        accountLabel: "primary",
+        platform: "linux",
+        nodeId: "acc-1:srv-1",
+        nodeLabel: "Tokyo",
+        region: "jp",
+        egressIp: "203.0.113.9",
+        protocol: "socks5",
+        gatePort: 19001,
+        ttlSeconds: 3600,
+        expiresAt: "2026-10-26T01:00:00Z",
+        requests: 3,
+        bytes: 1024,
+        sticky: true,
+        status: "active",
+        idempotencyKey: "k",
+        createdAt: "2026-10-26T00:00:00Z",
+      },
+      connection: {
+        host: "127.0.0.1",
+        port: 19001,
+        protocol: "socks5",
+        username: "usr-1",
+        credentialKind: "ajs_sk",
+      },
+    }),
+  );
+  const detail = await client.getLease("lease-1");
+  assert.equal(detail.lease.id, "lease-1");
+  assert.deepEqual(detail.connection, {
+    host: "127.0.0.1",
+    port: 19001,
+    protocol: "socks5",
+    username: "usr-1",
+    credentialKind: "ajs_sk",
+  });
+  assert.equal(new URL(calls[0].url).pathname, "/v1/leases/lease-1");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(JSON.stringify(detail).includes(token), false);
+});
+
+test("listNodes encodes filters and decodes nodes", async () => {
+  const { client, calls } = stubClient(() =>
+    json([
+      {
+        id: "acc-1:srv-1",
+        accountId: "acc-1",
+        accountLabel: "primary",
+        label: "Tokyo",
+        region: "jp",
+        country: "JP",
+        city: "Tokyo",
+        state: "LIVE",
+        latencyMs: 42,
+        successRate: 0.98,
+        inUse: 1,
+        capacity: 4,
+        egressIp: "203.0.113.9",
+        protocol: "socks5",
+        gatePort: 19001,
+        lastProbeAt: "2026-10-26T00:00:00Z",
+        serverId: "srv-1",
+      },
+      {
+        id: "acc-2:srv-2",
+        accountId: "acc-2",
+        accountLabel: "backup",
+        label: "Osaka",
+        region: "jp",
+        country: "JP",
+        city: "Osaka",
+        state: "STALE",
+        latencyMs: 0,
+        successRate: 0,
+        inUse: 0,
+        capacity: 2,
+        egressIp: "",
+        protocol: "http",
+        gatePort: 0,
+        lastProbeAt: "",
+      },
+    ]),
+  );
+  const nodes = await client.listNodes({
+    accountId: "acc-1",
+    state: "LIVE",
+    region: "jp",
+    limit: 20,
+    offset: 40,
+  });
+  assert.equal(nodes.length, 2);
+  assert.equal(nodes[0].serverId, "srv-1");
+  assert.equal(nodes[0].successRate, 0.98);
+  assert.equal(nodes[1].state, "STALE");
+  assert.equal(nodes[1].serverId, undefined);
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, "/v1/nodes");
+  assert.equal(url.searchParams.get("account_id"), "acc-1");
+  assert.equal(url.searchParams.get("state"), "LIVE");
+  assert.equal(url.searchParams.get("region"), "jp");
+  assert.equal(url.searchParams.get("limit"), "20");
+  assert.equal(url.searchParams.get("offset"), "40");
+});
+
+test("listRequests keeps an explicit limit=0 and decodes rows", async () => {
+  const row = {
+    id: "req-1",
+    ts: "2026-10-26T00:00:00Z",
+    userId: "usr-1",
+    userName: "u",
+    accountLabel: "primary",
+    nodeLabel: "Tokyo",
+    region: "jp",
+    method: "CONNECT",
+    target: "example.com:443",
+    status: 200,
+    bytes: 2048,
+    latencyMs: 12,
+    source: "gate",
+  };
+  const { client, calls } = stubClient(() => json([row]));
+  const requests = await client.listRequests({ userId: "usr-1", limit: 0, offset: 5 });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].source, "gate");
+  assert.equal(requests[0].bytes, 2048);
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, "/v1/requests");
+  assert.equal(url.searchParams.get("user_id"), "usr-1");
+  assert.equal(url.searchParams.get("limit"), "0");
+  assert.equal(url.searchParams.get("offset"), "5");
+
+  const second = stubClient(() => json([]));
+  await second.client.listRequests();
+  assert.equal(new URL(second.calls[0].url).searchParams.has("limit"), false);
+});
+
+test("scoped-key 403 reasons map to helpers, not messages", async () => {
+  const denial = (reason, message = "denied") =>
+    json({ error: { code: "FORBIDDEN", message, reason } }, 403);
+  const scope = stubClient(() => denial("scope_required"));
+  await assert.rejects(scope.client.listNodes(), (err) => {
+    assert.equal(isScopeRequired(err), true);
+    assert.equal(isScopedKeyRestricted(err), false);
+    assert.equal(isApiErrorReason(err, "scope_required"), true);
+    assert.equal(err instanceof ApiError, true);
+    assert.equal(err.message.includes(token), false);
+    return true;
+  });
+  const restricted = stubClient(() => denial("scoped_key_restricted"));
+  await assert.rejects(restricted.client.listRequests(), (err) => {
+    assert.equal(isScopedKeyRestricted(err), true);
+    assert.equal(isScopeRequired(err), false);
+    return true;
+  });
+  const other = stubClient(() => denial("origin_forbidden"));
+  await assert.rejects(other.client.listNodes(), (err) => {
+    assert.equal(isScopeRequired(err), false);
+    assert.equal(isScopedKeyRestricted(err), false);
+    return true;
+  });
+  assert.equal(isScopeRequired(new Error("boom")), false);
+  assert.equal(isScopedKeyRestricted(new Error("boom")), false);
 });
 
 test("patchAccount sends an explicit null budget", async () => {

@@ -55,6 +55,31 @@ func IsCode(err error, code string) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
+// Scoped-key denial reasons carried by APIError.Reason. The daemon emits only
+// these two values on a scoped-key 403; the message is not part of the contract.
+const (
+	// ReasonScopeRequired means the key lacks the route's scope.
+	ReasonScopeRequired = "scope_required"
+	// ReasonScopedKeyRestricted means the key's accountIds/regions grant
+	// excludes the target, or a lease/user_id belongs to another user.
+	ReasonScopedKeyRestricted = "scoped_key_restricted"
+)
+
+// HasReason reports whether err is an *APIError carrying the given reason.
+func HasReason(err error, reason string) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Reason == reason
+}
+
+// IsScopeRequired reports whether err is a scoped-key 403 for a missing route
+// scope (error.reason=scope_required).
+func IsScopeRequired(err error) bool { return HasReason(err, ReasonScopeRequired) }
+
+// IsScopedKeyRestricted reports whether err is a scoped-key 403 for an
+// account/region grant or lease/user ownership (error.reason=
+// scoped_key_restricted).
+func IsScopedKeyRestricted(err error) bool { return HasReason(err, ReasonScopedKeyRestricted) }
+
 // NetworkError is a transport failure (DNS, connect, TLS, reset). It wraps the
 // underlying error, so errors.Is(err, context.Canceled) still works.
 type NetworkError struct {

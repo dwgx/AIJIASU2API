@@ -72,6 +72,19 @@ func WithIdempotencyKey(key string) LeaseOption {
 	return func(o *leaseOptions) { o.idempotencyKey = key }
 }
 
+// GetLease reads one lease and the loopback gate it currently points at. A
+// non-admin scoped key may only read a lease owned by its own user on an
+// account its grant names: an unknown id and another user's lease answer the
+// same 404, an account outside the grant answers 403 with reason
+// scoped_key_restricted. The scoped-key secret is never returned.
+func (c *Client) GetLease(ctx context.Context, id string) (*LeaseDetail, error) {
+	var out LeaseDetail
+	if _, err := c.do(ctx, http.MethodGet, leasePath(id), nil, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // RotateLease rotates a lease to a new egress IP and restarts its TTL.
 func (c *Client) RotateLease(ctx context.Context, id string) (*Lease, error) {
 	var out Lease

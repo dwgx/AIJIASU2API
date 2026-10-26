@@ -24,11 +24,16 @@ import type {
   Event,
   EventsPage,
   Lease,
+  LeaseDetail,
   ListAccountsOptions,
   ListEventsOptions,
   ListLeasesOptions,
+  ListNodesOptions,
   ListOperationsOptions,
+  ListRequestsOptions,
   Operation,
+  ProxyNode,
+  RequestLog,
   SelectNodeRequest,
   SelectNodeResult,
   ServersOptions,
@@ -334,6 +339,21 @@ export class Client {
     });
   }
 
+  // -------------------------------------------------------------------- nodes
+
+  /** Lists proxy nodes. A scoped key only sees nodes of its granted accounts. */
+  async listNodes(options: ListNodesOptions = {}): Promise<ProxyNode[]> {
+    return this.request<ProxyNode[]>("GET", "/v1/nodes", {
+      query: buildQuery({
+        account_id: options.accountId,
+        state: options.state,
+        region: options.region,
+        limit: options.limit,
+        offset: options.offset,
+      }),
+    });
+  }
+
   // --------------------------------------------------------------- operations
 
   /**
@@ -464,6 +484,16 @@ export class Client {
   }
 
   /**
+   * Reads one lease and the loopback gate it currently points at. A scoped key
+   * only reads a lease owned by its own user on a granted account; an unknown
+   * id and another user's lease answer the same 404. The secret is never
+   * returned, only the credential shape.
+   */
+  async getLease(id: string): Promise<LeaseDetail> {
+    return this.request<LeaseDetail>("GET", `/v1/leases/${encodeURIComponent(id)}`);
+  }
+
+  /**
    * Creates an idempotent lease. A key is generated when neither the body nor
    * the option supplies one, and is sent as both the body field and the
    * Idempotency-Key header so a transient 5xx is retried safely.
@@ -505,6 +535,23 @@ export class Client {
         to: options.to,
         account: options.account,
         userId: options.userId,
+      }),
+    });
+  }
+
+  // ----------------------------------------------------------------- requests
+
+  /**
+   * Lists recorded requests, newest first. An omitted limit uses the daemon's
+   * 200-row page; `limit: 0` asks for every retained row. A scoped key is
+   * served only its own userId.
+   */
+  async listRequests(options: ListRequestsOptions = {}): Promise<RequestLog[]> {
+    return this.request<RequestLog[]>("GET", "/v1/requests", {
+      query: buildQuery({
+        user_id: options.userId,
+        limit: options.limit,
+        offset: options.offset,
       }),
     });
   }

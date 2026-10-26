@@ -58,6 +58,29 @@ export function isApiErrorCode(err: unknown, code: string): boolean {
   return isApiError(err) && err.code === code;
 }
 
+/**
+ * The only reasons a scoped-key 403 carries: `scope_required` when the key
+ * lacks the route scope, `scoped_key_restricted` when its accountIds/regions
+ * grant excludes the target or a lease/userId belongs to another user. Branch
+ * on the reason, never on the human-readable message.
+ */
+export const SCOPE_REQUIRED = "scope_required";
+export const SCOPED_KEY_RESTRICTED = "scoped_key_restricted";
+
+export function isApiErrorReason(err: unknown, reason: string): boolean {
+  return isApiError(err) && err.reason === reason;
+}
+
+/** The key lacks the route's scope (403, reason scope_required). */
+export function isScopeRequired(err: unknown): boolean {
+  return isApiErrorReason(err, SCOPE_REQUIRED);
+}
+
+/** The key's grant or lease/user ownership excludes the target (403). */
+export function isScopedKeyRestricted(err: unknown): boolean {
+  return isApiErrorReason(err, SCOPED_KEY_RESTRICTED);
+}
+
 /** A transport failure: DNS, connect, TLS, reset or a caller abort. */
 export class NetworkError extends Error {
   readonly method: string;

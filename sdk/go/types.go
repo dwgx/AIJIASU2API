@@ -47,6 +47,28 @@ const (
 	NodeStale    NodeState = "STALE"
 )
 
+// ProxyNode is one proxy node. ServerID is empty for seeded skeleton nodes and
+// LastProbeAt is empty until the node is probed.
+type ProxyNode struct {
+	ID           string        `json:"id"`
+	AccountID    string        `json:"accountId"`
+	AccountLabel string        `json:"accountLabel"`
+	Label        string        `json:"label"`
+	Region       string        `json:"region"`
+	Country      string        `json:"country"`
+	City         string        `json:"city"`
+	State        NodeState     `json:"state"`
+	LatencyMs    int           `json:"latencyMs"`
+	SuccessRate  float64       `json:"successRate"`
+	InUse        int           `json:"inUse"`
+	Capacity     int           `json:"capacity"`
+	EgressIP     string        `json:"egressIp"`
+	Protocol     ProxyProtocol `json:"protocol"`
+	GatePort     int           `json:"gatePort"`
+	LastProbeAt  string        `json:"lastProbeAt"`
+	ServerID     string        `json:"serverId,omitempty"`
+}
+
 // OperationState is the lifecycle of one async operation.
 type OperationState string
 
@@ -273,6 +295,30 @@ type Lease struct {
 	CreatedAt      string        `json:"createdAt"`
 }
 
+// LeaseCredentialKind names the credential shape a lease connection accepts.
+type LeaseCredentialKind string
+
+// CredentialKindScopedKey means the connection password is the caller's own
+// ajs_sk_ scoped key carrying proxy:connect. The secret is never in the body.
+const CredentialKindScopedKey LeaseCredentialKind = "ajs_sk"
+
+// LeaseConnection is the loopback gate one lease currently points at. A switch
+// that rebinds the lease moves Port; the scoped-key secret is never included.
+type LeaseConnection struct {
+	Host           string              `json:"host"`
+	Port           int                 `json:"port"`
+	Protocol       ProxyProtocol       `json:"protocol"`
+	Username       string              `json:"username"`
+	CredentialKind LeaseCredentialKind `json:"credentialKind"`
+}
+
+// LeaseDetail is the GET /v1/leases/{id} body: the lease and the endpoint a
+// client dials for it.
+type LeaseDetail struct {
+	Lease      Lease           `json:"lease"`
+	Connection LeaseConnection `json:"connection"`
+}
+
 // CreateLeaseInput is the POST /v1/leases body. IdempotencyKey is optional;
 // CreateLease fills both the body field and the header when it is empty.
 type CreateLeaseInput struct {
@@ -349,6 +395,36 @@ type UsageSummary struct {
 	RowsRetained  int            `json:"rowsRetained"`
 	RetentionDays int            `json:"retentionDays"`
 	QuotaEnforced bool           `json:"quotaEnforced"`
+}
+
+// RequestSource attributes a request row to the surface that recorded it.
+type RequestSource string
+
+const (
+	// RequestSourceProxy is seeded or imported panel traffic.
+	RequestSourceProxy RequestSource = "proxy"
+	// RequestSourceMutationLab is the request lab.
+	RequestSourceMutationLab RequestSource = "mutation-lab"
+	// RequestSourceGate is a real accepted flow metered by the node controller.
+	RequestSourceGate RequestSource = "gate"
+)
+
+// RequestLog is one recorded request row. The daemon serves a non-admin scoped
+// key only its own UserID, so a customer never sees another tenant's rows.
+type RequestLog struct {
+	ID           string        `json:"id"`
+	TS           string        `json:"ts"`
+	UserID       string        `json:"userId"`
+	UserName     string        `json:"userName"`
+	AccountLabel string        `json:"accountLabel"`
+	NodeLabel    string        `json:"nodeLabel"`
+	Region       string        `json:"region"`
+	Method       string        `json:"method"`
+	Target       string        `json:"target"`
+	Status       int           `json:"status"`
+	Bytes        int64         `json:"bytes"`
+	LatencyMs    int           `json:"latencyMs"`
+	Source       RequestSource `json:"source"`
 }
 
 // Event is one retained or streamed event. Data is the scrubbed payload.
