@@ -182,6 +182,35 @@ function seedOrders(now: number, plans: Plan[]): Order[] {
   }
   chargedBackOrder.grant = grantFor(chargedBackOrder, iso(now - 39 * DAY_MS + standard.leaseTtlSeconds * 1000), iso(now - 3 * DAY_MS))
 
+  // One active order whose grant lease was ended by a daemon restart. The
+  // paid term is still unexpired, so the portal can offer the restore action;
+  // the reason is the same machine value the daemon records in leaseEnds.
+  const interruptedPaidAt = now - 4 * DAY_MS
+  const interruptedOrder: Order = {
+    id: 'ord-08',
+    tenantId: 'tenant-01',
+    userId: 'u-01',
+    planId: standard.id,
+    plan: standard,
+    provider: 'manual',
+    state: 'active',
+    providerRef: 'OFFLINE-2026-1022-08',
+    reviewRequired: false,
+    createdAt: iso(now - 5 * DAY_MS),
+    paidAt: iso(interruptedPaidAt),
+    activatedAt: iso(interruptedPaidAt + 30_000),
+    cancelledAt: null,
+    refundedAt: null,
+    grant: null,
+  }
+  interruptedOrder.grant = grantFor(
+    interruptedOrder,
+    iso(interruptedPaidAt + standard.leaseTtlSeconds * 1000),
+    null,
+  )
+  interruptedOrder.grant.leaseEndedReason = 'daemon_restart'
+  interruptedOrder.grant.leaseEndedAt = iso(now - 2 * DAY_MS)
+
   return [
     {
       id: 'ord-03',
@@ -220,6 +249,7 @@ function seedOrders(now: number, plans: Plan[]): Order[] {
     refundedOrder,
     activeOrder,
     chargedBackOrder,
+    interruptedOrder,
     {
       id: 'ord-06',
       tenantId: 'tenant-01',
@@ -310,6 +340,7 @@ function openOrderFor(state: MockOrderState, tenantId: string, userId: string): 
         (order.state === 'active' &&
           order.grant !== null &&
           order.grant.revokedAt === null &&
+          !order.grant.leaseEndedReason &&
           Date.parse(order.grant.expiresAt) > now)),
   )
 }
@@ -335,6 +366,21 @@ export function mockCreateOrder(
     const existing = state.orders.find((order) => order.id === prior.orderId)
     if (existing) return clone(existing)
   }
+
+  // Mirror the daemon's create path: an active order for the same plan whose
+  // grant lease ended is re-issued, never charged a second time.
+  const ended = state.orders.find(
+    (order) =>
+      order.tenantId === tenantId &&
+      order.userId === userId &&
+      order.state === 'active' &&
+      order.planId === planId &&
+      order.grant !== null &&
+      order.grant.revokedAt === null &&
+      Boolean(order.grant.leaseEndedReason) &&
+      Date.parse(order.grant.expiresAt) > Date.now(),
+  )
+  if (ended) return mockReissueOrder(ended.id)
 
   if (openOrderFor(state, tenantId, userId)) {
     throw new ApiError(409, 'An open order already exists for this user', 'CONFLICT')
@@ -384,6 +430,50 @@ export function mockCancelOrder(
   }
   order.state = 'cancelled'
   order.cancelledAt = iso(Date.now())
+  return clone(order)
+}
+
+/**
+ * POST /v1/portal/orders/{id}/reissue — restore service for an own active
+ * order whose grant lease ended. Mirrors the daemon's single-grant contract:
+ * the order and payment stay untouched, and the same grant points at one
+ * replacement lease with its original paid expiry.
+ */
+export function mockReissueOrder(
+  id: string,
+  owner?: { tenantId: string; userId: string },
+): Order {
+  const state = stateValue()
+  const order = findOrder(id)
+  if (owner && (order.tenantId !== owner.tenantId || order.userId !== owner.userId)) {
+    throw new ApiError(404, 'Order not found', 'NOT_FOUND')
+  }
+  if (order.state !== 'active' || !order.grant) {
+    throw new ApiError(409, 'Only an active order can restore service', 'CONFLICT')
+  }
+  if (order.grant.revokedAt !== null) {
+    throw new ApiError(409, 'The entitlement was revoked', 'CONFLICT')
+  }
+  if (!order.grant.leaseEndedReason) {
+    throw new ApiError(409, 'The entitlement lease is still active', 'CONFLICT')
+  }
+  if (Date.parse(order.grant.expiresAt) <= Date.now()) {
+    throw new ApiError(409, 'The entitlement has expired', 'CONFLICT')
+  }
+
+  const used = new Set<string>()
+  for (const candidate of state.orders) {
+    if (candidate.grant) used.add(candidate.grant.leaseId)
+  }
+  let seq = 1
+  let leaseId = `lease-${order.id}-r${seq}`
+  while (used.has(leaseId)) {
+    seq += 1
+    leaseId = `lease-${order.id}-r${seq}`
+  }
+  order.grant.leaseId = leaseId
+  delete order.grant.leaseEndedReason
+  delete order.grant.leaseEndedAt
   return clone(order)
 }
 

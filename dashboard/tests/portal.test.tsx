@@ -175,10 +175,38 @@ describe('portal client — cookie session and CSRF', () => {
       code: 'UPSTREAM_UNAVAILABLE',
     })
   })
+
+  it('posts the reissue action with CSRF, never a bearer, and maps a 409', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(LIVE_SESSION))
+      .mockResolvedValueOnce(jsonResponse({ id: 'ord-08', state: 'active' }))
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'CONFLICT', message: 'lease is still active' } }, 409),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { portalApi: live } = await livePortal()
+    await live.login({ email: 'ada@example.com', password: 'secret' })
+    const order = await live.reissueOrder('ord-08')
+    expect(order.id).toBe('ord-08')
+
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain('/v1/portal/orders/ord-08/reissue')
+    expect(init.method).toBe('POST')
+    expect(init.credentials).toBe('include')
+    expect(headersOf(init).get('X-CSRF-Token')).toBe('csrf-live-1')
+    expect(headersOf(init).has('Authorization')).toBe(false)
+
+    await expect(live.reissueOrder('ord-08')).rejects.toMatchObject({
+      status: 409,
+      code: 'CONFLICT',
+    })
+  })
 })
 
 describe('portal client — mock parity', () => {
-  it('scopes leases, usage and keys to the signed-in tenant', async () => {
+  it('scopes leases, usage, keys and orders to the signed-in tenant', async () => {
     await signInMockTenant()
     const leases = await portalApi.leases()
     expect(leases.map((lease) => lease.id).sort()).toEqual(['lease-01', 'lease-02'])
@@ -192,6 +220,11 @@ describe('portal client — mock parity', () => {
     const keys = await portalApi.keys()
     expect(keys.map((key) => key.id)).toEqual(['key-01', 'key-02'])
     expect(keys.every((key) => key.userId === 'u-01')).toBe(true)
+
+    const orders = await portalApi.orders()
+    const ended = orders.find((order) => order.id === 'ord-08')
+    expect(ended?.grant?.leaseEndedReason).toBe('daemon_restart')
+    expect(ended?.grant?.leaseEndedAt).toBeTruthy()
   })
 
   it('issues a one-time secret and revokes only owned keys', async () => {

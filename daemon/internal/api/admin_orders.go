@@ -98,7 +98,7 @@ func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 		if userID != "" && order.UserID != userID {
 			continue
 		}
-		filtered = append(filtered, order)
+		filtered = append(filtered, s.orderServiceView(order))
 	}
 	start, end, ok := paginate(w, r, len(filtered))
 	if !ok {
@@ -114,7 +114,7 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, order)
+	writeJSON(w, http.StatusOK, s.orderServiceView(order))
 }
 
 // handleSettleOrder records an admin's offline settlement attestation. It

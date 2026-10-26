@@ -477,6 +477,12 @@ func TestDemoteNodeRecordsDurableLeaseEnd(t *testing.T) {
 		ends[0].Lease.Status != model.LeaseRevoked {
 		t.Fatalf("lease ends = %+v, want one daemon_restart row for %s", ends, lease.ID)
 	}
+	if end, ok := st.LeaseEnd(lease.ID); !ok || end.Reason != "daemon_restart" || end.EndedAt == "" {
+		t.Fatalf("LeaseEnd(%s) = %+v/%v, want the durable row", lease.ID, end, ok)
+	}
+	if _, ok := st.LeaseEnd("lease-missing"); ok {
+		t.Fatal("LeaseEnd(missing) reported an outcome")
+	}
 
 	data, err := st.Snapshot()
 	if err != nil {

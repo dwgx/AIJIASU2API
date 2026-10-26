@@ -5505,7 +5505,8 @@ svg {
 
 .order-plan,
 .order-owner,
-.order-state {
+.order-state,
+.order-grant {
   display: flex;
   flex-direction: column;
   gap: 2px;

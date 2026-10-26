@@ -9,7 +9,7 @@ build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 457 tests in 50 files.
+- Tests: Vitest + React Testing Library + jsdom, 473 tests in 52 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -76,7 +76,7 @@ npm ci             # installs exactly the committed package-lock.json
 npm run dev        # http://127.0.0.1:5173
 npm run build      # tsc -b && vite build → dist/ (mock mode unless VITE_USE_MOCK=false)
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 457 tests in 50 files
+npm test           # Vitest, 473 tests in 52 files
 npm run typecheck  # tsc -b
 ```
 
@@ -895,7 +895,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 457 Vitest tests in 50 files (65 at the 2026-10-23 record; see
+- 473 Vitest tests in 52 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -959,8 +959,11 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   plans with price, term and quota, creates an order after the confirmation that says no online
   payment is taken, replays a per-dialog `Idempotency-Key` with `X-CSRF-Token` and no bearer,
   turns a changed plan or a second open order into the daemon's 409 copy, renders awaiting, paid,
-  active, refunded and review-required states honestly, cancels an awaiting order, and answers a
-  foreign cancel without leaking its existence. The admin block filters every tenant's orders by
+  active, refunded and review-required states honestly, cancels an awaiting order, answers a
+  foreign cancel without leaking its existence, shows a service-interrupted order with its
+  localized ended-lease reason, restores service through the reissue action, re-issues an ended
+  same-plan order on create without a second charge, and renders the action in Chinese. The admin
+  block filters every tenant's orders by
   state and review flag, requires a receipt reference before attesting an offline payment, retries
   activation, records an offline refund, cancels an awaiting order, deactivates and reactivates a
   plan while existing snapshots keep their price, hides a deactivated plan from new orders, and
@@ -1095,8 +1098,12 @@ to `u-01`), one pending applicant and one suspended tenant.
   payment-status banner, a review-required banner, a **Pay now** button for an awaiting order
   (opens the returned 易支付 `payUrl` in a new tab) and a clear **Offline settlement** state when
   the adapter answers 503, plus a cancel confirm. Opening checkout never marks an order paid.
-  The daemon's per-IP, per-address and per-tenant buckets answer 429 with `Retry-After`, which the
-  page surfaces as a wait-in-seconds message.
+  An active order whose grant lease ended (for example after a daemon restart) shows a
+  **Service interrupted** badge, the localized reason projected from the daemon's durable
+  `leaseEnds` log, and a **Restore service** button that calls
+  `POST /v1/portal/orders/{id}/reissue`; a successful restore keeps the original order and paid
+  expiry and clears the interruption. The daemon's per-IP, per-address and per-tenant buckets
+  answer 429 with `Retry-After`, which the page surfaces as a wait-in-seconds message.
 - **Copy.** Errors are stable portal strings rather than daemon messages: one credential refusal,
   one rate-limit line, one unavailable line and one generic failure, in both languages.
 
@@ -1262,7 +1269,7 @@ tests/
   platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
   portal.test.tsx         portal client cookie/CSRF contract, mock tenant scoping, signup/pending, own-data UI, zh
   portal-activity.test.tsx tenant-scoped activity rows, cursor load-more, empty state, zh
-  orders.test.tsx         portal plans/orders and admin orders/plans: idempotency, honest states, attestation, refund, review flag, zh
+  orders.test.tsx         portal plans/orders and admin orders/plans: idempotency, honest states, lease-ended restore, attestation, refund, review flag, zh
 ```
 
 ### Accounts views

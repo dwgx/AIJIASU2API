@@ -301,6 +301,60 @@ describe('portal plans and orders', () => {
     ).not.toBeInTheDocument()
     expect(await screen.findByText(/易支付 is not enabled/)).toBeInTheDocument()
   })
+  it('shows an ended-lease reason and restores service from the order row', async () => {
+    await signIn()
+    const { user } = await openPortal('Orders')
+
+    const row = await findRow('ord-08')
+    expect(within(row).getByText('Service interrupted')).toBeInTheDocument()
+    expect(within(row).getByText('Lease ended: daemon restarted')).toBeInTheDocument()
+
+    const before = (await portalApi.orders()).find((order) => order.id === 'ord-08')
+    expect(before?.grant?.leaseEndedReason).toBe('daemon_restart')
+    const oldLeaseID = before?.grant?.leaseId
+
+    await user.click(within(row).getByRole('button', { name: 'Restore service' }))
+    expect(
+      await screen.findByText('Service restored with a replacement lease.'),
+    ).toBeInTheDocument()
+
+    await waitFor(() =>
+      expect(
+        within(rowForSync('ord-08')).queryByText('Service interrupted'),
+      ).not.toBeInTheDocument(),
+    )
+    const after = (await portalApi.orders()).find((order) => order.id === 'ord-08')
+    expect(after?.state).toBe('active')
+    expect(after?.grant?.leaseEndedReason).toBeUndefined()
+    expect(after?.grant?.leaseId).not.toBe(oldLeaseID)
+  })
+
+  it('re-issues an ended same-plan order on create instead of charging again', async () => {
+    await signIn()
+    const before = await portalApi.orders()
+    const reissued = await portalApi.createOrder('plan-02', 'reissue-on-create')
+
+    expect(reissued.id).toBe('ord-08')
+    expect(reissued.state).toBe('active')
+    expect(reissued.grant?.leaseEndedReason).toBeUndefined()
+    expect((await portalApi.orders()).filter((order) => order.id === 'ord-08')).toHaveLength(1)
+    expect(await portalApi.orders()).toHaveLength(before.length)
+  })
+
+  it('renders the ended-lease reason and restore action in Chinese', async () => {
+    localStorage.setItem('ajs.lang', 'zh')
+    await signIn()
+    window.history.pushState({}, '', '/portal')
+    render(<App />)
+    await screen.findByRole('heading', { name: '客户中心', level: 1 })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('tab', { name: '订单' }))
+
+    const row = await findRow('ord-08')
+    expect(within(row).getByText('服务已中断')).toBeInTheDocument()
+    expect(within(row).getByText('租约已结束：守护进程重启')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '恢复服务' })).toBeInTheDocument()
+  })
 })
 
 function rowForSync(id: string): HTMLElement {
@@ -405,7 +459,7 @@ describe('admin orders', () => {
 
   it('cancels an awaiting order after confirmation', async () => {
     await signIn()
-    const order = await portalApi.createOrder('plan-02', 'admin-cancel')
+    const order = await portalApi.createOrder('plan-01', 'admin-cancel')
     const { user } = await openAdmin()
 
     const row = await findRow(order.id)

@@ -43,6 +43,25 @@ func (s *Store) LeaseEnds() []LeaseEnd {
 	return out
 }
 
+// LeaseEnd returns the durable outcome row for one lease. The second result is
+// false when the lease was removed by a path that did not write an outcome
+// row (an operator revoke or an ordinary expiry sweep); callers that need to
+// explain an ended lease use "lease_ended" in that case.
+func (s *Store) LeaseEnd(leaseID string) (LeaseEnd, bool) {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return LeaseEnd{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, end := range s.leaseEnds {
+		if end.Lease.ID == leaseID {
+			return end, true
+		}
+	}
+	return LeaseEnd{}, false
+}
+
 // SetLeaseRevokeHook installs the sink for leases revoked by startup recovery
 // or a restore. Revocations recorded before the hook exists (the startup path
 // loads the snapshot before the webhook dispatcher is built) are queued in

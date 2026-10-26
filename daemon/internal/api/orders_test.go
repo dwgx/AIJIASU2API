@@ -830,6 +830,80 @@ func TestReissuePublicationIsFailClosedAndRetryable(t *testing.T) {
 	}
 }
 
+// TestPortalOrderLeaseEndedReasonAfterDaemonRestart is the AJS-403 portal
+// contract: an active order whose grant lease was ended by a restart carries
+// the durable machine reason and end instant on every portal order read, and
+// a successful re-issue clears the projection because the new lease is live.
+func TestPortalOrderLeaseEndedReasonAfterDaemonRestart(t *testing.T) {
+	ts, st, _ := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-ended-reason@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	// Reissue must not race any other live lease for the same user; release
+	// the remaining seeded rows so this test isolates the ended-grant path.
+	for _, existing := range st.Leases() {
+		if existing.UserID == "u-01" {
+			if err := st.ReleaseLease(existing.ID); err != nil {
+				t.Fatalf("release seeded lease %s: %v", existing.ID, err)
+			}
+		}
+	}
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "ended-reason-order")
+
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-ended-reason", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant: %+v", active)
+	}
+	lease, ok := st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+
+	// The list and the single-order read both expose why service stopped.
+	resp, body = portalOrderCall(t, ts, http.MethodGet, "/v1/portal/orders", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	list := decodeBody[[]model.Order](t, body)
+	var listed *model.Order
+	for i := range list {
+		if list[i].ID == order.ID {
+			listed = &list[i]
+			break
+		}
+	}
+	if listed == nil || listed.Grant == nil {
+		t.Fatalf("ended order missing from portal list: %+v", list)
+	}
+	if listed.Grant.LeaseEndedReason != "daemon_restart" || listed.Grant.LeaseEndedAt == "" {
+		t.Fatalf("listed grant projection = %+v, want daemon_restart with an instant", listed.Grant)
+	}
+
+	resp, body = portalOrderCall(t, ts, http.MethodGet, "/v1/portal/orders/"+order.ID, nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	read := decodeBody[model.Order](t, body)
+	if read.Grant == nil || read.Grant.LeaseEndedReason != "daemon_restart" || read.Grant.LeaseEndedAt == "" {
+		t.Fatalf("read grant projection = %+v, want the durable lease outcome", read.Grant)
+	}
+
+	// A replacement lease makes the order serving again; the projection is
+	// cleared because the grant no longer names an ended lease.
+	reviveOrderAPILease(t, st, lease)
+	resp, body = portalOrderCall(t, ts, http.MethodPost,
+		"/v1/portal/orders/"+order.ID+"/reissue", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	after := decodeBody[model.Order](t, body)
+	if after.Grant == nil || after.Grant.LeaseEndedReason != "" || after.Grant.LeaseEndedAt != "" {
+		t.Fatalf("reissued grant projection = %+v, want a live lease with no ended fields", after.Grant)
+	}
+	if after.Grant.LeaseID == lease.ID {
+		t.Fatalf("reissue kept the ended lease %s", lease.ID)
+	}
+}
+
 // TestAdminOrderReissueAfterDaemonRestart proves the admin path exists even
 // without a portal session and uses the same single-grant operation.
 func TestAdminOrderReissueAfterDaemonRestart(t *testing.T) {

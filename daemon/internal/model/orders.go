@@ -114,6 +114,13 @@ type EntitlementGrant struct {
 	PreviousQuotaBytes *int64  `json:"previousQuotaBytes"`
 	ExpiresAt          string  `json:"expiresAt"`
 	RevokedAt          *string `json:"revokedAt"`
+	// LeaseEndedReason and LeaseEndedAt are read-only projections of the
+	// durable leaseEnds row for LeaseID. They are set by the API when the
+	// grant's lease is no longer active but its paid term is unexpired, so a
+	// customer can see why service stopped and that it can be restored. They
+	// are never written back to the order or persisted in a snapshot.
+	LeaseEndedReason string `json:"leaseEndedReason,omitempty"`
+	LeaseEndedAt     string `json:"leaseEndedAt,omitempty"`
 }
 
 // OrderCreateRequest is the POST /v1/portal/orders body. The idempotency key

@@ -99,10 +99,12 @@ As of 2026-10-25:
   cookie (no bearer, no Web Storage) and an in-memory CSRF token; mock mode seeds one active, one
   pending and one suspended tenant. Plans creates an order under a per-dialog idempotency key and
   Orders lists only the tenant's own orders with a **Pay now** 易支付 checkout, an
-  offline-settlement fallback and a cancel confirm; the operator **Orders** page filters by state
+  offline-settlement fallback and a cancel confirm; an active order whose grant lease ended shows
+  its localized reason and a **Restore service** action that re-issues the same grant without a
+  second order, grant or charge. The operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  457 Vitest tests in 50 files. The UI is bilingual: a `中` / `EN` switch
+  473 Vitest tests in 52 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -464,7 +466,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (457 tests in 50 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (473 tests in 52 files), `cd daemon && go test ./...`
 (981 test functions, needs `../emulator`), `cd emulator && go test ./...` (41 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of

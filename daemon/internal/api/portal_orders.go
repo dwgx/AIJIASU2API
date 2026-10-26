@@ -15,6 +15,28 @@ import (
 // separate bucket from key writes, so one busy page cannot exhaust the other.
 const portalOrderWriteLimitPerMin = 20
 
+// orderServiceView decorates one order with the durable outcome of its grant
+// lease. The order state stays truthful (`active` means the paid term is
+// unexpired); when the lease that backs the grant is gone, the customer still
+// needs to know why service stopped and whether the re-issue action applies.
+// The projection is computed on read and never persisted on the order.
+func (s *Server) orderServiceView(order model.Order) model.Order {
+	if order.State != model.OrderActive || order.Grant == nil || order.Grant.RevokedAt != nil {
+		return order
+	}
+	if lease, ok := s.store.Lease(order.Grant.LeaseID); ok &&
+		lease.UserID == order.UserID && lease.ExpiresAt == order.Grant.ExpiresAt {
+		return order
+	}
+	reason, endedAt := "lease_ended", ""
+	if end, ok := s.store.LeaseEnd(order.Grant.LeaseID); ok {
+		reason, endedAt = end.Reason, end.EndedAt
+	}
+	order.Grant.LeaseEndedReason = reason
+	order.Grant.LeaseEndedAt = endedAt
+	return order
+}
+
 // handlePortalPlans lists the active catalogue only. An inactive plan is admin
 // configuration and must not be offered to a customer.
 func (s *Server) handlePortalPlans(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +71,7 @@ func (s *Server) handlePortalListOrders(w http.ResponseWriter, r *http.Request) 
 	own := make([]model.Order, 0, len(orders))
 	for _, order := range orders {
 		if order.UserID == principal.User.ID {
-			own = append(own, order)
+			own = append(own, s.orderServiceView(order))
 		}
 	}
 	start, end, ok := paginate(w, r, len(own))
@@ -90,7 +112,7 @@ func (s *Server) handlePortalCreateOrder(w http.ResponseWriter, r *http.Request)
 			s.writeReissueError(w, failedLease, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, after)
+		writeJSON(w, http.StatusOK, s.orderServiceView(after))
 		return
 	}
 	order, replayed, err := s.store.CreateOrder(
@@ -111,7 +133,7 @@ func (s *Server) handlePortalCreateOrder(w http.ResponseWriter, r *http.Request)
 	if replayed {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, order)
+	writeJSON(w, status, s.orderServiceView(order))
 }
 
 // handlePortalGetOrder reads one own order. A foreign or unknown id answers the
@@ -131,7 +153,7 @@ func (s *Server) handlePortalGetOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, order)
+	writeJSON(w, http.StatusOK, s.orderServiceView(order))
 }
 
 // handlePortalCancelOrder cancels an awaiting_payment order. A cancelled order

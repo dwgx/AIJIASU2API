@@ -2032,6 +2032,9 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   AJS-402-LeaseSemanticsGate.md assignment file was not present in this checkout; this gate is
   evaluated against restart/reissue double-spend and honest-response behavior, not a claimed live
   vendor/Resin restart drill.
+  Portal order reads project the durable lease outcome onto `grant.leaseEndedReason` and
+  `grant.leaseEndedAt` while the paid term is unexpired; a successful re-issue clears both because
+  the grant then names the live replacement. The projection is read-only and never persisted.
 - **Refunds and chargebacks.** `POST …/refund` records an already completed full offline refund and
   never transfers money; `POST …/chargeback` records external evidence and always flags review.
   Both revoke the grant's lease and restore its previous quota without re-enabling a suspended user

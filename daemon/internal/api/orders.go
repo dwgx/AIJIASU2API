@@ -83,7 +83,7 @@ func (s *Server) handlePortalReissueOrder(w http.ResponseWriter, r *http.Request
 		s.writeReissueError(w, failedLease, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, after)
+	writeJSON(w, http.StatusOK, s.orderServiceView(after))
 }
 
 // handleReissueOrder is the admin counterpart of the portal re-issue route.
@@ -96,7 +96,7 @@ func (s *Server) handleReissueOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeReissueError(w, failedLease, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, after)
+	writeJSON(w, http.StatusOK, s.orderServiceView(after))
 }
 
 // writeReissueError keeps ordinary store refusals unchanged and gives a

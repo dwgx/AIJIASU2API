@@ -6,6 +6,7 @@ import {
   mockCreateOrder,
   mockListOrders,
   mockListPlans,
+  mockReissueOrder,
   resetOrderMock,
 } from './order-mock'
 import type { ApiKey, AuditEvent, Lease, Order, Plan, UsageBucket, UsageQuery, UsageSummary } from './types'
@@ -895,6 +896,29 @@ export const portalApi = {
       return mockCancelOrder(id, { tenantId: tenant.id, userId: tenant.userId ?? '' })
     }
     return request<Order>(`/v1/portal/orders/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+    })
+  },
+
+  /**
+   * POST /v1/portal/orders/{id}/reissue — restore service for an own active
+   * order whose grant lease ended. It creates one replacement lease for the
+   * same grant, never a new order, grant or payment.
+   */
+  async reissueOrder(id: string): Promise<Order> {
+    if (mockEnabled()) {
+      await wait()
+      const tenant = mockActiveTenant()
+      try {
+        return mockReissueOrder(id, { tenantId: tenant.id, userId: tenant.userId ?? '' })
+      } catch (cause) {
+        if (cause instanceof ApiError) {
+          throw new PortalError(cause.status, cause.message, cause.code)
+        }
+        throw cause
+      }
+    }
+    return request<Order>(`/v1/portal/orders/${encodeURIComponent(id)}/reissue`, {
       method: 'POST',
     })
   },

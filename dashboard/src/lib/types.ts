@@ -210,6 +210,14 @@ export interface EntitlementGrant {
   previousQuotaBytes: number
   expiresAt: string
   revokedAt: string | null
+  /**
+   * Read-only projection set by the daemon when the referenced lease is no
+   * longer serving but the paid term has not expired. Absent on a live grant
+   * (and on older daemons that do not project the lease outcome).
+   */
+  leaseEndedReason?: string
+  /** RFC 3339 instant the grant lease ended; empty when unknown. */
+  leaseEndedAt?: string
 }
 
 /** The payment providers the daemon can name on an order. */

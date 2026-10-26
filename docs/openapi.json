@@ -13806,6 +13806,14 @@
             "type": "string",
             "description": "Lease expiry, paidAt + leaseTtlSeconds. Service ends here, not at a browser timer."
           },
+          "leaseEndedReason": {
+            "type": "string",
+            "description": "Read-only projection: the durable machine reason the grant lease ended, set only while the paid term is unexpired and the lease is no longer serving. Absent on a live grant."
+          },
+          "leaseEndedAt": {
+            "type": "string",
+            "description": "Read-only projection: RFC 3339 instant the grant lease ended; empty when unknown."
+          },
           "revokedAt": {
             "oneOf": [
               {
