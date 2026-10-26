@@ -179,9 +179,19 @@ type Snapshot struct {
 // copying, so a slow disk write never blocks the API; the copy itself is one
 // consistent view.
 func (s *Store) Snapshot() ([]byte, error) {
+	s.mu.RLock()
+	snap := s.snapshotLocked()
+	s.mu.RUnlock()
+	return encodeSnapshot(snap)
+}
+
+// snapshotLocked copies one consistent view of every persisted field. The
+// caller must hold s.mu for reading or writing. Encoding is separate so a
+// journalled commit (AJS-433) can render the post-mutation document while it
+// still holds the write lock that ordered the mutation.
+func (s *Store) snapshotLocked() Snapshot {
 	snap := Snapshot{Version: SnapshotVersion}
 
-	s.mu.RLock()
 	snap.Accounts = make([]model.Account, len(s.accounts))
 	for i, account := range s.accounts {
 		snap.Accounts[i] = cloneAccount(account)
@@ -327,8 +337,12 @@ func (s *Store) Snapshot() ([]byte, error) {
 	snap.ScopedKeySeq = s.scopedKeySeq
 	snap.MutationSeq = s.mutationSeq
 	snap.AuditSeq = s.auditSeq
-	s.mu.RUnlock()
+	return snap
+}
 
+// encodeSnapshot renders a copied Snapshot as the canonical v2 document. The
+// trailing newline keeps state.json line-oriented for operators.
+func encodeSnapshot(snap Snapshot) ([]byte, error) {
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode state snapshot: %w", err)
@@ -575,6 +589,23 @@ func (s *Store) Restore(data []byte) error {
 	return nil
 }
 
+// RestoreForReplay installs a journal snapshot. The document is validated by a
+// fresh, hook-free Store first, so replay cannot half-apply a corrupt or
+// internally inconsistent record; that probe has no hooks, sealer or device
+// material, and validation makes no external call. The store's own sealer then
+// installs the document exactly as Load does.
+//
+// The caller must run replay before installing any hook: the real Restore only
+// queues lease revocations and scans sealed device material, both local and
+// read-only, but it must not be able to publish an event to a live sink.
+func (s *Store) RestoreForReplay(data []byte) error {
+	probe := NewEmpty()
+	if err := probe.Restore(data); err != nil {
+		return fmt.Errorf("replay snapshot: %w", err)
+	}
+	return s.Restore(data)
+}
+
 // migrateLegacySnapshotDevices converts a version 1 plaintext device map into
 // deterministic pool records. Deterministic ids and machine codes make a
 // repeated migration of the same document idempotent.
@@ -599,6 +630,11 @@ func (s *Store) migrateLegacySnapshotDevices(snap *Snapshot) error {
 // directory followed by an atomic rename, so readers observe either the old or
 // the new document and never a partial one. The directory is created when
 // missing.
+//
+// This is also the journal's compatibility/export checkpoint: with
+// AJS_JOURNAL=1 the journal is the recovery authority and this document is the
+// portable export/rollback copy, refreshed after a successful checkpoint. The
+// journal never reads it back.
 func (s *Store) Save(path string) error {
 	data, err := s.Snapshot()
 	if err != nil {

@@ -65,6 +65,7 @@ func run() error {
 	corsOrigins := flag.String("cors-origins", envOr("AJS_CORS_ORIGINS", strings.Join(api.DefaultCORSOrigins, ",")), "comma-separated allowed CORS origins")
 	adminOrigins := flag.String("admin-origins", os.Getenv("AJS_ADMIN_ORIGINS"), "comma-separated exact browser origins allowed on unsafe admin requests (env AJS_ADMIN_ORIGINS; default AJS_CORS_ORIGINS)")
 	logLevel := flag.String("log-level", envOr("AJS_LOG_LEVEL", "info"), "debug, info, warn or error")
+	journalEnabled := flag.Bool("journal", os.Getenv("AJS_JOURNAL") == "1", "recover and append to the state journal (env AJS_JOURNAL=1; default: state.json snapshots)")
 	resinURL := flag.String("resin-url", envOr(resin.EnvBaseURL, resin.DefaultBaseURL), "Resin admin API base URL (env AJS_RESIN_URL)")
 	resinToken := flag.String("resin-token", os.Getenv(resin.EnvAdminToken), "Resin admin bearer token (env AJS_RESIN_ADMIN_TOKEN); empty disables the integration")
 	subscriptionName := flag.String("subscription-name", envOr("AJS_SUBSCRIPTION_NAME", runtime.DefaultSubscriptionName), "Resin local subscription name (env AJS_SUBSCRIPTION_NAME)")
@@ -176,6 +177,21 @@ func run() error {
 	if operatorSet != nil && !*strictRBAC {
 		logger.Warn("rbac_compatibility_mode", "reason", "per-operator tokens enabled but legacy shared bearer remains accepted; set AJS_RBAC_STRICT=1 after migrating clients")
 	}
+	// The journal, when enabled, takes the state-directory lock before any
+	// sealed secret file is opened and recovers committed state before the
+	// listener starts. The default remains the state.json snapshot load; the
+	// mutator commit path is wired separately (AJS-433).
+	statePath := stateFilePath()
+	var journal *store.Journal
+	if *journalEnabled {
+		opened, err := store.OpenJournal(filepath.Dir(statePath))
+		if err != nil {
+			return fmt.Errorf("journal: %w", err)
+		}
+		journal = opened
+		defer func() { _ = journal.Close() }()
+	}
+
 	st, secrets, deviceSecrets, err := openStore(logger)
 	if err != nil {
 		return err
@@ -187,10 +203,6 @@ func run() error {
 		defer func() { _ = deviceSecrets.Close() }()
 	}
 
-	// The snapshot is the authoritative full state. It is loaded before the
-	// listener starts so a corrupt or future-version file fails startup
-	// instead of serving a half-restored panel.
-	statePath := stateFilePath()
 	// restoreApplied is marked by POST /v1/backup/restore once it has replaced
 	// the panel files. snapshots shares the flag, so after an apply this
 	// process never writes the stale in-memory panel over the restored
@@ -201,13 +213,37 @@ func run() error {
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		return fmt.Errorf("state directory %s: %w", filepath.Dir(statePath), err)
 	}
-	if err := st.Load(statePath); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("load state: %w", err)
+	// Without the journal the snapshot is the authoritative full state; it is
+	// loaded before the listener so a corrupt or future-version file fails
+	// startup instead of serving a half-restored panel. With the journal,
+	// CURRENT and state.log are the authority and state.json is only the
+	// export: a first run (no CURRENT) imports that export once.
+	if journal == nil || !journal.Initialized() {
+		if err := st.Load(statePath); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("load state: %w", err)
+			}
+			logger.Info("state_missing", "path", statePath)
+		} else {
+			logger.Info("state_loaded", "path", statePath,
+				"accounts", len(st.Accounts()),
+				"nodes", len(st.Nodes()),
+				"leases", len(st.Leases()))
 		}
-		logger.Info("state_missing", "path", statePath)
-	} else {
-		logger.Info("state_loaded", "path", statePath,
+	}
+	if journal != nil {
+		recovery, err := journal.Recover(st)
+		if err != nil {
+			return fmt.Errorf("journal recovery: %w", err)
+		}
+		st.AttachJournal(journal)
+		logger.Info("journal_recovered",
+			"path", filepath.Dir(statePath),
+			"generation", recovery.Generation,
+			"fresh", recovery.Fresh,
+			"checkpoint_seq", recovery.CheckpointSeq,
+			"last_seq", recovery.LastSeq,
+			"frames", recovery.Frames,
 			"accounts", len(st.Accounts()),
 			"nodes", len(st.Nodes()),
 			"leases", len(st.Leases()))

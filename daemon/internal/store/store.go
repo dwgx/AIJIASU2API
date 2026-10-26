@@ -76,6 +76,11 @@ type Store struct {
 	mu  sync.RWMutex
 	now func() time.Time
 
+	// journal is the append-only commit log opened at startup (AJS-432).
+	// Mutators still rely on the periodic state.json export until AJS-433
+	// wires commitLocked to it; recovery is its only user in this slice.
+	journal *Journal
+
 	accounts []model.Account
 	nodes    []model.ProxyNode
 	leases   []model.Lease
@@ -374,6 +379,15 @@ func newWithClock(now func() time.Time, sealer Sealer) *Store {
 	s.auditSeq = seedAudit
 	s.syncAccountCountsLocked()
 	return s
+}
+
+// AttachJournal records the journal this process opened. It must be called
+// once during startup, after Recover and before the first request, so the
+// commit wiring added in AJS-433 has one stable log. No mutator reads it yet.
+func (s *Store) AttachJournal(j *Journal) {
+	s.mu.Lock()
+	s.journal = j
+	s.mu.Unlock()
 }
 
 // Accounts returns a snapshot in seed order.
