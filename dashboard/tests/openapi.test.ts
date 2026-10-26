@@ -81,6 +81,13 @@ const serverSource = readFileSync(
   `${cwd}/../daemon/internal/api/server.go`,
   'utf8',
 )
+// The reissue actions are registered beside their handlers instead of in the
+// central router table, so the parity scan must read both files or those
+// routes drift out of the document unnoticed.
+const ordersSource = readFileSync(
+  `${cwd}/../daemon/internal/api/orders.go`,
+  'utf8',
+)
 
 function operations(): OperationEntry[] {
   const entries: OperationEntry[] = []
@@ -131,11 +138,13 @@ function collectRefs(node: unknown, at: string, out: Array<{ at: string; ref: st
   }
 }
 
-/** The exact route table from server.go: "get /v1/accounts", ... */
+/** The exact route table from server.go and orders.go: "get /v1/accounts", ... */
 function serverRoutes(): string[] {
   const pattern = /rt\.handle\(http\.Method(Get|Post|Put|Patch|Delete),\s*"([^"]+)"/g
-  return [...serverSource.matchAll(pattern)].map(
-    ([, method, path]) => `${method.toLowerCase()} ${path}`,
+  return [serverSource, ordersSource].flatMap((source) =>
+    [...source.matchAll(pattern)].map(
+      ([, method, path]) => `${method.toLowerCase()} ${path}`,
+    ),
   )
 }
 
@@ -180,7 +189,7 @@ describe('docs/openapi.json', () => {
     expect(String(doc.servers[0]?.url)).toContain('127.0.0.1:2261')
   })
 
-  it('documents every route registered in server.go and invents no P0 route', () => {
+  it('documents every route registered in server.go and orders.go and invents no P0 route', () => {
     expect(routes.length).toBeGreaterThan(50)
     const documented = new Set(entries.map(({ method, path }) => `${method} ${path}`))
     expect(routes.filter((route) => !documented.has(route))).toEqual([])
@@ -194,8 +203,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(117)
-    expect(entries).toHaveLength(144)
+    expect(Object.keys(doc.paths)).toHaveLength(119)
+    expect(entries).toHaveLength(146)
   })
 
   it('documents the real-time debugger trace and stream', () => {
@@ -335,6 +344,7 @@ describe('docs/openapi.json', () => {
       '/v1/portal/orders/{id}': true,
       '/v1/portal/orders/{id}/checkout': true,
       '/v1/portal/orders/{id}/cancel': true,
+      '/v1/portal/orders/{id}/reissue': true,
       // The payment webhooks authenticate their provider signature over the
       // raw body; a provider cannot send a bearer token.
       '/v1/payments/stripe': true,
@@ -564,6 +574,81 @@ describe('docs/openapi.json', () => {
       'order.activated',
       'order.refunded',
     ]))
+  })
+
+  it('documents the order fulfilment job and the reissue actions', () => {
+    // The durable job is the contract the admin and portal surfaces read. Its
+    // state is closed at three values: cleanup-pending is a modifier on a
+    // publishing job, never a fourth state.
+    const job = schema('FulfilmentJob')
+    expect(job.properties?.state?.enum).toEqual(['queued', 'publishing', 'dead_letter'])
+    expect(job.properties?.mode?.enum).toEqual(['initial', 'reissue'])
+    expect(job.properties?.lastReason?.enum).toEqual([
+      'capacity',
+      'tenant_suspended',
+      'target_changed',
+      'publish_failed',
+      'timeout',
+      'internal',
+      'interrupted',
+      'entitlement_expired',
+    ])
+    expect(job.required).toEqual([
+      'orderId',
+      'mode',
+      'state',
+      'attempts',
+      'entitlementExpiresAt',
+      'updatedAt',
+    ])
+    expect(job.properties?.nextAttemptAt?.oneOf).toBeDefined()
+    expect(job.properties?.blocked).toMatchObject({ type: 'boolean' })
+    expect(job.properties?.cleanupPending).toMatchObject({ type: 'boolean' })
+    // Attempt fencing identifiers are internal to the publisher; they must
+    // never become part of the document a browser builds against.
+    for (const name of [
+      'attemptLeaseId',
+      'publishedAt',
+      'publishedLeaseId',
+      'publishedAccountId',
+    ]) {
+      expect(job.properties?.[name], name).toBeUndefined()
+    }
+    expect(schema('Order').properties?.fulfilment?.oneOf).toEqual(
+      expect.arrayContaining([{ $ref: '#/components/schemas/FulfilmentJob' }]),
+    )
+
+    // The reissue actions are registered in orders.go beside their handlers,
+    // not in the central router table, so they drifted out of the document
+    // once already. The route scan must see them and the document must match.
+    expect(routes).toEqual(
+      expect.arrayContaining([
+        'post /v1/admin/orders/{id}/reissue',
+        'post /v1/portal/orders/{id}/reissue',
+      ]),
+    )
+    const admin = doc.paths['/v1/admin/orders/{id}/reissue']?.post
+    expect(admin).toBeDefined()
+    expect(admin?.['x-implementation-phase']).toBe('P0')
+    expect(admin?.security).toBeUndefined()
+    expect(parameterNames(admin!)).toEqual(
+      expect.arrayContaining(['path:id', 'header:X-AJS-CSRF']),
+    )
+    expect(responseSchema(admin!, '200')).toEqual({ $ref: '#/components/schemas/Order' })
+    expect(admin?.responses['409']).toEqual({ $ref: '#/components/responses/Conflict' })
+    expect(admin?.responses['503']).toEqual({
+      $ref: '#/components/responses/ServiceUnavailable',
+    })
+
+    const portal = doc.paths['/v1/portal/orders/{id}/reissue']?.post
+    expect(portal).toBeDefined()
+    expect(portal?.['x-implementation-phase']).toBe('P0')
+    expect(portal?.security).toEqual([{ portalCookie: [] }])
+    expect(parameterNames(portal!)).toEqual(
+      expect.arrayContaining(['path:id', 'header:X-CSRF-Token']),
+    )
+    expect(responseSchema(portal!, '200')).toEqual({ $ref: '#/components/schemas/Order' })
+    expect(portal?.responses['429']).toEqual({ $ref: '#/components/responses/RateLimited' })
   })
 
   it('marks the proposed P1 interfaces', () => {
@@ -807,5 +892,10 @@ describe('docs/openapi.json', () => {
       'INVALID_ARGUMENT', 'NOT_FOUND', 'CONFLICT', 'UPSTREAM_UNAVAILABLE',
       'QUOTA_EXCEEDED', 'RATE_LIMITED', 'UNAUTHORIZED', 'METHOD_NOT_ALLOWED', 'INTERNAL',
     ]))
+    // A scoped-key denial is machine-readable: the dashboard branches on these
+    // two reasons instead of parsing the message.
+    const reason = String(detail.properties?.reason?.description)
+    expect(reason).toContain('scope_required')
+    expect(reason).toContain('scoped_key_restricted')
   })
 })

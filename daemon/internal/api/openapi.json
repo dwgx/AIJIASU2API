@@ -6230,6 +6230,63 @@
         }
       }
     },
+    "/v1/portal/orders/{id}/reissue": {
+      "post": {
+        "operationId": "portalReissueOrder",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Restore service for an own active order whose grant lease ended.",
+        "description": "Creates a replacement lease for the same grant and never a second order, grant or payment, so the paid term is unchanged. Registered only when the tenant portal is enabled. A live lease, an order owned by a fulfilment job, a revoked grant or an expired paid term answers 409, so a retry cannot allocate a second lease. A publication failure answers 409 or 503 with reason lease_publish_failed and restores the grant's ended lease reference before replying.",
+        "x-implementation-phase": "P0",
+        "security": [
+          {
+            "portalCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/PortalCSRF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order carrying the replacement grant lease. The response never carries the raw lease credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/v1/admin/plans": {
       "get": {
         "operationId": "listPlans",
@@ -6640,7 +6697,7 @@
           "Order Admin"
         ],
         "summary": "Record an already completed full offline refund; never transfers money.",
-        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in. An order paid through a provider with no refund API in this build (epay) is refused 409 PROVIDER_REFUND_UNSUPPORTED; nothing is recorded and the order, its fulfilment job, its lease and the user quota are unchanged.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -6799,6 +6856,55 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders/{id}/reissue": {
+      "post": {
+        "operationId": "adminReissueOrder",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Restore service for an active order whose grant lease ended.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in. Creates a replacement lease for the same grant and never a second order, grant or payment. A live lease, an order owned by a fulfilment job, a revoked grant or an expired paid term answers 409. A publication failure answers 409 or 503 with reason lease_publish_failed and restores the grant's ended lease reference before replying.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order carrying the replacement grant lease. The response never carries the raw lease credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -7930,7 +8036,8 @@
               "CURSOR_EXPIRED",
               "OPERATION_TIMEOUT",
               "FROZEN",
-              "PRECONDITION_FAILED"
+              "PRECONDITION_FAILED",
+              "PROVIDER_REFUND_UNSUPPORTED"
             ]
           },
           "message": {
@@ -7938,7 +8045,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "Stable machine-readable reason for catalog/connect failures (for example login_disabled, snapshot_changed, connect_cooldown)."
+            "description": "Stable machine-readable reason. A scoped-key denial answers 403 with scope_required when the key lacks the route scope and scoped_key_restricted when its accountIds/regions exclude the surface; catalog/connect failures use their own codes (for example login_disabled, snapshot_changed, connect_cooldown) and a rolled-back publication adds lease_publish_failed. Absent when the failure has no stable code, so a client must treat an unknown or missing value as generic."
           },
           "details": {
             "type": "object",
@@ -14175,6 +14282,90 @@
           "revokedAt"
         ]
       },
+      "FulfilmentJob": {
+        "type": "object",
+        "description": "Durable publication work for one paid order: created once, kept across restarts, and removed only after the entitlement commits. A completed job is deleted from its order, so there is deliberately no done state. Internal attempt fencing identifiers (attemptLeaseId, publishedAt, publishedLeaseId, publishedAccountId) are not part of this contract; a client must never read or render them.",
+        "properties": {
+          "orderId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "reissue"
+            ],
+            "description": "initial publishes the first serving lease of a paid order; reissue replaces an ended lease on an active order without creating a second entitlement."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "publishing",
+              "dead_letter"
+            ],
+            "description": "queued waits for its next attempt, publishing has an attempt in flight, dead_letter will not run automatically."
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Publication attempts that actually ran; queued waits and duplicate callbacks are not counted."
+          },
+          "entitlementExpiresAt": {
+            "type": "string",
+            "description": "RFC 3339 end of the paid term the job must not outlive: paidAt + leaseTtlSeconds for initial work, the grant's original expiry for a reissue."
+          },
+          "nextAttemptAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 time of the next automatic attempt. Null or absent while an attempt is in flight and for a dead-lettered job."
+          },
+          "lastReason": {
+            "type": "string",
+            "enum": [
+              "capacity",
+              "tenant_suspended",
+              "target_changed",
+              "publish_failed",
+              "timeout",
+              "internal",
+              "interrupted",
+              "entitlement_expired"
+            ],
+            "description": "Closed refusal code of the last attempt: capacity (no free slot), tenant_suspended, target_changed (the reserved node/slot/generation no longer matches), publish_failed, timeout, internal, interrupted (a restart requeued the attempt; no attempt failed), entitlement_expired (the paid term ended before a publication could commit). Absent before the first attempt."
+          },
+          "lastError": {
+            "type": "string",
+            "description": "Bounded, sanitized failure detail; never a credential, payment reference or signed URL."
+          },
+          "blocked": {
+            "type": "boolean",
+            "description": "True on a dead-lettered job that needs an operator; false for every job that may still run automatically."
+          },
+          "cleanupPending": {
+            "type": "boolean",
+            "description": "True on a publishing job whose published attempt could not be withdrawn externally: the reservation is retained and the worker keeps retrying the withdrawal. A modifier on publishing, never a state of its own."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "RFC 3339 time the job last changed."
+          }
+        },
+        "required": [
+          "orderId",
+          "mode",
+          "state",
+          "attempts",
+          "entitlementExpiresAt",
+          "updatedAt"
+        ]
+      },
       "Order": {
         "type": "object",
         "properties": {
@@ -14276,6 +14467,17 @@
               }
             ],
             "description": "The order's one entitlement; null before activation or after quarantine."
+          },
+          "fulfilment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FulfilmentJob"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable publication work for this order; null or absent when nothing is pending (no settled payment yet, the job already committed, or a terminal order). Exactly one job may exist per order."
           }
         },
         "required": [
