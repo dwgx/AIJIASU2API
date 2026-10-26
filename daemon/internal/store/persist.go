@@ -1384,6 +1384,15 @@ func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
 	}
 	kept := snap.Leases[:0]
 	for _, lease := range snap.Leases {
+		if lease.Status == model.LeasePendingPublication {
+			// A provisional publication reservation is not a customer-serving
+			// lease. Generic restart reconciliation must not end it as
+			// daemon_restart or emit a customer revoke event; the dedicated
+			// RecoverFulfilments pass discards it with fulfilment_interrupted,
+			// releases its node slot and requeues the job.
+			kept = append(kept, lease)
+			continue
+		}
 		if _, ok := accounts[lease.AccountID]; !ok {
 			endRestartLease(lease, "account row is missing")
 			repaired++

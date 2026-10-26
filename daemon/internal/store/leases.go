@@ -499,6 +499,48 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
 	return revoked
 }
 
+// allocateLeaseLocked appends one lease row and takes its node's slot in the
+// same critical section. The caller holds s.mu and has already run the
+// ordinary admission checks (account state, concurrency, slot capacity and a
+// free live node); status is active for a direct grant and pending_publication
+// for a fulfilment reservation. This helper only keeps the two mutations
+// together so a lease row never exists without its node accounting. It is
+// deliberately not an admission path of its own and does not change any
+// refusal rule.
+func (s *Store) allocateLeaseLocked(lease model.Lease) {
+	s.leases = append(s.leases, lease)
+	if idx := s.nodeIndexLocked(lease.NodeID); idx >= 0 {
+		s.nodes[idx].InUse++
+	}
+}
+
+// releaseProvisionalLeaseLocked removes one pending_publication reservation,
+// returns its node slot and keeps the id in the durable end log so a later
+// attempt can never mint the same fencing id. It is a no-op for a missing row
+// or for any lease that already left the provisional state, so a stale caller
+// cannot revoke a serving lease. No revoke event is queued: the lease was
+// never published as serving. The caller holds s.mu.
+func (s *Store) releaseProvisionalLeaseLocked(leaseID, userID, reason string) bool {
+	idx := s.leaseIndexLocked(leaseID)
+	if idx < 0 {
+		return false
+	}
+	lease := s.leases[idx]
+	if lease.Status != model.LeasePendingPublication || lease.UserID != userID {
+		return false
+	}
+	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
+	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
+		s.nodes[nodeIdx].InUse--
+	}
+	lease.Status = model.LeaseRevoked
+	s.normalizeLeaseLocked(&lease)
+	s.leaseEnds = prependCapped(s.leaseEnds, LeaseEnd{
+		Lease: lease, Reason: reason, EndedAt: iso(s.now()),
+	}, LeaseEndRetention)
+	return true
+}
+
 // slotGenerationLocked is the serving generation a lease must stamp: the slot
 // row's generation for a slot node, zero for a legacy node. A node has no
 // generation field, so it is never inferred from the node.

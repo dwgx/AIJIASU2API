@@ -497,6 +497,9 @@ func (s *Store) cancelOrderLocked(idx int, actor string) (model.Order, error) {
 	case model.OrderAwaitingPayment:
 		order.State = model.OrderCancelled
 		order.CancelledAt = ptrString(iso(s.now()))
+		// Cancellation is a terminal reversal too: a legacy or hand-edited
+		// awaiting row must not keep publication work or a reservation.
+		s.cancelFulfilmentLocked(order)
 		s.addAuditLocked(model.SeverityInfo, actor, "order.cancelled", order.ID,
 			"awaiting payment cancelled",
 			map[string]string{
@@ -779,19 +782,21 @@ func (s *Store) applyRefundLocked(idx int, event model.PaymentEvent, reason, act
 	order.State = model.OrderRefunded
 	order.RefundedAt = ptrString(iso(s.now()))
 	revoked := s.revokeGrantLocked(idx, actor)
+	cancelled := s.cancelFulfilmentLocked(order)
 	s.recordPaymentEventLocked(event, model.PaymentApplied)
 	s.addAuditLocked(model.SeverityInfo, actor, "refund.completed", order.ID,
-		fmt.Sprintf("full offline refund · %s · grant revoked %t",
-			formatMinor(event.AmountMinor, event.Currency), revoked),
+		fmt.Sprintf("full offline refund · %s · grant revoked %t · fulfilment cancelled %t",
+			formatMinor(event.AmountMinor, event.Currency), revoked, cancelled),
 		map[string]string{
-			"orderId":  order.ID,
-			"provider": event.Provider,
-			"eventId":  event.ID,
-			"amount":   fmt.Sprintf("%d", event.AmountMinor),
-			"currency": event.Currency,
-			"ref":      referenceFingerprint(event.ProviderRef),
-			"from":     string(from),
-			"to":       string(model.OrderRefunded),
+			"orderId":             order.ID,
+			"provider":            event.Provider,
+			"eventId":             event.ID,
+			"amount":              fmt.Sprintf("%d", event.AmountMinor),
+			"currency":            event.Currency,
+			"ref":                 referenceFingerprint(event.ProviderRef),
+			"from":                string(from),
+			"to":                  string(model.OrderRefunded),
+			"fulfilmentCancelled": strconv.FormatBool(cancelled),
 		})
 	return cloneOrder(*order), nil
 }
@@ -808,19 +813,21 @@ func (s *Store) applyChargebackLocked(idx int, event model.PaymentEvent, reason,
 		order.State = model.OrderChargedBack
 		order.ReviewRequired = true
 		revoked := s.revokeGrantLocked(idx, actor)
+		cancelled := s.cancelFulfilmentLocked(order)
 		s.recordPaymentEventLocked(event, model.PaymentApplied)
 		s.addAuditLocked(model.SeverityWarn, actor, "chargeback.recorded", order.ID,
-			fmt.Sprintf("chargeback recorded · grant revoked %t · %s", revoked,
-				referenceFingerprint(event.ProviderRef)),
+			fmt.Sprintf("chargeback recorded · grant revoked %t · fulfilment cancelled %t · %s",
+				revoked, cancelled, referenceFingerprint(event.ProviderRef)),
 			map[string]string{
-				"orderId":  order.ID,
-				"provider": event.Provider,
-				"eventId":  event.ID,
-				"amount":   fmt.Sprintf("%d", event.AmountMinor),
-				"currency": event.Currency,
-				"ref":      referenceFingerprint(event.ProviderRef),
-				"from":     string(from),
-				"to":       string(model.OrderChargedBack),
+				"orderId":             order.ID,
+				"provider":            event.Provider,
+				"eventId":             event.ID,
+				"amount":              fmt.Sprintf("%d", event.AmountMinor),
+				"currency":            event.Currency,
+				"ref":                 referenceFingerprint(event.ProviderRef),
+				"from":                string(from),
+				"to":                  string(model.OrderChargedBack),
+				"fulfilmentCancelled": strconv.FormatBool(cancelled),
 			})
 		return cloneOrder(*order), nil
 	default:
@@ -863,21 +870,107 @@ func clearInitialFulfilment(order *model.Order) {
 	order.Fulfilment = nil
 }
 
+// cancelFulfilmentLocked stops the order's publication work as part of a
+// terminal reversal. It releases the attempt's provisional reservation and
+// drops the job, so no publishing row or node slot survives a refund,
+// chargeback or other terminal transition and a late commit/abort has nothing
+// to promote or requeue. The caller holds s.mu and has already decided the
+// terminal state. A queued or dead-lettered job has no reservation and is
+// simply dropped.
+func (s *Store) cancelFulfilmentLocked(order *model.Order) bool {
+	job := order.Fulfilment
+	if job == nil {
+		return false
+	}
+	if job.AttemptLeaseID != "" {
+		s.releaseProvisionalLeaseLocked(job.AttemptLeaseID, order.UserID, "fulfilment_cancelled")
+	}
+	order.Fulfilment = nil
+	return true
+}
+
+// orderLeaseUserLocked resolves the user that owns an order's entitlement and
+// validates the tenant link. The caller holds s.mu. Service eligibility
+// (Enabled) is checked separately: begin reserves capacity only after the user
+// exists, and commit re-checks the flag before promoting the reservation.
+func (s *Store) orderLeaseUserLocked(order *model.Order) (model.PanelUser, error) {
+	tenantIdx := s.tenantIndexLocked(order.TenantID)
+	if tenantIdx < 0 {
+		return model.PanelUser{}, notFoundf("tenant not found")
+	}
+	tenant := &s.tenants[tenantIdx]
+	if tenant.Status != model.TenantActive {
+		return model.PanelUser{}, conflictf("tenant is not active")
+	}
+	if tenant.UserID == nil || *tenant.UserID != order.UserID {
+		return model.PanelUser{}, conflictf("tenant is not linked to this user")
+	}
+	userIdx := s.userIndexLocked(order.UserID)
+	if userIdx < 0 {
+		return model.PanelUser{}, notFoundf("user not found")
+	}
+	return s.users[userIdx], nil
+}
+
+// orderLeaseRowLocked builds one order entitlement lease for a resolved
+// target. id is fixed before publication; status is pending_publication while
+// an attempt reserves it and active only after the commit promotes it. The
+// caller holds s.mu.
+func (s *Store) orderLeaseRowLocked(order *model.Order, user model.PanelUser,
+	account model.Account, node model.ProxyNode, platform model.Platform, id string,
+	status model.LeaseStatus, ttlSeconds int, expiresAt string, now time.Time) model.Lease {
+	return model.Lease{
+		ID:           id,
+		UserID:       user.ID,
+		UserName:     user.Name,
+		AccountID:    account.ID,
+		AccountLabel: account.Label,
+		Platform:     platform,
+		NodeID:       node.ID,
+		NodeLabel:    node.Label,
+		Region:       node.Region,
+		EgressIP:     node.EgressIP,
+		Protocol:     node.Protocol,
+		GatePort:     node.GatePort,
+		TTLSeconds:   ttlSeconds,
+		ExpiresAt:    expiresAt,
+		Sticky:       true,
+		Status:       status,
+		CreatedAt:    iso(now),
+		// An order lease is a normal entitlement lease: it carries the exact
+		// slot and the generation it was issued under, so slot/generation
+		// cleanup and audit can attribute it.
+		Slot:       node.Slot,
+		Generation: s.slotGenerationLocked(node),
+	}
+}
+
 // activateOrderLocked creates the order's entitlement exactly once. A grant is
 // keyed by the unique order id, so a retry or a concurrent duplicate reuses the
 // existing lease and never extends the TTL or overwrites the quota twice.
 //
 // Activation requires an active tenant and an enabled linked user. A blocked
-// activation leaves the order paid, records payment.activation_retry and is
-// retryable; the payment itself stays recorded.
-func (s *Store) activateOrderLocked(idx int, actor string) bool {
+// activation leaves the order paid, records payment.activation_retry and
+// returns the typed refusal; the payment itself stays recorded.
+func (s *Store) activateOrderLocked(idx int, actor string) error {
 	record := &s.orders[idx]
 	order := &record.Order
 	if order.State != model.OrderPaid {
-		return order.State == model.OrderActive
+		if order.State == model.OrderActive {
+			return nil
+		}
+		return conflictf("order %q is %s; only a paid order can activate", order.ID, order.State)
 	}
 	now := s.now()
 	s.sweepExpiredLocked(now)
+	// A publishing attempt owns the order's reservation; activating here would
+	// mint a second lease and orphan the provisional row. A dead-lettered job
+	// is an operator queue, so a settlement replay must not resurrect it. Only
+	// a queued job (no reservation yet) may still be activated by the legacy
+	// settlement retry, which clears that job.
+	if order.Fulfilment != nil && order.Fulfilment.State != model.FulfilmentQueued {
+		return conflictf("order %q has a %s fulfilment job", order.ID, order.Fulfilment.State)
+	}
 	if order.Grant != nil {
 		if order.Grant.RevokedAt == nil {
 			if s.grantLeaseActiveLocked(order, now) {
@@ -886,7 +979,7 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 					order.ActivatedAt = ptrString(iso(now))
 				}
 				clearInitialFulfilment(order)
-				return true
+				return nil
 			}
 			// The grant is still owned by the order but its lease ended (for
 			// example a daemon restart). Reactivating must not pretend the
@@ -894,41 +987,41 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 			// the replacement lease without creating a second grant.
 			s.retryBlockedLocked(order, actor, "grant_lease_ended",
 				"entitlement lease has ended; reissue required")
-			return false
+			return conflictf("order %q entitlement lease has ended; reissue required", order.ID)
 		}
 		s.retryBlockedLocked(order, actor, "grant_revoked", "entitlement was already revoked")
-		return false
+		return conflictf("order %q entitlement was revoked", order.ID)
 	}
 
 	tenantIdx := s.tenantIndexLocked(order.TenantID)
 	if tenantIdx < 0 {
 		s.retryBlockedLocked(order, actor, "tenant_not_found", "tenant not found")
-		return false
+		return notFoundf("tenant not found")
 	}
 	tenant := &s.tenants[tenantIdx]
 	if tenant.Status != model.TenantActive {
 		s.retryBlockedLocked(order, actor, "tenant_inactive", "tenant is not active")
-		return false
+		return conflictf("tenant is not active")
 	}
 	if tenant.UserID == nil || *tenant.UserID != order.UserID {
 		s.retryBlockedLocked(order, actor, "tenant_user_mismatch", "tenant is not linked to this user")
-		return false
+		return conflictf("tenant is not linked to this user")
 	}
 	userIdx := s.userIndexLocked(order.UserID)
 	if userIdx < 0 {
 		s.retryBlockedLocked(order, actor, "user_not_found", "user not found")
-		return false
+		return notFoundf("user not found")
 	}
 	user := &s.users[userIdx]
 	if !user.Enabled {
 		s.retryBlockedLocked(order, actor, "user_suspended", "user is suspended")
-		return false
+		return conflictf("user is suspended")
 	}
 
 	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(*user, now)
 	if err != nil {
 		s.retryBlockedLocked(order, actor, activationBlockedCode(err), err.Error())
-		return false
+		return err
 	}
 	account := s.accounts[accountIdx]
 	node := s.nodes[nodeIdx]
@@ -941,35 +1034,13 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 	}
 	expiresAt := paidAt.Add(time.Duration(order.Plan.LeaseTTLSeconds) * time.Second)
 
-	lease := model.Lease{
-		// The entitlement lease id is derived from the order id, which is
-		// monotonic, so a later lease can never reuse the id an older grant
-		// still references after expiry.
-		ID:           "lease-" + order.ID,
-		UserID:       user.ID,
-		UserName:     user.Name,
-		AccountID:    account.ID,
-		AccountLabel: account.Label,
-		Platform:     platform,
-		NodeID:       node.ID,
-		NodeLabel:    node.Label,
-		Region:       node.Region,
-		EgressIP:     node.EgressIP,
-		Protocol:     node.Protocol,
-		GatePort:     node.GatePort,
-		TTLSeconds:   order.Plan.LeaseTTLSeconds,
-		ExpiresAt:    iso(expiresAt),
-		Sticky:       true,
-		Status:       model.LeaseActive,
-		CreatedAt:    iso(now),
-		// An order lease is a normal entitlement lease: it carries the exact
-		// slot and the generation it was issued under, so slot/generation
-		// cleanup and audit can attribute it.
-		Slot:       node.Slot,
-		Generation: s.slotGenerationLocked(node),
-	}
-	s.leases = append(s.leases, lease)
-	s.nodes[nodeIdx].InUse++
+	// The entitlement lease id is derived from the order id and skips every id
+	// an aborted reservation or earlier lease already used, so an active row
+	// can never collide with a durable leaseEnds row.
+	lease := s.orderLeaseRowLocked(order, *user, account, node, platform,
+		s.nextOrderLeaseIDLocked(order.ID), model.LeaseActive, order.Plan.LeaseTTLSeconds,
+		iso(expiresAt), now)
+	s.allocateLeaseLocked(lease)
 
 	previousQuota := copyInt64(user.QuotaBytesMonth)
 	user.QuotaBytesMonth = ptrInt64(order.Plan.QuotaBytes)
@@ -1005,7 +1076,7 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 			"quota":    fmt.Sprintf("%d", order.Plan.QuotaBytes),
 			"state":    string(model.OrderActive),
 		})
-	return true
+	return nil
 }
 
 // ReissueOrderLease creates a replacement serving lease for an existing paid
@@ -1032,6 +1103,48 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 	if idx < 0 {
 		return model.Order{}, model.Lease{}, notFoundf("order %q not found", orderID)
 	}
+	return s.reissueOrderLeaseLocked(idx, actor)
+}
+
+// selectReissueTargetLocked resolves the account/node for a replacement lease
+// and enforces the same-user single-lease rule. The caller holds s.mu and has
+// already validated the order, its live grant and the ended old lease. It is
+// shared by the direct reissue path and the fulfilment reservation so both
+// apply exactly one admission rule.
+func (s *Store) selectReissueTargetLocked(order *model.Order, user model.PanelUser,
+	now time.Time) (int, int, model.Platform, error) {
+	oldLeaseID := order.Grant.LeaseID
+	var endedPlatform model.Platform
+	for _, end := range s.leaseEnds {
+		if end.Lease.ID == oldLeaseID {
+			endedPlatform = s.leasePlatformLocked(end.Lease)
+			break
+		}
+	}
+	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(user, now)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	// Reissue replaces only this order's ended lease. It must not allocate a
+	// second lease on the selected user/platform. Nor may a saturated preferred
+	// platform silently turn reissue into a different-platform lease alongside
+	// an existing lease for the ended grant's platform.
+	for _, existing := range s.leases {
+		if existing.UserID != user.ID {
+			continue
+		}
+		existingPlatform := s.leasePlatformLocked(existing)
+		if existingPlatform == platform || (endedPlatform != "" && endedPlatform != platform) {
+			return 0, 0, "", leaseErrorf(ErrConflict, "lease_conflict",
+				"user %q already holds an active %s lease", user.Name, existingPlatform)
+		}
+	}
+	return accountIdx, nodeIdx, platform, nil
+}
+
+// reissueOrderLeaseLocked is the critical section of ReissueOrderLease. The
+// caller holds s.mu and has already resolved idx.
+func (s *Store) reissueOrderLeaseLocked(idx int, actor string) (model.Order, model.Lease, error) {
 	order := &s.orders[idx].Order
 	if order.State != model.OrderActive {
 		return model.Order{}, model.Lease{}, conflictf(
@@ -1042,6 +1155,14 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 	}
 	if order.Grant.RevokedAt != nil {
 		return model.Order{}, model.Lease{}, conflictf("order %q entitlement was revoked", order.ID)
+	}
+	// A queued or publishing fulfilment job owns this order's replacement
+	// work. Allocating a serving lease here would race the reservation and
+	// leave a stale job, so the direct path refuses and the service keeps the
+	// single writer role.
+	if order.Fulfilment != nil {
+		return model.Order{}, model.Lease{}, conflictf(
+			"order %q has a fulfilment job; reissue is owned by fulfilment", order.ID)
 	}
 	now := s.now()
 	s.sweepExpiredLocked(now)
@@ -1055,51 +1176,16 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 			"order %q entitlement lease %s is still active", order.ID, order.Grant.LeaseID)
 	}
 
-	tenantIdx := s.tenantIndexLocked(order.TenantID)
-	if tenantIdx < 0 {
-		return model.Order{}, model.Lease{}, conflictf("tenant %q not found", order.TenantID)
-	}
-	tenant := s.tenants[tenantIdx]
-	if tenant.Status != model.TenantActive {
-		return model.Order{}, model.Lease{}, conflictf("tenant %q is not active", tenant.ID)
-	}
-	if tenant.UserID == nil || *tenant.UserID != order.UserID {
-		return model.Order{}, model.Lease{}, conflictf("tenant is not linked to this user")
-	}
-	userIdx := s.userIndexLocked(order.UserID)
-	if userIdx < 0 {
-		return model.Order{}, model.Lease{}, conflictf("user %q not found", order.UserID)
-	}
-	user := &s.users[userIdx]
-	if !user.Enabled {
-		return model.Order{}, model.Lease{}, conflictf("user %q is suspended", user.Name)
-	}
-
-	oldLeaseID := order.Grant.LeaseID
-	var endedPlatform model.Platform
-	for _, end := range s.leaseEnds {
-		if end.Lease.ID == oldLeaseID {
-			endedPlatform = s.leasePlatformLocked(end.Lease)
-			break
-		}
-	}
-	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(*user, now)
+	user, err := s.orderLeaseUserLocked(order)
 	if err != nil {
 		return model.Order{}, model.Lease{}, err
 	}
-	// Reissue replaces only this order's ended lease. It must not allocate a
-	// second lease on the selected user/platform. Nor may a saturated preferred
-	// platform silently turn reissue into a different-platform lease alongside
-	// an existing lease for the ended grant's platform.
-	for _, existing := range s.leases {
-		if existing.UserID != user.ID {
-			continue
-		}
-		existingPlatform := s.leasePlatformLocked(existing)
-		if existingPlatform == platform || (endedPlatform != "" && endedPlatform != platform) {
-			return model.Order{}, model.Lease{}, leaseErrorf(ErrConflict, "lease_conflict",
-				"user %q already holds an active %s lease", user.Name, existingPlatform)
-		}
+	if !user.Enabled {
+		return model.Order{}, model.Lease{}, conflictf("user %q is suspended", user.Name)
+	}
+	accountIdx, nodeIdx, platform, err := s.selectReissueTargetLocked(order, user, now)
+	if err != nil {
+		return model.Order{}, model.Lease{}, err
 	}
 	account := s.accounts[accountIdx]
 	node := s.nodes[nodeIdx]
@@ -1108,29 +1194,11 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 	if remaining < 1 {
 		remaining = 1
 	}
-	lease := model.Lease{
-		ID:           s.nextOrderLeaseIDLocked(order.ID),
-		UserID:       user.ID,
-		UserName:     user.Name,
-		AccountID:    account.ID,
-		AccountLabel: account.Label,
-		Platform:     platform,
-		NodeID:       node.ID,
-		NodeLabel:    node.Label,
-		Region:       node.Region,
-		EgressIP:     node.EgressIP,
-		Protocol:     node.Protocol,
-		GatePort:     node.GatePort,
-		TTLSeconds:   remaining,
-		ExpiresAt:    order.Grant.ExpiresAt,
-		Sticky:       true,
-		Status:       model.LeaseActive,
-		CreatedAt:    iso(now),
-		Slot:         node.Slot,
-		Generation:   s.slotGenerationLocked(node),
-	}
-	s.leases = append(s.leases, lease)
-	s.nodes[nodeIdx].InUse++
+	oldLeaseID := order.Grant.LeaseID
+	lease := s.orderLeaseRowLocked(order, user, account, node, platform,
+		s.nextOrderLeaseIDLocked(order.ID), model.LeaseActive, remaining,
+		order.Grant.ExpiresAt, now)
+	s.allocateLeaseLocked(lease)
 	order.Grant.LeaseID = lease.ID
 	// order.Grant.ExpiresAt intentionally stays the original paid-term
 	// expiry; the replacement lease must not outlive what the customer paid.
@@ -1202,14 +1270,19 @@ func (s *Store) RollbackOrderReissue(orderID, leaseID, previousLeaseID, reason s
 }
 
 // FulfilmentAttempt is what one BeginFulfilment call reserved: the 1-based
-// attempt number and the fencing token the matching AbortFulfilment must
-// present. P0-2B extends the publication attempt with the provisional lease
-// it reserves.
+// attempt number, the exact provisional lease the caller must publish, and the
+// fencing token the matching CommitFulfilment or AbortFulfilment must present.
+// The lease id is fixed before publication, so the publisher and the commit
+// act on one immutable identity. PreviousLeaseID is the ended grant lease a
+// reissue replaces; ExpiresAt is the frozen paid term the job must not outlive.
 type FulfilmentAttempt struct {
-	OrderID string
-	Mode    model.FulfilmentMode
-	Number  int
-	LeaseID string
+	OrderID         string
+	Mode            model.FulfilmentMode
+	Number          int
+	Lease           model.Lease
+	LeaseID         string
+	PreviousLeaseID string
+	ExpiresAt       string
 }
 
 // EnqueueFulfilment attaches the order's single publication job. It is
@@ -1305,12 +1378,15 @@ func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (mo
 
 // BeginFulfilment starts one publication attempt. It is the store's
 // single-winner gate: only a queued, unblocked, non-dead-lettered job on a
-// non-terminal, non-review order may begin, and the attempt count and the
-// publishing state are written under the same lock, so concurrent or repeated
-// calls cannot start a second attempt. A queued wait or a duplicate callback
-// never increments Attempts; only this call does. A job whose frozen paid term
-// has ended is dead-lettered here instead of consuming an attempt: service
-// after expiry is impossible, so the job becomes an operator item.
+// non-terminal, non-review order may begin, and the attempt count, the
+// publishing state and the provisional lease reservation are written under
+// the same lock, so concurrent or repeated calls cannot start a second attempt
+// or reserve twice. A queued wait or a duplicate callback never increments
+// Attempts; only this call does. The returned lease is the exact, immutable
+// row the caller must publish: the commit promotes it and an abort releases
+// it. A job whose frozen paid term has ended is dead-lettered here instead of
+// consuming an attempt: service after expiry is impossible, so the job becomes
+// an operator item.
 func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
@@ -1350,6 +1426,9 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 		return FulfilmentAttempt{}, conflictf("order %q used all %d fulfilment attempts",
 			order.ID, MaxFulfilmentAttempts)
 	}
+
+	now := s.now()
+	s.sweepExpiredLocked(now)
 	switch job.Mode {
 	case model.FulfilmentInitial:
 		if order.State != model.OrderPaid {
@@ -1361,9 +1440,16 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 			return FulfilmentAttempt{}, conflictf("order %q is %s; a reissue attempt needs an active order",
 				order.ID, order.State)
 		}
+		if order.Grant == nil || order.Grant.RevokedAt != nil {
+			return FulfilmentAttempt{}, conflictf(
+				"order %q has no live entitlement grant to reissue", order.ID)
+		}
+		if s.leaseIndexLocked(order.Grant.LeaseID) >= 0 {
+			return FulfilmentAttempt{}, conflictf(
+				"order %q entitlement lease %s is still active", order.ID, order.Grant.LeaseID)
+		}
 	}
 
-	now := s.now()
 	expires, ok := leaseExpiry(job.EntitlementExpiresAt)
 	if !ok {
 		return FulfilmentAttempt{}, conflictf("order %q fulfilment job has no valid paid term", order.ID)
@@ -1375,19 +1461,59 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 			order.ID, job.EntitlementExpiresAt)
 	}
 
+	// The reservation is the publication contract: select the target and take
+	// the node slot in this critical section, before any external call. A
+	// refusal here leaves the job queued and allocates nothing.
+	user, err := s.orderLeaseUserLocked(order)
+	if err != nil {
+		return FulfilmentAttempt{}, err
+	}
+	if !user.Enabled {
+		return FulfilmentAttempt{}, conflictf("user is suspended")
+	}
+	var (
+		accountIdx, nodeIdx int
+		platform            model.Platform
+		ttlSeconds          int
+		previousLeaseID     string
+	)
+	switch job.Mode {
+	case model.FulfilmentInitial:
+		accountIdx, nodeIdx, platform, err = s.pickOrderLeaseTargetLocked(user, now)
+		ttlSeconds = order.Plan.LeaseTTLSeconds
+	case model.FulfilmentReissue:
+		previousLeaseID = order.Grant.LeaseID
+		accountIdx, nodeIdx, platform, err = s.selectReissueTargetLocked(order, user, now)
+		remaining := int(expires.Sub(now) / time.Second)
+		if remaining < 1 {
+			remaining = 1
+		}
+		ttlSeconds = remaining
+	}
+	if err != nil {
+		return FulfilmentAttempt{}, err
+	}
+	lease := s.orderLeaseRowLocked(order, user, s.accounts[accountIdx], s.nodes[nodeIdx],
+		platform, s.nextOrderLeaseIDLocked(order.ID), model.LeasePendingPublication,
+		ttlSeconds, job.EntitlementExpiresAt, now)
+	s.allocateLeaseLocked(lease)
+
 	job.Attempts++
 	job.State = model.FulfilmentPublishing
 	job.Blocked = false
-	job.AttemptLeaseID = fulfilmentAttemptLeaseID(order.ID, job.Attempts)
+	job.AttemptLeaseID = lease.ID
 	// NextAttemptAt describes when a queued job becomes due; while an attempt
 	// is in flight the abort schedules the next one.
 	job.NextAttemptAt = nil
 	job.UpdatedAt = iso(now)
 	return FulfilmentAttempt{
-		OrderID: order.ID,
-		Mode:    job.Mode,
-		Number:  job.Attempts,
-		LeaseID: job.AttemptLeaseID,
+		OrderID:         order.ID,
+		Mode:            job.Mode,
+		Number:          job.Attempts,
+		Lease:           lease,
+		LeaseID:         lease.ID,
+		PreviousLeaseID: previousLeaseID,
+		ExpiresAt:       job.EntitlementExpiresAt,
 	}, nil
 }
 
@@ -1436,6 +1562,11 @@ func (s *Store) AbortFulfilment(orderID, attemptLeaseID string, reason model.Ful
 	}
 
 	now := s.now()
+	// The attempt's reservation is provisional work: a definite abort gives
+	// the node slot back before the job is rescheduled or dead-lettered. The
+	// id stays in the durable end log so a later attempt cannot reuse the
+	// fencing token.
+	s.releaseProvisionalLeaseLocked(job.AttemptLeaseID, order.UserID, "fulfilment_aborted")
 	if !retryable || job.Attempts >= MaxFulfilmentAttempts {
 		s.deadLetterFulfilmentLocked(order, job, reason, detail, now)
 		return cloneOrder(*order), nil
@@ -1465,6 +1596,225 @@ func (s *Store) AbortFulfilment(orderID, attemptLeaseID string, reason model.Ful
 	return cloneOrder(*order), nil
 }
 
+// CommitFulfilment promotes the in-flight publication attempt into the order's
+// entitlement. The caller has already published externally and presents the
+// provisional lease BeginFulfilment reserved, so a stale or duplicated commit
+// cannot grant twice: the job and its exact lease are the single-winner gate.
+//
+// The critical section revalidates the whole decision instead of trusting the
+// begin result. The order must still be paid (initial) or active with a live
+// unexpired grant (reissue), the job must still be publishing with exactly
+// that lease, the order must not need review, and the paid term must not have
+// ended. The reserved row must still be pending_publication, still belong to
+// this order's user, still name a live bound target and still carry the
+// generation it was reserved under; no target is selected and no second lease
+// is allocated here. Initial work promotes the row, creates exactly one grant
+// and one quota replacement and clears the job; reissue promotes the row and
+// repoints the existing grant, leaving quota alone.
+//
+// Every refusal is a typed store error and leaves the order and reservation
+// untouched — still paid (or active with the ended grant), the job still
+// publishing and the provisional row still reserved — so the caller can
+// AbortFulfilment with the matching reason. No partial grant, lease or quota
+// survives a failure.
+func (s *Store) CommitFulfilment(orderID, attemptLeaseID string) (model.Order, error) {
+	orderID = strings.TrimSpace(orderID)
+	attemptLeaseID = strings.TrimSpace(attemptLeaseID)
+	switch {
+	case orderID == "":
+		return model.Order{}, invalidf("orderId is required")
+	case attemptLeaseID == "":
+		return model.Order{}, invalidf("attemptLeaseId is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return model.Order{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if terminalOrderState(order.State) {
+		return model.Order{}, conflictf("order %q is %s; terminal orders never resume",
+			order.ID, order.State)
+	}
+	if order.ReviewRequired {
+		return model.Order{}, conflictf("order %q requires review; fulfilment is blocked", order.ID)
+	}
+	job := order.Fulfilment
+	switch {
+	case job == nil:
+		return model.Order{}, conflictf("order %q has no fulfilment job", order.ID)
+	case job.State != model.FulfilmentPublishing:
+		return model.Order{}, conflictf("order %q has no attempt publishing", order.ID)
+	case job.Attempts < 1:
+		return model.Order{}, conflictf("order %q attempt count is inconsistent", order.ID)
+	case job.AttemptLeaseID != attemptLeaseID:
+		return model.Order{}, conflictf("order %q attempt lease %q is stale", order.ID, attemptLeaseID)
+	}
+	switch job.Mode {
+	case model.FulfilmentInitial:
+		if order.State != model.OrderPaid {
+			return model.Order{}, conflictf("order %q is %s; an initial commit needs a paid order",
+				order.ID, order.State)
+		}
+		if order.Grant != nil {
+			return model.Order{}, conflictf("order %q already owns an entitlement grant", order.ID)
+		}
+	case model.FulfilmentReissue:
+		if order.State != model.OrderActive {
+			return model.Order{}, conflictf("order %q is %s; a reissue commit needs an active order",
+				order.ID, order.State)
+		}
+		if order.Grant == nil || order.Grant.RevokedAt != nil {
+			return model.Order{}, conflictf("order %q has no live entitlement grant to reissue", order.ID)
+		}
+	default:
+		return model.Order{}, conflictf("order %q has an unknown fulfilment mode", order.ID)
+	}
+
+	now := s.now()
+	expires, ok := leaseExpiry(job.EntitlementExpiresAt)
+	if !ok || !expires.After(now) {
+		return model.Order{}, conflictf("order %q entitlement expired at %s",
+			order.ID, job.EntitlementExpiresAt)
+	}
+	mode := job.Mode
+	attempts := job.Attempts
+
+	leaseIdx := s.leaseIndexLocked(job.AttemptLeaseID)
+	if leaseIdx < 0 {
+		return model.Order{}, conflictf("order %q fulfilment reservation %q is missing",
+			order.ID, job.AttemptLeaseID)
+	}
+	lease := s.leases[leaseIdx]
+	if lease.Status != model.LeasePendingPublication {
+		return model.Order{}, conflictf(
+			"order %q fulfilment reservation %q is %s, want pending_publication",
+			order.ID, lease.ID, lease.Status)
+	}
+	if lease.UserID != order.UserID {
+		return model.Order{}, conflictf("order %q fulfilment reservation %q belongs to another user",
+			order.ID, lease.ID)
+	}
+	if lease.ExpiresAt != job.EntitlementExpiresAt {
+		return model.Order{}, conflictf("order %q fulfilment reservation %q changed its paid term",
+			order.ID, lease.ID)
+	}
+	nodeIdx := s.nodeIndexLocked(lease.NodeID)
+	if nodeIdx < 0 {
+		return model.Order{}, conflictf("order %q fulfilment target node %q is missing",
+			order.ID, lease.NodeID)
+	}
+	node := s.nodes[nodeIdx]
+	if node.AccountID != lease.AccountID || node.State != model.NodeLive ||
+		node.GatePort <= 0 || node.GatePort != lease.GatePort {
+		return model.Order{}, conflictf("order %q fulfilment target %q is no longer serving",
+			order.ID, lease.NodeID)
+	}
+	accountIdx := s.accountIndexLocked(lease.AccountID)
+	if accountIdx < 0 {
+		return model.Order{}, conflictf("order %q fulfilment account %q is missing",
+			order.ID, lease.AccountID)
+	}
+	if err := leaseAccountAvailable(s.accounts[accountIdx], now); err != nil {
+		return model.Order{}, err
+	}
+	if lease.Slot > 0 {
+		slot, ok := s.accountSlots[model.SlotKey{AccountID: lease.AccountID, Index: lease.Slot}]
+		if !ok || slot.State != model.SlotLive || slot.GatePort != lease.GatePort ||
+			lease.Generation != slot.Generation {
+			return model.Order{}, conflictf("order %q fulfilment target slot is no longer serving",
+				order.ID)
+		}
+	}
+	user, err := s.orderLeaseUserLocked(order)
+	if err != nil {
+		return model.Order{}, err
+	}
+	if !user.Enabled {
+		return model.Order{}, conflictf("user is suspended")
+	}
+
+	switch mode {
+	case model.FulfilmentInitial:
+		s.leases[leaseIdx].Status = model.LeaseActive
+		userIdx := s.userIndexLocked(order.UserID)
+		previousQuota := copyInt64(s.users[userIdx].QuotaBytesMonth)
+		s.users[userIdx].QuotaBytesMonth = ptrInt64(order.Plan.QuotaBytes)
+		order.Grant = &model.EntitlementGrant{
+			OrderID:            order.ID,
+			LeaseID:            lease.ID,
+			QuotaBytes:         order.Plan.QuotaBytes,
+			PreviousQuotaBytes: previousQuota,
+			ExpiresAt:          lease.ExpiresAt,
+		}
+		order.State = model.OrderActive
+		order.ActivatedAt = ptrString(iso(now))
+		order.Fulfilment = nil
+		s.addAuditLocked(model.SeverityInfo, "system", "lease.create", lease.UserName,
+			fmt.Sprintf("%s · %s · node %s · ttl %s · order %s", lease.Platform, lease.AccountLabel,
+				lease.NodeLabel, (time.Duration(lease.TTLSeconds)*time.Second).String(), order.ID),
+			map[string]string{
+				"leaseId":    lease.ID,
+				"accountId":  lease.AccountID,
+				"nodeId":     lease.NodeID,
+				"platform":   string(lease.Platform),
+				"orderId":    order.ID,
+				"slot":       fmt.Sprintf("%d", lease.Slot),
+				"generation": fmt.Sprintf("%d", lease.Generation),
+			})
+		s.addAuditLocked(model.SeverityInfo, "system", "entitlement.granted", order.ID,
+			fmt.Sprintf("lease %s · quota %d bytes · expires %s", lease.ID, order.Plan.QuotaBytes, lease.ExpiresAt),
+			map[string]string{
+				"orderId":  order.ID,
+				"leaseId":  lease.ID,
+				"tenantId": order.TenantID,
+				"userId":   order.UserID,
+				"quota":    fmt.Sprintf("%d", order.Plan.QuotaBytes),
+				"state":    string(model.OrderActive),
+			})
+	case model.FulfilmentReissue:
+		if order.Grant.ExpiresAt != lease.ExpiresAt {
+			return model.Order{}, conflictf("order %q reissue reservation changed the paid term",
+				order.ID)
+		}
+		if s.leaseIndexLocked(order.Grant.LeaseID) >= 0 {
+			return model.Order{}, conflictf("order %q entitlement lease %s is still active",
+				order.ID, order.Grant.LeaseID)
+		}
+		oldLeaseID := order.Grant.LeaseID
+		s.leases[leaseIdx].Status = model.LeaseActive
+		order.Grant.LeaseID = lease.ID
+		order.Fulfilment = nil
+		s.addAuditLocked(model.SeverityInfo, "system", "lease.reissued", lease.UserName,
+			fmt.Sprintf("%s · %s · node %s · order %s · %s → %s", lease.Platform, lease.AccountLabel,
+				lease.NodeLabel, order.ID, oldLeaseID, lease.ID),
+			map[string]string{
+				"leaseId":         lease.ID,
+				"previousLeaseId": oldLeaseID,
+				"orderId":         order.ID,
+				"tenantId":        order.TenantID,
+				"userId":          order.UserID,
+				"accountId":       lease.AccountID,
+				"nodeId":          lease.NodeID,
+				"slot":            fmt.Sprintf("%d", lease.Slot),
+				"generation":      strconv.FormatUint(lease.Generation, 10),
+				"expiresAt":       lease.ExpiresAt,
+				"reason":          s.leaseEndReasonLocked(oldLeaseID),
+			})
+	}
+	s.addAuditLocked(model.SeverityInfo, "system", "fulfilment.committed", order.ID,
+		fmt.Sprintf("%s · attempt %d · lease %s", mode, attempts, lease.ID),
+		map[string]string{
+			"orderId":  order.ID,
+			"mode":     string(mode),
+			"attempts": strconv.Itoa(attempts),
+			"leaseId":  lease.ID,
+		})
+	return cloneOrder(*order), nil
+}
+
 // DueFulfilments returns the queued jobs whose next attempt is due, oldest
 // order first so the bounded worker cannot starve an old paid order behind a
 // stream of new ones. A publishing or dead-lettered job is never due, and a
@@ -1488,16 +1838,26 @@ func (s *Store) DueFulfilments(now time.Time) []model.Order {
 	return out
 }
 
-// RecoverFulfilments requeues every attempt a restart interrupted. A
-// publishing job has no durable proof that its publication completed, so it
-// returns to the queue immediately with the same attempt count: only a real
-// BeginFulfilment increments Attempts. Queued and dead-lettered jobs are left
-// alone; a dead letter is an operator queue, never an automatic retry. A job
-// left on a terminal order is stale work and is dropped.
+// RecoverFulfilments discards every provisional publication reservation a
+// restart interrupted and requeues every publishing attempt. A publishing job
+// has no durable proof that its publication completed, so it returns to the
+// queue immediately with the same attempt count: only a real BeginFulfilment
+// increments Attempts. Queued and dead-lettered jobs are left alone; a dead
+// letter is an operator queue, never an automatic retry. A job left on a
+// terminal order is stale work and is dropped.
 func (s *Store) RecoverFulfilments() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	// A provisional reservation has no durable proof that its publication
+	// completed, so every pending_publication row is discarded and its node
+	// slot returned before any job is requeued. The id stays in the end log so
+	// a later attempt cannot reuse the interrupted fencing token.
+	for _, lease := range append([]model.Lease(nil), s.leases...) {
+		if lease.Status == model.LeasePendingPublication {
+			s.releaseProvisionalLeaseLocked(lease.ID, lease.UserID, "fulfilment_interrupted")
+		}
+	}
 	for i := range s.orders {
 		order := &s.orders[i].Order
 		job := order.Fulfilment
@@ -1524,15 +1884,6 @@ func (s *Store) RecoverFulfilments() error {
 			})
 	}
 	return nil
-}
-
-// fulfilmentAttemptLeaseID derives the fencing token of one attempt. It is
-// deterministic from persisted state (order id and attempt count), so a
-// restart cannot mint a different token for the same in-flight attempt, and it
-// is unique per attempt, so an abort from an earlier attempt is rejected. The
-// publication slice replaces the token with the provisional lease it reserves.
-func fulfilmentAttemptLeaseID(orderID string, attempt int) string {
-	return fmt.Sprintf("lease-%s-a%d", orderID, attempt)
 }
 
 // orderFulfilmentExpiry returns the paid term a job must not outlive. Initial
@@ -1837,6 +2188,11 @@ func (snap *Snapshot) validateOrders() error {
 			record.ReviewRequired = true
 			if record.Grant != nil {
 				droppedLeases[record.Grant.LeaseID] = struct{}{}
+			}
+			if record.Fulfilment != nil && record.Fulfilment.AttemptLeaseID != "" {
+				// A quarantined order loses its publication work too; its
+				// provisional reservation must not outlive the cancellation.
+				droppedLeases[record.Fulfilment.AttemptLeaseID] = struct{}{}
 			}
 			record.Grant = nil
 			record.Fulfilment = nil

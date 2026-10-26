@@ -1213,7 +1213,11 @@ func TestRecoverPaidOrdersQueuesInitialFulfilmentOnce(t *testing.T) {
 	}
 
 	// In-flight publication is not recovery work either: the next boot scan
-	// must neither duplicate nor reset the publishing attempt.
+	// must neither duplicate nor reset the publishing attempt. Begin reserves
+	// the target, so the suspended fixture user must be eligible again.
+	if _, err := st.SetUserEnabled(existingOrder.UserID, true); err != nil {
+		t.Fatalf("SetUserEnabled(existing): %v", err)
+	}
 	existingAttempt, err := st.BeginFulfilment(existingOrder.ID)
 	if err != nil {
 		t.Fatalf("BeginFulfilment(existing): %v", err)
@@ -1242,6 +1246,10 @@ func TestRecoverPaidOrdersQueuesInitialFulfilmentOnce(t *testing.T) {
 	}
 
 	// Dead-lettered work is an operator queue: the boot scan leaves it alone.
+	// Begin again reserves a target, so the fixture user must be eligible.
+	if _, err := st.SetUserEnabled(paid.UserID, true); err != nil {
+		t.Fatalf("SetUserEnabled(paid): %v", err)
+	}
 	attempt, err := st.BeginFulfilment(paid.ID)
 	if err != nil {
 		t.Fatalf("BeginFulfilment: %v", err)
@@ -1261,6 +1269,142 @@ func TestRecoverPaidOrdersQueuesInitialFulfilmentOnce(t *testing.T) {
 	if dead.Fulfilment == nil || dead.Fulfilment.State != model.FulfilmentDeadLetter ||
 		dead.Fulfilment.Attempts != 1 {
 		t.Fatalf("dead-letter job = %+v, want the operator item untouched", dead.Fulfilment)
+	}
+}
+
+// TestRecoverOnStartupDiscardsProvisionalReservationBeforeLeaseRecovery pins
+// the boot order: generic restore reconciliation leaves a pending_publication
+// row alone, and RecoverOnStartup discards it with the dedicated
+// fulfilment_interrupted reason before the generic node demotion can end it as
+// a customer-serving daemon_restart lease.
+func TestRecoverOnStartupDiscardsProvisionalReservationBeforeLeaseRecovery(t *testing.T) {
+	st := store.NewEmpty()
+	logger := discardLogger()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Boot Ops", Username: "boot-ops", Password: "local-placeholder",
+		Platform: model.PlatformAndroid, Concurrency: 10,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-boot", AccountID: account.ID, Label: "boot-1", Region: "cn-zj",
+		State: model.NodeLive, EgressIP: "203.0.113.90",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13090,
+	}); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	order := newRecoveryOrder(t, st, "boot-provisional", 3600)
+	if _, err := st.SetUserEnabled(order.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled: %v", err)
+	}
+	paid := settleRecoveryOrder(t, st, order, "boot-provisional")
+	if paid.State != model.OrderPaid || paid.Grant != nil {
+		t.Fatalf("paid fixture = %+v, want paid without a grant", paid)
+	}
+	if _, err := st.EnqueueFulfilment(order.ID, model.FulfilmentInitial); err != nil {
+		t.Fatalf("EnqueueFulfilment: %v", err)
+	}
+	if _, err := st.SetUserEnabled(order.UserID, true); err != nil {
+		t.Fatalf("SetUserEnabled(resume): %v", err)
+	}
+	attempt, err := st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if attempt.Lease.Status != model.LeasePendingPublication {
+		t.Fatalf("reservation = %+v, want pending_publication", attempt.Lease)
+	}
+
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var snap store.Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	// A crashed node is the shape that used to make generic reconciliation
+	// end the provisional row as daemon_restart.
+	foundNode := false
+	for i := range snap.Nodes {
+		if snap.Nodes[i].ID != attempt.Lease.NodeID {
+			continue
+		}
+		snap.Nodes[i].State = model.NodeReady
+		snap.Nodes[i].GatePort = 0
+		snap.Nodes[i].EgressIP = ""
+		foundNode = true
+	}
+	if !foundNode {
+		t.Fatalf("snapshot has no node %q", attempt.Lease.NodeID)
+	}
+	edited, err := json.Marshal(&snap)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	restored := store.New()
+	if err := restored.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	// Generic reconciliation must not have treated the provisional row as a
+	// customer-serving lease.
+	leases := restored.Leases()
+	if len(leases) != 1 || leases[0].ID != attempt.LeaseID ||
+		leases[0].Status != model.LeasePendingPublication {
+		t.Fatalf("leases after restore = %+v, want the untouched reservation", leases)
+	}
+	for _, end := range restored.LeaseEnds() {
+		if end.Lease.ID == attempt.LeaseID {
+			t.Fatalf("generic reconciliation ended the reservation as %q", end.Reason)
+		}
+	}
+
+	// Boot recovery discards it before the generic node demotion runs.
+	if _, err := runtime.RecoverOnStartup(restored, nil, logger); err != nil {
+		t.Fatalf("RecoverOnStartup: %v", err)
+	}
+	if leases := restored.Leases(); len(leases) != 0 {
+		t.Fatalf("leases after boot recovery = %+v, want the reservation released", leases)
+	}
+	after, _ := restored.Order(order.ID)
+	if after.Fulfilment == nil || after.Fulfilment.State != model.FulfilmentQueued ||
+		after.Fulfilment.Attempts != 1 || after.Fulfilment.AttemptLeaseID != "" ||
+		after.Fulfilment.LastReason != model.FulfilmentReasonInterrupted {
+		t.Fatalf("job after boot recovery = %+v, want queued without a reservation", after.Fulfilment)
+	}
+	var pendingEnds, restartEnds int
+	for _, end := range restored.LeaseEnds() {
+		if end.Lease.ID != attempt.LeaseID {
+			continue
+		}
+		switch end.Reason {
+		case "fulfilment_interrupted":
+			pendingEnds++
+		case "daemon_restart":
+			restartEnds++
+		}
+	}
+	if pendingEnds != 1 || restartEnds != 0 {
+		t.Fatalf("reservation end rows = interrupted:%d restart:%d, want 1/0",
+			pendingEnds, restartEnds)
+	}
+	node, ok := restored.Node(attempt.Lease.NodeID)
+	if !ok || node.InUse != 0 {
+		t.Fatalf("node InUse after boot recovery = %d, want 0", node.InUse)
+	}
+
+	// A second boot is idempotent: no new end row and no double release.
+	endsBefore := len(restored.LeaseEnds())
+	if _, err := runtime.RecoverOnStartup(restored, nil, logger); err != nil {
+		t.Fatalf("second RecoverOnStartup: %v", err)
+	}
+	if len(restored.LeaseEnds()) != endsBefore {
+		t.Fatalf("second boot added lease end rows: %d -> %d",
+			endsBefore, len(restored.LeaseEnds()))
+	}
+	if node, _ := restored.Node(attempt.Lease.NodeID); node.InUse != 0 {
+		t.Fatalf("second boot changed node InUse to %d", node.InUse)
 	}
 }
 

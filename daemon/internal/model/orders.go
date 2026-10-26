@@ -237,6 +237,13 @@ type FulfilmentJob struct {
 	UpdatedAt            string           `json:"updatedAt"`
 }
 
+// LeasePendingPublication is a provisional serving lease reserved by one order
+// fulfilment attempt. It holds its node slot but is not serving: only the
+// fulfilment commit promotes it to active, while an abort or startup recovery
+// removes it. Normal admission counts it as a reservation, and no customer
+// path may treat it as a live lease.
+const LeasePendingPublication LeaseStatus = "pending_publication"
+
 // OrderCreateRequest is the POST /v1/portal/orders body. The idempotency key
 // travels in the Idempotency-Key header, never in the body.
 type OrderCreateRequest struct {

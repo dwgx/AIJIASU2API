@@ -54,6 +54,12 @@ type RecoveryResult struct {
 // state, so the call is also safe outside the first boot. Repeating it is a
 // no-op: only LIVE/DRAINING rows are considered, and a demoted row is STALE.
 //
+// It first runs the dedicated fulfilment recovery: every pending_publication
+// reservation is discarded with fulfilment_interrupted, its node slot released
+// and its job requeued. That order matters — the generic demotion below must
+// never end a provisional reservation as a customer-serving daemon_restart
+// lease or emit a customer revoke event for it.
+//
 // The caller runs this before the first panel reconcile: the panel renders
 // LIVE rows, so demoting afterwards would publish a gate that does not exist.
 func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (RecoveryResult, error) {
@@ -62,6 +68,14 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 	}
 	if logger == nil {
 		logger = slog.Default()
+	}
+	var errs []error
+	// A pending_publication row is provisional publication work, not a
+	// customer-serving lease. Discard it and requeue its job before the
+	// generic lease recovery below (the Leases sweep and DemoteNode) can
+	// treat it as a daemon_restart lease or emit a customer revoke event.
+	if err := st.RecoverFulfilments(); err != nil {
+		errs = append(errs, fmt.Errorf("runtime: recover fulfilment reservations: %w", err))
 	}
 	// Keep the old recovery side effect: a read sweeps expired leases (and
 	// fires the expiry hook) before any node is demoted. The rows are not
@@ -77,7 +91,6 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 	}
 
 	var result RecoveryResult
-	var errs []error
 	for _, node := range st.Nodes() {
 		if node.State != model.NodeLive && node.State != model.NodeDraining {
 			continue

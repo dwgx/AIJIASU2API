@@ -1080,7 +1080,8 @@ func TestActivationRetryDoesNotTreatEndedGrantLeaseAsActive(t *testing.T) {
 // paidOrderWithoutGrant settles an order while the fixture's user is
 // suspended. The existing settlement path then records the payment and leaves
 // the order paid without a grant, which is the state an initial fulfilment job
-// starts from.
+// starts from. The suspension is only a device to record money without a
+// grant; the user is enabled again so a later reservation can be admitted.
 func (f *orderFixture) paidOrderWithoutGrant(t *testing.T, key string) model.Order {
 	t.Helper()
 	order := f.createOrder(t, key)
@@ -1090,6 +1091,9 @@ func (f *orderFixture) paidOrderWithoutGrant(t *testing.T, key string) model.Ord
 	paid := f.apply(t, f.settleEvent(order.ID, "evt-"+key, "receipt-"+key))
 	if paid.State != model.OrderPaid || paid.Grant != nil {
 		t.Fatalf("settled while suspended = %+v, want paid without a grant", paid)
+	}
+	if _, err := f.st.SetUserEnabled(f.user.ID, true); err != nil {
+		t.Fatalf("resume user: %v", err)
 	}
 	return paid
 }
@@ -1227,6 +1231,7 @@ func TestEnqueueFulfilmentReissueNeedsEndedUnexpiredGrant(t *testing.T) {
 	if _, _, _, err := f.st.DemoteNode(lease.NodeID); err != nil {
 		t.Fatalf("DemoteNode: %v", err)
 	}
+	reviveOrderNode(t, f.st, lease)
 	queued, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue)
 	if err != nil {
 		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
@@ -1241,6 +1246,20 @@ func TestEnqueueFulfilmentReissueNeedsEndedUnexpiredGrant(t *testing.T) {
 	}
 	if attempt.Mode != model.FulfilmentReissue || attempt.Number != 1 || attempt.LeaseID == "" {
 		t.Fatalf("reissue attempt = %+v", attempt)
+	}
+	if attempt.PreviousLeaseID != active.Grant.LeaseID ||
+		attempt.Lease.ID != attempt.LeaseID ||
+		attempt.Lease.Status != model.LeasePendingPublication {
+		t.Fatalf("reissue reservation = %+v, want the provisional replacement", attempt)
+	}
+	reserved, ok := f.st.Lease(attempt.LeaseID)
+	if !ok || reserved.Status != model.LeasePendingPublication {
+		t.Fatalf("reserved lease = %+v, ok=%t", reserved, ok)
+	}
+	// The reservation must not move the grant or the quota.
+	unchanged, _ := f.st.Order(order.ID)
+	if unchanged.Grant == nil || unchanged.Grant.LeaseID != active.Grant.LeaseID {
+		t.Fatalf("grant after begin = %+v, want the old ended lease", unchanged.Grant)
 	}
 
 	// A paid term that has expired cannot be reissued.
@@ -1299,6 +1318,12 @@ func TestFulfilmentBeginAbortFencing(t *testing.T) {
 		t.Fatalf("aborted job = %+v", job)
 	}
 	requireNextAttempt(t, job, f.now.Add(5*time.Second))
+	if leases := f.st.Leases(); len(leases) != 0 {
+		t.Fatalf("abort kept reservations: %+v", leases)
+	}
+	if node, ok := f.st.Node("node-orders"); !ok || node.InUse != 0 {
+		t.Fatalf("node InUse after abort = %d, want the slot released", node.InUse)
+	}
 	// The same attempt cannot abort twice.
 	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate abort error = %v, want ErrConflict", err)
@@ -1311,6 +1336,13 @@ func TestFulfilmentBeginAbortFencing(t *testing.T) {
 	if second.Number != 2 || second.LeaseID == attempt.LeaseID {
 		t.Fatalf("second attempt = %+v, want a distinct lease from %q", second, attempt.LeaseID)
 	}
+	if second.Lease.ID != second.LeaseID ||
+		second.Lease.Status != model.LeasePendingPublication {
+		t.Fatalf("second reservation = %+v, want the pending replacement", second.Lease)
+	}
+	if leases := f.st.Leases(); len(leases) != 1 || leases[0].ID != second.LeaseID {
+		t.Fatalf("second reservation rows = %+v, want exactly %s", leases, second.LeaseID)
+	}
 	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
 		t.Fatalf("abort with the first attempt lease error = %v, want ErrConflict", err)
 	}
@@ -1320,6 +1352,9 @@ func TestFulfilmentBeginAbortFencing(t *testing.T) {
 	}
 	if aborted.Fulfilment.Attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", aborted.Fulfilment.Attempts)
+	}
+	if leases := f.st.Leases(); len(leases) != 0 {
+		t.Fatalf("second abort kept reservations: %+v", leases)
 	}
 	requireNextAttempt(t, *aborted.Fulfilment, f.now.Add(15*time.Second))
 }
@@ -1698,9 +1733,19 @@ func TestRecoverFulfilmentsRequeuesInterruptedAttempts(t *testing.T) {
 		job.Attempts != 1 || job.AttemptLeaseID != attempt.LeaseID {
 		t.Fatalf("restored publishing job = %+v", job)
 	}
+	if pending := pendingReservations(t, restored); len(pending) != 1 ||
+		pending[0].ID != attempt.LeaseID {
+		t.Fatalf("restored reservations = %+v, want the in-flight %s", pending, attempt.LeaseID)
+	}
 
 	if err := restored.RecoverFulfilments(); err != nil {
 		t.Fatalf("RecoverFulfilments: %v", err)
+	}
+	if pending := pendingReservations(t, restored); len(pending) != 0 {
+		t.Fatalf("recovery kept reservations: %+v", pending)
+	}
+	if node, ok := restored.Node(attempt.Lease.NodeID); !ok || node.InUse != 0 {
+		t.Fatalf("node InUse after recovery = %d, want the reservation released", node.InUse)
 	}
 	job := fulfilmentJobOf(t, restored, paid.ID)
 	if job.State != model.FulfilmentQueued || job.Attempts != 1 ||
@@ -1842,6 +1887,15 @@ func TestConcurrentBeginFulfilmentStartsOneAttempt(t *testing.T) {
 		job.AttemptLeaseID != won[0].LeaseID {
 		t.Fatalf("job after the race = %+v, winner = %+v", job, won[0])
 	}
+	leases := f.st.Leases()
+	if len(leases) != 1 || leases[0].ID != won[0].LeaseID ||
+		leases[0].Status != model.LeasePendingPublication {
+		t.Fatalf("reservations after the race = %+v, want exactly %s",
+			leases, won[0].LeaseID)
+	}
+	if node, ok := f.st.Node("node-orders"); !ok || node.InUse != 1 {
+		t.Fatalf("node InUse after the race = %d, want one reservation", node.InUse)
+	}
 }
 
 // flagOrderReview applies a wrong-amount settlement to a paid order. The
@@ -1884,6 +1938,25 @@ func TestBeginFulfilmentRefusesReviewRequiredOrder(t *testing.T) {
 	job := fulfilmentJobOf(t, f.st, paid.ID)
 	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.Blocked {
 		t.Fatalf("review order job changed: %+v", job)
+	}
+}
+
+func TestBeginFulfilmentRefusesSuspendedUser(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "suspended-begin")
+	enqueueInitial(t, f.st, paid.ID)
+	quotaBefore := f.user.QuotaBytesMonth
+	if _, err := f.st.SetUserEnabled(f.user.ID, false); err != nil {
+		t.Fatalf("suspend user: %v", err)
+	}
+
+	if _, err := f.st.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin for a suspended user error = %v, want ErrConflict", err)
+	}
+	requireNoReservation(t, f.st, f.user.ID, paid.ID, quotaBefore)
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.AttemptLeaseID != "" {
+		t.Fatalf("suspended begin job = %+v, want queued at zero attempts", job)
 	}
 }
 
@@ -2333,5 +2406,1034 @@ func TestRestoreScrubsFulfilmentDetail(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// addBuyer creates one active tenant linked to a fresh enabled user, so a test
+// can hold several orders in different states without tripping the
+// one-open-order-per-user rule.
+func (f *orderFixture) addBuyer(t *testing.T, key string) (model.Tenant, model.PanelUser) {
+	t.Helper()
+	user, err := f.st.CreateUser(model.CreateUserInput{
+		Name: "order-buyer-" + key, Platform: "android", QuotaBytesMonth: ptrInt64(1000),
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(%s): %v", key, err)
+	}
+	tenant := signupTestTenant(t, f.st, key+"@example.com", "Buyer "+key)
+	approved, err := f.st.ApproveTenant(tenant.ID, user.ID, nil)
+	if err != nil {
+		t.Fatalf("ApproveTenant(%s): %v", key, err)
+	}
+	return approved, user
+}
+
+// TestOrderActiveWithGrantRequiresServingLease pins the acknowledgement
+// predicate: only an active order with a non-revoked grant backed by a live
+// lease reports serving. A paid order and an active order whose lease ended
+// (a restart, a node revocation) do not.
+func TestOrderActiveWithGrantRequiresServingLease(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "serving-paid")
+	if order, serving := f.st.OrderActiveWithGrant(paid.ID); serving || order.State != model.OrderPaid {
+		t.Fatalf("paid order = %+v serving=%t, want paid without service", order, serving)
+	}
+	if _, serving := f.st.OrderActiveWithGrant("ord-missing"); serving {
+		t.Fatal("unknown order reported serving")
+	}
+
+	g := newOrderFixture(t)
+	order := g.createOrder(t, "serving-active")
+	active := g.apply(t, g.settleEvent(order.ID, "evt-serving-active", "receipt-serving-active"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v", active)
+	}
+	got, serving := g.st.OrderActiveWithGrant(order.ID)
+	if !serving || got.Grant == nil || got.Grant.LeaseID != active.Grant.LeaseID {
+		t.Fatalf("active order = %+v serving=%t, want serving", got, serving)
+	}
+
+	// Ending the grant lease leaves the order active but unserved until a
+	// reissue publishes a replacement.
+	lease, ok := g.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %s missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := g.st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	got, serving = g.st.OrderActiveWithGrant(order.ID)
+	if serving || got.State != model.OrderActive || got.Grant == nil {
+		t.Fatalf("ended lease order = %+v serving=%t, want active without service", got, serving)
+	}
+}
+
+// TestPendingEpayOrdersSelectsPaidWithoutGrant pins the reconciliation
+// selection: awaiting epay checkouts and paid epay orders with no grant are
+// re-queried oldest first, while active, cancelled, review-required and
+// never-checked-out rows stay out.
+func TestPendingEpayOrdersSelectsPaidWithoutGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	settle := func(orderID, eventID string, amount int64) model.Order {
+		t.Helper()
+		return f.apply(t, model.PaymentEvent{
+			Provider: model.ProviderEpay, ID: eventID, Kind: model.PaymentSettled,
+			OrderID: orderID, ProviderRef: eventID, AmountMinor: amount,
+			Currency: f.plan.Currency, OccurredAt: iso(*f.now),
+		})
+	}
+	newOrder := func(key string) (model.Tenant, model.PanelUser, model.Order) {
+		t.Helper()
+		tenant, user := f.addBuyer(t, key)
+		order, replayed, err := f.st.CreateOrder(tenant.ID, user.ID, f.plan.ID, key, "test")
+		if err != nil || replayed {
+			t.Fatalf("CreateOrder(%s) = %+v replayed=%t err=%v", key, order, replayed, err)
+		}
+		return tenant, user, order
+	}
+	checkout := func(tenantID, orderID string) {
+		t.Helper()
+		if _, err := f.st.MarkOrderCheckout(tenantID, orderID, model.ProviderEpay); err != nil {
+			t.Fatalf("MarkOrderCheckout(%s): %v", orderID, err)
+		}
+	}
+
+	awaitingTenant, _, awaiting := newOrder("epay-awaiting")
+	checkout(awaitingTenant.ID, awaiting.ID)
+
+	paidTenant, paidUser, paidOrder := newOrder("epay-paid")
+	checkout(paidTenant.ID, paidOrder.ID)
+	if _, err := f.st.SetUserEnabled(paidUser.ID, false); err != nil {
+		t.Fatalf("suspend paid buyer: %v", err)
+	}
+	paid := settle(paidOrder.ID, "trade-epay-paid", f.plan.AmountMinor)
+	if paid.State != model.OrderPaid || paid.Grant != nil {
+		t.Fatalf("paid buyer settlement = %+v, want paid without a grant", paid)
+	}
+
+	activeTenant, _, activeOrder := newOrder("epay-active")
+	checkout(activeTenant.ID, activeOrder.ID)
+	if active := settle(activeOrder.ID, "trade-epay-active", f.plan.AmountMinor); active.State != model.OrderActive {
+		t.Fatalf("active buyer settlement = %+v, want active", active)
+	}
+
+	cancelledTenant, _, cancelledOrder := newOrder("epay-cancelled")
+	checkout(cancelledTenant.ID, cancelledOrder.ID)
+	if _, err := f.st.CancelOrder(cancelledOrder.ID, "tenant"); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	reviewTenant, _, reviewOrder := newOrder("epay-review")
+	checkout(reviewTenant.ID, reviewOrder.ID)
+	if reviewed := settle(reviewOrder.ID, "trade-epay-review", 1); !reviewed.ReviewRequired {
+		t.Fatalf("mismatch settlement = %+v, want review", reviewed)
+	}
+
+	if _, _, manual := newOrder("manual-awaiting"); manual.Provider == model.ProviderEpay {
+		t.Fatalf("never-checked-out order = %+v, want no epay intent", manual)
+	}
+
+	got := f.st.PendingEpayOrders()
+	want := []string{awaiting.ID, paidOrder.ID}
+	if len(got) != len(want) {
+		t.Fatalf("selected %d orders %v, want %v", len(got), orderIDs(got), want)
+	}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("selected[%d] = %s, want %s (all: %v)", i, got[i].ID, id, orderIDs(got))
+		}
+	}
+}
+
+func orderIDs(orders []model.Order) []string {
+	ids := make([]string, len(orders))
+	for i, order := range orders {
+		ids[i] = order.ID
+	}
+	return ids
+}
+
+// publishingInitial prepares the state CommitFulfilment requires: a paid order
+// whose user can be granted service, one queued initial job and one in-flight
+// attempt with its provisional lease reserved. The returned order carries the
+// publishing job.
+func (f *orderFixture) publishingInitial(t *testing.T, key string) (model.Order, FulfilmentAttempt) {
+	t.Helper()
+	paid := f.paidOrderWithoutGrant(t, key)
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(%s): %v", paid.ID, err)
+	}
+	if attempt.Lease.ID != attempt.LeaseID ||
+		attempt.Lease.Status != model.LeasePendingPublication ||
+		attempt.ExpiresAt == "" {
+		t.Fatalf("begin attempt = %+v, want a pending_publication reservation", attempt)
+	}
+	stored, ok := f.st.Order(paid.ID)
+	if !ok {
+		t.Fatalf("order %q missing", paid.ID)
+	}
+	return stored, attempt
+}
+
+// requireUncommittedPaid asserts a refused commit changed nothing financial:
+// the order is still paid without a grant, the attempt still owns the job, the
+// exact provisional row is still reserved and the user still holds the
+// pre-commit quota.
+func requireUncommittedPaid(t *testing.T, st *Store, userID, orderID string,
+	attempt FulfilmentAttempt, wantQuota *int64) {
+	t.Helper()
+	order, ok := st.Order(orderID)
+	if !ok {
+		t.Fatalf("order %q missing", orderID)
+	}
+	if order.State != model.OrderPaid || order.Grant != nil || order.ActivatedAt != nil {
+		t.Fatalf("order after refused commit = %+v, want paid without a grant", order)
+	}
+	job := fulfilmentJobOf(t, st, orderID)
+	if job.State != model.FulfilmentPublishing || job.Attempts != attempt.Number ||
+		job.AttemptLeaseID != attempt.LeaseID {
+		t.Fatalf("job after refused commit = %+v, want publishing attempt %d", job, attempt.Number)
+	}
+	if grants := st.Grants(); len(grants) != 0 {
+		t.Fatalf("refused commit created grants: %+v", grants)
+	}
+	// Read the raw rows: Leases() sweeps expired reservations, which would
+	// hide the row an expired-term refusal deliberately leaves for Abort.
+	st.mu.RLock()
+	pending := make([]model.Lease, 0, 1)
+	nodeInUse := 0
+	for _, lease := range st.leases {
+		if lease.Status == model.LeasePendingPublication {
+			pending = append(pending, lease)
+		}
+	}
+	if len(pending) == 1 {
+		if idx := st.nodeIndexLocked(pending[0].NodeID); idx >= 0 {
+			nodeInUse = st.nodes[idx].InUse
+		}
+	}
+	st.mu.RUnlock()
+	if len(pending) != 1 || pending[0].ID != attempt.LeaseID || pending[0].UserID != userID {
+		t.Fatalf("refused commit reservations = %+v, want exactly %s", pending, attempt.LeaseID)
+	}
+	if nodeInUse != 1 {
+		t.Fatalf("node InUse after refused commit = %d, want the reservation held", nodeInUse)
+	}
+	user, ok := st.User(userID)
+	if !ok {
+		t.Fatalf("user %q missing", userID)
+	}
+	if (user.QuotaBytesMonth == nil) != (wantQuota == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *wantQuota) {
+		t.Fatalf("quota after refused commit = %v, want %v", user.QuotaBytesMonth, wantQuota)
+	}
+}
+
+// requireNoReservation asserts a refused begin allocated nothing: no lease,
+// no grant and no quota movement.
+func requireNoReservation(t *testing.T, st *Store, userID, orderID string, wantQuota *int64) {
+	t.Helper()
+	order, ok := st.Order(orderID)
+	if !ok {
+		t.Fatalf("order %q missing", orderID)
+	}
+	if order.State != model.OrderPaid || order.Grant != nil {
+		t.Fatalf("order after refused begin = %+v, want paid without a grant", order)
+	}
+	if grants := st.Grants(); len(grants) != 0 {
+		t.Fatalf("refused begin created grants: %+v", grants)
+	}
+	st.mu.RLock()
+	leases := len(st.leases)
+	st.mu.RUnlock()
+	if leases != 0 {
+		t.Fatalf("refused begin created %d leases", leases)
+	}
+	user, ok := st.User(userID)
+	if !ok {
+		t.Fatalf("user %q missing", userID)
+	}
+	if (user.QuotaBytesMonth == nil) != (wantQuota == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *wantQuota) {
+		t.Fatalf("quota after refused begin = %v, want %v", user.QuotaBytesMonth, wantQuota)
+	}
+}
+
+func TestCommitFulfilmentInitialGrantsOnce(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-initial")
+	wantExpiry := fulfilmentJobOf(t, f.st, paid.ID).EntitlementExpiresAt
+	quotaBefore := f.user.QuotaBytesMonth
+	if quotaBefore == nil {
+		t.Fatal("fixture user has no quota")
+	}
+	reserved, ok := f.st.Lease(attempt.LeaseID)
+	if !ok || reserved.Status != model.LeasePendingPublication ||
+		reserved.ExpiresAt != wantExpiry {
+		t.Fatalf("reserved lease = %+v, ok=%t, want pending_publication with term %s",
+			reserved, ok, wantExpiry)
+	}
+
+	committed, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID)
+	if err != nil {
+		t.Fatalf("CommitFulfilment: %v", err)
+	}
+	if committed.State != model.OrderActive || committed.Grant == nil {
+		t.Fatalf("committed order = %+v, want active with a grant", committed)
+	}
+	if committed.Fulfilment != nil {
+		t.Fatalf("committed order still has a job: %+v", committed.Fulfilment)
+	}
+	if committed.ActivatedAt == nil {
+		t.Fatal("committed order has no ActivatedAt")
+	}
+	if committed.Grant.LeaseID != attempt.LeaseID || committed.Grant.ExpiresAt != wantExpiry {
+		t.Fatalf("grant = %+v, want the reserved lease %s with term %s",
+			committed.Grant, attempt.LeaseID, wantExpiry)
+	}
+	if committed.Grant.PreviousQuotaBytes == nil || *committed.Grant.PreviousQuotaBytes != *quotaBefore {
+		t.Fatalf("grant previous quota = %v, want %d", committed.Grant.PreviousQuotaBytes, *quotaBefore)
+	}
+
+	leases := f.st.Leases()
+	if len(leases) != 1 || leases[0].ID != attempt.LeaseID ||
+		leases[0].Status != model.LeaseActive {
+		t.Fatalf("leases = %+v, want exactly the promoted lease %s", leases, attempt.LeaseID)
+	}
+	node, ok := f.st.Node("node-orders")
+	if !ok || node.InUse != 1 {
+		t.Fatalf("node InUse = %d, want the committed lease's one slot", node.InUse)
+	}
+	if len(f.st.Grants()) != 1 {
+		t.Fatalf("grants = %+v, want exactly one", f.st.Grants())
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != f.plan.QuotaBytes {
+		t.Fatalf("user quota = %v, want one replacement of %d", user.QuotaBytesMonth, f.plan.QuotaBytes)
+	}
+
+	audit := findAudit(t, f.st, "fulfilment.committed", func(event model.AuditEvent) bool {
+		return event.Meta["orderId"] == paid.ID
+	})
+	if audit.Meta["mode"] != string(model.FulfilmentInitial) || audit.Meta["attempts"] != "1" ||
+		audit.Meta["leaseId"] != committed.Grant.LeaseID {
+		t.Fatalf("fulfilment.committed meta = %v", audit.Meta)
+	}
+
+	// A duplicate commit cannot grant a second entitlement or replace quota
+	// again; the completed job is gone, so the fencing token is unknown.
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate commit error = %v, want ErrConflict", err)
+	}
+	if len(f.st.Grants()) != 1 || len(f.st.Leases()) != 1 {
+		t.Fatalf("duplicate commit changed state: grants=%d leases=%d",
+			len(f.st.Grants()), len(f.st.Leases()))
+	}
+	user, _ = f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != f.plan.QuotaBytes {
+		t.Fatalf("duplicate commit changed quota: %v", user.QuotaBytesMonth)
+	}
+	if countAudit(f.st, "fulfilment.committed") != 1 {
+		t.Fatalf("duplicate commit audited %d times", countAudit(f.st, "fulfilment.committed"))
+	}
+}
+
+func TestCommitFulfilmentRejectsStaleAttemptLease(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "commit-stale")
+	enqueueInitial(t, f.st, paid.ID)
+
+	// A queued job has no in-flight attempt, so there is nothing to commit.
+	if _, err := f.st.CommitFulfilment(paid.ID, "lease-stale"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit before begin error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.CommitFulfilment(paid.ID, " "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("commit without attempt lease error = %v, want ErrInvalid", err)
+	}
+
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	for _, stale := range []string{"lease-stale", attempt.LeaseID + "-x"} {
+		if _, err := f.st.CommitFulfilment(paid.ID, stale); !errors.Is(err, ErrConflict) {
+			t.Fatalf("commit with stale lease %q error = %v, want ErrConflict", stale, err)
+		}
+	}
+	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
+
+	// The real fencing token still commits after the rejected attempts.
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("CommitFulfilment with the current attempt: %v", err)
+	}
+}
+
+func TestBeginFulfilmentWithoutCapacityLeavesPaid(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "begin-capacity")
+	enqueueInitial(t, f.st, paid.ID)
+	quotaBefore := f.user.QuotaBytesMonth
+	node, ok := f.st.Node("node-orders")
+	if !ok {
+		t.Fatal("fixture node missing")
+	}
+
+	// Capacity is reserved at begin, so an exhausted pool refuses before any
+	// external publication can happen.
+	if _, _, _, err := f.st.DemoteNode(node.ID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	_, err := f.st.BeginFulfilment(paid.ID)
+	if !errors.Is(err, ErrQuota) {
+		t.Fatalf("begin without capacity error = %v, want ErrQuota", err)
+	}
+	var leaseErr *LeaseError
+	if !errors.As(err, &leaseErr) || leaseErr.Reason != "no_capacity" {
+		t.Fatalf("begin without capacity error = %v, want a no_capacity LeaseError", err)
+	}
+	requireNoReservation(t, f.st, f.user.ID, paid.ID, quotaBefore)
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.AttemptLeaseID != "" {
+		t.Fatalf("job after refused begin = %+v, want queued at zero attempts", job)
+	}
+
+	// Restoring the target lets the same queued job reserve and commit once.
+	node.State = model.NodeLive
+	if _, err := f.st.PutNode(node); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment after capacity returned: %v", err)
+	}
+	committed, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID)
+	if err != nil {
+		t.Fatalf("CommitFulfilment after capacity returned: %v", err)
+	}
+	if committed.State != model.OrderActive || committed.Grant == nil ||
+		committed.Grant.LeaseID != attempt.LeaseID {
+		t.Fatalf("committed order = %+v, want the reserved lease promoted", committed)
+	}
+}
+
+func TestCommitFulfilmentMissingReservationLeavesPaid(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-reservation")
+	quotaBefore := f.user.QuotaBytesMonth
+
+	// A restart or node demotion can drop the provisional row after the
+	// publisher saw it. The commit must refuse rather than mint a new lease.
+	if _, _, _, err := f.st.DemoteNode(attempt.Lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit after reservation loss error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(paid.ID)
+	if stored.State != model.OrderPaid || stored.Grant != nil {
+		t.Fatalf("order after reservation loss = %+v, want paid without a grant", stored)
+	}
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentPublishing || job.Attempts != 1 ||
+		job.AttemptLeaseID != attempt.LeaseID {
+		t.Fatalf("job after reservation loss = %+v, want the attempt still publishing", job)
+	}
+	if grants := f.st.Grants(); len(grants) != 0 {
+		t.Fatalf("reservation loss created grants: %+v", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if (user.QuotaBytesMonth == nil) != (quotaBefore == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *quotaBefore) {
+		t.Fatalf("reservation loss moved quota: %v, want %v", user.QuotaBytesMonth, quotaBefore)
+	}
+
+	// The caller can still abort the dangling attempt and requeue it.
+	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonTargetChanged, "reservation lost", true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment after reservation loss: %v", err)
+	}
+	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentQueued {
+		t.Fatalf("aborted job = %+v, want queued", aborted.Fulfilment)
+	}
+}
+
+func TestCommitFulfilmentRefusesExpiredPaidTerm(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-expired")
+	*f.now = f.now.Add(time.Duration(f.plan.LeaseTTLSeconds)*time.Second + time.Second)
+
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit after expiry error = %v, want ErrConflict", err)
+	}
+	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
+
+	// The caller aborts the expired attempt; the reservation is released and
+	// the job becomes an operator dead letter.
+	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonEntitlementExpired, "paid term ended", false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(expired): %v", err)
+	}
+	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("expired job = %+v, want a dead letter", aborted.Fulfilment)
+	}
+	f.st.mu.RLock()
+	pending := 0
+	for _, lease := range f.st.leases {
+		if lease.Status == model.LeasePendingPublication {
+			pending++
+		}
+	}
+	f.st.mu.RUnlock()
+	if pending != 0 {
+		t.Fatalf("expired abort left %d pending reservations", pending)
+	}
+}
+
+func TestCommitFulfilmentRefusesReviewRequiredOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-review")
+
+	// A conflicting amount marks the order review-only; it must not grant.
+	reviewed := f.apply(t, model.PaymentEvent{
+		Provider: model.ProviderManual, ID: "evt-commit-review-conflict",
+		Kind: model.PaymentSettled, OrderID: paid.ID, ProviderRef: "receipt-other",
+		AmountMinor: 1, Currency: f.plan.Currency, OccurredAt: iso(*f.now),
+	})
+	if !reviewed.ReviewRequired || reviewed.State != model.OrderPaid {
+		t.Fatalf("conflicting settlement = %+v, want paid with review", reviewed)
+	}
+
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit on review order error = %v, want ErrConflict", err)
+	}
+	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
+}
+
+func TestCommitFulfilmentReissueRepointsGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "commit-reissue")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-commit-reissue", "receipt-commit-reissue"))
+	if active.Grant == nil {
+		t.Fatalf("settled order = %+v, want a grant", active)
+	}
+	oldLeaseID := active.Grant.LeaseID
+	oldExpiry := active.Grant.ExpiresAt
+	oldLease, ok := f.st.Lease(oldLeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", oldLeaseID)
+	}
+	paymentsBefore := len(f.st.PaymentEvents())
+	userBefore, ok := f.st.User(f.user.ID)
+	if !ok {
+		t.Fatalf("user %q missing", f.user.ID)
+	}
+	quotaBefore := userBefore.QuotaBytesMonth
+
+	// End the grant's lease the way a daemon restart does, then queue the
+	// reissue job a publication attempt would carry.
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue); err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	attempt, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(reissue): %v", err)
+	}
+	if attempt.Mode != model.FulfilmentReissue {
+		t.Fatalf("attempt = %+v, want reissue", attempt)
+	}
+	if attempt.PreviousLeaseID != oldLeaseID ||
+		attempt.Lease.ID != attempt.LeaseID ||
+		attempt.Lease.Status != model.LeasePendingPublication {
+		t.Fatalf("reissue reservation = %+v, want the provisional replacement", attempt)
+	}
+	reserved, ok := f.st.Lease(attempt.LeaseID)
+	if !ok || reserved.Status != model.LeasePendingPublication {
+		t.Fatalf("reserved replacement = %+v, ok=%t", reserved, ok)
+	}
+	before, _ := f.st.Order(order.ID)
+	if before.Grant == nil || before.Grant.LeaseID != oldLeaseID {
+		t.Fatalf("grant before commit = %+v, want the old ended lease", before.Grant)
+	}
+
+	committed, err := f.st.CommitFulfilment(order.ID, attempt.LeaseID)
+	if err != nil {
+		t.Fatalf("CommitFulfilment(reissue): %v", err)
+	}
+	if committed.State != model.OrderActive || committed.Grant == nil {
+		t.Fatalf("committed reissue = %+v, want active with a grant", committed)
+	}
+	if committed.Fulfilment != nil {
+		t.Fatalf("committed reissue still has a job: %+v", committed.Fulfilment)
+	}
+	if committed.Grant.LeaseID != attempt.LeaseID || committed.Grant.RevokedAt != nil {
+		t.Fatalf("reissue grant = %+v, want the promoted reservation %s",
+			committed.Grant, attempt.LeaseID)
+	}
+	if committed.Grant.ExpiresAt != oldExpiry {
+		t.Fatalf("reissue expiry = %s, want the original %s", committed.Grant.ExpiresAt, oldExpiry)
+	}
+	leases := f.st.Leases()
+	if len(leases) != 1 || leases[0].ID != committed.Grant.LeaseID ||
+		leases[0].ExpiresAt != oldExpiry {
+		t.Fatalf("leases = %+v, want exactly the replacement %s", leases, committed.Grant.LeaseID)
+	}
+	if node, ok := f.st.Node("node-orders"); !ok || node.InUse != 1 {
+		t.Fatalf("node InUse = %d, want the replacement lease's one slot", node.InUse)
+	}
+	if len(f.st.Grants()) != 1 {
+		t.Fatalf("grants = %d, want the original single grant", len(f.st.Grants()))
+	}
+	if len(f.st.PaymentEvents()) != paymentsBefore {
+		t.Fatalf("payment events = %d, want the original %d", len(f.st.PaymentEvents()), paymentsBefore)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || quotaBefore == nil || *user.QuotaBytesMonth != *quotaBefore {
+		t.Fatalf("reissue changed quota = %v, want %v", user.QuotaBytesMonth, quotaBefore)
+	}
+	audit := findAudit(t, f.st, "fulfilment.committed", func(event model.AuditEvent) bool {
+		return event.Meta["orderId"] == order.ID
+	})
+	if audit.Meta["mode"] != string(model.FulfilmentReissue) ||
+		audit.Meta["leaseId"] != committed.Grant.LeaseID {
+		t.Fatalf("fulfilment.committed meta = %v", audit.Meta)
+	}
+
+	// A duplicate commit cannot allocate a second replacement.
+	if _, err := f.st.CommitFulfilment(order.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate reissue commit error = %v, want ErrConflict", err)
+	}
+	if len(f.st.Leases()) != 1 || len(f.st.Grants()) != 1 {
+		t.Fatalf("duplicate reissue commit changed state: leases=%d grants=%d",
+			len(f.st.Leases()), len(f.st.Grants()))
+	}
+}
+
+func TestConcurrentCommitFulfilmentGrantsOnce(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-concurrent")
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	committed := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			committed++
+		case errors.Is(err, ErrConflict):
+		default:
+			t.Fatalf("concurrent commit: %v", err)
+		}
+	}
+	if committed != 1 {
+		t.Fatalf("concurrent commits succeeded %d times, want exactly 1", committed)
+	}
+	if len(f.st.Grants()) != 1 || len(f.st.Leases()) != 1 {
+		t.Fatalf("concurrent commit state: grants=%d leases=%d, want one each",
+			len(f.st.Grants()), len(f.st.Leases()))
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != f.plan.QuotaBytes {
+		t.Fatalf("concurrent commit quota = %v, want one replacement of %d",
+			user.QuotaBytesMonth, f.plan.QuotaBytes)
+	}
+	if countAudit(f.st, "fulfilment.committed") != 1 {
+		t.Fatalf("concurrent commit audited %d times, want 1",
+			countAudit(f.st, "fulfilment.committed"))
+	}
+}
+
+// pendingReservations reads the raw provisional rows without the expiry sweep
+// Leases() performs, so a test can prove what an abort or commit left behind.
+func pendingReservations(t *testing.T, st *Store) []model.Lease {
+	t.Helper()
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	out := make([]model.Lease, 0, 1)
+	for _, lease := range st.leases {
+		if lease.Status == model.LeasePendingPublication {
+			out = append(out, lease)
+		}
+	}
+	return out
+}
+
+func TestCommitFulfilmentAfterAbortIsRefused(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-after-abort")
+	quotaBefore := f.user.QuotaBytesMonth
+
+	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "publication refused", true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentQueued ||
+		aborted.Fulfilment.Attempts != 1 || aborted.Fulfilment.AttemptLeaseID != "" {
+		t.Fatalf("aborted job = %+v, want queued attempt 1", aborted.Fulfilment)
+	}
+	if pending := pendingReservations(t, f.st); len(pending) != 0 {
+		t.Fatalf("abort kept reservations: %+v", pending)
+	}
+
+	// The released attempt token can never commit; the job is queued, not
+	// publishing, so a late commit must be refused.
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit after abort error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(paid.ID)
+	if stored.State != model.OrderPaid || stored.Grant != nil {
+		t.Fatalf("order after abort commit = %+v, want paid without a grant", stored)
+	}
+	if grants := f.st.Grants(); len(grants) != 0 {
+		t.Fatalf("commit after abort created grants: %+v", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if (user.QuotaBytesMonth == nil) != (quotaBefore == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *quotaBefore) {
+		t.Fatalf("commit after abort moved quota: %v, want %v", user.QuotaBytesMonth, quotaBefore)
+	}
+}
+
+func TestCommitFulfilmentRejectsWrongMode(t *testing.T) {
+	// An initial-mode job on an order that is no longer paid.
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-wrong-mode")
+	f.st.mu.Lock()
+	f.st.orders[f.st.orderIndexLocked(paid.ID)].Order.State = model.OrderActive
+	f.st.mu.Unlock()
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("initial commit on active order error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(paid.ID)
+	if stored.State != model.OrderActive || stored.Grant != nil {
+		t.Fatalf("wrong-mode initial order = %+v, want unchanged", stored)
+	}
+	if grants := f.st.Grants(); len(grants) != 0 {
+		t.Fatalf("wrong-mode initial commit created grants: %+v", grants)
+	}
+
+	// A reissue-mode job on a paid order.
+	g := newOrderFixture(t)
+	paidReissue, attemptReissue := g.publishingInitial(t, "commit-wrong-mode-reissue")
+	g.st.mu.Lock()
+	g.st.orders[g.st.orderIndexLocked(paidReissue.ID)].Fulfilment.Mode = model.FulfilmentReissue
+	g.st.mu.Unlock()
+	if _, err := g.st.CommitFulfilment(paidReissue.ID, attemptReissue.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue commit on paid order error = %v, want ErrConflict", err)
+	}
+	storedReissue, _ := g.st.Order(paidReissue.ID)
+	if storedReissue.State != model.OrderPaid || storedReissue.Grant != nil {
+		t.Fatalf("wrong-mode reissue order = %+v, want unchanged", storedReissue)
+	}
+	if grants := g.st.Grants(); len(grants) != 0 {
+		t.Fatalf("wrong-mode reissue commit created grants: %+v", grants)
+	}
+}
+
+func TestCommitFulfilmentRejectsJobWithoutPaidTerm(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "commit-no-term")
+	f.st.mu.Lock()
+	f.st.orders[f.st.orderIndexLocked(paid.ID)].Fulfilment.EntitlementExpiresAt = ""
+	f.st.mu.Unlock()
+
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("commit without paid term error = %v, want ErrConflict", err)
+	}
+	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
+}
+
+func TestCommitFulfilmentReissueExpiredLeavesOldGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "commit-reissue-expired")
+	active := f.apply(t, f.settleEvent(order.ID,
+		"evt-commit-reissue-expired", "receipt-commit-reissue-expired"))
+	if active.Grant == nil {
+		t.Fatalf("settled order = %+v, want a grant", active)
+	}
+	oldLeaseID := active.Grant.LeaseID
+	oldExpiry := active.Grant.ExpiresAt
+	oldLease, ok := f.st.Lease(oldLeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", oldLeaseID)
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue); err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	attempt, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(reissue): %v", err)
+	}
+
+	// The replacement was reserved while the term was live, but the paid term
+	// ends before the commit arrives.
+	*f.now = f.now.Add(time.Duration(f.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	if _, err := f.st.CommitFulfilment(order.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expired reissue commit error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(order.ID)
+	if stored.State != model.OrderActive || stored.Grant == nil ||
+		stored.Grant.LeaseID != oldLeaseID || stored.Grant.ExpiresAt != oldExpiry {
+		t.Fatalf("grant after expired reissue commit = %+v, want the old ended lease", stored.Grant)
+	}
+	job := fulfilmentJobOf(t, f.st, order.ID)
+	if job.State != model.FulfilmentPublishing || job.Attempts != 1 {
+		t.Fatalf("job after expired reissue commit = %+v, want the attempt untouched", job)
+	}
+	if grants := f.st.Grants(); len(grants) != 1 {
+		t.Fatalf("grants after expired reissue commit = %d, want the original one", len(grants))
+	}
+
+	// Abort releases the expired reservation and dead-letters the job.
+	aborted, err := f.st.AbortFulfilment(order.ID, attempt.LeaseID,
+		model.FulfilmentReasonEntitlementExpired, "paid term ended", false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(expired reissue): %v", err)
+	}
+	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("expired reissue job = %+v, want a dead letter", aborted.Fulfilment)
+	}
+	if pending := pendingReservations(t, f.st); len(pending) != 0 {
+		t.Fatalf("expired reissue abort kept reservations: %+v", pending)
+	}
+}
+
+// requireTerminalFulfilmentCleanup asserts a terminal reversal removed all
+// publication work: no job, no provisional row and no held node slot.
+func requireTerminalFulfilmentCleanup(t *testing.T, st *Store, orderID string) {
+	t.Helper()
+	order, ok := st.Order(orderID)
+	if !ok {
+		t.Fatalf("order %q missing", orderID)
+	}
+	if order.Fulfilment != nil {
+		t.Fatalf("terminal order kept a job: %+v", order.Fulfilment)
+	}
+	if pending := pendingReservations(t, st); len(pending) != 0 {
+		t.Fatalf("terminal order kept reservations: %+v", pending)
+	}
+	st.mu.RLock()
+	inUse := make(map[string]int, len(st.nodes))
+	for _, node := range st.nodes {
+		inUse[node.ID] = node.InUse
+	}
+	st.mu.RUnlock()
+	for id, count := range inUse {
+		if count != 0 {
+			t.Fatalf("node %s InUse after terminal reversal = %d, want 0", id, count)
+		}
+	}
+}
+
+func TestRefundDuringInitialPublishingReleasesReservation(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "refund-publishing")
+	quotaBefore := f.user.QuotaBytesMonth
+
+	refunded, err := f.st.RecordManualRefund(paid.ID, "refund-publishing",
+		"customer request", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualRefund: %v", err)
+	}
+	if refunded.State != model.OrderRefunded || refunded.Fulfilment != nil {
+		t.Fatalf("refunded order = %+v, want refunded without work", refunded)
+	}
+	requireTerminalFulfilmentCleanup(t, f.st, paid.ID)
+	if grants := f.st.Grants(); len(grants) != 0 {
+		t.Fatalf("initial refund created grants: %+v", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if (user.QuotaBytesMonth == nil) != (quotaBefore == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *quotaBefore) {
+		t.Fatalf("initial refund moved quota: %v, want %v", user.QuotaBytesMonth, quotaBefore)
+	}
+
+	// A late commit and a late abort both lose; neither may resurrect work.
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late commit after refund error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late abort after refund error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(paid.ID)
+	if stored.State != model.OrderRefunded || stored.Grant != nil || stored.Fulfilment != nil {
+		t.Fatalf("late calls changed the refunded order: %+v", stored)
+	}
+	if got := len(f.st.PaymentEvents()); got != 2 {
+		t.Fatalf("payment events = %d, want settlement + refund", got)
+	}
+}
+
+func TestChargebackDuringInitialPublishingReleasesReservation(t *testing.T) {
+	f := newOrderFixture(t)
+	paid, attempt := f.publishingInitial(t, "chargeback-publishing")
+	quotaBefore := f.user.QuotaBytesMonth
+
+	charged, err := f.st.RecordManualChargeback(paid.ID, "chargeback-publishing",
+		"dispute evidence", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualChargeback: %v", err)
+	}
+	if charged.State != model.OrderChargedBack || !charged.ReviewRequired ||
+		charged.Fulfilment != nil {
+		t.Fatalf("charged-back order = %+v, want charged_back with review and no work", charged)
+	}
+	requireTerminalFulfilmentCleanup(t, f.st, paid.ID)
+	if grants := f.st.Grants(); len(grants) != 0 {
+		t.Fatalf("initial chargeback created grants: %+v", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if (user.QuotaBytesMonth == nil) != (quotaBefore == nil) ||
+		(user.QuotaBytesMonth != nil && *user.QuotaBytesMonth != *quotaBefore) {
+		t.Fatalf("initial chargeback moved quota: %v, want %v", user.QuotaBytesMonth, quotaBefore)
+	}
+
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late commit after chargeback error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late abort after chargeback error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(paid.ID)
+	if stored.State != model.OrderChargedBack || stored.Grant != nil || stored.Fulfilment != nil {
+		t.Fatalf("late calls changed the charged-back order: %+v", stored)
+	}
+}
+
+// publishingReissue prepares an active order whose grant lease ended and whose
+// reissue attempt has reserved the replacement, so a terminal reversal must
+// release that replacement without touching the old grant pointer.
+func (f *orderFixture) publishingReissue(t *testing.T, key string) (model.Order, FulfilmentAttempt) {
+	t.Helper()
+	order := f.createOrder(t, key)
+	active := f.apply(t, f.settleEvent(order.ID, "evt-"+key, "receipt-"+key))
+	if active.Grant == nil {
+		t.Fatalf("settled order = %+v, want a grant", active)
+	}
+	oldLease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue); err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	attempt, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(reissue): %v", err)
+	}
+	if attempt.Mode != model.FulfilmentReissue ||
+		attempt.Lease.Status != model.LeasePendingPublication {
+		t.Fatalf("reissue attempt = %+v, want a pending replacement", attempt)
+	}
+	stored, ok := f.st.Order(order.ID)
+	if !ok {
+		t.Fatalf("order %q missing", order.ID)
+	}
+	return stored, attempt
+}
+
+func TestRefundDuringReissuePublishingReleasesReservation(t *testing.T) {
+	f := newOrderFixture(t)
+	active, attempt := f.publishingReissue(t, "refund-reissue-publishing")
+	oldLeaseID := active.Grant.LeaseID
+
+	refunded, err := f.st.RecordManualRefund(active.ID, "refund-reissue-publishing",
+		"customer request", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualRefund: %v", err)
+	}
+	if refunded.State != model.OrderRefunded || refunded.Fulfilment != nil {
+		t.Fatalf("refunded reissue order = %+v, want refunded without work", refunded)
+	}
+	requireTerminalFulfilmentCleanup(t, f.st, active.ID)
+	grants := f.st.Grants()
+	if len(grants) != 1 || grants[0].LeaseID != oldLeaseID || grants[0].RevokedAt == nil {
+		t.Fatalf("grants after reissue refund = %+v, want the original grant revoked", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != *f.user.QuotaBytesMonth {
+		t.Fatalf("reissue refund quota = %v, want the pre-grant %d",
+			user.QuotaBytesMonth, *f.user.QuotaBytesMonth)
+	}
+
+	if _, err := f.st.CommitFulfilment(active.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late reissue commit after refund error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(active.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late reissue abort after refund error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(active.ID)
+	if stored.State != model.OrderRefunded || stored.Grant == nil ||
+		stored.Grant.RevokedAt == nil || stored.Fulfilment != nil {
+		t.Fatalf("late calls changed the refunded reissue order: %+v", stored)
+	}
+}
+
+func TestChargebackDuringReissuePublishingReleasesReservation(t *testing.T) {
+	f := newOrderFixture(t)
+	active, attempt := f.publishingReissue(t, "chargeback-reissue-publishing")
+	oldLeaseID := active.Grant.LeaseID
+
+	charged, err := f.st.RecordManualChargeback(active.ID, "chargeback-reissue-publishing",
+		"dispute evidence", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualChargeback: %v", err)
+	}
+	if charged.State != model.OrderChargedBack || !charged.ReviewRequired ||
+		charged.Fulfilment != nil {
+		t.Fatalf("charged-back reissue order = %+v, want charged_back with review and no work", charged)
+	}
+	requireTerminalFulfilmentCleanup(t, f.st, active.ID)
+	grants := f.st.Grants()
+	if len(grants) != 1 || grants[0].LeaseID != oldLeaseID || grants[0].RevokedAt == nil {
+		t.Fatalf("grants after reissue chargeback = %+v, want the original grant revoked", grants)
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != *f.user.QuotaBytesMonth {
+		t.Fatalf("reissue chargeback quota = %v, want the pre-grant %d",
+			user.QuotaBytesMonth, *f.user.QuotaBytesMonth)
+	}
+
+	if _, err := f.st.CommitFulfilment(active.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late reissue commit after chargeback error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(active.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("late reissue abort after chargeback error = %v, want ErrConflict", err)
+	}
+	stored, _ := f.st.Order(active.ID)
+	if stored.State != model.OrderChargedBack || stored.Grant == nil ||
+		stored.Grant.RevokedAt == nil || stored.Fulfilment != nil {
+		t.Fatalf("late calls changed the charged-back reissue order: %+v", stored)
 	}
 }

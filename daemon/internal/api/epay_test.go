@@ -422,6 +422,9 @@ func TestEpayNotifyDuringPublishingStillAnswersFail(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || string(body) != "fail" {
 		t.Fatalf("capacity notify response = %d %q", resp.StatusCode, body)
 	}
+	// Begin reserves the target, so the fixture must have a free slot before
+	// the test can model an in-flight publication.
+	freeFixtureCapacity(t, st)
 	attempt, err := st.BeginFulfilment(order.ID)
 	if err != nil {
 		t.Fatalf("BeginFulfilment: %v", err)
@@ -550,6 +553,9 @@ func TestEpayNotifyPaidDeadLetterAnswersFail(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || string(body) != "fail" {
 		t.Fatalf("capacity notify response = %d %q", resp.StatusCode, body)
 	}
+	// Begin reserves the target, so free the fixture slot before modelling the
+	// in-flight attempt that dead-letters.
+	freeFixtureCapacity(t, st)
 	attempt, err := st.BeginFulfilment(order.ID)
 	if err != nil {
 		t.Fatalf("BeginFulfilment: %v", err)
