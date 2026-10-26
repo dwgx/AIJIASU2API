@@ -990,9 +990,31 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 		return model.Order{}, model.Lease{}, conflictf("user %q is suspended", user.Name)
 	}
 
+	oldLeaseID := order.Grant.LeaseID
+	var endedPlatform model.Platform
+	for _, end := range s.leaseEnds {
+		if end.Lease.ID == oldLeaseID {
+			endedPlatform = s.leasePlatformLocked(end.Lease)
+			break
+		}
+	}
 	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(*user, now)
 	if err != nil {
 		return model.Order{}, model.Lease{}, err
+	}
+	// Reissue replaces only this order's ended lease. It must not allocate a
+	// second lease on the selected user/platform. Nor may a saturated preferred
+	// platform silently turn reissue into a different-platform lease alongside
+	// an existing lease for the ended grant's platform.
+	for _, existing := range s.leases {
+		if existing.UserID != user.ID {
+			continue
+		}
+		existingPlatform := s.leasePlatformLocked(existing)
+		if existingPlatform == platform || (endedPlatform != "" && endedPlatform != platform) {
+			return model.Order{}, model.Lease{}, leaseErrorf(ErrConflict, "lease_conflict",
+				"user %q already holds an active %s lease", user.Name, existingPlatform)
+		}
 	}
 	account := s.accounts[accountIdx]
 	node := s.nodes[nodeIdx]
@@ -1001,7 +1023,6 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 	if remaining < 1 {
 		remaining = 1
 	}
-	oldLeaseID := order.Grant.LeaseID
 	lease := model.Lease{
 		ID:           s.nextOrderLeaseIDLocked(order.ID),
 		UserID:       user.ID,
@@ -1046,6 +1067,53 @@ func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lea
 			"reason":          s.leaseEndReasonLocked(oldLeaseID),
 		})
 	return cloneOrder(*order), lease, nil
+}
+
+// RollbackOrderReissue removes a replacement lease whose publication failed
+// and restores its grant to the ended lease it was meant to replace. The order
+// remains active with an unserved grant, so an explicit retry can reissue it;
+// a lease.reissued response or event is not valid until publication succeeds.
+// The replacement must still be present and still be the grant's current lease,
+// otherwise this method refuses to alter state rather than rolling back a
+// concurrently changed entitlement.
+func (s *Store) RollbackOrderReissue(orderID, leaseID, previousLeaseID, reason string) error {
+	orderID = strings.TrimSpace(orderID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	leaseIdx := s.leaseIndexLocked(leaseID)
+	if leaseIdx < 0 {
+		return notFoundf("lease %q not found", leaseID)
+	}
+	lease := s.leases[leaseIdx]
+	if order.Grant == nil || order.Grant.LeaseID != leaseID ||
+		lease.UserID != order.UserID || lease.ExpiresAt != order.Grant.ExpiresAt {
+		return conflictf("order %q grant no longer owns replacement lease %q", orderID, leaseID)
+	}
+	s.leases = append(s.leases[:leaseIdx], s.leases[leaseIdx+1:]...)
+	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
+		s.nodes[nodeIdx].InUse--
+	}
+	order.Grant.LeaseID = previousLeaseID
+	detail := clientMessage(reason)
+	if detail == "" {
+		detail = "publication failed"
+	}
+	s.addAuditLocked(model.SeverityError, "system", "lease.publish_failed", lease.UserName,
+		fmt.Sprintf("Replacement lease on %s not reissued · %s", lease.NodeLabel, detail),
+		map[string]string{
+			"leaseId": lease.ID, "previousLeaseId": previousLeaseID,
+			"orderId": order.ID, "accountId": lease.AccountID, "nodeId": lease.NodeID,
+			"platform":   string(s.leasePlatformLocked(lease)),
+			"slot":       strconv.Itoa(lease.Slot),
+			"generation": strconv.FormatUint(lease.Generation, 10), "reason": detail,
+		})
+	return nil
 }
 
 // nextOrderLeaseIDLocked returns an id for a replacement lease that cannot

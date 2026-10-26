@@ -1,26 +1,47 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/store"
 	"ajsaccountd/internal/webhook"
 )
 
-// reissueEndedOrderLease commits one replacement lease for an existing order
-// and emits the customer-visible lease.reissued event after the store commit.
-// The store owns the single-grant/no-second-charge guarantees; this helper only
-// joins the event emission to the successful transaction.
-func (s *Server) reissueEndedOrderLease(orderID, actor string) (model.Order, error) {
+// reissueEndedOrderLease publishes one replacement before answering success,
+// using the same fail-closed boundary as ordinary lease creation. On failure
+// it restores the grant's ended lease reference so a retry remains safe, and
+// emits neither lease.reissued nor an active-order response for service that
+// was not published. The store owns the single-grant/no-second-charge rules.
+func (s *Server) reissueEndedOrderLease(r *http.Request, orderID, actor string) (model.Order, model.Lease, error) {
+	before, ok := s.store.Order(orderID)
+	if !ok {
+		return model.Order{}, model.Lease{}, &store.Error{
+			Kind: store.ErrNotFound, Message: fmt.Sprintf("order %q not found", orderID),
+		}
+	}
+	previousLeaseID := ""
+	if before.Grant != nil {
+		previousLeaseID = before.Grant.LeaseID
+	}
 	order, lease, err := s.store.ReissueOrderLease(orderID, actor)
 	if err != nil {
-		return model.Order{}, err
+		return model.Order{}, model.Lease{}, err
+	}
+	if err := s.publishLease(r.Context(), lease); err != nil {
+		if rollbackErr := s.store.RollbackOrderReissue(orderID, lease.ID, previousLeaseID, err.Error()); rollbackErr != nil {
+			s.logger.Error("order_reissue_rollback_failed", "order", orderID, "lease", lease.ID, "error", rollbackErr)
+			return model.Order{}, model.Lease{}, rollbackErr
+		}
+		s.rollbackUnpublishedLease(lease, err)
+		return model.Order{}, lease, err
 	}
 	data := webhook.LeaseEventData(
 		lease.ID, lease.UserID, string(lease.Platform), lease.AccountID, lease.ExpiresAt)
 	data["orderId"] = order.ID
 	s.emit(webhook.EventLeaseReissued, data)
-	return order, nil
+	return order, model.Lease{}, nil
 }
 
 // registerOrderReissueRoutes wires the explicit re-issue actions. The admin
@@ -57,9 +78,9 @@ func (s *Server) handlePortalReissueOrder(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	after, err := s.reissueEndedOrderLease(order.ID, "tenant:"+principal.Tenant.ID)
+	after, failedLease, err := s.reissueEndedOrderLease(r, order.ID, "tenant:"+principal.Tenant.ID)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeReissueError(w, failedLease, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, after)
@@ -70,10 +91,21 @@ func (s *Server) handlePortalReissueOrder(w http.ResponseWriter, r *http.Request
 // administration route, so an operator can restore a paid entitlement after a
 // restart without a customer session.
 func (s *Server) handleReissueOrder(w http.ResponseWriter, r *http.Request) {
-	after, err := s.reissueEndedOrderLease(pathParam(r, "id"), "operator")
+	after, failedLease, err := s.reissueEndedOrderLease(r, pathParam(r, "id"), "operator")
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeReissueError(w, failedLease, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, after)
+}
+
+// writeReissueError keeps ordinary store refusals unchanged and gives a
+// publication failure the same typed response as POST /v1/leases. The returned
+// lease is nonempty only after the failed replacement was rolled back.
+func (s *Server) writeReissueError(w http.ResponseWriter, failedLease model.Lease, err error) {
+	if failedLease.ID != "" {
+		s.writeLeasePublishError(w, failedLease, err)
+		return
+	}
+	s.writeStoreError(w, err)
 }

@@ -761,6 +761,75 @@ func TestPortalOrderReissueAfterDaemonRestart(t *testing.T) {
 	}
 }
 
+// TestReissuePublicationIsFailClosedAndRetryable is the AJS-402 honesty gate:
+// a replacement is not reported or emitted until the same publication seam as
+// a normal create accepts it. Failure restores the ended grant for a safe retry.
+func TestReissuePublicationIsFailClosedAndRetryable(t *testing.T) {
+	panel := &leasePanel{err: fmt.Errorf("resin is unreachable")}
+	ts, st, sink := newOrderTestServer(t, Config{Panel: panel})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-reissue-publish@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "reissue-publish")
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-reissue-publish", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	oldLease, ok := st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatal("original order lease missing")
+	}
+	if _, _, _, err := st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderAPILease(t, st, oldLease)
+
+	resp, body = portalOrderCall(t, ts, http.MethodPost,
+		"/v1/portal/orders/"+order.ID+"/reissue", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+	requireLeaseReason(t, body, leaseReasonPublishFailed)
+	for _, lease := range st.Leases() {
+		if lease.AccountID == oldLease.AccountID {
+			t.Fatalf("failed replacement publication left an active lease: %+v", lease)
+		}
+	}
+	stored, ok := st.Order(order.ID)
+	if !ok || stored.Grant == nil || stored.Grant.LeaseID != oldLease.ID {
+		t.Fatalf("failed publication grant = %+v, want original %s", stored.Grant, oldLease.ID)
+	}
+	if got := sink.count(webhook.EventLeaseReissued); got != 0 {
+		t.Fatalf("failed publication emitted %d lease.reissued events", got)
+	}
+	if panel.publishes != 1 || len(panel.leaseIDs) != 1 || panel.leaseIDs[0] == oldLease.ID {
+		t.Fatalf("replacement publication = %+v, publishes %d", panel.leaseIDs, panel.publishes)
+	}
+
+	panel.err = nil
+	resp, body = portalOrderCall(t, ts, http.MethodPost,
+		"/v1/portal/orders/"+order.ID+"/reissue", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	after := decodeBody[model.Order](t, body)
+	if after.Grant == nil || after.Grant.LeaseID == oldLease.ID {
+		t.Fatalf("retry did not install a replacement: %+v", after.Grant)
+	}
+	var activeReplacement *model.Lease
+	for _, lease := range st.Leases() {
+		if lease.AccountID == oldLease.AccountID {
+			copy := lease
+			activeReplacement = &copy
+		}
+	}
+	if activeReplacement == nil || activeReplacement.ID != after.Grant.LeaseID {
+		t.Fatalf("user leases after retry = %+v, want %s", activeReplacement, after.Grant.LeaseID)
+	}
+	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
+		t.Fatalf("successful retry emitted %d lease.reissued events, want 1", got)
+	}
+	if panel.publishes != 2 {
+		t.Fatalf("publication attempts = %d, want failed attempt plus retry", panel.publishes)
+	}
+}
+
 // TestAdminOrderReissueAfterDaemonRestart proves the admin path exists even
 // without a portal session and uses the same single-grant operation.
 func TestAdminOrderReissueAfterDaemonRestart(t *testing.T) {

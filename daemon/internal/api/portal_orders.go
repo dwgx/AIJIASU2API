@@ -85,9 +85,9 @@ func (s *Server) handlePortalCreateOrder(w http.ResponseWriter, r *http.Request)
 	}
 	actor := "tenant:" + principal.Tenant.ID
 	if candidate, ok := s.store.ReissueCandidate(principal.Tenant.ID, principal.User.ID, in.PlanID); ok {
-		after, err := s.reissueEndedOrderLease(candidate.ID, actor)
+		after, failedLease, err := s.reissueEndedOrderLease(r, candidate.ID, actor)
 		if err != nil {
-			s.writeStoreError(w, err)
+			s.writeReissueError(w, failedLease, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, after)

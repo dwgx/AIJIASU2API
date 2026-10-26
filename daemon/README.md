@@ -2020,6 +2020,18 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   `POST /v1/admin/orders/{id}/reissue` creates exactly one replacement lease for the same grant,
   keeps the original paid expiry, records a `lease.reissued` audit row and event, and never creates
   a second grant or payment event. A retry while the replacement lease is live answers 409.
+  Another active lease for the same user on the replacement platform is also a 409
+  (`lease_conflict`); a fallback to a different platform cannot coexist with an existing lease
+  for the ended grant's platform either. An unrelated active lease on another platform does not
+  block normal same-platform replacement. Reissue uses the same
+  Resin/publication-hook boundary as ordinary create: success and `lease.reissued` follow
+  publication, while a failed publication rolls back the replacement, restores the grant's ended
+  lease reference, and answers `lease_publish_failed` without charging or emitting a false success.
+  The same grant can then be reissued by an explicit retry. AJS-402 regression coverage includes
+  competing reissues, another active user lease, publication failure and retry. The requested
+  AJS-402-LeaseSemanticsGate.md assignment file was not present in this checkout; this gate is
+  evaluated against restart/reissue double-spend and honest-response behavior, not a claimed live
+  vendor/Resin restart drill.
 - **Refunds and chargebacks.** `POST …/refund` records an already completed full offline refund and
   never transfers money; `POST …/chargeback` records external evidence and always flags review.
   Both revoke the grant's lease and restore its previous quota without re-enabling a suspended user

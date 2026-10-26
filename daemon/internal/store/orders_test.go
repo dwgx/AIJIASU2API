@@ -854,6 +854,190 @@ func TestReissueOrderLeaseRefusesExpiredGrant(t *testing.T) {
 	}
 }
 
+// TestConcurrentReissueAllocatesOneReplacement proves the grant pointer is the
+// transaction's single-winner guard even when every request races the restart.
+func TestConcurrentReissueAllocatesOneReplacement(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-concurrent")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-concurrent", "receipt-reissue-concurrent"))
+	oldLease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatal("original grant lease missing")
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	const attempts = 12
+	start := make(chan struct{})
+	errs := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for range attempts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := f.st.ReissueOrderLease(order.ID, "operator")
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	succeeded := 0
+	for err := range errs {
+		if err == nil {
+			succeeded++
+		} else if !errors.Is(err, ErrConflict) {
+			t.Fatalf("concurrent reissue unexpected error: %v", err)
+		}
+	}
+	if succeeded != 1 || len(f.st.Leases()) != 1 || countAudit(f.st, "lease.reissued") != 1 {
+		t.Fatalf("concurrent reissue succeeded=%d leases=%d audits=%d; want exactly one",
+			succeeded, len(f.st.Leases()), countAudit(f.st, "lease.reissued"))
+	}
+}
+
+// TestReissueRefusesAnotherActiveUserLease proves replacing an ended grant
+// does not bypass the ordinary one-active-lease-per-user/platform invariant.
+func TestReissueRefusesAnotherActiveUserLease(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-other-lease")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-other", "receipt-reissue-other"))
+	oldLeaseID := active.Grant.LeaseID
+	oldLease, ok := f.st.Lease(oldLeaseID)
+	if !ok {
+		t.Fatalf("original grant lease %q missing", oldLeaseID)
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	secondAccount, err := f.st.CreateAccount(model.CreateAccountInput{
+		Label: "Orders Spare", Username: "orders-spare", Password: "local-placeholder",
+		Platform: model.PlatformAndroid, Concurrency: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(second): %v", err)
+	}
+	if _, err := f.st.PutNode(model.ProxyNode{
+		ID: "node-reissue-other", AccountID: secondAccount.ID, Label: "orders-2",
+		Region: oldLease.Region, State: model.NodeLive, EgressIP: "203.0.113.91",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13091,
+	}); err != nil {
+		t.Fatalf("PutNode(second): %v", err)
+	}
+	other, _, err := f.st.CreateLease(model.CreateLeaseInput{
+		UserID: f.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(other): %v", err)
+	}
+	if _, _, err := f.st.ReissueOrderLease(order.ID, "operator"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue with another active user lease = %v, want ErrConflict", err)
+	}
+	stored, ok := f.st.Order(order.ID)
+	if !ok || stored.Grant == nil || stored.Grant.LeaseID != oldLeaseID {
+		t.Fatalf("grant changed after refused reissue: %+v", stored.Grant)
+	}
+	leases := f.st.Leases()
+	if len(leases) != 1 || leases[0].ID != other.ID {
+		t.Fatalf("refused reissue changed active leases: %+v", leases)
+	}
+}
+
+// TestReissueCannotUseFallbackBesideAnotherPlatformLease covers the indirect
+// portal-create path: a saturated preferred platform falls through in target
+// selection, but a current lease must refuse that fallback rather than mint a
+// second active entitlement for the same user.
+func TestReissueCannotUseFallbackBesideAnotherPlatformLease(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-fallback-conflict")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-fallback", "receipt-reissue-fallback"))
+	oldLease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatal("original grant lease missing")
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	iosAccount, err := f.st.CreateAccount(model.CreateAccountInput{
+		Label: "Orders iOS", Username: "orders-ios", Password: "local-placeholder",
+		Platform: model.PlatformIOS, Concurrency: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(iOS): %v", err)
+	}
+	if _, err := f.st.PutNode(model.ProxyNode{
+		ID: "node-reissue-ios", AccountID: iosAccount.ID, Label: "orders-ios",
+		Region: oldLease.Region, State: model.NodeLive, EgressIP: "203.0.113.92",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13092,
+	}); err != nil {
+		t.Fatalf("PutNode(iOS): %v", err)
+	}
+	// The only Android node is already held by the user's current lease;
+	// without the conflict guard, reissue would fall back to the iOS node.
+	current, _, err := f.st.CreateLease(model.CreateLeaseInput{
+		UserID: f.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(current): %v", err)
+	}
+	if _, candidate := f.st.ReissueCandidate(f.tenant.ID, f.user.ID, f.plan.ID); !candidate {
+		t.Fatal("ended paid grant was not a reissue candidate")
+	}
+	if _, _, err := f.st.ReissueOrderLease(order.ID, "operator"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("fallback reissue beside another-platform lease = %v, want ErrConflict", err)
+	}
+	leases := f.st.Leases()
+	if len(leases) != 1 || leases[0].ID != current.ID {
+		t.Fatalf("refused fallback changed active leases: %+v", leases)
+	}
+	stored, _ := f.st.Order(order.ID)
+	if stored.Grant == nil || stored.Grant.LeaseID != oldLease.ID {
+		t.Fatalf("refused fallback changed grant: %+v", stored.Grant)
+	}
+}
+
+// TestRollbackOrderReissueRestoresEndedGrant proves a publication failure can
+// be compensated without losing the paid grant or leaving a second lease.
+func TestRollbackOrderReissueRestoresEndedGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-rollback")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-rollback", "receipt-reissue-rollback"))
+	oldLeaseID := active.Grant.LeaseID
+	oldLease, ok := f.st.Lease(oldLeaseID)
+	if !ok {
+		t.Fatal("original grant lease missing")
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	_, replacement, err := f.st.ReissueOrderLease(order.ID, "operator")
+	if err != nil {
+		t.Fatalf("ReissueOrderLease: %v", err)
+	}
+	if err := f.st.RollbackOrderReissue(order.ID, replacement.ID, oldLeaseID, "panel unavailable"); err != nil {
+		t.Fatalf("RollbackOrderReissue: %v", err)
+	}
+	stored, ok := f.st.Order(order.ID)
+	if !ok || stored.Grant == nil || stored.Grant.LeaseID != oldLeaseID {
+		t.Fatalf("rolled-back grant = %+v, want original %s", stored.Grant, oldLeaseID)
+	}
+	if len(f.st.Leases()) != 0 {
+		t.Fatalf("rollback left active leases: %+v", f.st.Leases())
+	}
+	node, _ := f.st.Node(oldLease.NodeID)
+	if node.InUse != 0 {
+		t.Fatalf("rollback left node inUse=%d", node.InUse)
+	}
+	if !containsAction(auditActions(f.st), "lease.publish_failed") {
+		t.Fatal("rollback wrote no lease.publish_failed audit")
+	}
+}
+
 // TestActivationRetryDoesNotTreatEndedGrantLeaseAsActive proves a paid order
 // whose grant points at an ended lease stays paid on a settlement retry; it
 // must not be flipped back to active without a serving lease.
