@@ -239,6 +239,9 @@ func (r epayQueryResponse) status() EpayOrderStatus {
 
 // EpayReconcileStore is the store surface the reconciler needs. Keeping it an
 // interface makes the polling loop testable without a live gateway or store.
+// PendingEpayOrders is the store's selection of rows that need a provider
+// query: awaiting checkouts and paid orders whose entitlement was never
+// granted. The store owns the state rules; the reconciler never invents them.
 type EpayReconcileStore interface {
 	PendingEpayOrders() []model.Order
 	ApplyPaymentEvent(provider string, event model.PaymentEvent, actor string) (model.Order, error)
@@ -257,9 +260,12 @@ type EpayReconcilerConfig struct {
 	Jitter    func(time.Duration) time.Duration
 }
 
-// EpayReconciler polls pending epay orders and settles the ones the gateway
-// reports TRADE_SUCCESS. It is intentionally separate from the HTTP surface:
-// a restart resumes reconciliation from the persisted order rows.
+// EpayReconciler polls the epay orders that still need a provider answer and
+// settles the ones the gateway reports TRADE_SUCCESS. The store selects the
+// rows: awaiting checkouts and paid orders whose entitlement was never granted
+// are reconciled, while terminal and review-required rows are left alone. The
+// poller is intentionally separate from the HTTP surface: a restart resumes
+// reconciliation from the persisted order rows.
 type EpayReconciler struct {
 	provider  *Epay
 	store     EpayReconcileStore
@@ -459,6 +465,14 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		if after.ReviewRequired {
 			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
 				"gateway reported TRADE_SUCCESS; settlement requires review")
+			continue
+		}
+		if after.State == model.OrderPaid {
+			// The money is recorded but no entitlement serves yet: an initial
+			// fulfilment job owns the remaining work. Reporting "settled" here
+			// would claim service the customer does not have.
+			r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,
+				"gateway reported TRADE_SUCCESS; payment recorded, entitlement pending fulfilment")
 			continue
 		}
 		r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,

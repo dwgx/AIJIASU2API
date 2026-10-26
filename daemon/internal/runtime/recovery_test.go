@@ -935,6 +935,335 @@ func TestAutoLoginSerializesConcurrentRuns(t *testing.T) {
 	}
 }
 
+// newRecoveryOrder creates one active tenant linked to a fresh enabled user and
+// returns the order it owns. The runtime package cannot reach the store's
+// internal fixtures, so this builds the same state through the public API.
+func newRecoveryOrder(t *testing.T, st *store.Store, key string, ttlSeconds int) model.Order {
+	t.Helper()
+	plan, err := st.CreatePlan(model.PlanInput{
+		Name: "Recovery " + key, AmountMinor: 3000, Currency: "CNY",
+		LeaseTTLSeconds: ttlSeconds, QuotaBytes: 10 << 30,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlan(%s): %v", key, err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "recovery-" + key, Platform: "android"})
+	if err != nil {
+		t.Fatalf("CreateUser(%s): %v", key, err)
+	}
+	email := key + "@recovery.example.com"
+	if err := st.SignupTenant(model.TenantSignupInput{
+		Email: email, Password: "recovery-password", DisplayName: "Recovery " + key,
+	}); err != nil {
+		t.Fatalf("SignupTenant(%s): %v", key, err)
+	}
+	var tenant model.Tenant
+	for _, candidate := range st.Tenants() {
+		if candidate.Email == email {
+			tenant = candidate
+			break
+		}
+	}
+	if tenant.ID == "" {
+		t.Fatalf("SignupTenant(%s) stored no tenant", key)
+	}
+	if _, err := st.ApproveTenant(tenant.ID, user.ID, nil); err != nil {
+		t.Fatalf("ApproveTenant(%s): %v", key, err)
+	}
+	order, replayed, err := st.CreateOrder(tenant.ID, user.ID, plan.ID, key, "test")
+	if err != nil || replayed {
+		t.Fatalf("CreateOrder(%s) = %+v replayed=%t err=%v", key, order, replayed, err)
+	}
+	return order
+}
+
+// settleRecoveryOrder applies one offline settlement fact, the same path the
+// admin attestation uses.
+func settleRecoveryOrder(t *testing.T, st *store.Store, order model.Order, key string) model.Order {
+	t.Helper()
+	settled, err := st.ApplyPaymentEvent(model.ProviderManual, model.PaymentEvent{
+		Provider: model.ProviderManual, ID: "evt-" + key, Kind: model.PaymentSettled,
+		OrderID: order.ID, ProviderRef: "receipt-" + key,
+	}, "test")
+	if err != nil {
+		t.Fatalf("ApplyPaymentEvent(%s): %v", key, err)
+	}
+	return settled
+}
+
+// expireOrderPaidTerm rewrites one order's paidAt in a snapshot and restores it
+// into a fresh store, so a paid term can be ended without waiting out the
+// plan's minimum TTL.
+func expireOrderPaidTerm(t *testing.T, st *store.Store, orderID string, paidAt time.Time) *store.Store {
+	t.Helper()
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	orders, ok := doc["orders"].([]any)
+	if !ok {
+		t.Fatalf("snapshot carries no orders")
+	}
+	found := false
+	for _, raw := range orders {
+		record, ok := raw.(map[string]any)
+		if !ok || record["id"] != orderID {
+			continue
+		}
+		record["paidAt"] = paidAt.UTC().Format(time.RFC3339Nano)
+		found = true
+	}
+	if !found {
+		t.Fatalf("snapshot has no order %s", orderID)
+	}
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	restored := store.New()
+	if err := restored.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	return restored
+}
+
+// recoveryQuota reads one user's monthly quota. Recording money must not move
+// it; only a committed entitlement may.
+func recoveryQuota(t *testing.T, st *store.Store, userID string) *int64 {
+	t.Helper()
+	user, ok := st.User(userID)
+	if !ok {
+		t.Fatalf("user %s missing", userID)
+	}
+	return user.QuotaBytesMonth
+}
+
+// TestRecoverPaidOrdersQueuesInitialFulfilmentOnce pins the boot scan: a paid
+// order with no grant and no work receives exactly one initial fulfilment job,
+// an existing job is never duplicated, a review-required order is an operator
+// decision, and a paid term that already ended is dead-lettered instead of
+// activated. Active and terminal orders are not recovery work either.
+func TestRecoverPaidOrdersQueuesInitialFulfilmentOnce(t *testing.T) {
+	st := store.New()
+	logger := discardLogger()
+
+	// The demo fixture holds the account's only slot; release it so the active
+	// case below can actually activate.
+	for _, lease := range st.Leases() {
+		if err := st.ReleaseLease(lease.ID); err != nil {
+			t.Fatalf("ReleaseLease(%s): %v", lease.ID, err)
+		}
+	}
+
+	// A paid order with no work at all: the scan must queue it once.
+	paidOrder := newRecoveryOrder(t, st, "boot-paid", 3600)
+	if _, err := st.SetUserEnabled(paidOrder.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled: %v", err)
+	}
+	paid := settleRecoveryOrder(t, st, paidOrder, "boot-paid")
+	if paid.State != model.OrderPaid || paid.Grant != nil || paid.Fulfilment != nil {
+		t.Fatalf("paid fixture = %+v, want paid without a grant or job", paid)
+	}
+
+	// A paid order that already owns a queued job: the scan must not duplicate
+	// it or rewrite its schedule.
+	existingOrder := newRecoveryOrder(t, st, "boot-existing", 3600)
+	if _, err := st.SetUserEnabled(existingOrder.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled(existing): %v", err)
+	}
+	existingPaid := settleRecoveryOrder(t, st, existingOrder, "boot-existing")
+	if existingPaid.State != model.OrderPaid || existingPaid.Grant != nil {
+		t.Fatalf("existing fixture = %+v, want paid without a grant", existingPaid)
+	}
+	if _, err := st.EnqueueFulfilment(existingOrder.ID, model.FulfilmentInitial); err != nil {
+		t.Fatalf("EnqueueFulfilment(existing): %v", err)
+	}
+	existingBefore, _ := st.Order(existingOrder.ID)
+	if existingBefore.Fulfilment == nil {
+		t.Fatalf("existing fixture has no job")
+	}
+	existingUpdated := existingBefore.Fulfilment.UpdatedAt
+
+	// A paid order quarantined for review: the money is recorded but
+	// fulfilment is an operator decision, so the boot scan must skip it.
+	reviewOrder := newRecoveryOrder(t, st, "boot-review", 3600)
+	if _, err := st.MarkOrderCheckout(reviewOrder.TenantID, reviewOrder.ID, model.ProviderEpay); err != nil {
+		t.Fatalf("MarkOrderCheckout(review): %v", err)
+	}
+	if _, err := st.SetUserEnabled(reviewOrder.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled(review): %v", err)
+	}
+	for _, eventID := range []string{"evt-boot-review", "evt-boot-review-conflict"} {
+		if _, err := st.ApplyPaymentEvent(model.ProviderEpay, model.PaymentEvent{
+			Provider: model.ProviderEpay, ID: eventID, Kind: model.PaymentSettled,
+			OrderID: reviewOrder.ID, ProviderRef: eventID,
+			AmountMinor: 3000, Currency: "CNY",
+		}, "test"); err != nil {
+			t.Fatalf("ApplyPaymentEvent(review/%s): %v", eventID, err)
+		}
+	}
+	reviewed, _ := st.Order(reviewOrder.ID)
+	if reviewed.State != model.OrderPaid || !reviewed.ReviewRequired ||
+		reviewed.Grant != nil || reviewed.Fulfilment != nil {
+		t.Fatalf("review fixture = %+v, want paid with review and no job", reviewed)
+	}
+
+	// A paid term that already ended cannot serve: the scan dead-letters it
+	// instead of activating anything. The term is ended by rewriting the
+	// persisted paidAt, because the plan contract refuses a TTL below a minute.
+	expiredStore := store.New()
+	expiredOrder := newRecoveryOrder(t, expiredStore, "boot-expired", 60)
+	if _, err := expiredStore.SetUserEnabled(expiredOrder.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled(expired): %v", err)
+	}
+	expired := settleRecoveryOrder(t, expiredStore, expiredOrder, "boot-expired")
+	if expired.State != model.OrderPaid || expired.Grant != nil || expired.Fulfilment != nil {
+		t.Fatalf("expired fixture = %+v, want paid without a grant or job", expired)
+	}
+	expiredStore = expireOrderPaidTerm(t, expiredStore, expiredOrder.ID, time.Now().Add(-2*time.Hour))
+	expiredResult, err := runtime.RecoverPaidOrders(expiredStore, logger)
+	if err != nil {
+		t.Fatalf("RecoverPaidOrders(expired): %v", err)
+	}
+	if len(expiredResult.Queued) != 0 || len(expiredResult.DeadLettered) != 1 ||
+		expiredResult.DeadLettered[0] != expiredOrder.ID {
+		t.Fatalf("expired recovery = %+v, want only %s dead-lettered", expiredResult, expiredOrder.ID)
+	}
+	expiredAfter, _ := expiredStore.Order(expiredOrder.ID)
+	if expiredAfter.State != model.OrderPaid || expiredAfter.Grant != nil {
+		t.Fatalf("expired order = %+v, want paid without a grant", expiredAfter)
+	}
+	expiredJob := expiredAfter.Fulfilment
+	if expiredJob == nil || expiredJob.State != model.FulfilmentDeadLetter || !expiredJob.Blocked ||
+		expiredJob.LastReason != model.FulfilmentReasonEntitlementExpired ||
+		expiredJob.Attempts != 0 || expiredJob.NextAttemptAt != nil {
+		t.Fatalf("expired job = %+v, want a blocked entitlement_expired dead letter", expiredJob)
+	}
+	expiredAt := expiredJob.UpdatedAt
+	if recoveryQuota(t, expiredStore, expiredOrder.UserID) != nil {
+		t.Fatalf("expired order moved the quota")
+	}
+	// A second boot leaves the dead letter alone.
+	expiredResult, err = runtime.RecoverPaidOrders(expiredStore, logger)
+	if err != nil {
+		t.Fatalf("second RecoverPaidOrders(expired): %v", err)
+	}
+	if len(expiredResult.Queued) != 0 || len(expiredResult.DeadLettered) != 0 {
+		t.Fatalf("second expired recovery = %+v, want no work", expiredResult)
+	}
+	if again, _ := expiredStore.Order(expiredOrder.ID); again.Fulfilment == nil ||
+		again.Fulfilment.State != model.FulfilmentDeadLetter || again.Fulfilment.UpdatedAt != expiredAt {
+		t.Fatalf("expired dead letter was rewritten: %+v", again.Fulfilment)
+	}
+
+	// An active order and a terminal order are not recovery work.
+	activeOrder := newRecoveryOrder(t, st, "boot-active", 3600)
+	if active := settleRecoveryOrder(t, st, activeOrder, "boot-active"); active.State != model.OrderActive {
+		t.Fatalf("active fixture = %+v, want active", active)
+	}
+	cancelledOrder := newRecoveryOrder(t, st, "boot-cancelled", 3600)
+	if _, err := st.CancelOrder(cancelledOrder.ID, "test"); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	result, err := runtime.RecoverPaidOrders(st, logger)
+	if err != nil {
+		t.Fatalf("RecoverPaidOrders: %v", err)
+	}
+	if len(result.Queued) != 1 || result.Queued[0] != paid.ID {
+		t.Fatalf("queued = %v, want only %s", result.Queued, paid.ID)
+	}
+	if len(result.DeadLettered) != 0 {
+		t.Fatalf("dead-lettered = %v, want none in the healthy store", result.DeadLettered)
+	}
+	queued, _ := st.Order(paid.ID)
+	if queued.Fulfilment == nil || queued.Fulfilment.Mode != model.FulfilmentInitial ||
+		queued.Fulfilment.State != model.FulfilmentQueued || queued.Fulfilment.Attempts != 0 {
+		t.Fatalf("queued job = %+v", queued.Fulfilment)
+	}
+	queuedAt := queued.Fulfilment.UpdatedAt
+	if queued.Grant != nil || recoveryQuota(t, st, paid.UserID) != nil {
+		t.Fatalf("boot scan granted service or quota: grant=%+v quota=%v",
+			queued.Grant, recoveryQuota(t, st, paid.UserID))
+	}
+
+	existingAfter, _ := st.Order(existingOrder.ID)
+	if existingAfter.Fulfilment == nil || existingAfter.Fulfilment.UpdatedAt != existingUpdated ||
+		existingAfter.Fulfilment.Attempts != 0 ||
+		existingAfter.Fulfilment.State != model.FulfilmentQueued {
+		t.Fatalf("existing job = %+v, want the original untouched", existingAfter.Fulfilment)
+	}
+	if recoveryQuota(t, st, existingOrder.UserID) != nil {
+		t.Fatalf("existing paid order moved the quota")
+	}
+	reviewAfter, _ := st.Order(reviewOrder.ID)
+	if reviewAfter.Fulfilment != nil || !reviewAfter.ReviewRequired || reviewAfter.Grant != nil {
+		t.Fatalf("review order = %+v, want review without a job", reviewAfter)
+	}
+	if recoveryQuota(t, st, reviewOrder.UserID) != nil {
+		t.Fatalf("review order moved the quota")
+	}
+	if activeQuota := recoveryQuota(t, st, activeOrder.UserID); activeQuota == nil ||
+		*activeQuota != 10<<30 {
+		t.Fatalf("active order quota = %v, want the plan quota", activeQuota)
+	}
+
+	// In-flight publication is not recovery work either: the next boot scan
+	// must neither duplicate nor reset the publishing attempt.
+	existingAttempt, err := st.BeginFulfilment(existingOrder.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(existing): %v", err)
+	}
+
+	// A second boot attaches nothing and rewrites nothing.
+	result, err = runtime.RecoverPaidOrders(st, logger)
+	if err != nil {
+		t.Fatalf("second RecoverPaidOrders: %v", err)
+	}
+	if len(result.Queued) != 0 || len(result.DeadLettered) != 0 {
+		t.Fatalf("second recovery = %+v, want no work", result)
+	}
+	existingPublishing, _ := st.Order(existingOrder.ID)
+	if existingPublishing.Fulfilment == nil ||
+		existingPublishing.Fulfilment.State != model.FulfilmentPublishing ||
+		existingPublishing.Fulfilment.Attempts != 1 ||
+		existingPublishing.Fulfilment.AttemptLeaseID != existingAttempt.LeaseID {
+		t.Fatalf("publishing job = %+v, want the in-flight attempt untouched",
+			existingPublishing.Fulfilment)
+	}
+	again, _ := st.Order(paid.ID)
+	if again.Fulfilment == nil || again.Fulfilment.UpdatedAt != queuedAt ||
+		again.Fulfilment.Attempts != 0 || again.Fulfilment.State != model.FulfilmentQueued {
+		t.Fatalf("second scan rewrote the job: %+v", again.Fulfilment)
+	}
+
+	// Dead-lettered work is an operator queue: the boot scan leaves it alone.
+	attempt, err := st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if _, err := st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonPublishFailed,
+		"publication refused", false); err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	result, err = runtime.RecoverPaidOrders(st, logger)
+	if err != nil {
+		t.Fatalf("third RecoverPaidOrders: %v", err)
+	}
+	if len(result.Queued) != 0 || len(result.DeadLettered) != 0 {
+		t.Fatalf("recovery after dead letter = %+v, want no work", result)
+	}
+	dead, _ := st.Order(paid.ID)
+	if dead.Fulfilment == nil || dead.Fulfilment.State != model.FulfilmentDeadLetter ||
+		dead.Fulfilment.Attempts != 1 {
+		t.Fatalf("dead-letter job = %+v, want the operator item untouched", dead.Fulfilment)
+	}
+}
+
 // TestUndrainStaleNodeDoesNotClaimLive pins the follow-up honesty rule: a
 // demoted row has no gate, so the operator's "activate" (undrain) must not
 // turn it LIVE. Only a login can reopen the gate.

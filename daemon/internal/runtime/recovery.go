@@ -111,6 +111,64 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 	return result, errors.Join(errs...)
 }
 
+// FulfilmentRecovery summarises one boot scan of paid orders that never
+// received an entitlement. Queued holds the order ids that received their
+// initial fulfilment job in this pass; DeadLettered holds the ids whose paid
+// term had already ended, so the job was recorded as an operator item instead
+// of being queued.
+type FulfilmentRecovery struct {
+	Queued       []string
+	DeadLettered []string
+}
+
+// RecoverPaidOrders attaches the durable initial fulfilment job to every paid
+// order that has no entitlement and no job. It is the boot half of the notify
+// contract: money recorded while publication was unavailable must not be
+// stranded just because the process restarted. The scan is idempotent — the
+// store keeps exactly one job per order, so a second pass attaches nothing —
+// and it never retries dead-lettered or review-required work, because those
+// are operator decisions.
+func RecoverPaidOrders(st *store.Store, logger *slog.Logger) (FulfilmentRecovery, error) {
+	if st == nil {
+		return FulfilmentRecovery{}, errors.New("runtime: paid order recovery requires a store")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var result FulfilmentRecovery
+	var errs []error
+	for _, order := range st.Orders() {
+		if order.State != model.OrderPaid || order.Grant != nil ||
+			order.ReviewRequired || order.Fulfilment != nil {
+			continue
+		}
+		after, err := st.EnqueueFulfilment(order.ID, model.FulfilmentInitial)
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+				// The row changed between the scan and the write (an operator
+				// quarantined it, or it was evicted); that command owns the
+				// outcome.
+				continue
+			}
+			errs = append(errs, fmt.Errorf("runtime: enqueue fulfilment for %s: %w", order.ID, err))
+			continue
+		}
+		if after.Fulfilment == nil {
+			continue
+		}
+		if after.Fulfilment.State == model.FulfilmentDeadLetter {
+			result.DeadLettered = append(result.DeadLettered, order.ID)
+			continue
+		}
+		result.Queued = append(result.Queued, order.ID)
+	}
+	if len(result.Queued) > 0 || len(result.DeadLettered) > 0 {
+		logger.Info("paid_order_recovery",
+			"queued", len(result.Queued), "dead_lettered", len(result.DeadLettered))
+	}
+	return result, errors.Join(errs...)
+}
+
 // LoginCall is the vendor login the startup auto-login performs.
 // *account.LoginService implements it.
 type LoginCall interface {

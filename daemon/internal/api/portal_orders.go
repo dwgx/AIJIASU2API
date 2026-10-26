@@ -278,8 +278,10 @@ func (s *Server) handlePortalCheckoutOrder(w http.ResponseWriter, r *http.Reques
 
 // handleEpayNotify verifies one 易支付 form callback and applies it through the
 // same store settlement path as an admin attestation. The response is the
-// gateway's plain-text protocol: "success" only after an accepted or duplicate
-// event; every rejected callback answers "fail" and changes nothing.
+// gateway's plain-text protocol: "success" only when the order is actually
+// serving, "fail" for every rejected callback and for a payment that is
+// recorded but not yet fulfilled. A malformed, badly signed or unknown
+// callback changes nothing.
 func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Epay == nil || !s.cfg.Epay.Enabled() {
 		writeEpayAck(w, http.StatusServiceUnavailable, "fail")
@@ -344,7 +346,26 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.emitOrderTransition(before, after)
-	writeEpayAck(w, http.StatusOK, "success")
+	// The gateway's plain-text ack is a service claim, not a payment claim.
+	// Only an order that is actually serving may answer success. A paid order
+	// means the money is durably recorded but the entitlement is not published
+	// yet, so the callback attaches the durable initial job (idempotent per
+	// order) and answers fail: the gateway keeps retrying, and no callback
+	// ever claims service that does not exist.
+	current, serving := s.store.OrderActiveWithGrant(order.ID)
+	if serving {
+		writeEpayAck(w, http.StatusOK, "success")
+		return
+	}
+	if current.State == model.OrderPaid && !current.ReviewRequired {
+		if _, err := s.store.EnqueueFulfilment(current.ID, model.FulfilmentInitial); err != nil &&
+			!errors.Is(err, store.ErrConflict) {
+			// The payment is already durable; a failed enqueue must not turn
+			// the acknowledgement into a payment failure or a success.
+			s.logger.Warn("epay_notify_fulfilment_enqueue_failed", "order_id", current.ID, "error", err)
+		}
+	}
+	writeEpayAck(w, http.StatusOK, "fail")
 }
 
 // writeEpayAck writes the gateway's plain-text acknowledgement. Cache-Control

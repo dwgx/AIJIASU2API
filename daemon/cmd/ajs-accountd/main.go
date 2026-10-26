@@ -257,6 +257,18 @@ func run() error {
 		snapshots.save("startup-recovery")
 	}
 
+	// A paid order whose entitlement was never published is durable money with
+	// no service. The scan attaches the one initial fulfilment job so a restart
+	// cannot strand it; review and dead-letter rows stay operator work and are
+	// never retried here.
+	fulfilmentRecovery, err := runtime.RecoverPaidOrders(st, logger)
+	if err != nil {
+		logger.Error("paid_order_recovery_failed", "error", err)
+	}
+	if len(fulfilmentRecovery.Queued) > 0 || len(fulfilmentRecovery.DeadLettered) > 0 {
+		snapshots.save("paid-order-recovery")
+	}
+
 	snapshotEvery, err := snapshotInterval()
 	if err != nil {
 		return err

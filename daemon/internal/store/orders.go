@@ -382,6 +382,24 @@ func (s *Store) TenantOrder(tenantID, orderID string) (model.Order, error) {
 	return cloneOrder(s.orders[idx].Order), nil
 }
 
+// OrderActiveWithGrant returns one order and reports whether it is actually
+// serving: state active, a non-revoked grant, and a live lease that still
+// matches the grant. It is the acknowledgement predicate for a settlement
+// callback, where only a published entitlement may be reported as success. A
+// paid order is never serving even when an activation left a grant behind, and
+// an unknown id reports false.
+func (s *Store) OrderActiveWithGrant(orderID string) (model.Order, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	idx := s.orderIndexLocked(strings.TrimSpace(orderID))
+	if idx < 0 {
+		return model.Order{}, false
+	}
+	order := &s.orders[idx].Order
+	serving := order.State == model.OrderActive && s.grantLeaseActiveLocked(order, s.now())
+	return cloneOrder(*order), serving
+}
+
 // MarkOrderCheckout records the provider a customer chose at checkout. It is
 // an intent marker, never a payment: the state stays awaiting_payment and no
 // grant or payment event is created. Only an owner-scoped awaiting order may
@@ -416,19 +434,32 @@ func (s *Store) MarkOrderCheckout(tenantID, orderID, provider string) (model.Ord
 	return cloneOrder(*order), nil
 }
 
-// PendingEpayOrders returns the awaiting_payment orders a customer checked out
-// through epay, oldest first so the bounded reconciler batch cannot starve an
-// old order behind a stream of new checkouts. An order that was never checked
-// out, or one already quarantined for review, stays out of the queue.
+// PendingEpayOrders returns the epay orders one reconciliation pass must
+// re-query, oldest first so the bounded batch cannot starve an old order behind
+// a stream of new checkouts. Two states qualify: an awaiting_payment order a
+// customer checked out through epay, and a paid order whose money arrived
+// through epay but whose entitlement was never granted — the callback was
+// accepted and its initial fulfilment job is queued, publishing or
+// dead-lettered. A paid order stays in the queue until it serves, because only
+// a query can discover the provider facts behind it. Terminal and
+// review-required rows stay out: terminal money never grants service, and a
+// review row is an operator decision, not a polling target.
 func (s *Store) PendingEpayOrders() []model.Order {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]model.Order, 0)
 	for i := len(s.orders) - 1; i >= 0; i-- {
 		record := s.orders[i]
-		if record.State == model.OrderAwaitingPayment && record.Provider == model.ProviderEpay &&
-			!record.ReviewRequired {
+		if record.Provider != model.ProviderEpay || record.ReviewRequired {
+			continue
+		}
+		switch record.State {
+		case model.OrderAwaitingPayment:
 			out = append(out, cloneOrder(record.Order))
+		case model.OrderPaid:
+			if record.Grant == nil {
+				out = append(out, cloneOrder(record.Order))
+			}
 		}
 	}
 	return out
@@ -820,6 +851,18 @@ func (s *Store) refundDecisionLocked(request RefundRequest) RefundDecision {
 	return RefundAllow
 }
 
+// clearInitialFulfilment removes the initial job an activation just
+// completed. A job is publication work, not money: once the order serves there
+// is nothing left to publish, and a job left on an active order would be
+// dropped as malformed on the next restore. Only initial work is cleared; a
+// reissue job belongs to an order that is already active.
+func clearInitialFulfilment(order *model.Order) {
+	if order.Fulfilment == nil || order.Fulfilment.Mode != model.FulfilmentInitial {
+		return
+	}
+	order.Fulfilment = nil
+}
+
 // activateOrderLocked creates the order's entitlement exactly once. A grant is
 // keyed by the unique order id, so a retry or a concurrent duplicate reuses the
 // existing lease and never extends the TTL or overwrites the quota twice.
@@ -842,6 +885,7 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 				if order.ActivatedAt == nil {
 					order.ActivatedAt = ptrString(iso(now))
 				}
+				clearInitialFulfilment(order)
 				return true
 			}
 			// The grant is still owned by the order but its lease ended (for
@@ -938,6 +982,7 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 	}
 	order.State = model.OrderActive
 	order.ActivatedAt = ptrString(iso(now))
+	clearInitialFulfilment(order)
 	s.addAuditLocked(model.SeverityInfo, actor, "lease.create", user.Name,
 		fmt.Sprintf("%s · %s · node %s · ttl %s · order %s", platform, account.Label,
 			node.Label, (time.Duration(order.Plan.LeaseTTLSeconds)*time.Second).String(), order.ID),

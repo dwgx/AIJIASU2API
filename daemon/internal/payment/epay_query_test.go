@@ -254,6 +254,46 @@ func TestEpayReconcileRotatesFullBatch(t *testing.T) {
 	}
 }
 
+// TestEpayReconcileRotatesMixedAwaitingAndPaidRows proves a batch smaller than
+// the queue still reaches paid rows behind awaiting ones: the store hands back
+// one ordered list and the poller rotates its start, so neither state starves
+// the other.
+func TestEpayReconcileRotatesMixedAwaitingAndPaidRows(t *testing.T) {
+	seen := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Query().Get("out_trade_no")]++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":1,"out_trade_no":"`+r.URL.Query().Get("out_trade_no")+`","money":"30.00","status":0}`)
+	}))
+	defer server.Close()
+	orders := make([]model.Order, 6)
+	for i := range orders {
+		orders[i] = testEpayOrder()
+		orders[i].ID = fmt.Sprintf("ord-%03d", i+1)
+		orders[i].State = model.OrderAwaitingPayment
+		if i%2 == 1 {
+			orders[i].State = model.OrderPaid
+		}
+	}
+	store := &fakeEpayStore{pending: orders}
+	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: store,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxOrders: 3,
+	})
+	for range 2 {
+		if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+			t.Fatalf("ReconcileOnce: %v", err)
+		}
+	}
+	for _, order := range orders {
+		if seen[order.ID] == 0 {
+			t.Fatalf("mixed rotation starved %s (%s): %v", order.ID, order.State, seen)
+		}
+	}
+}
+
 func TestEpayReconcileSkipsNonCNYOrder(t *testing.T) {
 	server := epayQueryServer(t, `{"code":1,"trade_no":"trade-usd","out_trade_no":"ord-usd","money":"30.00","status":1}`, http.StatusOK, nil)
 	defer server.Close()
@@ -355,6 +395,36 @@ func TestEpayReconcileRejectsMismatchAndBoundsBatch(t *testing.T) {
 	if len(audits) != 2 || audits[0].severity != model.SeverityWarn ||
 		audits[0].action != "epay.reconcile" {
 		t.Fatalf("audits = %+v", audits)
+	}
+}
+
+// TestEpayReconcileQueriesPaidUnfulfilledOrder proves the poller handles a paid
+// order the store selected for reconciliation: it applies the gateway fact and
+// reports the payment as recorded but not yet served, instead of skipping a row
+// that is no longer awaiting_payment.
+func TestEpayReconcileQueriesPaidUnfulfilledOrder(t *testing.T) {
+	payload := `{"code":1,"trade_no":"trade-paid","out_trade_no":"ord-001","money":"30.00","trade_status":"TRADE_SUCCESS"}`
+	server := epayQueryServer(t, payload, http.StatusOK, nil)
+	defer server.Close()
+	provider := NewEpay(EpayConfig{Gateway: server.URL, PID: "1001", Key: epayTestKey})
+	order := testEpayOrder()
+	order.State = model.OrderPaid
+	store := &fakeEpayStore{pending: []model.Order{order}}
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: store,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	applied, audits := store.snapshot()
+	if len(applied) != 1 || applied[0].ID != "trade-paid" {
+		t.Fatalf("applied = %+v, want one reconciliation fact", applied)
+	}
+	if len(audits) != 1 || audits[0].action != "epay.reconcile" ||
+		audits[0].severity != model.SeverityInfo || audits[0].target != "ord-001" ||
+		!strings.Contains(audits[0].detail, "pending fulfilment") {
+		t.Fatalf("audits = %+v, want a paid-but-unfulfilled reconciliation row", audits)
 	}
 }
 
