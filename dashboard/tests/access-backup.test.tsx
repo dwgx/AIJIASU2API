@@ -197,7 +197,6 @@ describe('scoped key settings', () => {
       'requests:read',
       'audit:read',
       'metrics:read',
-      'lab:read',
       'settings:read',
       'settings:write',
       'usage:read',

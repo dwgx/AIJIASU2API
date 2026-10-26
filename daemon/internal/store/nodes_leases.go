@@ -4,28 +4,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"ajsaccountd/internal/model"
 )
-
-// egressPool mirrors the dashboard mock's rotation pool.
-var egressPool = []string{
-	"203.0.113.24",
-	"198.51.100.44",
-	"192.0.2.77",
-	"203.0.113.88",
-	"198.51.100.91",
-}
-
-func nextEgressIP(current string) string {
-	for i, ip := range egressPool {
-		if ip == current {
-			return egressPool[(i+1)%len(egressPool)]
-		}
-	}
-	return egressPool[0]
-}
 
 // maxNodeRegionLen bounds the region label mirrored from a vendor server.
 const maxNodeRegionLen = 64
@@ -409,41 +390,14 @@ func (s *Store) ProbeNode(id string) (model.ProxyNode, error) {
 	return *node, nil
 }
 
-// RotateLease assigns the next egress IP, refreshes the TTL window and mirrors
-// the new address onto the node.
-func (s *Store) RotateLease(id string, actor ...string) (model.Lease, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	idx := s.leaseIndexLocked(id)
-	if idx < 0 {
-		return model.Lease{}, notFoundf("lease %q not found", id)
-	}
-	lease := &s.leases[idx]
-	oldIP := lease.EgressIP
-	lease.EgressIP = nextEgressIP(lease.EgressIP)
-	lease.ExpiresAt = iso(s.now().Add(time.Duration(lease.TTLSeconds) * time.Second))
-	lease.Requests += 17
-	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 {
-		s.nodes[nodeIdx].EgressIP = lease.EgressIP
-	}
-	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "lease.rotate", lease.UserName,
-		fmt.Sprintf("synthetic rotation without Resin · %s → %s", oldIP, lease.EgressIP))
-	out := *lease
-	s.normalizeLeaseLocked(&out)
-	if err := s.commitLocked(); err != nil {
-		return model.Lease{}, err
-	}
-	return out, nil
-}
-
 // ApplyLeaseRotation records the lease state Resin reported after a rotation:
 // the egress IP, the expiry and the request counter. Empty egressIP/expiresAt
 // keep the current value; the id, account, user, node and TTL are never
-// changed. The node's egress IP mirrors the lease, like RotateLease does.
+// changed. The node's egress IP mirrors the lease, like the panel path does.
 //
-// This is the panel-mode replacement for RotateLease's synthetic next-IP
-// logic: the address comes from Resin's GetLease, never from the local pool.
+// This is the only rotation writer: the address comes from Resin's GetLease,
+// never from a local pool. A daemon without a configured Resin panel answers
+// 503 UPSTREAM_UNAVAILABLE instead of inventing a rotation.
 func (s *Store) ApplyLeaseRotation(id, egressIP, expiresAt string, requests int64) (model.Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

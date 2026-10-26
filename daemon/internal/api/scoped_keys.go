@@ -68,16 +68,11 @@ var routeScopes = map[string]model.Scope{
 	http.MethodPost + " /v1/schedules/{id}/actions/run": model.ScopeSettingsWrite,
 	http.MethodGet + " /v1/schedules/{id}/runs":         model.ScopeSettingsRead,
 
-	http.MethodGet + " /v1/lab/overview":      model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/flags":         model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/gates":         model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/flows":         model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/sessions":      model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/egress":        model.ScopeLabRead,
-	http.MethodPost + " /v1/lab/egress-check": model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/profiles":      model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/logs":          model.ScopeLabRead,
-	http.MethodGet + " /v1/lab/diagnostics":   model.ScopeLabRead,
+	// Lab telemetry is operator diagnostics, not a customer surface: every
+	// /v1/lab/* route is deliberately absent, so only the admin token or a key
+	// carrying the admin scope can reach it. The rows name other tenants'
+	// accounts, users, targets and gate ports, and the egress check spends a
+	// real vendor flow; neither belongs to a least-privilege key.
 
 	http.MethodGet + " /v1/nodes":                       model.ScopeCatalogRead,
 	http.MethodPost + " /v1/nodes/{id}/actions/drain":   model.ScopeCatalogWrite,

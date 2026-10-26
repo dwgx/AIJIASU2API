@@ -45,7 +45,7 @@
     },
     {
       "name": "Lab",
-      "description": "Read-only runtime telemetry and guarded probes."
+      "description": "Read-only runtime telemetry and guarded probes. Admin only: no scoped key can reach these routes."
     },
     {
       "name": "Nodes",
@@ -1931,6 +1931,7 @@
           "Lab"
         ],
         "summary": "Effective modes, counts and warnings.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -1946,6 +1947,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1959,6 +1963,7 @@
           "Lab"
         ],
         "summary": "Effective configuration flags with secrets redacted.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -1974,6 +1979,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1987,6 +1995,7 @@
           "Lab"
         ],
         "summary": "Running gates joined to their store nodes.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2012,6 +2021,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -2025,6 +2037,7 @@
           "Lab"
         ],
         "summary": "Finished flows from the bounded per-gate rings.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2042,6 +2055,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2068,6 +2084,7 @@
           "Lab"
         ],
         "summary": "Authenticated FV sessions with redacted ids.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2093,6 +2110,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -2106,6 +2126,7 @@
           "Lab"
         ],
         "summary": "Claimed vs verified egress records.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2131,6 +2152,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -2144,6 +2168,7 @@
           "Lab"
         ],
         "summary": "Run one guarded egress probe for a node.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2161,6 +2186,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -2204,6 +2232,7 @@
           "Lab"
         ],
         "summary": "Supported FV version profiles and reference samples.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2219,6 +2248,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -2232,6 +2264,7 @@
           "Lab"
         ],
         "summary": "Redacted runtime log entries from the bounded ring.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2249,6 +2282,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2303,6 +2339,7 @@
           "Lab"
         ],
         "summary": "Health, state snapshot and build diagnostics.",
+        "description": "Admin only: no scoped key can reach this route.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -2317,6 +2354,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2639,7 +2679,7 @@
           "Leases"
         ],
         "summary": "Rotate a lease to a new egress IP and restart its TTL.",
-        "description": "A non-admin scoped key may only rotate a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted.",
+        "description": "A non-admin scoped key may only rotate a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted. Rotation requires a configured Resin panel: without one the route answers 503 UPSTREAM_UNAVAILABLE and mutates nothing.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -12752,7 +12792,6 @@
           "requests:read",
           "audit:read",
           "metrics:read",
-          "lab:read",
           "settings:read",
           "settings:write",
           "usage:read",

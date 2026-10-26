@@ -184,8 +184,54 @@ func TestAdminOperatorScopedKeyCannotSpoof(t *testing.T) {
 	if !ok {
 		t.Fatal("no user.suspend audit row")
 	}
-	if row.Actor != adminOperatorFallback {
-		t.Fatalf("scoped key actor = %q, want %q (the header must not name a key actor)", row.Actor, adminOperatorFallback)
+	if row.Actor != "key:"+key.Key.Prefix {
+		t.Fatalf("scoped key actor = %q, want %q (the header must not name a key actor)",
+			row.Actor, "key:"+key.Key.Prefix)
+	}
+}
+
+// TestScopedKeyAuditActor pins the attribution of a scoped-key mutation: the
+// audit row names the key principal ("key:<prefix>"), never the generic
+// operator fallback and never the secret, while admin-token attribution is
+// unchanged (the proxy-authenticated name when present, "operator" otherwise).
+func TestScopedKeyAuditActor(t *testing.T) {
+	ts, st := newTestServer(t)
+	key := restrictedWriteKey(t, ts, []string{"acc-01"}, nil)
+
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-01",
+		map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	row, ok := findAuditAction(st.Audit(50), "lease.revoke")
+	if !ok {
+		t.Fatalf("no lease.revoke audit row (body %s)", body)
+	}
+	want := "key:" + key.Key.Prefix
+	if row.Actor != want {
+		t.Fatalf("scoped-key audit actor = %q, want %q", row.Actor, want)
+	}
+	if strings.Contains(row.Actor, key.Secret) {
+		t.Fatal("the audit actor carries the key secret")
+	}
+
+	// Admin attribution is unchanged: the historical fallback without the
+	// proxy header…
+	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	row, ok = findAuditAction(st.Audit(50), "lease.revoke")
+	if !ok || row.Actor != adminOperatorFallback {
+		t.Fatalf("admin audit actor = %q, want %q", row.Actor, adminOperatorFallback)
+	}
+
+	// …and the authenticated operator name when the header is present.
+	req := newRequest(t, http.MethodDelete, ts.URL+"/v1/leases/lease-04", map[string]any{"confirm": true})
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
+	req.Header.Set(adminOperatorHeader, "alice")
+	resp, body = doRequest(t, ts, req)
+	requireStatus(t, resp, http.StatusNoContent)
+	row, ok = findAuditAction(st.Audit(50), "lease.revoke")
+	if !ok || row.Actor != "alice" {
+		t.Fatalf("operator audit actor = %q, want alice (body %s)", row.Actor, body)
 	}
 }
 

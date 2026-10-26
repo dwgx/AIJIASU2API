@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,5 +172,66 @@ func TestScopedPlatformReadsRespectAccountRestriction(t *testing.T) {
 	}
 	if len(healthPayload.Nodes) != 1 || healthPayload.Nodes[0].NodeID != "node-01" {
 		t.Fatalf("restricted health nodes = %+v, want only node-01", healthPayload.Nodes)
+	}
+}
+
+// TestScopedKeyLabIsAdminOnly pins the AJS-452 boundary: /v1/lab/* is operator
+// diagnostics, not a customer surface. A key carrying every remaining
+// non-admin scope is refused 403 scope_required on every lab route, the
+// removed lab:read grant cannot be issued any more, and the admin scope keeps
+// the operator view.
+func TestScopedKeyLabIsAdminOnly(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	key, _ := mustCreateScopedKey(t, ts, map[string]any{
+		"userId": "u-01",
+		"label":  "everything but admin",
+		"scopes": []string{
+			"accounts:read", "accounts:write", "catalog:read", "catalog:write",
+			"leases:read", "leases:write", "proxy:connect",
+			"requests:read", "audit:read", "metrics:read",
+			"settings:read", "settings:write", "usage:read", "renewal:read",
+			"health:read", "events:read",
+		},
+		"accountIds": []string{"acc-01"},
+	})
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/v1/lab/overview"},
+		{http.MethodGet, "/v1/lab/flags"},
+		{http.MethodGet, "/v1/lab/gates"},
+		{http.MethodGet, "/v1/lab/flows"},
+		{http.MethodGet, "/v1/lab/sessions"},
+		{http.MethodGet, "/v1/lab/egress"},
+		{http.MethodPost, "/v1/lab/egress-check"},
+		{http.MethodGet, "/v1/lab/profiles"},
+		{http.MethodGet, "/v1/lab/logs"},
+		{http.MethodGet, "/v1/lab/diagnostics"},
+	}
+	for _, route := range routes {
+		resp, body := scopedCall(t, ts, key.Secret, route.method, route.path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonScopeRequired)
+	}
+
+	// lab:read is no longer part of the vocabulary, so it cannot be granted.
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/scoped-keys", map[string]any{
+		"userId": "u-01", "label": "lab reader", "scopes": []string{"lab:read"},
+	})
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+
+	// The admin grant still reaches the same routes.
+	adminKey, _ := mustCreateScopedKey(t, ts, map[string]any{
+		"userId": "u-01", "label": "operator", "scopes": []string{"admin"},
+	})
+	resp, body = scopedCall(t, ts, adminKey.Secret, http.MethodGet, "/v1/lab/overview", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if !strings.Contains(string(body), `"enabled":false`) {
+		t.Fatalf("admin lab overview = %s, want the disabled-but-served body", body)
 	}
 }

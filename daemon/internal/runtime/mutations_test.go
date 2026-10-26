@@ -476,13 +476,18 @@ func TestMutationFallbackWithoutPanel(t *testing.T) {
 	ts := httptest.NewServer(api.New(api.Config{AllowInsecure: true}, st, discardLogger()))
 	t.Cleanup(ts.Close)
 
+	// Rotation is a Resin action: without a panel it answers 503 and leaves the
+	// recorded lease untouched instead of inventing an egress change.
 	status, body := apiCall(t, ts, http.MethodPost, "/v1/leases/lease-01/actions/rotate")
-	if status != http.StatusOK {
-		t.Fatalf("fallback rotate = %d, want 200 (body %s)", status, body)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("fallback rotate = %d, want 503 (body %s)", status, body)
 	}
-	rotated := decode[model.Lease](t, body)
-	if rotated.EgressIP != "203.0.113.24" || rotated.Requests != 18_449 {
-		t.Fatalf("fallback rotate = %+v, want next pool IP and requests +17", rotated)
+	if code := errorCode(t, body); code != api.CodeUpstreamUnavailable {
+		t.Fatalf("fallback rotate code = %q, want %s", code, api.CodeUpstreamUnavailable)
+	}
+	before, ok := st.Lease("lease-01")
+	if !ok || before.EgressIP != "203.0.113.11" || before.Requests != 18_432 {
+		t.Fatalf("refused rotate changed lease-01 = %+v (exists=%v)", before, ok)
 	}
 
 	status, body = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-02", map[string]any{"confirm": true})

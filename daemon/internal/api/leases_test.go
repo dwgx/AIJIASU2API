@@ -795,3 +795,73 @@ func TestGetLeaseConnection(t *testing.T) {
 		}
 	})
 }
+
+// rotatePanel is the minimal runtime.Panel double for the rotation path: it
+// records the call and answers a rotated lease without touching the store, so
+// the test can prove the API routed the request to the panel.
+type rotatePanel struct {
+	runtime.Panel
+	calls   int
+	leaseID string
+}
+
+func (p *rotatePanel) RotateLease(_ context.Context, leaseID string) (model.Lease, error) {
+	p.calls++
+	p.leaseID = leaseID
+	return model.Lease{ID: leaseID, EgressIP: "198.51.100.7", Status: model.LeaseActive}, nil
+}
+
+// TestLeaseRotateRequiresPanel pins the honesty contract of
+// POST /v1/leases/{id}/actions/rotate: a rotation is a Resin action, so a
+// daemon without a configured panel answers 503 UPSTREAM_UNAVAILABLE before
+// any mutation instead of rewriting the recorded egress IP and request
+// counter. A configured panel is still called exactly once and its answer is
+// served unchanged.
+func TestLeaseRotateRequiresPanel(t *testing.T) {
+	t.Run("no panel refuses before mutation", func(t *testing.T) {
+		ts, st := newTestServer(t)
+		before, ok := st.Lease("lease-01")
+		if !ok {
+			t.Fatal("seed lease-01 is missing")
+		}
+		nodeBefore, ok := st.Node(before.NodeID)
+		if !ok {
+			t.Fatalf("node %s is missing", before.NodeID)
+		}
+		auditBefore := len(st.Audit(1000))
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/leases/lease-01/actions/rotate", nil)
+		requireStatus(t, resp, http.StatusServiceUnavailable)
+		requireErrorCode(t, body, CodeUpstreamUnavailable)
+
+		after, ok := st.Lease("lease-01")
+		if !ok || after.EgressIP != before.EgressIP || after.Requests != before.Requests ||
+			after.ExpiresAt != before.ExpiresAt || after.Status != before.Status {
+			t.Fatalf("refused rotate changed the lease: %+v (exists=%v)", after, ok)
+		}
+		if nodeAfter, ok := st.Node(before.NodeID); !ok || nodeAfter.EgressIP != nodeBefore.EgressIP {
+			t.Fatalf("refused rotate changed the node egress: %+v (exists=%v)", nodeAfter, ok)
+		}
+		if got := len(st.Audit(1000)); got != auditBefore {
+			t.Fatalf("refused rotate wrote %d audit rows", got-auditBefore)
+		}
+	})
+
+	t.Run("configured panel still rotates", func(t *testing.T) {
+		st := store.New()
+		panel := &rotatePanel{}
+		server := New(Config{AdminToken: testToken, Panel: panel}, st,
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+
+		resp, body := apiCall(t, ts, http.MethodPost, "/v1/leases/lease-01/actions/rotate", nil)
+		requireStatus(t, resp, http.StatusOK)
+		if panel.calls != 1 || panel.leaseID != "lease-01" {
+			t.Fatalf("panel rotations = %d for %q, want one for lease-01", panel.calls, panel.leaseID)
+		}
+		if rotated := decodeBody[model.Lease](t, body); rotated.ID != "lease-01" || rotated.EgressIP != "198.51.100.7" {
+			t.Fatalf("panel answer = %+v, want the panel's rotated lease", rotated)
+		}
+	})
+}

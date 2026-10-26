@@ -240,21 +240,26 @@ func (s *Server) authorizeLease(w http.ResponseWriter, r *http.Request, id strin
 
 func (s *Server) handleRotateLease(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
-	if _, _, denied := s.authorizeLease(w, r, id); denied {
+	_, found, denied := s.authorizeLease(w, r, id)
+	if denied {
 		return
 	}
-	if s.cfg.Panel != nil {
-		lease, err := s.cfg.Panel.RotateLease(r.Context(), id)
-		if err != nil {
-			s.writePanelError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, lease)
+	if !found {
+		writeError(w, http.StatusNotFound, CodeNotFound, "lease not found")
 		return
 	}
-	lease, err := s.store.RotateLease(id, s.auditActor(r))
+	// A rotation is a Resin action. Without a panel there is no upstream to
+	// move the lease, so refuse before the store is touched instead of
+	// rewriting the recorded egress IP and reporting a rotation that did not
+	// happen.
+	if s.cfg.Panel == nil {
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
+			"lease rotation requires a configured Resin panel")
+		return
+	}
+	lease, err := s.cfg.Panel.RotateLease(r.Context(), id)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writePanelError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, lease)

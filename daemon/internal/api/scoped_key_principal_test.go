@@ -230,11 +230,19 @@ func TestScopedKeyLeaseMutationOwnership(t *testing.T) {
 		t.Fatal("an account-refused revoke removed the key's own lease")
 	}
 
-	// The key's own lease on its own account rotates and then revokes.
+	// The key's own lease on its own account passes the ownership gate; this
+	// server has no Resin panel, so the rotation itself answers 503 and leaves
+	// the row untouched. The same lease then revokes.
+	before01, ok := st.Lease("lease-01")
+	if !ok {
+		t.Fatal("seed lease-01 is missing")
+	}
 	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/leases/lease-01/actions/rotate", nil)
-	requireStatus(t, resp, http.StatusOK)
-	if rotated := decodeBody[model.Lease](t, body); rotated.ID != "lease-01" || rotated.UserID != "u-01" {
-		t.Fatalf("own-lease rotate = %+v", rotated)
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
+	if after, ok := st.Lease("lease-01"); !ok || after.EgressIP != before01.EgressIP ||
+		after.Requests != before01.Requests || after.ExpiresAt != before01.ExpiresAt {
+		t.Fatalf("refused own-lease rotate changed the lease: %+v (exists=%v)", after, ok)
 	}
 	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-01",
 		map[string]any{"confirm": true})

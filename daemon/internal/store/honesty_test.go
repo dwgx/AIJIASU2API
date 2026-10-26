@@ -40,27 +40,3 @@ func TestProbeNodeAuditIsHonest(t *testing.T) {
 		t.Fatalf("probe audit detail = %q, want the no-probe wording", event.Detail)
 	}
 }
-
-// TestRotateLeaseAuditLabelsSynthetic locks the other honesty fix: without
-// Resin the rotation is local, and the audit says so.
-func TestRotateLeaseAuditLabelsSynthetic(t *testing.T) {
-	st := store.New()
-	leases := st.Leases()
-	if len(leases) == 0 {
-		t.Fatal("seeded store has no lease")
-	}
-	if _, err := st.RotateLease(leases[0].ID); err != nil {
-		t.Fatalf("RotateLease: %v", err)
-	}
-	events := st.Audit(1)
-	if len(events) != 1 {
-		t.Fatalf("audit = %+v, want one event", events)
-	}
-	event := events[0]
-	if event.Action != "lease.rotate" {
-		t.Fatalf("audit event = %+v", event)
-	}
-	if !strings.Contains(event.Detail, "synthetic rotation without Resin") {
-		t.Fatalf("rotate audit detail = %q, want the synthetic label", event.Detail)
-	}
-}

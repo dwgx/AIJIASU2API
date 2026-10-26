@@ -86,7 +86,6 @@ table, and the admin token bypasses it by definition. Routes absent from the tab
 | `requests:read` | Read the request log | `GET /v1/requests` |
 | `audit:read` | Read and export the audit log | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics | `GET /metrics`, `GET /v1/metrics` |
-| `lab:read` | Lab telemetry and the guarded egress check | `GET /v1/lab/*`, `POST /v1/lab/egress-check` |
 | `settings:read` | Read settings and schedules | `GET /v1/settings`, `GET /v1/schedules` |
 | `settings:write` | Patch settings and schedules | `PATCH /v1/settings`, `POST /v1/schedules` |
 | `usage:read` | Usage aggregation | `GET /v1/usage` |
@@ -97,11 +96,13 @@ table, and the admin token bypasses it by definition. Routes absent from the tab
 
 Admin-only even with a scoped key: account export/import/bulk-delete, device pool, users, API
 keys, scoped-key management, webhooks, backup/inspect/restore, plans/orders, tenant
-administration, reconciliation, `GET /v1/whoami`, `GET /v1/openapi.json` and
-`GET /v1/system/update`. The reason is in
+administration, reconciliation, every `/v1/lab/*` route (including `POST /v1/lab/egress-check`),
+`GET /v1/whoami`, `GET /v1/openapi.json` and `GET /v1/system/update`. The reason is in
 [`daemon/internal/api/scoped_keys.go`](../daemon/internal/api/scoped_keys.go): a filtered export
-still discloses credentials, a filtered bulk-delete is destructive with partial success, and a
-customer key has no business enumerating the daemon's outbound receivers or sealed files.
+still discloses credentials, a filtered bulk-delete is destructive with partial success, lab
+telemetry names other tenants' accounts, users, targets and gate ports and its egress check spends
+a real vendor flow, and a customer key has no business enumerating the daemon's outbound receivers
+or sealed files.
 
 ## Key subject and grants
 
@@ -128,7 +129,7 @@ A scoped key has two boundaries: the user it belongs to (`userId`) and the accou
 `catalog:*`, `leases:*` or `proxy:connect` scope must name at least one `accountIds` or `regions`
 entry; `POST /v1/scoped-keys` answers `400 INVALID_ARGUMENT` otherwise. A key whose scopes are all
 global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`,
-`lab:read`, `renewal:read`, `health:read`) may omit both lists, which then means "not narrowed by
+`renewal:read`, `health:read`) may omit both lists, which then means "not narrowed by
 account".
 A key carrying the `admin` scope ignores both lists. A key minted before this rule with an
 account/catalog/lease scope and no grant fails closed with `403` on every non-admin route until it
@@ -284,7 +285,9 @@ platform; a second is `409`, an exhausted quota or account slot is `429`. An `Id
 (header or body `idempotencyKey`, max 128 characters, both must agree) replays the original lease.
 A non-admin scoped key is bound to its own `userId`: an empty `userId` becomes the key's user, a
 different id is `403`, `GET /v1/leases` returns only that user's leases, and revoke/rotate answer
-`404` for a missing id and for another user's lease alike. Revoke answers `204`. A lease on an
+`404` for a missing id and for another user's lease alike. Revoke answers `204`. Rotation is a
+Resin action: with no panel configured the route answers `503 UPSTREAM_UNAVAILABLE` and mutates
+nothing (the recorded egress IP, expiry and request counter stay as they were). A lease on an
 account whose display capacity is above one carries
 `warning: "multi_session_unimplemented"`; the live account has `useCount=1`, so this archive admits
 one slot.

@@ -643,7 +643,6 @@ export const SCOPES = [
   'requests:read',
   'audit:read',
   'metrics:read',
-  'lab:read',
   'settings:read',
   'settings:write',
   'usage:read',

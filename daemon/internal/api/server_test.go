@@ -1080,26 +1080,19 @@ func TestLeaseRotateRelease(t *testing.T) {
 		t.Fatalf("unexpected seed egress IP %q", original.EgressIP)
 	}
 
+	// Rotation is a Resin action. A daemon without a configured panel answers
+	// 503 and leaves the row exactly as it was: no invented egress IP, no
+	// refreshed expiry and no synthetic request counter.
 	resp, body := apiCall(t, ts, http.MethodPost, "/v1/leases/lease-01/actions/rotate", nil)
-	requireStatus(t, resp, http.StatusOK)
-	rotated := decodeBody[model.Lease](t, body)
-	if rotated.EgressIP != "203.0.113.24" {
-		t.Fatalf("rotated egress IP = %q, want 203.0.113.24", rotated.EgressIP)
-	}
-	if rotated.ExpiresAt == original.ExpiresAt {
-		t.Fatalf("rotate did not refresh expiresAt (%q)", rotated.ExpiresAt)
-	}
-	if rotated.TTLSeconds != original.TTLSeconds {
-		t.Fatalf("rotate changed ttlSeconds from %d to %d", original.TTLSeconds, rotated.TTLSeconds)
-	}
-	if rotated.Requests != original.Requests+17 {
-		t.Fatalf("rotate requests = %d, want %d", rotated.Requests, original.Requests+17)
-	}
+	requireStatus(t, resp, http.StatusServiceUnavailable)
+	requireErrorCode(t, body, CodeUpstreamUnavailable)
 
-	_, body = apiCall(t, ts, http.MethodGet, "/v1/nodes", nil)
-	nodes := decodeBody[[]model.ProxyNode](t, body)
-	if nodes[0].EgressIP != rotated.EgressIP {
-		t.Fatalf("node egress IP = %q, want %q", nodes[0].EgressIP, rotated.EgressIP)
+	_, body = apiCall(t, ts, http.MethodGet, "/v1/leases", nil)
+	leases = decodeBody[[]model.Lease](t, body)
+	unchanged := leases[0]
+	if unchanged.EgressIP != original.EgressIP || unchanged.ExpiresAt != original.ExpiresAt ||
+		unchanged.Requests != original.Requests || unchanged.TTLSeconds != original.TTLSeconds {
+		t.Fatalf("refused rotate changed the lease: %+v, want %+v", unchanged, original)
 	}
 
 	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-01", map[string]any{"confirm": true})
@@ -1117,7 +1110,7 @@ func TestLeaseRotateRelease(t *testing.T) {
 	}
 
 	_, body = apiCall(t, ts, http.MethodGet, "/v1/nodes", nil)
-	nodes = decodeBody[[]model.ProxyNode](t, body)
+	nodes := decodeBody[[]model.ProxyNode](t, body)
 	if nodes[0].InUse != 2 {
 		t.Fatalf("node inUse after release = %d, want 2", nodes[0].InUse)
 	}

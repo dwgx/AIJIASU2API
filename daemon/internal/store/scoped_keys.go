@@ -260,7 +260,7 @@ func validScope(scope model.Scope) bool {
 		model.ScopeLeasesRead, model.ScopeLeasesWrite,
 		model.ScopeProxyConnect,
 		model.ScopeRequestsRead, model.ScopeAuditRead,
-		model.ScopeMetricsRead, model.ScopeLabRead,
+		model.ScopeMetricsRead,
 		model.ScopeSettingsRead, model.ScopeSettingsWrite,
 		model.ScopeUsageRead, model.ScopeRenewalRead, model.ScopeHealthRead,
 		model.ScopeEventsRead,

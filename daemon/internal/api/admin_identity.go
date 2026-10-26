@@ -59,15 +59,25 @@ func sanitizeOperator(raw string) string {
 	return value
 }
 
-// auditActor names the authenticated admin operator for a mutation. The
-// fallback preserves the historical actor for requests that do not carry the
-// proxy-authenticated header (CLI clients, tests, older deployments).
+// auditActor names the authenticated caller for a mutation. An operator token
+// (strict mode) is its authenticated username, a legacy admin bearer is the
+// proxy-authenticated header or the historical "operator" fallback, and a
+// scoped key is its display prefix ("key:<prefix>"): the secret is never an
+// audit label, but an operator can still tell two keys apart in the trail.
+// Admin audit attribution is unchanged.
 func (s *Server) auditActor(r *http.Request) string {
-	if identity, ok := authIdentityFrom(r); ok && identity.rbac {
+	identity, ok := authIdentityFrom(r)
+	if !ok {
+		return adminOperatorFallback
+	}
+	if identity.rbac {
 		return identity.operator
 	}
-	if identity, ok := authIdentityFrom(r); ok && identity.admin && identity.operator != "" {
-		return identity.operator
+	if identity.admin {
+		if identity.operator != "" {
+			return identity.operator
+		}
+		return adminOperatorFallback
 	}
-	return adminOperatorFallback
+	return "key:" + identity.key.Prefix
 }

@@ -569,7 +569,7 @@ func TestBackupRoutesAreAdminOnly(t *testing.T) {
 		"scopes": []string{
 			"accounts:read", "accounts:write", "catalog:read", "catalog:write",
 			"leases:read", "leases:write", "requests:read", "audit:read",
-			"metrics:read", "lab:read", "settings:read", "settings:write",
+			"metrics:read", "settings:read", "settings:write",
 		},
 		"accountIds": []string{"acc-01"},
 	})

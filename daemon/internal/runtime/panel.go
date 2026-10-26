@@ -5,8 +5,9 @@
 // rotation and release, node drain and undrain.
 //
 // Mutations are only routed here when a Resin panel is configured. Without
-// one, the API keeps calling the store directly and the store's synthetic
-// next-IP rotation remains the fallback.
+// one, the API serves the store for the mutations the store can perform and
+// answers 503 UPSTREAM_UNAVAILABLE for lease rotation, which has no local
+// implementation.
 package runtime
 
 import (

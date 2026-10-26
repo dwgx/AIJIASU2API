@@ -284,7 +284,6 @@ const (
 	ScopeRequestsRead  Scope = "requests:read"
 	ScopeAuditRead     Scope = "audit:read"
 	ScopeMetricsRead   Scope = "metrics:read"
-	ScopeLabRead       Scope = "lab:read"
 	ScopeSettingsRead  Scope = "settings:read"
 	ScopeSettingsWrite Scope = "settings:write"
 	ScopeUsageRead     Scope = "usage:read"

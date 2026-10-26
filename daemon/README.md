@@ -37,7 +37,9 @@ stops admitting (or reopens) before the node state changes; without the
 switch the handlers keep the store/Resin behavior. A Lab telemetry view
 (`/v1/lab/*`) reports the effective modes, flags, gate counters, session health, claimed egress,
 profiles, a bounded redacted log ring and diagnostics; its GETs are read-only and it contacts no
-vendor, and the single POST runs an explicit egress probe that writes nothing.
+vendor, and the single POST runs an explicit egress probe that writes nothing. The whole surface is
+admin-only: it names other tenants' accounts, users, targets and gate ports, so no scoped key
+without the `admin` grant can reach it.
 There is still no SQLite: the JSON snapshot is the v0.1 stopgap for the schema in `docs/PANEL.md`
 §6, and the node supervisor is implemented but not wired to the controller.
 
@@ -1908,7 +1910,6 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 | `requests:read` | `GET /v1/requests` |
 | `audit:read` | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | `GET /metrics`, `GET /v1/metrics` |
-| `lab:read` | every `/v1/lab/*` route, including `POST /v1/lab/egress-check` |
 | `settings:read` | `GET /v1/settings`, schedule reads and preview |
 | `settings:write` | `PATCH /v1/settings`, schedule create/patch/delete/run |
 | `usage:read` | `GET /v1/usage` |
@@ -1919,7 +1920,10 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 
 Routes absent from the table are admin-only — the scoped-key registry, users, API keys, requests
 mutation, reconcile, update, the webhook registry (`/v1/webhooks*`), the panel backup routes
-(`/v1/backup*`) and `/v1/device-pool*` — so a key without `admin` gets 403 `FORBIDDEN` there.
+(`/v1/backup*`), `/v1/device-pool*` and every `/v1/lab/*` route (including
+`POST /v1/lab/egress-check`) — so a key without `admin` gets 403 `FORBIDDEN` there. Lab telemetry
+is operator diagnostics: it names other tenants' accounts, users, targets and gate ports, and the
+egress check spends a real vendor flow, so it is not part of the customer permission model.
 The customer portal chain is also absent: a scoped key is never a tenant identity, and tenant
 administration needs the admin token or a key carrying the `admin` scope.
 The three read scopes cover one read route family each; they grant no write and do not bypass the
@@ -2493,7 +2497,7 @@ its usual 404/409 status.
 | Route | Panel path | Store fallback (no panel) |
 |---|---|---|
 | POST `/v1/leases` | `store.CreateLease` → `PublishLease` (reconcile + node still in the topology); on failure `store.RollbackLease` → 409/503 `lease_publish_failed` | `store.CreateLease` → optional `LeasePublishHook` (also fail-closed) |
-| POST `/v1/leases/{id}/actions/rotate` | read store lease → full tag `<subscription>/<tag>` from the last topology → `pub.Rotate(..., true)` → `GetLease` → `store.ApplyLeaseRotation` | next pool IP, expiry refreshed, requests +17 |
+| POST `/v1/leases/{id}/actions/rotate` | read store lease → full tag `<subscription>/<tag>` from the last topology → `pub.Rotate(..., true)` → `GetLease` → `store.ApplyLeaseRotation` | 503 `UPSTREAM_UNAVAILABLE`; the store row is not touched |
 | DELETE `/v1/leases/{id}` | `DeleteLease` (404 idempotent) → `store.ReleaseLease` | `store.ReleaseLease` |
 | POST `/v1/nodes/{id}/actions/drain` | `NodeDrainHook` (gate close) → `store.DrainNode` → `Reconcile` (publish the LIVE-only set) | `NodeDrainHook` → `store.DrainNode` |
 | POST `/v1/nodes/{id}/actions/undrain` | `NodeDrainHook` (gate reopen) → `store.UndrainNode` → `Reconcile` | `NodeDrainHook` → `store.UndrainNode` |
@@ -2505,7 +2509,9 @@ and restores before returning, so the panel reads the new lease after the
 restore. Delete-only rotation is not used: the M1 spike showed it re-picks the
 same node. `ApplyLeaseRotation` records Resin's `egress_ip`/`expiry` and mirrors
 the IP onto the node, preserving id/account/user/node/TTL and the local request
-counter; the synthetic next-IP pool only runs in fallback mode.
+counter. It is the only rotation writer: without a configured panel the route
+answers 503 `UPSTREAM_UNAVAILABLE` before any mutation, so the recorded egress
+IP never changes without Resin.
 
 Drain/undrain transition the store and then republish. When the publish
 fails the handler answers 503 but the store state stays DRAINING/LIVE, and the
@@ -2659,7 +2665,7 @@ authority by setting it.
 | GET | `/v1/leases` | list; filter `user_id`; a non-admin scoped key sees only its own user's leases and a foreign `user_id` → 403 |
 | GET | `/v1/leases/{id}` | `{lease, connection:{host:"127.0.0.1", port, protocol, username, credentialKind:"ajs_sk"}}`; `port` is the gate the lease currently points at (a switch rebinds it), the secret is never returned; a non-admin scoped key may read only its own user's lease (missing/foreign id → 404, account outside the grant → 403) |
 | POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). A non-admin scoped key fills an empty `userId` with its own user, refuses another with 403, and must name an allowed `accountId`. 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`account_slots_exhausted`/`no_capacity`; `warning: multi_session_unimplemented` when display capacity effectiveSlots > 1 |
-| POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17; a non-admin scoped key may rotate only its own user's lease on a granted account (missing/foreign id → 404) |
+| POST | `/v1/leases/{id}/actions/rotate` | requires a configured panel: filter exclusion + Resin lease read; without one → 503 `UPSTREAM_UNAVAILABLE` and no mutation; a non-admin scoped key may rotate only its own user's lease on a granted account (missing/foreign id → 404) |
 | DELETE | `/v1/leases/{id}` | body `{confirm:true}` → 204; panel: delete Resin lease (404 idempotent), then store row; fallback: store release; decrement node `inUse`; a missing confirm → 400; a non-admin scoped key may revoke only its own user's lease on a granted account (missing/foreign id → 404) |
 | GET | `/v1/users` | list |
 | POST | `/v1/users` | create; name conflict → 409 |
@@ -3173,8 +3179,8 @@ real gate.
 record, 400 for empty/blank/unknown-field/wrong-type bodies, 409 without a gate or reader, 429
 inside the cooldown, and a failed probe as a 200 record with `error`.
 `internal/lablog/ring_test.go` covers the bounded window, allowlist-only attributes, filters and
-handler forwarding; `internal/store/honesty_test.go`
-covers the audit labels behind the probe and synthetic-rotation rows the dashboard shows.
+handler forwarding; `internal/store/honesty_test.go` covers the audit label behind the probe row
+the dashboard shows.
 
 ## Review fixes (AJS-53)
 
