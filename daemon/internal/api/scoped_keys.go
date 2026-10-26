@@ -16,12 +16,15 @@ var routeScopes = map[string]model.Scope{
 	http.MethodGet + " /metrics":    model.ScopeMetricsRead,
 	http.MethodGet + " /v1/metrics": model.ScopeMetricsRead,
 
+	// Account export, import and bulk-delete are deliberately absent. A
+	// filtered export still discloses credentials, import has no tenant-owned
+	// id or region semantics, and a filtered bulk-delete is destructive with
+	// partial success; so a scoped key without the admin scope is refused by
+	// the router before any handler runs. Only the static capabilities read,
+	// which names limits and never account data, stays available.
 	http.MethodGet + " /v1/accounts":                          model.ScopeAccountsRead,
 	http.MethodPost + " /v1/accounts":                         model.ScopeAccountsWrite,
 	http.MethodGet + " /v1/accounts/io/capabilities":          model.ScopeAccountsRead,
-	http.MethodPost + " /v1/accounts/export":                  model.ScopeAccountsRead,
-	http.MethodPost + " /v1/accounts/import":                  model.ScopeAccountsWrite,
-	http.MethodPost + " /v1/accounts/bulk-delete":             model.ScopeAccountsWrite,
 	http.MethodGet + " /v1/accounts/{id}":                     model.ScopeAccountsRead,
 	http.MethodPatch + " /v1/accounts/{id}":                   model.ScopeAccountsWrite,
 	http.MethodDelete + " /v1/accounts/{id}":                  model.ScopeAccountsWrite,
@@ -185,6 +188,12 @@ func (s *Server) scopedKeyDeniesRequest(key model.ScopedKey, r *http.Request) bo
 	if len(key.AccountIDs) == 0 && len(key.Regions) == 0 {
 		return false
 	}
+	// The schedule list applies its own key filter before the accountId
+	// filter, so an outside or unknown account answers an empty list instead of
+	// 403. Every other route keeps the query denial below.
+	if r.URL.Path == "/v1/schedules" {
+		return false
+	}
 	for _, name := range []string{"account_id", "accountId"} {
 		if value := strings.TrimSpace(r.URL.Query().Get(name)); value != "" {
 			if !s.keyAllowsAccountID(key, value) {
@@ -287,11 +296,40 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+// restrictedKey returns the scoped key installed by the auth middleware when it
+// narrows reads to named accounts or regions. Admin tokens and admin-scoped
+// keys never restrict, even when they carry accountIds/regions: the admin grant
+// already covers every account. The bool is false for unrestricted callers, so
+// handlers skip filtering entirely.
+func (s *Server) restrictedKey(r *http.Request) (model.ScopedKey, bool) {
+	key, ok := scopedKeyFromRequest(r)
+	if !ok || hasScope(key.Scopes, model.ScopeAdmin) {
+		return model.ScopedKey{}, false
+	}
+	if len(key.AccountIDs) == 0 && len(key.Regions) == 0 {
+		return model.ScopedKey{}, false
+	}
+	return key, true
+}
+
+// denyGlobalRead answers 403 for a restricted key on a surface that is global
+// and unattributed. Filtering such a response would have to guess ownership, so
+// the request is refused instead of returning another tenant's rows. It reports
+// whether the response was written.
+func (s *Server) denyGlobalRead(w http.ResponseWriter, r *http.Request, surface string) bool {
+	if _, restricted := s.restrictedKey(r); !restricted {
+		return false
+	}
+	writeError(w, http.StatusForbidden, CodeForbidden,
+		"scoped key is restricted to named accounts; "+surface+" is not available")
+	return true
+}
+
 // visibleAccountIDs returns the account ids a restricted key may see. The bool
 // is false when the key is unrestricted, so callers skip filtering entirely.
 func (s *Server) visibleAccountIDs(r *http.Request) (map[string]struct{}, bool) {
-	key, ok := scopedKeyFromRequest(r)
-	if !ok || (len(key.AccountIDs) == 0 && len(key.Regions) == 0) {
+	key, ok := s.restrictedKey(r)
+	if !ok {
 		return nil, false
 	}
 	ids := make(map[string]struct{}, len(key.AccountIDs))
@@ -304,8 +342,8 @@ func (s *Server) visibleAccountIDs(r *http.Request) (map[string]struct{}, bool) 
 }
 
 func (s *Server) filterAccountsForRequest(r *http.Request, accounts []model.Account) []model.Account {
-	key, ok := scopedKeyFromRequest(r)
-	if !ok || (len(key.AccountIDs) == 0 && len(key.Regions) == 0) {
+	key, ok := s.restrictedKey(r)
+	if !ok {
 		return accounts
 	}
 	filtered := make([]model.Account, 0, len(accounts))

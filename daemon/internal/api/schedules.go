@@ -30,8 +30,53 @@ type CatalogLister interface {
 	CatalogServers(accountID string) ([]runtime.CatalogServer, bool)
 }
 
+// scheduleVisible reports whether the caller may see one schedule. A restricted
+// key sees only schedules whose target is an account it may read; every other
+// schedule is indistinguishable from a missing one, so a lookup that fails this
+// check answers the same 404 as an unknown id.
+func (s *Server) scheduleVisible(r *http.Request, scheduleValue model.Schedule) bool {
+	visible, restricted := s.visibleAccountIDs(r)
+	if !restricted {
+		return true
+	}
+	if scheduleValue.Target.Kind != "account" {
+		return false
+	}
+	_, ok := visible[scheduleValue.Target.ID]
+	return ok
+}
+
+// scheduleTargetVisible reports whether the caller may target the account a
+// create or PATCH names. An unrestricted caller passes and keeps the existing
+// validation path; a restricted one may only target a visible account.
+func (s *Server) scheduleTargetVisible(r *http.Request, target model.ScheduleTarget) bool {
+	visible, restricted := s.visibleAccountIDs(r)
+	if !restricted {
+		return true
+	}
+	if target.Kind != "account" {
+		return false
+	}
+	_, ok := visible[target.ID]
+	return ok
+}
+
 func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	schedules := s.store.Schedules()
+	// The key filter runs before every query filter and before pagination, so a
+	// page is filled from the visible rows only. An accountId outside the key
+	// therefore answers an empty list instead of an empty page.
+	if visible, restricted := s.visibleAccountIDs(r); restricted {
+		filtered := make([]model.Schedule, 0, len(schedules))
+		for _, scheduleValue := range schedules {
+			if scheduleValue.Target.Kind == "account" {
+				if _, ok := visible[scheduleValue.Target.ID]; ok {
+					filtered = append(filtered, scheduleValue)
+				}
+			}
+		}
+		schedules = filtered
+	}
 	for i := range schedules {
 		schedules[i] = s.refreshRunCount(schedules[i])
 	}
@@ -68,12 +113,12 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSchedule(w http.ResponseWriter, r *http.Request) {
-	schedule, ok := s.store.Schedule(pathParam(r, "id"))
-	if !ok {
+	scheduleValue, ok := s.store.Schedule(pathParam(r, "id"))
+	if !ok || !s.scheduleVisible(r, scheduleValue) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
 		return
 	}
-	s.writeSchedule(w, http.StatusOK, s.refreshRunCount(schedule))
+	s.writeSchedule(w, http.StatusOK, s.refreshRunCount(scheduleValue))
 }
 
 func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +128,13 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	var input model.ScheduleCreateInput
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	// The target is authorized before any validation or catalog access: a
+	// restricted key may only create against an account it can read, and an
+	// unknown id is indistinguishable from another tenant's.
+	if input.Target != nil && !s.scheduleTargetVisible(r, *input.Target) {
+		writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
 		return
 	}
 	now := time.Now()
@@ -139,7 +191,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, ok := s.store.Schedule(pathParam(r, "id"))
-	if !ok {
+	if !ok || !s.scheduleVisible(r, current) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
 		return
 	}
@@ -150,6 +202,12 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	var input model.SchedulePatchInput
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	// A changed target must stay inside the key's accounts, checked before
+	// validation and before any mutation of the current schedule.
+	if input.Target != nil && !s.scheduleTargetVisible(r, *input.Target) {
+		writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
 		return
 	}
 	next := current
@@ -241,6 +299,11 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := pathParam(r, "id")
+	scheduleValue, ok := s.store.Schedule(id)
+	if !ok || !s.scheduleVisible(r, scheduleValue) {
+		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
+		return
+	}
 	if s.cfg.Schedules.IsRunning(id) {
 		writeScheduleReason(w, http.StatusConflict, CodeConflict, "in_flight",
 			"a run is in flight for this schedule", nil)
@@ -259,7 +322,7 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheduleValue, ok := s.store.Schedule(pathParam(r, "id"))
-	if !ok {
+	if !ok || !s.scheduleVisible(r, scheduleValue) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
 		return
 	}
@@ -299,7 +362,9 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
-	if _, ok := s.store.Schedule(id); !ok {
+	// The parent schedule is authorized exactly like GET before any run row is
+	// read, so an invisible schedule leaks neither its runs nor its existence.
+	if scheduleValue, ok := s.store.Schedule(id); !ok || !s.scheduleVisible(r, scheduleValue) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
 		return
 	}

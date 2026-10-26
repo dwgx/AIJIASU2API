@@ -443,18 +443,21 @@ func (s *Store) UpdateSettings(patch model.SettingsPatch, actor ...string) (mode
 	return next, nil
 }
 
-// Metrics renders the deterministic dashboard series for a window.
-func (s *Store) Metrics(window model.MetricRange) (model.Metrics, error) {
+// MetricsForAccounts renders the dashboard series for an explicit account
+// snapshot. The API passes the accounts a restricted key may read, so only
+// visible accountHealth rows can appear. The caller owns the slice and
+// buildMetrics only reads it; Metrics remains the all-accounts wrapper.
+func (s *Store) MetricsForAccounts(window model.MetricRange, accounts []model.Account) (model.Metrics, error) {
 	if window != model.Range24h && window != model.Range7d {
 		return model.Metrics{}, invalidf("range must be 24h or 7d")
 	}
-	s.mu.RLock()
-	accounts := make([]model.Account, len(s.accounts))
-	for i, account := range s.accounts {
-		accounts[i] = cloneAccount(account)
-	}
-	s.mu.RUnlock()
 	return buildMetrics(window, s.now(), accounts), nil
+}
+
+// Metrics renders the deterministic dashboard series for a window over every
+// account.
+func (s *Store) Metrics(window model.MetricRange) (model.Metrics, error) {
+	return s.MetricsForAccounts(window, s.Accounts())
 }
 
 // Topology returns the node-to-tag map used by the subscription renderer.

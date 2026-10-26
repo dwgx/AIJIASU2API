@@ -13,8 +13,10 @@ import (
 )
 
 // CreateScopedKey issues a least-privilege secret, stores only its SHA-256 and
-// returns the secret once. The account and region lists restrict reads; an
-// empty list means unrestricted.
+// returns the secret once. The scopes decide which routes the key may call;
+// the account and region lists narrow that grant to the named accounts, with
+// global unattributed surfaces refused rather than guessed. An empty list on
+// both dimensions means unrestricted, not none.
 func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string) (model.ScopedKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

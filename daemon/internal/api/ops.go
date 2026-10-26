@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"ajsaccountd/internal/model"
+	"ajsaccountd/internal/publisher"
+	"ajsaccountd/internal/runtime"
 )
 
 type healthResponse struct {
@@ -43,7 +45,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if window == "" {
 		window = model.Range24h
 	}
-	metrics, err := s.store.Metrics(window)
+	// A restricted key gets the series for the accounts it may read, built from
+	// that explicit snapshot: only visible accountHealth rows contribute.
+	accounts := s.filterAccountsForRequest(r, s.store.Accounts())
+	metrics, err := s.store.MetricsForAccounts(window, accounts)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -55,6 +60,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // exposition format: aggregate counts only, with every state present including
 // zeros. No ids, labels, usernames, IPs or secrets appear in the output.
 func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	// The exposition aggregates accounts, nodes, leases, users, keys, requests
+	// and scheduler state globally. None of those counters can be rebuilt from
+	// a per-account subset honestly, so a restricted key is refused outright.
+	if s.denyGlobalRead(w, r, "global metrics") {
+		return
+	}
 	accounts := map[model.AccountState]int{
 		model.AccountActive:     0,
 		model.AccountPaused:     0,
@@ -153,6 +164,14 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 const defaultRequestsPageSize = 200
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
+	// A request row stores the account label it was written with, not the
+	// account id, and labels are recyclable: after B releases a label and A
+	// takes it, filtering A's rows by its current label would return B's
+	// history. There is no stable attribution in the log, so a restricted key
+	// is refused instead of served a guess. The unrestricted read is unchanged.
+	if s.denyGlobalRead(w, r, "the request log") {
+		return
+	}
 	requests := s.store.Requests()
 	start, end, ok := paginateWithLimit(w, r, len(requests), defaultRequestsPageSize)
 	if !ok {
@@ -175,6 +194,12 @@ func (s *Server) handleCreateMutation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	// Audit rows are global and carry free text, not a reliable account id, so
+	// a restricted key is refused before the store is read. Inferring ownership
+	// from the detail or target would be a guess presented as a filter.
+	if s.denyGlobalRead(w, r, "the audit log") {
+		return
+	}
 	limit := 20
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -259,5 +284,49 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.store.Topology())
+	topology := s.store.Topology()
+	// A restricted key gets the same map built from its visible nodes only:
+	// another tenant's node ids and tags never appear, and the map describes
+	// exactly the subset the key may read.
+	if visible, restricted := s.visibleAccountIDs(r); restricted {
+		nodes := make(map[string]string, len(visible))
+		for _, node := range s.store.Nodes() {
+			if _, ok := visible[node.AccountID]; ok {
+				nodes[node.ID] = node.Label
+			}
+		}
+		topology.Nodes = nodes
+	}
+	writeJSON(w, http.StatusOK, topology)
+}
+
+// projectPanelTopology narrows the panel's last-good view to the live nodes of
+// the accounts the caller may read. Both the node index and the subscription
+// content are global in the panel view, so a restricted key gets them rebuilt
+// from the identical visible subset instead of a filtered copy that would still
+// carry another tenant's tags in Content.
+func (s *Server) projectPanelTopology(r *http.Request, topology runtime.Topology) (runtime.Topology, error) {
+	visible, restricted := s.visibleAccountIDs(r)
+	if !restricted {
+		return topology, nil
+	}
+	nodes := make(map[string]string, len(visible))
+	live := make([]publisher.Node, 0, len(visible))
+	for _, node := range s.store.Nodes() {
+		if node.State != model.NodeLive {
+			continue
+		}
+		if _, ok := visible[node.AccountID]; !ok {
+			continue
+		}
+		nodes[node.ID] = node.Label
+		live = append(live, publisher.Node{Tag: node.Label, GatePort: node.GatePort})
+	}
+	content, err := publisher.Render(live)
+	if err != nil {
+		return runtime.Topology{}, err
+	}
+	topology.Nodes = nodes
+	topology.Content = content
+	return topology, nil
 }

@@ -354,3 +354,29 @@ func TestAuditExportCSVNeutralizesFormulaCells(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditExportCSVRestrictedKeyForbidden pins the global-audit rule on the
+// CSV path: a key restricted to named accounts is refused before the retention
+// window is read or a row is selected, so even a malformed window answers 403
+// rather than 400. An unrestricted audit:read key keeps its 200 stream.
+func TestAuditExportCSVRestrictedKeyForbidden(t *testing.T) {
+	ts, _ := newTestServer(t)
+	restricted, _ := mustCreateScopedKey(t, ts, map[string]any{
+		"userId":     "u-01",
+		"label":      "restricted audit",
+		"scopes":     []string{"audit:read"},
+		"accountIds": []string{"acc-01"},
+	})
+	for _, path := range []string{"/v1/audit/export.csv", "/v1/audit/export.csv?from=not-a-time"} {
+		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+	}
+	resp, _ := scopedCall(t, ts, restricted.Secret, http.MethodGet, "/v1/audit/export.csv", nil)
+	if got := resp.Header.Get("Content-Type"); strings.HasPrefix(got, "text/csv") {
+		t.Fatalf("refused export streamed CSV: Content-Type %q", got)
+	}
+	if got := resp.Header.Get("X-Truncated"); got != "" {
+		t.Fatalf("refused export selected rows: X-Truncated %q", got)
+	}
+}

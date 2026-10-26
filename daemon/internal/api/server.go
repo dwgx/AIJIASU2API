@@ -604,7 +604,15 @@ func (s *Server) handleTopologyView(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "resin topology unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, topology)
+	// A restricted key must never receive the raw global view: the projection
+	// rebuilds Nodes and Content from the live nodes of its visible accounts.
+	projected, err := s.projectPanelTopology(r, topology)
+	if err != nil {
+		s.logger.Warn("resin_topology_projection_failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "resin topology unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, projected)
 }
 
 // handleReconcile forces a re-render, PATCH and refresh through the panel.

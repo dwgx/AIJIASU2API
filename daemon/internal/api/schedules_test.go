@@ -441,3 +441,161 @@ func TestScheduleAPIMetrics(t *testing.T) {
 		}
 	}
 }
+
+// TestScopedKeyRestrictedSchedules covers the schedule surface for a key that
+// may only read one account: the list prefilter runs before the query filters
+// and pagination, invisible and unknown resources answer the same 404, writes
+// may only target a visible account, and the pure preview stays allowed.
+func TestScopedKeyRestrictedSchedules(t *testing.T) {
+	ts, st, _, _, accountA := newScheduleTestServer(t)
+	accountB, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Second Tenant", Username: "second", Password: "secret",
+		Platform: model.PlatformLinux, Concurrency: 1, Regions: []string{"jp"},
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/users", map[string]any{"name": "schedules.bot"})
+	requireStatus(t, resp, http.StatusCreated)
+	user := decodeBody[model.PanelUser](t, body)
+	created, _ := mustCreateScopedKey(t, ts, map[string]any{
+		"userId":     user.ID,
+		"label":      "schedule tenant",
+		"scopes":     []string{"settings:read", "settings:write"},
+		"accountIds": []string{accountA.ID},
+	})
+	key := created.Secret
+
+	createSchedule := func(name, accountID string) (model.Schedule, string) {
+		t.Helper()
+		resp, payload := apiCall(t, ts, http.MethodPost, "/v1/schedules", map[string]any{
+			"name":    name,
+			"action":  "account.reconnect",
+			"target":  map[string]any{"kind": "account", "id": accountID},
+			"trigger": map[string]any{"kind": "interval", "everySec": 600},
+		})
+		requireStatus(t, resp, http.StatusCreated)
+		return decodeBody[model.Schedule](t, payload), resp.Header.Get("ETag")
+	}
+	// B is created first so a filter applied after pagination would leak it as
+	// the first row of a ?limit=1 page.
+	scheduleB, _ := createSchedule("Tenant B reconnect", accountB.ID)
+	scheduleA, etagA := createSchedule("Tenant A reconnect", accountA.ID)
+
+	resp, body = scopedCall(t, ts, key, http.MethodGet, "/v1/schedules?limit=1", nil)
+	requireStatus(t, resp, http.StatusOK)
+	page := decodeBody[[]model.Schedule](t, body)
+	if len(page) != 1 || page[0].ID != scheduleA.ID {
+		t.Fatalf("restricted schedule page = %+v, want only %s", page, scheduleA.ID)
+	}
+
+	resp, body = scopedCall(t, ts, key, http.MethodGet, "/v1/schedules?accountId="+accountB.ID, nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.Schedule](t, body); len(got) != 0 {
+		t.Fatalf("outside accountId list = %+v, want empty", got)
+	}
+	resp, body = scopedCall(t, ts, key, http.MethodGet, "/v1/schedules?accountId=acc-unknown", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.Schedule](t, body); len(got) != 0 {
+		t.Fatalf("unknown accountId list = %+v, want empty", got)
+	}
+	if got := strings.TrimSpace(string(body)); got != "[]" {
+		t.Fatalf("unknown accountId body = %q, want []", got)
+	}
+	resp, body = scopedCall(t, ts, key, http.MethodGet, "/v1/schedules?enabled=false", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.Schedule](t, body); len(got) != 1 || got[0].ID != scheduleA.ID {
+		t.Fatalf("enabled filter = %+v, want only %s", got, scheduleA.ID)
+	}
+
+	// Detail: an invisible schedule and an unknown id are indistinguishable.
+	invisibleResp, invisibleBody := scopedCall(t, ts, key, http.MethodGet, "/v1/schedules/"+scheduleB.ID, nil)
+	requireStatus(t, invisibleResp, http.StatusNotFound)
+	unknownResp, unknownBody := scopedCall(t, ts, key, http.MethodGet, "/v1/schedules/sch-unknown", nil)
+	requireStatus(t, unknownResp, http.StatusNotFound)
+	invisibleErr := decodeBody[errorResponse](t, invisibleBody)
+	unknownErr := decodeBody[errorResponse](t, unknownBody)
+	if invisibleErr.Error.Code != CodeNotFound ||
+		invisibleErr.Error.Code != unknownErr.Error.Code ||
+		invisibleErr.Error.Message != unknownErr.Error.Message {
+		t.Fatalf("invisible error = %+v, unknown error = %+v", invisibleErr.Error, unknownErr.Error)
+	}
+
+	// Runs authorize the parent schedule before any run row is read.
+	for _, path := range []string{"/v1/schedules/" + scheduleB.ID + "/runs", "/v1/schedules/sch-unknown/runs"} {
+		resp, body = scopedCall(t, ts, key, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	}
+
+	// Authorization precedes If-Match: an invisible schedule is 404 even when
+	// the precondition header is absent.
+	resp, body = scopedCall(t, ts, key, http.MethodPatch, "/v1/schedules/"+scheduleB.ID,
+		map[string]any{"name": "hijack"})
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, body, CodeNotFound)
+	// A visible schedule cannot be retargeted to an invisible account.
+	req := newRequest(t, http.MethodPatch, ts.URL+"/v1/schedules/"+scheduleA.ID,
+		map[string]any{"target": map[string]any{"kind": "account", "id": accountB.ID}})
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
+	req.Header.Set("If-Match", etagA)
+	resp, body = doRequest(t, ts, req)
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, body, CodeNotFound)
+	unchanged, ok := st.Schedule(scheduleA.ID)
+	if !ok || unchanged.Target.ID != accountA.ID || unchanged.Name != scheduleA.Name {
+		t.Fatalf("schedule A changed after refused PATCH: %+v", unchanged)
+	}
+
+	// Create may only target a visible account.
+	for _, targetID := range []string{accountB.ID, "acc-unknown"} {
+		resp, body = scopedCall(t, ts, key, http.MethodPost, "/v1/schedules", map[string]any{
+			"name":    "Outside " + targetID,
+			"action":  "account.reconnect",
+			"target":  map[string]any{"kind": "account", "id": targetID},
+			"trigger": map[string]any{"kind": "interval", "everySec": 600},
+		})
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	}
+	resp, body = scopedCall(t, ts, key, http.MethodPost, "/v1/schedules", map[string]any{
+		"name":    "Tenant A manual",
+		"action":  "account.reconnect",
+		"target":  map[string]any{"kind": "account", "id": accountA.ID},
+		"trigger": map[string]any{"kind": "interval", "everySec": 900},
+	})
+	requireStatus(t, resp, http.StatusCreated)
+
+	// Delete and run fetch the schedule first; an invisible one is not touched.
+	for _, path := range []string{"/v1/schedules/" + scheduleB.ID, "/v1/schedules/sch-unknown"} {
+		resp, _ = scopedCall(t, ts, key, http.MethodDelete, path, nil)
+		requireStatus(t, resp, http.StatusNotFound)
+	}
+	if _, ok := st.Schedule(scheduleB.ID); !ok {
+		t.Fatal("a refused DELETE removed the invisible schedule")
+	}
+	for _, path := range []string{"/v1/schedules/" + scheduleB.ID + "/actions/run", "/v1/schedules/sch-unknown/actions/run"} {
+		resp, body = scopedCall(t, ts, key, http.MethodPost, path, map[string]any{"dryRun": true})
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	}
+
+	// Preview is pure and hardcodes its target, so it stays allowed.
+	resp, body = scopedCall(t, ts, key, http.MethodGet, "/v1/schedules/preview?kind=interval&everySec=300", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if runs := decodeBody[model.SchedulePreview](t, body).Runs; len(runs) == 0 {
+		t.Fatal("preview returned no runs for a restricted key")
+	}
+
+	// Admin compatibility: the same rows stay visible to the admin token.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/schedules", nil)
+	requireStatus(t, resp, http.StatusOK)
+	seen := make(map[string]bool)
+	for _, scheduleValue := range decodeBody[[]model.Schedule](t, body) {
+		seen[scheduleValue.ID] = true
+	}
+	if !seen[scheduleA.ID] || !seen[scheduleB.ID] {
+		t.Fatalf("admin schedule list = %v, want both tenants", seen)
+	}
+}
