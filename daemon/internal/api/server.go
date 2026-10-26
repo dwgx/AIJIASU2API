@@ -835,8 +835,8 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			return
 		}
 		if s.scopedKeyDeniesRequest(key, r) {
-			writeError(w, http.StatusForbidden, CodeForbidden,
-				"scoped key is not allowed to read this account")
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+				"scoped key is not allowed to read this account", nil)
 			return
 		}
 		if err := s.store.MarkScopedKeyUsed(key.ID); err != nil {
@@ -949,8 +949,8 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if identity, ok := authIdentityFrom(r); ok && !identity.allowsRoute(candidate.method, candidate.pattern) {
-			writeError(w, http.StatusForbidden, CodeForbidden,
-				"credential lacks the permission required by this route")
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopeRequired,
+				"credential lacks the permission required by this route", nil)
 			return
 		}
 		if identity, ok := authIdentityFrom(r); ok && identity.rbac && !identity.role.permits(routeRole(candidate.method, candidate.pattern)) {

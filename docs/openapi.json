@@ -210,6 +210,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           }
         }
       }
@@ -3188,6 +3191,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -3286,6 +3292,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -3380,6 +3389,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4513,7 +4525,7 @@
           "Usage"
         ],
         "summary": "Aggregate the request log over an inclusive UTC window.",
-        "description": "Requires usage:read for a scoped key. A key restricted by accountIds/regions aggregates only its accounts' rows, and an explicit account filter outside them answers 403 FORBIDDEN.",
+        "description": "Requires usage:read for a scoped key. The request log attributes rows by account label alone and labels are not unique, so a key restricted by accountIds/regions is refused outright with 403 FORBIDDEN and error.reason=scoped_key_restricted rather than served a filtered or partial aggregate; an explicit account filter cannot re-enable it. Admin tokens, admin-scoped keys and unrestricted scoped keys get the full summary.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -4533,7 +4545,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -6983,7 +6995,7 @@
           "Payments"
         ],
         "summary": "Verify a 易支付 GET query callback and record its settlement event.",
-        "description": "No bearer token: the MD5 signature over the query string is the credential. This is the standard 易支付 notify transport. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Answers success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
+        "description": "No bearer token: the MD5 signature over the query string is the credential. This is the standard 易支付 notify transport. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. The plain-text acknowledgement is a service claim, not a payment claim: success only when the order is active with a serving grant. A payment that is durably recorded but still paid or queued for fulfilment answers fail, so the gateway keeps retrying; every rejected callback also answers fail. Disabled configuration answers 503.",
         "x-implementation-phase": "P0",
         "security": [],
         "parameters": [
@@ -7081,7 +7093,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Plain-text acknowledgement: success for an accepted or duplicate event, fail for every rejection.",
+            "description": "Plain-text acknowledgement: success only when the order is active with a serving grant; fail for a durably recorded payment that is still paid or queued for fulfilment, a replayed event that is not serving, and every rejection.",
             "content": {
               "text/plain": {
                 "schema": {
@@ -7108,7 +7120,7 @@
           "Payments"
         ],
         "summary": "Verify a 易支付 notify (GET query or POST form) and record its settlement event.",
-        "description": "No bearer token: the MD5 signature over the query string/form body is the credential. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Standard 易支付 sends GET query parameters; a POST form body is also accepted. Answers the plain-text protocol: success only for an accepted or duplicate event, fail otherwise. Disabled configuration answers 503.",
+        "description": "No bearer token: the MD5 signature over the query string/form body is the credential. Verifies sign, pid, trade_status=TRADE_SUCCESS and money against the immutable order snapshot, then applies the event idempotently by trade_no. Standard 易支付 sends GET query parameters; a POST form body is also accepted. The plain-text acknowledgement is a service claim, not a payment claim: success only when the order is active with a serving grant. A payment that is durably recorded but still paid or queued for fulfilment answers fail, so the gateway keeps retrying; every rejected callback also answers fail. Disabled configuration answers 503.",
         "x-implementation-phase": "P0",
         "security": [],
         "requestBody": {
@@ -7180,7 +7192,7 @@
         },
         "responses": {
           "200": {
-            "description": "Plain-text acknowledgement: success for an accepted or duplicate event, fail for every rejection.",
+            "description": "Plain-text acknowledgement: success only when the order is active with a serving grant; fail for a durably recorded payment that is still paid or queued for fulfilment, a replayed event that is not serving, and every rejection.",
             "content": {
               "text/plain": {
                 "schema": {
@@ -7488,6 +7500,23 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ScopedKeyForbidden": {
+        "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude this global read. The message stays human-readable and is not part of the contract; clients branch on reason. These are the only two values these routes emit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "FORBIDDEN",
+                "message": "scoped key is restricted to named accounts; the audit log is not available",
+                "reason": "scoped_key_restricted"
+              }
             }
           }
         }

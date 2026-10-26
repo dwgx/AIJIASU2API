@@ -8,6 +8,17 @@ import (
 	"ajsaccountd/internal/model"
 )
 
+// Stable error.reason values of a scoped-key 403. The OpenAPI contract
+// (ErrorDetail.reason and the ScopedKeyForbidden response) names the same
+// pair, so a client can branch on the reason instead of parsing the message.
+const (
+	// ReasonScopeRequired means the key does not carry the route's scope.
+	ReasonScopeRequired = "scope_required"
+	// ReasonScopedKeyRestricted means the key's accountIds/regions exclude
+	// the requested surface.
+	ReasonScopedKeyRestricted = "scoped_key_restricted"
+)
+
 // routeScopes maps a registered route pattern to the scope a scoped key needs.
 // Routes absent from the table are admin-only: a scoped key without the admin
 // scope cannot reach them. Keeping the table beside the handlers makes the
@@ -320,8 +331,8 @@ func (s *Server) denyGlobalRead(w http.ResponseWriter, r *http.Request, surface 
 	if _, restricted := s.restrictedKey(r); !restricted {
 		return false
 	}
-	writeError(w, http.StatusForbidden, CodeForbidden,
-		"scoped key is restricted to named accounts; "+surface+" is not available")
+	writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+		"scoped key is restricted to named accounts; "+surface+" is not available", nil)
 	return true
 }
 
