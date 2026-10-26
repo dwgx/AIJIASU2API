@@ -1,6 +1,7 @@
 # PANEL — implementation design for `ajs-accountd` + Resin
 
 Status: historical design baseline (2026-10-23); current implementation status is in README.md (JSON snapshot, direct per-node gates, no ajsproxy child) · Date: 2026-10-23 · License: MIT
+Archived 2026-10-27: see [`../ARCHIVE.md`](../ARCHIVE.md) for the retained AJiaSu → API scope, experimental surfaces and known gaps.
 Companion research: `research/70-panel/REPORT.md` (evidence, candidate matrix, falsification)
 
 This document is the build sheet: components, API surface, data model, phases, and acceptance

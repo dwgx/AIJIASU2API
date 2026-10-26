@@ -22,6 +22,24 @@ account; the 2026-10-23 run is in
 [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md)), and no vendor
 artifact or credential from those runs is committed.
 
+## API-first (AJiaSu → API)
+
+The retained product is the core **AJiaSu → API** path: an authorized AJiaSu account becomes a
+scoped proxy API. An admin bearer token or an `ajs_sk_` scoped key calls the control plane at
+`http://127.0.0.1:2261`; accounts, catalog, guarded connect/switch, leases, nodes, requests and
+usage, topology and gate health are JSON over that API, with Go and TypeScript clients in `sdk/`.
+Start with [`docs/API-GUIDE.md`](docs/API-GUIDE.md) for the Webshare-style quickstart, scope table
+and curl examples; [`ARCHIVE.md`](ARCHIVE.md) is the archive map — what is kept, what is
+experimental, and the known gaps.
+
+Experimental or **not enabled** in this archive: the customer tenant portal
+(`AJS_TENANT_PORTAL=1`), orders and the 易支付 (epay) / Stripe payment adapters (offline-tested
+only; no daemon route charges a card), and the remote-ingress credential store
+(`AJS_REMOTE_INGRESS=1`, unwired). Every proxy gate binds `127.0.0.1`; there is no public proxy
+ingress, and the paid-tenant direction is closed. This does not change the
+[Use boundary](#use-boundary): commercial resale or automation still requires separate written
+vendor authorization covering the accounts, service and jurisdictions involved.
+
 ## Current status
 
 **Offline emulator, dashboard and daemon, plus a control-plane compose stack in `deploy/`; the
@@ -109,7 +127,7 @@ As of 2026-10-26:
   second order, grant or charge. The operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  480 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
+  500 Vitest tests in 56 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -246,8 +264,8 @@ As of 2026-10-26:
   persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
   egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
   no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 1323 `func Test`
-  functions — 1277 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
+  accounts once per process, pausing a jittered 60 s after a failed login. 1393 `func Test`
+  functions — 1347 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -381,7 +399,7 @@ for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT
 candidate analysis behind it.
 
 [`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (117 paths, 144 operations, 194 schemas at the last sync): every route registered in
+surface (120 paths, 147 operations, 195 schemas at the last sync): every route registered in
 `daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
 schedules, scoped keys, the platform views (renewal, usage, health, webhooks), plans and orders,
 the Stripe-compatible and 易支付 payment callbacks, the customer tenant portal and tenant
@@ -478,8 +496,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (480 tests in 54 files), `cd daemon && go test ./...`
-(1277 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
+Tests: `cd dashboard && npm test` (500 tests in 56 files), `cd daemon && go test ./...`
+(1347 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and

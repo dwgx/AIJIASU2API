@@ -1,6 +1,7 @@
 # PLAN — AJiaSu reverse engineering → egress-selectable proxy API
 
 Status: **historical research baseline (wave 1); current implementation status is in README.md** · Date: 2026-10-23 · Owner: project Owner
+Archived 2026-10-27: see [`ARCHIVE.md`](ARCHIVE.md) for the retained AJiaSu → API scope, experimental surfaces and known gaps.
 Repo: `D:/Project/LovePlusSpeedToProxy` (branch `panel-design`, no remote)
 
 ## 1. North star

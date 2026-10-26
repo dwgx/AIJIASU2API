@@ -2760,8 +2760,8 @@ transport failure leaves the state and `lastLoginAt` untouched.
 
 Other contract details:
 
-- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (117 paths, 144 operations,
-  194 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
+- `docs/openapi.json` is the OpenAPI 3.1 contract for this route table (120 paths, 147 operations,
+  195 schemas at the last sync). Every operation carries `x-implementation-phase`: `P0` is served
   today, `P1` marks the interfaces added after P0 (registered in this build; the scheduler engine
   stays off unless `AJS_SCHEDULES=1`). `dashboard/tests/openapi.test.ts` fails
   when the document stops parsing, a `$ref` dangles, an `operationId` repeats, a path parameter is
@@ -2861,8 +2861,8 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **1277 `func Test*` functions across 161 `_test.go` files** (one `TestMain`
-included; recounted 2026-10-26); the emulator module adds 46 functions in 14 files. Every suite
+The tree holds **1347 `func Test*` functions across 168 `_test.go` files** (one `TestMain`
+included; recounted 2026-10-27); the emulator module adds 46 functions in 14 files. Every suite
 runs offline.
 
 `internal/api/server_test.go` uses `httptest` only and covers: 401 vs `/healthz`
