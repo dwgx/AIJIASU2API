@@ -53,6 +53,9 @@ Startup recovery demotes a persisted `LIVE`/`DRAINING` node to `STALE` when
 no in-process gate serves it, and the opt-in `AJS_AUTO_LOGIN=1` reopens eligible sessions once per
 boot. Panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
 
+The FV carrier is obfuscation, not encryption; the two-time-pad properties and their consequences
+are described in [FV carrier confidentiality](#fv-carrier-confidentiality).
+
 As of 2026-10-25:
 
 - `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
@@ -522,6 +525,10 @@ research/77-m1-spike/      Resin v1.3.0 M1 spike report (PASS) and measurements
 research/82-live-20261023/  first live-account run: original app vs daemon egress parity (redacted)
 research/84-ajs-496/       static triage of the 4.9.6.0 / 4.3.0.1 / 4.12.2.0 samples (not executed)
 ```
+
+## FV carrier confidentiality
+
+The FV carrier is **obfuscation, not encryption**. The outer 16-byte key travels in the clear in every request, and AES-128-CTR is reused inside a session: the data channel encrypts both directions with `AES-128-CTR(sessionKey, IV=div)`. That data-channel reuse is confirmed against the live vendor (`research/82-live-20261023/REPORT.md` F4): an observer who can read the TCP stream can XOR the two directions of a flow and crib-drag the leading bytes. The auth body and the auth map share `AES-128-CTR(sessionKey, IV=n)` from offset 0 **in the emulator's implementation only**: this is confirmed against the mock capture (`captures/fvmock-1.log`) and is the emulator's assumption for the vendor, because a server that continues the body stream at offset `l=` would also decode and the live run does not distinguish them (`r=ok` also arrives in the response text). Under that assumption an observer can also XOR the auth body with the auth map over their shared `min(len(body), len(map))` prefix to recover `sid`, `sip`, `cip`, `dns` and `au`. With the Android field set (`DefaultAuthConfig`) and no body pad the `p=<password>` line starts at offset 136; production prepends the `_=` pad (`RandomPad`, 0..199 bytes, sorted first), so the offset is 136..335, and overlap with the mock's 187-byte map exposes a short password only when the pad is 50 bytes or shorter. The captured Linux body puts `p=` at offset 328, outside that map. The observer cannot derive the session key (RSA-OAEP, fresh per session), cannot recover relayed payload past the shared prefix, and cannot break TLS carried inside the tunnel. This is inherited from the vendor protocol and is **not fixed here on purpose**: changing the IV derivation breaks the shipping client. Treat the daemon-to-vendor hop as public; terminate TLS in the client or carry the hop over a tunnel you control.
 
 ## Legal and terms-of-service caution
 

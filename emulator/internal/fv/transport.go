@@ -117,8 +117,9 @@ type streamConn struct {
 	send cipher.Stream
 	recv cipher.Stream
 
-	wmu  sync.Mutex
-	wbuf []byte
+	wmu     sync.Mutex
+	wbuf    []byte
+	wclosed bool
 }
 
 func (c *streamConn) Read(p []byte) (int, error) {
@@ -132,12 +133,32 @@ func (c *streamConn) Read(p []byte) (int, error) {
 func (c *streamConn) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.wclosed {
+		return 0, io.ErrClosedPipe
+	}
 	if cap(c.wbuf) < len(p) {
 		c.wbuf = make([]byte, len(p))
 	}
 	buf := c.wbuf[:len(p)]
 	c.send.XORKeyStream(buf, p)
 	return c.conn.Write(buf)
+}
+
+// CloseWrite sends a FIN on the vendor connection while keeping the read
+// direction open, so the response to an already-written request still arrives.
+// A connection without CloseWrite is closed instead, which is what the gate
+// did before this method existed. CloseWrite is idempotent.
+func (c *streamConn) CloseWrite() error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.wclosed {
+		return nil
+	}
+	c.wclosed = true
+	if cw, ok := c.conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.conn.Close()
 }
 
 func (c *streamConn) Close() error                       { return c.conn.Close() }

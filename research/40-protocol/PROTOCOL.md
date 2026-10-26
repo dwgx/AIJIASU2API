@@ -1059,8 +1059,9 @@ AES-128-CTR(sessionKey, IV=n) over the raw SOCKS5 CONNECT
 
 Captured 18-byte body decrypts to
 `05 01 00 03 0b 65 78 61 6d 70 6c 65 2e 63 6f 6d 00 50`, i.e.
-SOCKS5 CONNECT `example.com:80`. The client waits for `code=200` and a 10-byte
-encrypted SOCKS5 reply before relaying payload.
+SOCKS5 CONNECT `example.com:80`. The client waits for `code=200` and an
+encrypted SOCKS5 reply before relaying payload; the reply length follows its
+ATYP (10 bytes for IPv4, 22 for IPv6, `7 + len(domain)` for a domain name).
 
 ### Login path
 
@@ -1080,7 +1081,11 @@ exercised by this path and remains `[UNKNOWN]`.
 | `captures/fvmock-2.bin` | raw data-channel connection (207 B) |
 | `captures/fvmock-2.log` | `s=test`, `n=<div>`, decrypted SOCKS5 CONNECT |
 
+### Confidentiality of the carrier
 
+Both directions of one data channel use `AES-128-CTR(sessionKey, IV=div)`. The client's payload starts at CTR offset `R = len(SOCKS5 CONNECT)` (18 for a domain target, 10 for IPv4), the server's at `L = len(SOCKS5 reply)` (10 for an IPv4 reply, 22 for IPv6, `7 + len(domain)` for a domain reply), so server payload byte `k` shares a keystream byte with client payload byte `k + R - L`; for the captured domain target with an IPv4 reply, `R=18` and `L=10`, so `k` maps to `k-8`. In the emulator's implementation the auth body and auth map both start at offset 0 under the same key and IV `n`, so their first `min(len(body),len(map))` bytes overlap. **Observed:** the data-channel reuse is confirmed against the live vendor (`research/82-live-20261023/REPORT.md` F4). The auth-map reuse is confirmed only against the mock (`captures/fvmock-1.log`: map decrypts with IV=n at offset 0 and the shipping client accepted it); a server that continues the body stream at offset `l=` would also decode, and the live run does not distinguish them because `r=ok` also arrives in the response text. Treat IV=n at offset 0 as the emulator's assumption.
+
+An on-path observer can XOR the directions and crib-drag headers. Under the emulator's auth-map assumption they can also recover `sid/sip/cip/dns/au` and, when the `_` body pad is 50 bytes or shorter, `p=`; they cannot recover the rest of a TLS flow or the session key.
 
 ## Error and edge cases
 

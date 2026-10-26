@@ -490,6 +490,7 @@ type opv2Conn struct {
 	sessionKey []byte
 	readBuf    []byte
 	wmu        sync.Mutex
+	wclosed    bool
 }
 
 func (c *opv2Conn) Read(p []byte) (int, error) {
@@ -511,6 +512,9 @@ func (c *opv2Conn) Read(p []byte) (int, error) {
 func (c *opv2Conn) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.wclosed {
+		return 0, io.ErrClosedPipe
+	}
 	written := 0
 	for len(p) > 0 {
 		n := min(len(p), OPV2MaxChunk)
@@ -533,6 +537,23 @@ func (c *opv2Conn) Write(p []byte) (int, error) {
 		p = p[n:]
 	}
 	return written, nil
+}
+
+// CloseWrite half-closes the underlying connection. OPV2 has no in-band FIN,
+// so the TCP FIN is the only half-close the legacy carrier can express. A
+// connection without CloseWrite is closed, matching the previous behaviour.
+// CloseWrite is idempotent.
+func (c *opv2Conn) CloseWrite() error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.wclosed {
+		return nil
+	}
+	c.wclosed = true
+	if cw, ok := c.conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.conn.Close()
 }
 
 func (c *opv2Conn) Close() error                       { return c.conn.Close() }

@@ -149,6 +149,14 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.Reader.Read(p) }
 
+// CloseWrite keeps the relay's half-close behaviour on a wrapped connection.
+func (c *bufferedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
 func splitHostPort(hostport string, defaultPort int) (string, int, error) {
 	host, portText, err := net.SplitHostPort(hostport)
 	if err != nil {

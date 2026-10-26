@@ -1,6 +1,14 @@
 // Package fv implements the FV data-plane core: RSA-OAEP session-key
-// transport, AES-128-CTR payload encryption, the s/n/k/l/_ frame, the auth
-// exchange, and the pluggable data-channel transports.
+// transport, the AES-128-CTR carrier, the s/n/k/l/_ frame, the auth exchange,
+// and the pluggable data-channel transports.
+//
+// The carrier is obfuscation, not encryption: the outer 16-byte key travels in
+// the clear, and the same session key and IV are reused in both directions of
+// a data channel (confirmed against the live vendor). The emulator also starts
+// the auth body and the auth map at the same CTR position under one key and
+// IV; that reuse is an emulator assumption, confirmed only against the mock,
+// not an established vendor property. See README.md, "FV carrier
+// confidentiality".
 //
 // The wire format is derived from the public-domain OpenAJS client and the
 // static analysis in research/40-protocol/PROTOCOL.md. Server-side behaviour
@@ -129,7 +137,11 @@ func OAEPBlock(pub *rsa.PublicKey, h crypto.Hash, sessionKey []byte) ([]byte, er
 }
 
 // NewCTR returns an AES-128-CTR stream. Encryption and decryption are the same
-// operation; the caller must use a fresh stream per direction and position.
+// operation. The carrier reuses one key and IV per data-channel flow in both
+// directions; the emulator additionally starts the auth body and the auth map
+// at the same position under one key and IV (an emulator assumption, not a
+// vendor-confirmed property). The stream is positioned by the caller, not made
+// unique here.
 func NewCTR(key, iv []byte) (cipher.Stream, error) {
 	if len(key) != SessionKeySize {
 		return nil, fmt.Errorf("%w: AES key is %d bytes, want %d", ErrBadKeySize, len(key), SessionKeySize)

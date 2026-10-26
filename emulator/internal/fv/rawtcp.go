@@ -5,9 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"strings"
 	"time"
 )
 
@@ -34,8 +32,8 @@ func (RawTCP) Dial(ctx context.Context, addr string) (net.Conn, error) {
 
 // OpenData opens one proxied flow: a fresh TCP connection, the data-channel
 // frame carrying s=<sid> and n=<payload IV>, then the encrypted SOCKS5 CONNECT
-// request. The server's header must contain code=200 and its 10-byte SOCKS5
-// reply must be 05 00.
+// request. The server's header must carry code=200 and its SOCKS5 reply must
+// be 05 00; the reply length follows its ATYP.
 func (RawTCP) OpenData(ctx context.Context, s *Session, host string, port int) (net.Conn, error) {
 	if s == nil {
 		return nil, errors.New("fv: nil session")
@@ -94,25 +92,22 @@ func (RawTCP) OpenData(ctx context.Context, s *Session, host string, port int) (
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(headerText, "code=200") {
-		return nil, fmt.Errorf("fv: data channel rejected: %s", headerText)
+	if err := checkCarrierCode("data channel", headerText); err != nil {
+		return nil, err
 	}
 
-	reply := make([]byte, 10)
-	if _, err := io.ReadFull(r, reply); err != nil {
-		return nil, fmt.Errorf("fv: read SOCKS5 reply: %w", err)
-	}
+	// The reply shares the payload CTR stream with everything the server
+	// sends afterwards, so the stream is created before the reply is read.
 	recv, err := NewCTR(s.Key, payloadIV)
 	if err != nil {
 		return nil, err
 	}
-	replyPlain := make([]byte, len(reply))
-	recv.XORKeyStream(replyPlain, reply)
-	if replyPlain[0] != 0x05 {
-		return nil, fmt.Errorf("fv: SOCKS5 reply version %d, want 5", replyPlain[0])
+	reply, err := ReadSocks5Reply(r, recv)
+	if err != nil {
+		return nil, err
 	}
-	if replyPlain[1] != 0x00 {
-		return nil, fmt.Errorf("fv: socks connect failed: rep=%d", replyPlain[1])
+	if reply.Rep != 0x00 {
+		return nil, fmt.Errorf("fv: socks connect failed: rep=%d atyp=%d bnd=%s:%d", reply.Rep, reply.Atyp, reply.BndAddr, reply.BndPort)
 	}
 
 	if err := conn.SetDeadline(time.Time{}); err != nil {

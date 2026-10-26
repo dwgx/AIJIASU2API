@@ -89,6 +89,62 @@ func ParseFields(text string) map[string]string {
 	return fields
 }
 
+// carrierCode returns the integer value of the response's code= field. It
+// parses the field value exactly: "code=2001" yields 2001, and a line such as
+// "msg=code=200" is a msg field, not a code, so the second result is false
+// when code= is absent or not an integer. Duplicate code= lines are ambiguous
+// and fail closed rather than letting ParseFields' last-wins merge pick one.
+func carrierCode(text string) (int, bool) {
+	var value string
+	seen := false
+	for _, line := range strings.Split(text, "\n") {
+		i := strings.IndexByte(line, '=')
+		if i <= 0 || line[:i] != "code" {
+			continue
+		}
+		if seen {
+			return 0, false
+		}
+		value = line[i+1:]
+		seen = true
+	}
+	if !seen {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+// CarrierError is returned when a carrier response does not carry code=200.
+// Code is -1 when the response has no parseable code= field. Text is the raw
+// response text, kept verbatim because the daemon's session-loss classifier
+// matches the vendor's fm= field inside it.
+type CarrierError struct {
+	Stage string
+	Code  int
+	Text  string
+}
+
+func (e *CarrierError) Error() string {
+	return fmt.Sprintf("fv: %s rejected: code=%d text=%q", e.Stage, e.Code, e.Text)
+}
+
+// checkCarrierCode validates a carrier response text. Only an exact code=200
+// passes; a missing or non-integer code fails closed.
+func checkCarrierCode(stage, text string) error {
+	code, ok := carrierCode(text)
+	if !ok {
+		return &CarrierError{Stage: stage, Code: -1, Text: text}
+	}
+	if code != 200 {
+		return &CarrierError{Stage: stage, Code: code, Text: text}
+	}
+	return nil
+}
+
 // ParseResponse decodes an FV response frame and returns its merged header and
 // body fields, body values winning on duplicate keys.
 //

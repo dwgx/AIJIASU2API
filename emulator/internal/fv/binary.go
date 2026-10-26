@@ -286,9 +286,9 @@ func (h *HTTPUpgrade) authenticateBinary(ctx context.Context, cfg AuthConfig, ad
 		conn.Close()
 		return nil, err
 	}
-	if !strings.Contains(respText, "code=200") {
+	if err := checkCarrierCode("authentication", respText); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("fv: authentication rejected: %q", respText)
+		return nil, err
 	}
 	mapFields, err := readAuthMap(r, conn, sessionKey, iv, idle)
 	if err != nil {
@@ -370,24 +370,21 @@ func (h *HTTPUpgrade) openBinaryData(ctx context.Context, s *Session, host strin
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(respText, "code=200") {
-		return nil, fmt.Errorf("fv: data channel rejected: %q", respText)
+	if err := checkCarrierCode("data channel", respText); err != nil {
+		return nil, err
 	}
-	reply := make([]byte, 10)
-	if _, err := io.ReadFull(r, reply); err != nil {
-		return nil, fmt.Errorf("fv: read SOCKS5 reply: %w", err)
-	}
+	// The reply shares the payload CTR stream with everything the server
+	// sends afterwards, so the stream is created before the reply is read.
 	recv, err := NewCTR(s.Key, div)
 	if err != nil {
 		return nil, err
 	}
-	replyPlain := make([]byte, len(reply))
-	recv.XORKeyStream(replyPlain, reply)
-	if replyPlain[0] != 0x05 {
-		return nil, fmt.Errorf("fv: SOCKS5 reply version %d, want 5", replyPlain[0])
+	reply, err := ReadSocks5Reply(r, recv)
+	if err != nil {
+		return nil, err
 	}
-	if replyPlain[1] != 0x00 {
-		return nil, fmt.Errorf("fv: socks connect failed: rep=%d", replyPlain[1])
+	if reply.Rep != 0x00 {
+		return nil, fmt.Errorf("fv: socks connect failed: rep=%d atyp=%d bnd=%s:%d", reply.Rep, reply.Atyp, reply.BndAddr, reply.BndPort)
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return nil, fmt.Errorf("fv: clear data-channel deadline: %w", err)

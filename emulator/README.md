@@ -200,8 +200,9 @@ The data-channel text is `s=<sid>`, `n=<payload IV hex>`, `k=`, `_=<pad>`;
 the header is encrypted with a fresh `hiv` sent in the clear; the payload is a
 SOCKS5 CONNECT request (`05 01 00 03 <len> <host> <port:BE>`) encrypted with
 the session key and `div`. The server must answer with an encrypted header
-containing `code=200` and a 10-byte `05 00` SOCKS5 reply. Relay continues both
-CTR streams after those bytes.
+carrying `code=200` and a `05 00` SOCKS5 reply whose length follows its ATYP
+(10 bytes for IPv4, 22 for IPv6, `7 + len(domain)` for a domain name). Relay
+continues both CTR streams after those bytes.
 
 ### Variant B — binary carrier (protocolVersion 2, primary)
 
@@ -226,8 +227,9 @@ half-close (EOF) so the client can finish reading. The data channel is a new
 TCP connection with `s=<sid>`, `n=<fresh div>`, `k=`, and **no `l=`**; the body
 is `AES-CTR(sessionKey, IV=div)` over
 `05 01 00 03 <len> <host> <port BE>`. The response text contains `code=200`,
-then a 10-byte `05 00` SOCKS5 reply encrypted with the session key and `div`,
-then relay.
+then a `05 00` SOCKS5 reply encrypted with the session key and `div` (length
+follows ATYP: 10 bytes for IPv4, 22 for IPv6, `7 + len(domain)` for a domain
+name), then relay.
 
 OAEP-SHA1 is confirmed on the mock; OAEP-SHA256 fails. The session key is 16
 bytes. Live compatibility is still unverified: no real service was contacted.
