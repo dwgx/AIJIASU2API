@@ -409,7 +409,9 @@ func (d *Dispatcher) Dispatch(event Event) error {
 	// The new entry is written before the drops are reported, so a re-entrant
 	// Dispatch from the drop hook cannot observe a key that is in memory but
 	// still missing from the store.
-	d.persistLiveOutbox(record, entry)
+	if err := d.persistLiveOutbox(record, entry); err != nil {
+		return err
+	}
 	d.reportOutboxDrops(evicted)
 	// The entry is durable before the first attempt starts.
 	if start {
@@ -822,16 +824,19 @@ func (d *Dispatcher) notifyOutboxDrop(entry OutboxEntry) {
 	d.cfg.OnOutboxDrop(entry)
 }
 
-// persistOutbox mirrors one entry into the outbox store. A persistence fault
-// is logged and delivery continues: durability degrades, availability does not.
-func (d *Dispatcher) persistOutbox(entry OutboxEntry) {
+// persistOutbox mirrors one entry into the outbox store. The error is returned
+// so the dispatch caller can fail closed: a poisoned store refuses every later
+// write, and the process is terminating.
+func (d *Dispatcher) persistOutbox(entry OutboxEntry) error {
 	if d.cfg.Outbox == nil {
-		return
+		return nil
 	}
 	if err := d.cfg.Outbox.PutOutbox(entry); err != nil {
-		d.logger.Warn("webhook_outbox_persist_failed",
+		d.logger.Error("webhook_outbox_persist_failed",
 			"endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+		return err
 	}
+	return nil
 }
 
 // persistLiveOutbox writes one record's current state only while the outbox
@@ -839,15 +844,19 @@ func (d *Dispatcher) persistOutbox(entry OutboxEntry) {
 // concurrent Dispatch can evict the record and delete its row before the write
 // lands; the write then verifies the record is gone and removes itself again.
 // Without that check a stale row would be replayed after the next restart.
-func (d *Dispatcher) persistLiveOutbox(record *outboxRecord, entry OutboxEntry) {
-	d.persistOutbox(entry)
+func (d *Dispatcher) persistLiveOutbox(record *outboxRecord, entry OutboxEntry) error {
+	if err := d.persistOutbox(entry); err != nil {
+		return err
+	}
 	if d.cfg.Outbox == nil || d.outboxLive(record) {
-		return
+		return nil
 	}
 	if err := d.cfg.Outbox.RemoveOutbox(entry.EndpointID, entry.ID); err != nil {
-		d.logger.Warn("webhook_outbox_remove_failed",
+		d.logger.Error("webhook_outbox_remove_failed",
 			"endpoint", entry.EndpointID, "event", entry.Event, "error", err)
+		return err
 	}
+	return nil
 }
 
 // outboxLive reports whether the outbox still holds this exact record. A
@@ -874,7 +883,11 @@ func (d *Dispatcher) advanceOutbox(record *outboxRecord, attempts int, next time
 	if !ok || current != record {
 		return
 	}
-	d.persistLiveOutbox(record, entry)
+	if err := d.persistLiveOutbox(record, entry); err != nil {
+		// The retry schedule could not be committed; the store is poisoned and
+		// main is terminating, so the endpoint loop must not keep retrying.
+		return
+	}
 }
 
 // completeOutbox removes a finished delivery from the outbox and its store.

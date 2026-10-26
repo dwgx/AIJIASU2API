@@ -756,15 +756,15 @@ func TestOperationsListFiltersAndScopedKeys(t *testing.T) {
 		if err != nil || busy != nil {
 			t.Fatalf("BeginOperation(%s): busy=%+v err=%v", accountID, busy, err)
 		}
-		if !st.MarkOperationRunning(op.ID) {
-			t.Fatalf("MarkOperationRunning(%s) = false", op.ID)
+		if started, err := st.MarkOperationRunning(op.ID); err != nil || !started {
+			t.Fatalf("MarkOperationRunning(%s) = %v, %v", op.ID, started, err)
 		}
 		var opErr *model.OperationError
 		if state == model.OperationFailed {
 			opErr = &model.OperationError{Code: "UPSTREAM_UNAVAILABLE", Message: "failed"}
 		}
-		if _, ok := st.FinishOperation(op.ID, state, nil, nil, opErr); !ok {
-			t.Fatalf("FinishOperation(%s) = false", op.ID)
+		if _, ok, err := st.FinishOperation(op.ID, state, nil, nil, opErr); err != nil || !ok {
+			t.Fatalf("FinishOperation(%s) = %v, %v", op.ID, ok, err)
 		}
 		return op
 	}
@@ -865,8 +865,8 @@ func TestCancelOperationEndpoint(t *testing.T) {
 	if err != nil || busy != nil {
 		t.Fatalf("BeginOperation(running): busy=%+v err=%v", busy, err)
 	}
-	if !st.MarkOperationRunning(running.ID) {
-		t.Fatal("MarkOperationRunning = false")
+	if started, err := st.MarkOperationRunning(running.ID); err != nil || !started {
+		t.Fatalf("MarkOperationRunning = %v, %v", started, err)
 	}
 	resp, _ = apiCall(t, ts, http.MethodDelete, "/v1/operations/"+running.ID, nil)
 	requireStatus(t, resp, http.StatusConflict)

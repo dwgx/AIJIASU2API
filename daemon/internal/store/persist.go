@@ -577,6 +577,10 @@ func (s *Store) Restore(data []byte) error {
 	}
 	s.usageMu.Unlock()
 	s.syncAccountCountsLocked()
+	// The installed state has no journal frame of its own. A checkpoint must
+	// not label it with the last committed sequence; the next mutation commits
+	// the whole post-state and clears this flag.
+	s.diverged = true
 	s.mu.Unlock()
 	// Rows reconcileSlotClaims ended while loading this document become
 	// lease.revoked events only after the store is installed and the lock is

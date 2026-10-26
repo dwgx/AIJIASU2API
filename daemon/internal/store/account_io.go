@@ -387,10 +387,11 @@ func (s *Store) SecretsEnabled() bool {
 
 // RecordAudit appends one audit event. It exists so the HTTP layer can record
 // export and bulk-delete summaries without exposing the audit slice.
-func (s *Store) RecordAudit(severity model.Severity, actor, action, target, detail string) {
+func (s *Store) RecordAudit(severity model.Severity, actor, action, target, detail string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addAuditLocked(severity, actor, action, target, detail)
+	return s.commitLocked()
 }
 
 // AccountDeleteStats returns the label and the node/lease counts of one
@@ -1673,7 +1674,11 @@ func (s *Store) ImportAccounts(plan ImportPlan, actor ...string) (ImportApply, e
 	for _, label := range reservedLabels {
 		delete(s.pendingLabels, strings.ToLower(label))
 	}
+	commitErr := s.commitLocked()
 	s.mu.Unlock()
+	if commitErr != nil {
+		return ImportApply{}, commitErr
+	}
 	return apply, nil
 }
 

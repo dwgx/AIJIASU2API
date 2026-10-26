@@ -90,6 +90,9 @@ func (s *Store) CreateSchedule(schedule model.Schedule, actor ...string) (model.
 			"enabled":    fmt.Sprintf("%t", schedule.Enabled),
 			"dryRun":     fmt.Sprintf("%t", schedule.Guard.DryRun),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Schedule{}, err
+	}
 	return cloneSchedule(schedule), nil
 }
 
@@ -139,6 +142,9 @@ func (s *Store) UpdateSchedule(next model.Schedule, expectedRevision int64, acto
 			"enabled":    fmt.Sprintf("%t", next.Enabled),
 			"dryRun":     fmt.Sprintf("%t", next.Guard.DryRun),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Schedule{}, err
+	}
 	return cloneSchedule(next), nil
 }
 
@@ -160,6 +166,9 @@ func (s *Store) MutateSchedule(id string, mutate func(*model.Schedule)) (model.S
 	next.CreatedAt = s.schedules[idx].CreatedAt
 	next.Degraded = next.ConsecutiveFailures >= 3
 	s.schedules[idx] = cloneSchedule(next)
+	if err := s.commitLocked(); err != nil {
+		return model.Schedule{}, err
+	}
 	return cloneSchedule(next), nil
 }
 
@@ -176,22 +185,32 @@ func (s *Store) DeleteSchedule(id string, actor ...string) error {
 	s.schedules = append(s.schedules[:idx], s.schedules[idx+1:]...)
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "schedule.deleted", id, name,
 		map[string]string{"scheduleId": id})
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
 // NextRunID reserves the next run identifier. The engine reserves it before
 // the fire journal write so a crash record and the eventual run row share one
 // id.
-func (s *Store) NextRunID() string {
+func (s *Store) NextRunID() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runSeq++
-	return fmt.Sprintf("run-%04d", s.runSeq)
+	// The sequence is persisted state: a reserved id that is not durable could
+	// be handed to a second run after recovery. The id is returned with the
+	// error so a caller that ignores it still cannot reuse the number.
+	id := fmt.Sprintf("run-%04d", s.runSeq)
+	if err := s.commitLocked(); err != nil {
+		return id, err
+	}
+	return id, nil
 }
 
 // AppendScheduleRun records one attempt, assigning run-NNNN. Runs are newest
 // first and bounded both globally and per schedule.
-func (s *Store) AppendScheduleRun(run model.ScheduleRun) model.ScheduleRun {
+func (s *Store) AppendScheduleRun(run model.ScheduleRun) (model.ScheduleRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if run.ID == "" {
@@ -202,7 +221,10 @@ func (s *Store) AppendScheduleRun(run model.ScheduleRun) model.ScheduleRun {
 	}
 	s.scheduleRuns = prependCapped(s.scheduleRuns, run, ScheduleRunRetention)
 	s.scheduleRuns = s.trimRunsPerScheduleLocked(s.scheduleRuns, run.ScheduleID)
-	return run
+	if err := s.commitLocked(); err != nil {
+		return run, err
+	}
+	return run, nil
 }
 
 // ScheduleRuns returns one schedule's runs newest first, capped at limit
@@ -251,16 +273,17 @@ func (s *Store) ScheduleRunCount(scheduleID string, from, to time.Time) int {
 
 // RecordScheduleFire upserts one fire record by key. The engine writes the
 // reservation and then the terminal state; the snapshot carries the result.
-func (s *Store) RecordScheduleFire(fire model.ScheduleFire) {
+func (s *Store) RecordScheduleFire(fire model.ScheduleFire) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.scheduleFires {
 		if s.scheduleFires[i].Key == fire.Key {
 			s.scheduleFires[i] = fire
-			return
+			return s.commitLocked()
 		}
 	}
 	s.scheduleFires = prependCapped(s.scheduleFires, fire, ScheduleFireRetention)
+	return s.commitLocked()
 }
 
 // ScheduleFires returns a copy of the retained fire records newest first.
@@ -284,7 +307,7 @@ func (s *Store) ReminderMarks() map[string]model.ReminderMark {
 // SetReminderMark stores one notice mark, pruning the oldest entries once the
 // cap is reached. The key includes expiresAt, so a renewed account re-arms
 // every threshold without deleting anything.
-func (s *Store) SetReminderMark(mark model.ReminderMark) {
+func (s *Store) SetReminderMark(mark model.ReminderMark) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := ReminderMarkKey(mark.AccountID, mark.Kind, mark.Threshold, mark.ExpiresAt)
@@ -295,20 +318,27 @@ func (s *Store) SetReminderMark(mark model.ReminderMark) {
 		s.pruneReminderMarksLocked()
 	}
 	s.reminderMarks[key] = mark
+	return s.commitLocked()
 }
 
 // PruneReminderMarks drops marks that no longer match an account's current
 // expiry. It runs after an account update or delete so a changed expiresAt
 // re-arms the thresholds without keeping stale rows.
-func (s *Store) PruneReminderMarks(valid map[string]string) {
+func (s *Store) PruneReminderMarks(valid map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	removed := false
 	for key, mark := range s.reminderMarks {
 		expiresAt, ok := valid[mark.AccountID]
 		if !ok || expiresAt != mark.ExpiresAt {
 			delete(s.reminderMarks, key)
+			removed = true
 		}
 	}
+	if removed {
+		return s.commitLocked()
+	}
+	return nil
 }
 
 // ReminderMarkKey is the persisted key of one notice:

@@ -392,6 +392,7 @@ func (s *Store) BindForLoginSlot(key model.SlotKey, profileName string) (DeviceM
 			}
 		}
 		s.mu.Lock()
+		changed := false
 		if current := s.deviceRecordLocked(recID); current != nil {
 			boundID, bound := s.boundRecordIDLocked(key)
 			if !bound {
@@ -400,17 +401,32 @@ func (s *Store) BindForLoginSlot(key model.SlotKey, profileName string) (DeviceM
 				if slotID, ok := s.slotBindingLocked(key); ok && slotID == recID {
 					s.setSlotBindingLocked(key, recID)
 					boundID, bound = recID, true
+					changed = true
 				}
 			}
 			if bound && boundID == recID {
 				if current.AssignedSlotKey == nil {
 					current.AssignedSlotKey = cloneSlotKey(&key)
+					changed = true
 				}
-				current.PresentedAt = cloneStringPtr(recCopy.PresentedAt)
+				if current.PresentedAt == nil {
+					current.PresentedAt = cloneStringPtr(recCopy.PresentedAt)
+					changed = true
+				}
 				s.deviceMaterial[recID] = cloneDeviceMaterial(material)
 			}
 		}
+		var commitErr error
+		if changed {
+			// First presentation and canonical-binding adoption are durable
+			// device state: a crash must not resurrect an unpresented identity
+			// or lose the slot binding the login just used.
+			commitErr = s.commitLocked()
+		}
 		s.mu.Unlock()
+		if commitErr != nil {
+			return DeviceMaterial{}, commitErr
+		}
 		return cloneDeviceMaterial(material), nil
 	}
 
@@ -442,7 +458,11 @@ func (s *Store) BindForLoginSlot(key model.SlotKey, profileName string) (DeviceM
 		s.mu.Lock()
 		s.addAuditLocked(model.SeverityWarn, "system", "device.restore_ambiguous", "pool",
 			fmt.Sprintf("slot=%s candidates=%d", key.String(), len(candidates)))
+		commitErr := s.commitLocked()
 		s.mu.Unlock()
+		if commitErr != nil {
+			return DeviceMaterial{}, commitErr
+		}
 		return DeviceMaterial{}, &AmbiguousRestoreError{Key: key, Candidates: ids}
 	}
 	if cfg.RestoreMode == "auto" && len(candidates) == 1 {
@@ -540,6 +560,10 @@ func (s *Store) BindForLoginSlot(key model.SlotKey, profileName string) (DeviceM
 	s.deviceAppendEventLocked(&rec, "assigned", "system", "source=login slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, "system", "device.assign", rec.ID,
 		"account="+account.Label+" source=login slot="+key.String())
+	if err := s.commitLocked(); err != nil {
+		s.mu.Unlock()
+		return DeviceMaterial{}, err
+	}
 	s.mu.Unlock()
 	return cloneDeviceMaterial(generated), nil
 }
@@ -626,6 +650,9 @@ func (s *Store) bindRestoredDeviceSlot(key model.SlotKey, deviceID string, keys 
 	s.deviceAppendEventLocked(current, "restored", "system", "candidate=auto slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, "system", "device.restore", current.ID,
 		"account="+label+" candidate=auto slot="+key.String())
+	if err := s.commitLocked(); err != nil {
+		return DeviceMaterial{}, err
+	}
 	return cloneDeviceMaterial(material), nil
 }
 
@@ -700,6 +727,9 @@ func (s *Store) bindAvailableDeviceSlot(key model.SlotKey, deviceID, label strin
 	s.deviceAppendEventLocked(current, "assigned", "system", "source=pool slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, "system", "device.assign", current.ID,
 		"account="+label+" source=pool slot="+key.String())
+	if err := s.commitLocked(); err != nil {
+		return DeviceMaterial{}, err
+	}
 	return cloneDeviceMaterial(material), nil
 }
 
@@ -800,6 +830,9 @@ func (s *Store) MarkDeviceSeenSlot(key model.SlotKey, username string) (DeviceRe
 		return DeviceRecord{}, deviceNotFoundf("device %q not found", recID)
 	}
 	s.markDeviceSeenSlotLocked(key, username)
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -978,6 +1011,9 @@ func (s *Store) RestoreDeviceSlot(deviceID string, key model.SlotKey, actor ...s
 	s.deviceAppendEventLocked(rec, "restored", auditActorArg(actor), "source=manual slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.restore", rec.ID,
 		"account="+s.deviceAccountLabelLocked(key.AccountID)+" candidate=manual slot="+key.String())
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -1071,6 +1107,9 @@ func (s *Store) AssignDeviceSlot(deviceID string, key model.SlotKey, actor ...st
 	s.deviceAppendEventLocked(rec, "assigned", auditActorArg(actor), "source=manual slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.assign", rec.ID,
 		"account="+s.deviceAccountLabelLocked(key.AccountID)+" source=manual slot="+key.String())
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 

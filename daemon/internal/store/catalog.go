@@ -114,6 +114,9 @@ func (s *Store) SetSelection(accountID, serverID, actor string) (model.Selection
 	}
 	s.addAuditLocked(model.SeverityInfo, selection.UpdatedBy, "catalog.select",
 		accountID+":"+serverID, "Target set · not connected", meta)
+	if err := s.commitLocked(); err != nil {
+		return model.Selection{}, err
+	}
 	return selection, nil
 }
 
@@ -134,6 +137,9 @@ func (s *Store) ClearSelection(accountID, actor string) (bool, error) {
 	delete(s.selections, accountID)
 	s.addAuditLocked(model.SeverityInfo, auditActor(actor), "catalog.unselect",
 		s.accounts[idx].Label, "Target cleared", map[string]string{"previousServerId": existing.ServerID})
+	if err := s.commitLocked(); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -156,6 +162,9 @@ func (s *Store) LoseSelection(accountID, reason string) (bool, error) {
 	s.addAuditLocked(model.SeverityWarn, "system", "catalog.selection_lost",
 		s.accounts[idx].Label, "Selected server is no longer usable · target cleared",
 		map[string]string{"serverId": existing.ServerID, "reason": reason})
+	if err := s.commitLocked(); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -336,6 +345,9 @@ func (s *Store) CommitSwitch(commit SwitchCommit) (model.ProxyNode, string, erro
 	s.syncAccountCountsLocked()
 	auditID := s.addAuditLocked(model.SeverityInfo, auditActor(commit.Actor), commit.Action,
 		commit.Target, commit.Detail, commit.Meta)
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, "", err
+	}
 	return node, auditID, nil
 }
 
@@ -378,8 +390,12 @@ func (s *Store) RecordCatalogAttempt(rec AttemptRecord) (string, error) {
 	if slot, ok := s.accountSlots[slotKey]; ok {
 		meta["generation"] = strconv.FormatUint(slot.Generation, 10)
 	}
-	return s.addAuditLocked(model.SeverityWarn, "operator", rec.Action,
-		rec.Target, rec.Detail, meta), nil
+	auditID := s.addAuditLocked(model.SeverityWarn, "operator", rec.Action,
+		rec.Target, rec.Detail, meta)
+	if err := s.commitLocked(); err != nil {
+		return "", err
+	}
+	return auditID, nil
 }
 
 // ServerStat returns one account/server attempt counter.
@@ -407,6 +423,9 @@ func (s *Store) SetNodeStateQuiet(id string, state model.NodeState) error {
 	s.nodes[idx].State = state
 	s.nodes[idx].LastProbeAt = iso(s.now())
 	s.syncAccountCountsLocked()
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -429,15 +448,22 @@ func (s *Store) DeleteNodeQuiet(id string) error {
 	}
 	s.leases = kept
 	s.syncAccountCountsLocked()
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
 // WriteAudit appends one audit event without touching catalog state. It is for
 // events that are not an attempt (for example catalog.switch_cleanup_failed).
-func (s *Store) WriteAudit(severity model.Severity, actor, action, target, detail string, meta map[string]string) string {
+func (s *Store) WriteAudit(severity model.Severity, actor, action, target, detail string, meta map[string]string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.addAuditLocked(severity, actor, action, target, detail, meta)
+	id := s.addAuditLocked(severity, actor, action, target, detail, meta)
+	if err := s.commitLocked(); err != nil {
+		return id, err
+	}
+	return id, nil
 }
 
 func serverStatKey(accountID, serverID string) string {

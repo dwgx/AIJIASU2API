@@ -44,8 +44,9 @@ func webhookOutboxKey(endpointID, id string) string { return endpointID + "\x00"
 
 // PutWebhookOutbox inserts or replaces one pending delivery. Replacing by
 // endpoint id + event id makes a retried attempt update the existing row
-// instead of accumulating duplicates. The append is memory-only: the periodic
-// snapshot carries it to disk, so a delivery never waits on a write or fsync.
+// instead of accumulating duplicates. The row is committed before this
+// returns: it is the durable counterpart of the dispatcher queue, so a crash
+// must resume the backlog rather than lose it.
 //
 // The store enforces the same cap as the dispatcher as a hard bound. The
 // dispatcher evicts first (and reports that eviction), so this path only
@@ -66,6 +67,9 @@ func (s *Store) PutWebhookOutbox(entry WebhookOutboxEntry) error {
 	for i := range s.webhookOutbox {
 		if s.webhookOutbox[i].EndpointID == entry.EndpointID && s.webhookOutbox[i].ID == entry.ID {
 			s.webhookOutbox[i] = cloneWebhookOutboxEntry(entry)
+			if err := s.commitLocked(); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
@@ -78,6 +82,9 @@ func (s *Store) PutWebhookOutbox(entry WebhookOutboxEntry) error {
 			}
 		}
 		s.webhookOutbox = append(s.webhookOutbox[:oldest], s.webhookOutbox[oldest+1:]...)
+	}
+	if err := s.commitLocked(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -94,6 +101,9 @@ func (s *Store) RemoveWebhookOutbox(endpointID, id string) error {
 	for i := range s.webhookOutbox {
 		if s.webhookOutbox[i].EndpointID == endpointID && s.webhookOutbox[i].ID == id {
 			s.webhookOutbox = append(s.webhookOutbox[:i], s.webhookOutbox[i+1:]...)
+			if err := s.commitLocked(); err != nil {
+				return err
+			}
 			return nil
 		}
 	}

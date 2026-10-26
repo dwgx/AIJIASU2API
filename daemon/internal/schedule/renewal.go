@@ -67,11 +67,14 @@ func (e *Engine) renewalSweep(now time.Time) {
 		if !now.Before(expires) {
 			key := store.ReminderMarkKey(account.ID, "overdue", 0, account.ExpiresAt)
 			if _, seen := marks[key]; !seen {
-				e.store.SetReminderMark(model.ReminderMark{
+				if err := e.store.SetReminderMark(model.ReminderMark{
 					AccountID: account.ID, Kind: "overdue", Threshold: 0,
 					ExpiresAt: account.ExpiresAt, State: "sent",
 					MarkedAt: now.UTC().Format(time.RFC3339),
-				})
+				}); err != nil {
+					e.logger.Error("renewal_mark_persist_failed", "account_id", account.ID, "error", err)
+					return
+				}
 				overdueCount++
 				e.notifyReminder(ReminderEvent{
 					AccountID: account.ID, Kind: ReminderKindRenewalOverdue,
@@ -88,11 +91,17 @@ func (e *Engine) renewalSweep(now time.Time) {
 			if _, seen := marks[key]; seen {
 				continue
 			}
-			e.store.SetReminderMark(model.ReminderMark{
+			// The mark is durable before the notification is handed out: a
+			// failed commit must not announce a reminder that a restart would
+			// send again.
+			if err := e.store.SetReminderMark(model.ReminderMark{
 				AccountID: account.ID, Kind: "threshold", Threshold: threshold,
 				ExpiresAt: account.ExpiresAt, State: "sent",
 				MarkedAt: now.UTC().Format(time.RFC3339),
-			})
+			}); err != nil {
+				e.logger.Error("renewal_mark_persist_failed", "account_id", account.ID, "error", err)
+				return
+			}
 			dueCount++
 			e.notifyReminder(ReminderEvent{
 				AccountID: account.ID, Kind: ReminderKindRenewalDue,
@@ -100,17 +109,28 @@ func (e *Engine) renewalSweep(now time.Time) {
 			})
 		}
 	}
-	e.store.PruneReminderMarks(valid)
+	if err := e.store.PruneReminderMarks(valid); err != nil {
+		e.logger.Error("renewal_marks_prune_failed", "error", err)
+		return
+	}
 	if dueCount+overdueCount == 0 {
 		return
 	}
-	e.store.WriteAudit(model.SeverityInfo, "system", "account.renewal_sweep", "system",
+	if _, err := e.store.WriteAudit(model.SeverityInfo, "system", "account.renewal_sweep", "system",
 		fmt.Sprintf("due %d · overdue %d", dueCount, overdueCount), map[string]string{
 			"dueCount":     fmt.Sprintf("%d", dueCount),
 			"overdueCount": fmt.Sprintf("%d", overdueCount),
-		})
-	_ = e.store.AppendScheduleRun(model.ScheduleRun{
-		ID:         e.store.NextRunID(),
+		}); err != nil {
+		e.logger.Error("renewal_audit_persist_failed", "error", err)
+		return
+	}
+	runID, err := e.store.NextRunID()
+	if err != nil {
+		e.logger.Error("renewal_run_id_persist_failed", "error", err)
+		return
+	}
+	if _, err := e.store.AppendScheduleRun(model.ScheduleRun{
+		ID:         runID,
 		ScheduleID: "system:renewal-sweep",
 		Trigger:    "cron",
 		StartedAt:  now.UTC().Format(time.RFC3339),
@@ -119,7 +139,9 @@ func (e *Engine) renewalSweep(now time.Time) {
 		Result:     "ok",
 		Detail:     fmt.Sprintf("due %d · overdue %d", dueCount, overdueCount),
 		Actor:      "system",
-	})
+	}); err != nil {
+		e.logger.Error("renewal_run_persist_failed", "error", err)
+	}
 }
 
 // notifyReminder hands one newly armed mark to the daemon. A nil hook is the

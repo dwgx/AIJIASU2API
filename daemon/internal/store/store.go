@@ -6,6 +6,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,11 @@ var (
 	// quota, an account's active-lease concurrency, or a pool with no free
 	// node. The API maps it to 429 QUOTA_EXCEEDED.
 	ErrQuota = errors.New("quota exceeded")
+	// ErrDurability reports that the state journal could not commit a
+	// mutation or a checkpoint. The store is poisoned at that point: readiness
+	// turns false, later commits are refused and main terminates without a
+	// shutdown save instead of serving state that is not on disk.
+	ErrDurability = errors.New("state durability failed")
 )
 
 // Error carries a client-safe message while keeping a matchable kind.
@@ -70,16 +76,59 @@ const (
 	RequestRetention = 10000
 )
 
+// storeMutex is the Store's write lock. Its Unlock delivers the hook events
+// queued by the mutation before returning, after the lock is released: a sink
+// that persists a webhook outbox calls back into the Store, so delivering the
+// hook under the lock would deadlock. Read unlocks never flush.
+type storeMutex struct {
+	sync.RWMutex
+	flush func()
+}
+
+func (m *storeMutex) Unlock() {
+	m.RWMutex.Unlock()
+	if m.flush != nil {
+		m.flush()
+	}
+}
+
 // Store holds every panel collection plus the sequence counters used for new
 // identifiers. All exported methods are safe for concurrent use.
 type Store struct {
-	mu  sync.RWMutex
+	mu  storeMutex
 	now func() time.Time
 
 	// journal is the append-only commit log opened at startup (AJS-432).
-	// Mutators still rely on the periodic state.json export until AJS-433
-	// wires commitLocked to it; recovery is its only user in this slice.
+	// Every money-critical, grant, lease, quota and audit-producing mutation
+	// commits its post-state through commitLocked; display-only history rides
+	// the periodic checkpoint.
 	journal *Journal
+
+	// durabilityErr is the first journal commit or checkpoint failure. It
+	// poisons the store: readiness fails, later commits are refused and main
+	// terminates without a shutdown save.
+	durabilityErr error
+	// durabilityFault is closed once on the first durability failure so main
+	// can stop the process instead of serving divergent memory.
+	durabilityFault chan struct{}
+	// checkpointedSeq is the last sequence written as a checkpoint. A timer
+	// tick with no newer frame is skipped: rewriting an identical checkpoint
+	// can only fail (a usage-month rollover changes its bytes without a
+	// mutation).
+	checkpointedSeq uint64
+	// committedSeq is the last sequence this process appended. A checkpoint
+	// may only run when it equals the journal's published sequence, so a
+	// checkpoint never labels memory that no frame committed.
+	committedSeq uint64
+	// diverged is set by Restore, which replaces the whole state without a
+	// frame. A checkpoint refuses until the next commit makes that state
+	// durable, so a restore can never be published under an older sequence.
+	diverged bool
+	// sweepDirty is set when an expiry sweep closed rows. The enclosing
+	// mutation's commit clears it; a caller that returns before that commit
+	// flushes it explicitly, so a sweep is never lost and never a second frame
+	// on a successful compound call.
+	sweepDirty bool
 
 	accounts []model.Account
 	nodes    []model.ProxyNode
@@ -94,18 +143,22 @@ type Store struct {
 	audit     []model.AuditEvent
 	settings  model.PanelSettings
 
-	// auditHook receives every critical audit event after it is appended. It
-	// is set once during startup (SetAuditHook) and invoked with s.mu held, so
-	// it must neither block nor call back into the Store; the webhook sink only
-	// enqueues. The hook is not part of the snapshot.
+	// auditHook receives every critical audit event. It is set once during
+	// startup (SetAuditHook). Delivery is queued under s.mu and runs after the
+	// mutation releases the write lock, so a sink may call back into the Store
+	// (the webhook outbox write does); it must not block for long.
 	auditHook func(model.AuditEvent)
 
 	// leaseExpiryHook receives every lease the expiry sweep releases, after
 	// the row is marked expired and its node freed. It is set once during
-	// startup (SetLeaseExpiryHook) and invoked with s.mu held, so it must
-	// neither block nor call back into the Store; the webhook sink only
-	// enqueues. The hook is not part of the snapshot.
+	// startup (SetLeaseExpiryHook). Like auditHook it is delivered after the
+	// write lock is released and must not block for long.
 	leaseExpiryHook func(model.Lease)
+
+	// hookMu guards pendingHooks. It is a leaf lock: the queue append happens
+	// while s.mu is held, and the drain happens with no store lock held.
+	hookMu       sync.Mutex
+	pendingHooks []pendingHook
 
 	// leaseRevokeHook receives leases revoked by startup recovery or a
 	// restore. It is installed once after the webhook sink exists; rows
@@ -166,7 +219,11 @@ type Store struct {
 
 	// deviceSealer seals raw device material; nil disables the pool. deviceMu
 	// serialises material I/O so a seal never blocks API reads, and pool
-	// mutations so two first logins cannot bind two records.
+	// mutations so two first logins cannot bind two records. Lock order is
+	// deviceMu -> s.mu -> journal.mu everywhere; a device mutation's commit
+	// therefore serialises other device work behind its fsync, which is the
+	// price of a whole-snapshot commit in slice 1 (no reverse order exists, so
+	// it cannot deadlock).
 	deviceSealer DeviceSealer
 	deviceMu     sync.Mutex
 	deviceCfg    DevicePoolConfig
@@ -311,8 +368,9 @@ func NewWithSealers(password Sealer, device DeviceSealer) *Store {
 }
 
 func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
-	return &Store{
+	st := &Store{
 		now:                now,
+		durabilityFault:    make(chan struct{}),
 		accounts:           []model.Account{},
 		nodes:              []model.ProxyNode{},
 		leases:             []model.Lease{},
@@ -356,6 +414,8 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		orders:             []orderRecord{},
 		paymentEvents:      []model.PaymentEvent{},
 	}
+	st.mu.flush = st.flushPendingHooks
+	return st
 }
 
 func newWithClock(now func() time.Time, sealer Sealer) *Store {
@@ -382,12 +442,168 @@ func newWithClock(now func() time.Time, sealer Sealer) *Store {
 }
 
 // AttachJournal records the journal this process opened. It must be called
-// once during startup, after Recover and before the first request, so the
-// commit wiring added in AJS-433 has one stable log. No mutator reads it yet.
+// once during startup, after Recover and before the first request, so every
+// critical mutator commits to one stable log. The journal's recovered sequence
+// is adopted as the last committed sequence, so the first checkpoint does not
+// rewrite the checkpoint Recover just wrote.
 func (s *Store) AttachJournal(j *Journal) {
 	s.mu.Lock()
 	s.journal = j
+	if j != nil {
+		// Recover already checkpointed the replayed state, so both counters
+		// start at the journal's published sequence.
+		s.checkpointedSeq = j.Seq()
+		s.committedSeq = j.Seq()
+	}
 	s.mu.Unlock()
+}
+
+// commitLocked appends the post-mutation state to the journal and fsyncs it.
+// The caller holds s.mu for writing, so the mutation, its snapshot and its
+// frame stay ordered; it must never call the public Snapshot method, which
+// would take the read lock and deadlock.
+//
+// Without a journal it is a no-op: unit tests and the default state.json mode
+// keep their existing persistence. A failure is never returned as a healthy
+// result: the store is poisoned, which turns readiness false, refuses later
+// commits and makes main terminate without a shutdown save. Mutators that can
+// return an error also return it; the void ones rely on the poison.
+func (s *Store) commitLocked() error {
+	if s.journal == nil {
+		// No journal, no frame to join: the flag exists only to drive one.
+		s.sweepDirty = false
+		return nil
+	}
+	if s.durabilityErr != nil {
+		return s.durabilityErr
+	}
+	data, err := encodeSnapshot(s.snapshotLocked())
+	if err != nil {
+		return s.poisonLocked("commit", err)
+	}
+	seq, err := s.journal.Append(data)
+	if err != nil {
+		return s.poisonLocked("commit", err)
+	}
+	s.committedSeq = seq
+	// The frame now carries the whole post-state, including a state installed
+	// by Restore or released by an expiry sweep, so a checkpoint may label
+	// memory again.
+	s.diverged = false
+	s.sweepDirty = false
+	// The size trigger is the second half of the checkpoint contract: a log
+	// that passes the bound is compacted before this mutation returns, so the
+	// recovery tail never depends on the timer alone.
+	if s.journal.LogBytes() >= journalCheckpointLogBytes {
+		return s.checkpointLocked()
+	}
+	return nil
+}
+
+// flushSweepLocked commits an expiry sweep that no outer mutation carried.
+// The caller holds s.mu for writing and calls it from a deferred exit, so an
+// early return still commits the sweep exactly once. The error is the
+// durability failure; commitLocked has already poisoned the store.
+func (s *Store) flushSweepLocked() error {
+	if !s.sweepDirty {
+		return nil
+	}
+	return s.commitLocked()
+}
+
+// Checkpoint compacts the journal: the current post-state becomes the newest
+// immutable checkpoint, CURRENT is published and the active log is archived.
+// main runs it on the checkpoint timer and once on graceful shutdown.
+//
+// Without a journal, or when no frame was appended since the last checkpoint,
+// it is a no-op: a redundant checkpoint would rewrite the same document and
+// could only fail on a usage-month rollover that changed its bytes.
+func (s *Store) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpointLocked()
+}
+
+// checkpointLocked is the write-locked form of Checkpoint. A failure poisons
+// the store for the same reason a failed commit does: the recovered state
+// would otherwise lag what this process already acknowledged.
+func (s *Store) checkpointLocked() error {
+	if s.journal == nil {
+		return nil
+	}
+	if s.durabilityErr != nil {
+		return s.durabilityErr
+	}
+	// A restored state has no frame of its own. This check must come before
+	// the no-new-frame skip: a restore right after a completed checkpoint
+	// leaves checkpointedSeq == Seq, and skipping would let stateSaver export
+	// divergent memory as if it were committed.
+	if s.diverged {
+		// Not poisoned: a restore installs state at the journal's sequence and
+		// the first mutation commits it. The refusal must be loud so the timer
+		// retries, but killing the daemon would make restore unusable when a
+		// tick lands before the first mutation.
+		return errors.New("checkpoint refused: the store was replaced by a restore with no committed frame")
+	}
+	if s.committedSeq != s.journal.Seq() {
+		return s.poisonLocked("checkpoint", errors.New(
+			"checkpoint refused: the in-memory state has no committed frame at this sequence"))
+	}
+	if s.checkpointedSeq == s.journal.Seq() {
+		return nil
+	}
+	data, err := encodeSnapshot(s.snapshotLocked())
+	if err != nil {
+		return s.poisonLocked("checkpoint", err)
+	}
+	seq, err := s.journal.Checkpoint(data)
+	if err != nil {
+		return s.poisonLocked("checkpoint", err)
+	}
+	s.checkpointedSeq = seq
+	return nil
+}
+
+// hooksInstalled reports whether any live event sink is installed. Journal
+// replay refuses such a store: replayed state must never publish an event.
+func (s *Store) hooksInstalled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditHook != nil || s.leaseExpiryHook != nil || s.leaseRevokeHook != nil
+}
+
+// DurabilityError reports the first journal failure, or nil while every
+// acknowledged mutation is durable. /readyz requires nil.
+func (s *Store) DurabilityError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.durabilityErr
+}
+
+// DurabilityFault is closed once when the store is poisoned. main selects on
+// it and stops the process without a final save; it never closes for a store
+// without a journal.
+func (s *Store) DurabilityFault() <-chan struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.durabilityFault
+}
+
+// poisonLocked records the first durability failure. Only the stage and the
+// error are logged: a snapshot is never written to the log. The caller holds
+// s.mu for writing.
+func (s *Store) poisonLocked(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if s.durabilityErr == nil {
+		s.durabilityErr = fmt.Errorf("%w: %s: %w", ErrDurability, stage, err)
+		slog.Error("state_durability_failed", "stage", stage, "error", err)
+		if s.durabilityFault != nil {
+			close(s.durabilityFault)
+		}
+	}
+	return s.durabilityErr
 }
 
 // Accounts returns a snapshot in seed order.
@@ -462,11 +678,17 @@ func (s *Store) Node(id string) (model.ProxyNode, bool) {
 }
 
 // Leases returns a snapshot in seed order. Expired leases are released first,
-// so a read never lists a lease whose TTL already passed.
+// so a read never lists a lease whose TTL already passed. The release commits
+// before the snapshot is taken; when that commit fails the store is poisoned
+// (readiness false, main terminates) and the read fails closed instead of
+// listing rows whose release is not durable.
 func (s *Store) Leases() []model.Lease {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepExpiredLocked(s.now())
+	if err := s.flushSweepLocked(); err != nil {
+		return nil
+	}
 	out := make([]model.Lease, len(s.leases))
 	copy(out, s.leases)
 	for i := range out {
@@ -475,11 +697,15 @@ func (s *Store) Leases() []model.Lease {
 	return out
 }
 
-// Lease returns one lease by id. Like Leases it sweeps expired rows first.
+// Lease returns one lease by id. Like Leases it sweeps expired rows first and
+// fails closed when the release could not be committed.
 func (s *Store) Lease(id string) (model.Lease, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepExpiredLocked(s.now())
+	if err := s.flushSweepLocked(); err != nil {
+		return model.Lease{}, false
+	}
 	idx := s.leaseIndexLocked(id)
 	if idx < 0 {
 		return model.Lease{}, false
@@ -596,22 +822,34 @@ func (s *Store) UserMonthlyUsage(userID string) int64 {
 // gate meter calls it live (every 256 KiB), so bytes count against the month in
 // which they crossed the tunnel even when the flow finishes after a month
 // boundary, and admission sees in-flight traffic instead of only completed
-// rows. The counters are persisted with the next snapshot.
-func (s *Store) AddUsage(userID, accountID string, bytes int64) {
+// rows.
+//
+// The counters are a quota input, so the update is committed before this
+// returns: an acknowledged chunk is never lost. The synchronous whole-snapshot
+// commit is the slice-1 contract (PersistenceDesign §2); a group commit would
+// still block every admitted caller until its containing frame synced. The
+// error is the durability failure: the caller (FlowMeter.Progress) must stop
+// the flow, and the store is already poisoned so the process terminates.
+func (s *Store) AddUsage(userID, accountID string, bytes int64) error {
 	if bytes <= 0 || (userID == "" && accountID == "") {
-		return
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Once poisoned, do not keep advancing memory a restart cannot recover.
+	if s.durabilityErr != nil {
+		return s.durabilityErr
+	}
 	s.ensureUsageMonthLocked()
 	s.usageMu.Lock()
-	defer s.usageMu.Unlock()
 	if userID != "" {
 		s.monthlyUsage[userID] += bytes
 	}
 	if accountID != "" {
 		s.accountUsage[accountID] += bytes
 	}
+	s.usageMu.Unlock()
+	return s.commitLocked()
 }
 
 // currentUsageMonth returns the UTC month key ("2006-01") and its first instant
@@ -859,7 +1097,11 @@ func (s *Store) CreateAccount(in model.CreateAccountInput, actor ...string) (mod
 	if s.sealer == nil {
 		id := s.reserveAccountIDLocked()
 		account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, nil, actor...)
+		commitErr := s.commitLocked()
 		s.mu.Unlock()
+		if commitErr != nil {
+			return model.Account{}, commitErr
+		}
 		return cloneAccount(account), nil
 	}
 	id := s.reserveAccountIDLocked()
@@ -883,6 +1125,9 @@ func (s *Store) CreateAccount(in model.CreateAccountInput, actor ...string) (mod
 		return model.Account{}, conflictf("an account named %q already exists", label)
 	}
 	account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, sealed, actor...)
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(account), nil
 }
 
@@ -1048,6 +1293,9 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch, actor ...stri
 		}
 	}
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.update", next.Label, "fields: "+strings.Join(changed, ", "))
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(next), nil
 }
 
@@ -1150,6 +1398,9 @@ func (s *Store) DeleteAccount(id string, actor ...string) error {
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.delete", label,
 		fmt.Sprintf("%d nodes and %d leases removed", nodesRemoved, leasesRemoved))
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1168,6 +1419,9 @@ func (s *Store) LoginAccount(id string, actor ...string) (model.Account, error) 
 		account.State = model.AccountActive
 	}
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.login", account.Label, "Session refreshed")
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(*account), nil
 }
 
@@ -1208,6 +1462,9 @@ func (s *Store) MarkLogin(id, userName, membership string, expired bool, useCoun
 	// the counters; identity stability never depends on them.
 	s.markDeviceSeenLocked(id, account.Username)
 	s.addAuditLocked(model.SeverityInfo, "operator", "account.login", account.Label, detail)
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(*account), nil
 }
 
@@ -1229,6 +1486,9 @@ func (s *Store) MarkAuthFailed(id, message string) (model.Account, error) {
 		detail = "Authentication rejected"
 	}
 	s.addAuditLocked(model.SeverityError, "operator", "account.auth_failed", account.Label, detail)
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(*account), nil
 }
 
@@ -1259,6 +1519,9 @@ func (s *Store) LogoutAccount(id string, actor ...string) (model.Account, error)
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.logout", account.Label,
 		fmt.Sprintf("Sessions stopped · %d nodes draining", draining))
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(*account), nil
 }
 
@@ -1344,9 +1607,63 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 	}
 	s.audit = prependCapped(s.audit, event, AuditRetention)
 	if s.auditHook != nil && severity == model.SeverityCritical {
-		s.auditHook(event)
+		// Delivery is queued here and runs after the write lock is released:
+		// the production sink persists the webhook outbox, which takes s.mu.
+		s.queueAuditHookLocked(event)
 	}
 	return event.ID
+}
+
+// pendingHook is one hook delivery captured under the store lock. The hook
+// function is captured with the event so the flush never reads a Store field
+// without the lock.
+type pendingHook struct {
+	audit    func(model.AuditEvent)
+	event    model.AuditEvent
+	lease    func(model.Lease)
+	leaseRow model.Lease
+}
+
+// queueAuditHookLocked captures one critical audit delivery. The caller holds
+// s.mu for writing; the event is delivered by the unlock flush.
+func (s *Store) queueAuditHookLocked(event model.AuditEvent) {
+	hook := s.auditHook
+	if hook == nil {
+		return
+	}
+	s.hookMu.Lock()
+	s.pendingHooks = append(s.pendingHooks, pendingHook{audit: hook, event: event})
+	s.hookMu.Unlock()
+}
+
+// queueLeaseExpiryHookLocked captures one expiry delivery. The caller holds
+// s.mu for writing; the event is delivered by the unlock flush.
+func (s *Store) queueLeaseExpiryHookLocked(lease model.Lease) {
+	hook := s.leaseExpiryHook
+	if hook == nil {
+		return
+	}
+	s.hookMu.Lock()
+	s.pendingHooks = append(s.pendingHooks, pendingHook{lease: hook, leaseRow: lease})
+	s.hookMu.Unlock()
+}
+
+// flushPendingHooks delivers the events queued by the mutation that just
+// released the write lock. It runs without s.mu, so a sink may call back into
+// the Store (the webhook outbox write does) without deadlocking.
+func (s *Store) flushPendingHooks() {
+	s.hookMu.Lock()
+	pending := s.pendingHooks
+	s.pendingHooks = nil
+	s.hookMu.Unlock()
+	for _, item := range pending {
+		if item.audit != nil {
+			item.audit(item.event)
+		}
+		if item.lease != nil {
+			item.lease(item.leaseRow)
+		}
+	}
 }
 
 // SetAuditHook installs the sink for critical audit events. It is meant to be

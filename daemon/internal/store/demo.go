@@ -49,11 +49,14 @@ func seedIDSet(prefix string, count, width int) map[string]struct{} {
 // request row or a later audit event survives.
 //
 // The call is idempotent: a store without seed rows returns zero counts. An
-// error is returned only when the sealer cannot delete a removed account's
-// entry; the caller must then not save the snapshot, so a restart retries the
-// purge with the accounts still present.
+// error is returned when the journal cannot commit the purge or the sealer
+// cannot delete a removed account's entry; the caller must then not save the
+// snapshot, so a restart retries the purge with the accounts still present.
 func (s *Store) PurgeDemo() (PurgeResult, error) {
-	result, removedAccounts, sealer := s.purgeDemoLocked()
+	result, removedAccounts, sealer, err := s.purgeDemoLocked()
+	if err != nil {
+		return result, err
+	}
 	// A sealer write may fsync, so the file-backed prune runs after the lock is
 	// released. Seed accounts never carry a sealed secret in this build, but a
 	// snapshot written by another build can, and a purged account must not
@@ -71,7 +74,7 @@ func (s *Store) PurgeDemo() (PurgeResult, error) {
 // purgeDemoLocked applies the in-memory purge under the write lock and returns
 // the removed account ids plus the configured sealer, so the caller can prune
 // the sealer file without holding the lock.
-func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer) {
+func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -159,5 +162,8 @@ func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer) {
 	// Purging removed rows, so the derived per-user totals must be rebuilt.
 	s.invalidateUserUsageLocked()
 	s.syncAccountCountsLocked()
-	return result, removedAccounts, s.sealer
+	if err := s.commitLocked(); err != nil {
+		return result, removedAccounts, s.sealer, err
+	}
+	return result, removedAccounts, s.sealer, nil
 }

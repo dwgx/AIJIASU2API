@@ -131,7 +131,10 @@ func TestInvalidateNodeLeasesRevokesAndRecountsInUse(t *testing.T) {
 		t.Fatalf("lease = %+v, want the slot node at generation 1", lease)
 	}
 
-	revoked := f.st.InvalidateNodeLeases(f.node.ID, "vendor_kick")
+	revoked, err := f.st.InvalidateNodeLeases(f.node.ID, "vendor_kick")
+	if err != nil {
+		t.Fatalf("InvalidateNodeLeases: %v", err)
+	}
 	if len(revoked) != 1 || revoked[0].ID != lease.ID || revoked[0].Status != model.LeaseRevoked {
 		t.Fatalf("revoked = %+v, want lease %s revoked", revoked, lease.ID)
 	}
@@ -152,7 +155,9 @@ func TestInvalidateNodeLeasesRevokesAndRecountsInUse(t *testing.T) {
 		t.Fatalf("no lease.revoke audit with reason vendor_kick: %+v", f.st.Audit(200))
 	}
 	// Idempotent: a second containment finds nothing to revoke.
-	if again := f.st.InvalidateNodeLeases(f.node.ID, "vendor_kick"); len(again) != 0 {
+	if again, err := f.st.InvalidateNodeLeases(f.node.ID, "vendor_kick"); err != nil {
+		t.Fatalf("InvalidateNodeLeases: %v", err)
+	} else if len(again) != 0 {
 		t.Fatalf("second invalidate revoked %d leases, want 0", len(again))
 	}
 }

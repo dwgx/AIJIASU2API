@@ -225,8 +225,8 @@ func (e *Engine) Start(ctx context.Context) error {
 	now := e.cfg.Now()
 	for _, unknown := range e.fireLog.TakeUnknown() {
 		e.unknownFires++
-		e.store.RecordScheduleFire(unknown)
-		e.store.WriteAudit(model.SeverityWarn, "system", "schedule.fire_unknown", unknown.Key,
+		e.recordFire(unknown)
+		e.audit(model.SeverityWarn, "system", "schedule.fire_unknown", unknown.Key,
 			"reservation had no terminal result; not retried", map[string]string{
 				"scheduleId": unknown.ScheduleID,
 				"runId":      unknown.RunID,
@@ -245,7 +245,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	for _, job := range catchUps {
 		e.enqueue(job)
 	}
-	e.store.WriteAudit(model.SeverityInfo, "system", "schedule.engine_start", "scheduler",
+	e.audit(model.SeverityInfo, "system", "schedule.engine_start", "scheduler",
 		fmt.Sprintf("tick %s · %d workers · %d schedules", e.cfg.Tick, e.cfg.MaxConcurrent, len(e.store.Schedules())),
 		map[string]string{
 			"tick":        e.cfg.Tick.String(),
@@ -283,7 +283,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	inFlight := len(e.running)
 	e.mu.Unlock()
-	e.store.WriteAudit(model.SeverityInfo, "system", "schedule.engine_stop", "scheduler",
+	e.audit(model.SeverityInfo, "system", "schedule.engine_stop", "scheduler",
 		"engine stopped", map[string]string{"inFlight": fmt.Sprintf("%d", inFlight)})
 	return nil
 }
@@ -325,7 +325,7 @@ func (e *Engine) Tick(now time.Time) {
 				nextRun = next.UTC().Format(time.RFC3339)
 			}
 			missedOnce := nextRun == "" && schedule.Trigger.Kind == "once"
-			_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) {
+			e.mutateSchedule(schedule.ID, func(next *model.Schedule) {
 				next.NextRunAt = nextRun
 				if missedOnce {
 					next.Enabled = false
@@ -333,7 +333,7 @@ func (e *Engine) Tick(now time.Time) {
 				}
 			})
 			if missedOnce {
-				e.store.WriteAudit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
+				e.audit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
 					"missed_window", map[string]string{"scheduleId": schedule.ID, "reason": "missed_window"})
 			}
 			continue
@@ -395,7 +395,44 @@ func (e *Engine) worker() {
 	}
 }
 
+// audit records one scheduler audit row. The store poisons itself when the
+// commit fails; logging at error level keeps the failure visible and execute
+// stops scheduling on its next tick.
+func (e *Engine) audit(severity model.Severity, actor, action, target, detail string, meta map[string]string) error {
+	if _, err := e.store.WriteAudit(severity, actor, action, target, detail, meta); err != nil {
+		e.logger.Error("schedule_audit_persist_failed", "action", action, "target", target, "error", err)
+		return err
+	}
+	return nil
+}
+
+// recordFire mirrors the fire journal into the store under the same rule.
+func (e *Engine) recordFire(fire model.ScheduleFire) error {
+	if err := e.store.RecordScheduleFire(fire); err != nil {
+		e.logger.Error("schedule_fire_persist_failed", "schedule_id", fire.ScheduleID,
+			"key", fire.Key, "error", err)
+		return err
+	}
+	return nil
+}
+
+// mutateSchedule applies one schedule update; a failed commit poisons the
+// store and is never dropped on the floor.
+func (e *Engine) mutateSchedule(id string, fn func(*model.Schedule)) error {
+	if _, err := e.store.MutateSchedule(id, fn); err != nil {
+		e.logger.Error("schedule_update_persist_failed", "schedule_id", id, "error", err)
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) execute(job runJob) {
+	if err := e.store.DurabilityError(); err != nil {
+		// A failed commit poisons the store; main is terminating. Do not start
+		// another run whose result could never be recorded.
+		e.logger.Error("schedule_store_poisoned", "schedule_id", job.scheduleID, "error", err)
+		return
+	}
 	e.mu.Lock()
 	delete(e.queued, job.scheduleID)
 	_, already := e.running[job.scheduleID]
@@ -589,7 +626,11 @@ func (e *Engine) runWithContext(ctx context.Context, job runJob, schedule model.
 	if job.dryRun != nil {
 		dryRun = *job.dryRun
 	}
-	runID := e.store.NextRunID()
+	runID, runIDErr := e.store.NextRunID()
+	if runIDErr != nil {
+		e.logger.Error("schedule_run_id_persist_failed", "schedule_id", schedule.ID, "error", runIDErr)
+		return model.ScheduleRun{}, runIDErr
+	}
 	fireKey := fireKeyFor(schedule.ID, job.scheduled)
 	if job.manual {
 		fireKey = "manual:" + runID
@@ -626,7 +667,7 @@ func (e *Engine) runWithContext(ctx context.Context, job runJob, schedule model.
 	if !ok {
 		finished := e.cfg.Now()
 		_ = e.fireLog.Finish(fireKey, "skipped", finished)
-		e.store.RecordScheduleFire(model.ScheduleFire{
+		e.recordFire(model.ScheduleFire{
 			Key: fireKey, ScheduleID: schedule.ID, ScheduledUnix: job.scheduled.Unix(),
 			State: "skipped", RunID: runID, Owner: "schedule:" + schedule.ID,
 			ReservedAt: now.UTC().Format(time.RFC3339), FinishedAt: finished.UTC().Format(time.RFC3339),
@@ -684,7 +725,15 @@ func (e *Engine) finishRun(schedule model.Schedule, job runJob, runID, fireKey s
 		AuditID:      outcome.AuditID,
 		Actor:        "schedule:" + schedule.ID,
 	}
-	run = e.store.AppendScheduleRun(run)
+	stored, persistErr := e.store.AppendScheduleRun(run)
+	if persistErr != nil {
+		// The run row is not durable: the store is poisoned. Stop the
+		// completion here — no fire mirror, no schedule update, no audit and no
+		// customer notification for a run the journal cannot hold.
+		e.logger.Error("schedule_run_persist_failed", "schedule_id", schedule.ID, "error", persistErr)
+		return run
+	}
+	run = stored
 	fire := model.ScheduleFire{
 		Key:           fireKey,
 		ScheduleID:    schedule.ID,
@@ -695,26 +744,37 @@ func (e *Engine) finishRun(schedule model.Schedule, job runJob, runID, fireKey s
 		ReservedAt:    started.UTC().Format(time.RFC3339),
 		FinishedAt:    finished.UTC().Format(time.RFC3339),
 	}
-	e.store.RecordScheduleFire(fire)
+	if err := e.recordFire(fire); err != nil {
+		return run
+	}
 	e.mu.Lock()
 	e.metrics[result]++
 	e.mu.Unlock()
 	e.updateAfterRun(schedule, job, run, outcome, started, finished)
 	if job.manual {
-		e.store.WriteAudit(model.SeverityInfo, "operator", "schedule.run", schedule.ID,
+		if err := e.audit(model.SeverityInfo, "operator", "schedule.run", schedule.ID,
 			run.Reason, map[string]string{
 				"scheduleId": schedule.ID,
 				"runId":      run.ID,
 				"result":     run.Result,
 				"reason":     run.Reason,
 				"dryRun":     fmt.Sprintf("%t", dryRunOf(job, schedule)),
-			})
+			}); err != nil {
+			return run
+		}
 	}
 	if result == "error" {
 		if outcome.ErrorClass == "transient" || outcome.ErrorClass == "internal" || outcome.ErrorClass == "invariant" {
 			e.recordCircuitFailure(schedule.Target.ID)
 		}
 		e.auditError(schedule, run, started)
+	}
+	// The customer webhook is the one step that leaves the process: it fires
+	// only when every row above is durable. A poisoned store stops here even
+	// when a later audit (auditError) failed.
+	if err := e.store.DurabilityError(); err != nil {
+		e.logger.Error("schedule_notify_suppressed", "schedule_id", schedule.ID, "error", err)
+		return run
 	}
 	if e.cfg.OnRun != nil {
 		e.cfg.OnRun(schedule, run)
@@ -769,7 +829,7 @@ func (e *Engine) updateAfterRun(schedule model.Schedule, job runJob, run model.S
 		outcome.Reason = "error"
 	}
 	runCount := e.runCountToday(schedule, finished)
-	_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) {
+	e.mutateSchedule(schedule.ID, func(next *model.Schedule) {
 		if outcome.Result != "skipped" {
 			next.LastRunAt = started.UTC().Format(time.RFC3339)
 		}
@@ -806,7 +866,11 @@ func (e *Engine) updateAfterRun(schedule model.Schedule, job runJob, run model.S
 }
 
 func (e *Engine) skip(schedule model.Schedule, scheduled, now time.Time, reason string, quiet, manual bool) model.ScheduleRun {
-	runID := e.store.NextRunID()
+	runID, runIDErr := e.store.NextRunID()
+	if runIDErr != nil {
+		e.logger.Error("schedule_run_id_persist_failed", "schedule_id", schedule.ID, "error", runIDErr)
+		return model.ScheduleRun{}
+	}
 	run := model.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   schedule.ID,
@@ -819,7 +883,14 @@ func (e *Engine) skip(schedule model.Schedule, scheduled, now time.Time, reason 
 		Reason:       reason,
 		Actor:        "schedule:" + schedule.ID,
 	}
-	run = e.store.AppendScheduleRun(run)
+	stored, persistErr := e.store.AppendScheduleRun(run)
+	if persistErr != nil {
+		// Same rule as finishRun: a skip the journal cannot hold must not
+		// advance the schedule, rewrite its state or emit an audit row.
+		e.logger.Error("schedule_run_persist_failed", "schedule_id", schedule.ID, "error", persistErr)
+		return run
+	}
+	run = stored
 	e.mu.Lock()
 	e.metrics["skipped"]++
 	e.mu.Unlock()
@@ -835,7 +906,7 @@ func (e *Engine) skip(schedule model.Schedule, scheduled, now time.Time, reason 
 		}
 	}
 	runCount := e.runCountToday(schedule, now)
-	_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) {
+	e.mutateSchedule(schedule.ID, func(next *model.Schedule) {
 		next.LastScheduledAt = scheduled.UTC().Format(time.RFC3339)
 		next.LastResult = "skipped"
 		next.LastError = reason
@@ -854,7 +925,7 @@ func (e *Engine) recordSkip(schedule model.Schedule, job runJob, now time.Time, 
 
 func (e *Engine) advance(schedule model.Schedule, scheduled, now time.Time) {
 	if schedule.Trigger.Kind == "once" {
-		_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) { next.NextRunAt = "" })
+		e.mutateSchedule(schedule.ID, func(next *model.Schedule) { next.NextRunAt = "" })
 		return
 	}
 	probe := schedule
@@ -864,7 +935,7 @@ func (e *Engine) advance(schedule model.Schedule, scheduled, now time.Time) {
 	if next, ok := NextAfter(probe, scheduled, now, e.drawJitter(schedule)); ok {
 		nextRun = next.UTC().Format(time.RFC3339)
 	}
-	_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) {
+	e.mutateSchedule(schedule.ID, func(next *model.Schedule) {
 		next.LastScheduledAt = scheduled.UTC().Format(time.RFC3339)
 		next.NextRunAt = nextRun
 	})
@@ -884,7 +955,7 @@ func (e *Engine) rearm(now time.Time) []runJob {
 			allowsRunOnce(schedule.Action) && withinGrace(schedule, now, next) {
 			catchUps = append(catchUps, runJob{scheduleID: schedule.ID, scheduled: next, enqueuedAt: now, catchUp: true})
 		} else if err == nil && !next.IsZero() {
-			e.store.WriteAudit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
+			e.audit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
 				"missed_window", map[string]string{"scheduleId": schedule.ID, "reason": "missed_window"})
 		}
 		probe := schedule
@@ -893,7 +964,7 @@ func (e *Engine) rearm(now time.Time) []runJob {
 		if computed, ok := NextRun(probe, now, e.drawJitter(schedule)); ok {
 			nextRun = computed.UTC().Format(time.RFC3339)
 		}
-		_, _ = e.store.MutateSchedule(schedule.ID, func(next *model.Schedule) {
+		e.mutateSchedule(schedule.ID, func(next *model.Schedule) {
 			next.NextRunAt = nextRun
 			if schedule.Trigger.Kind == "once" && nextRun == "" {
 				next.Enabled = false
@@ -1024,7 +1095,7 @@ func (e *Engine) auditSkip(schedule model.Schedule, reason string, now time.Time
 	}
 	e.lastSkipAt[schedule.ID] = now
 	e.mu.Unlock()
-	e.store.WriteAudit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
+	e.audit(model.SeverityInfo, "schedule:"+schedule.ID, "schedule.skip", schedule.ID,
 		reason, map[string]string{"scheduleId": schedule.ID, "reason": reason, "result": "skipped"})
 }
 
@@ -1037,7 +1108,7 @@ func (e *Engine) auditError(schedule model.Schedule, run model.ScheduleRun, now 
 	}
 	e.lastErrorAt[schedule.ID] = now
 	e.mu.Unlock()
-	e.store.WriteAudit(model.SeverityWarn, "schedule:"+schedule.ID, "schedule.error", schedule.ID,
+	e.audit(model.SeverityWarn, "schedule:"+schedule.ID, "schedule.error", schedule.ID,
 		run.Reason, map[string]string{
 			"scheduleId": schedule.ID,
 			"runId":      run.ID,
@@ -1048,7 +1119,7 @@ func (e *Engine) auditError(schedule model.Schedule, run model.ScheduleRun, now 
 }
 
 func (e *Engine) auditPause(schedule model.Schedule, reason string) {
-	e.store.WriteAudit(model.SeverityWarn, "schedule:"+schedule.ID, "schedule.paused", schedule.ID,
+	e.audit(model.SeverityWarn, "schedule:"+schedule.ID, "schedule.paused", schedule.ID,
 		reason, map[string]string{"scheduleId": schedule.ID, "reason": reason})
 }
 

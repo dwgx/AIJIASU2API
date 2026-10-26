@@ -304,8 +304,9 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 	// deployments POST a form body. ParseForm merges the query string and an
 	// urlencoded body, so one verification path serves both transports.
 	if err := r.ParseForm(); err != nil {
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
-			"malformed form body")
+		if !s.rejectEpayNotify(w, "malformed form body") {
+			return
+		}
 		writeEpayAck(w, http.StatusOK, "fail")
 		return
 	}
@@ -313,8 +314,9 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 	orderID := strings.TrimSpace(form.Get("out_trade_no"))
 	order, ok := s.store.Order(orderID)
 	if !ok {
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
-			"unknown order")
+		if !s.rejectEpayNotify(w, "unknown order") {
+			return
+		}
 		writeEpayAck(w, http.StatusOK, "fail")
 		return
 	}
@@ -336,7 +338,9 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 			writeEpayAck(w, http.StatusServiceUnavailable, "fail")
 			return
 		}
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay", reason)
+		if !s.rejectEpayNotify(w, reason) {
+			return
+		}
 		writeEpayAck(w, http.StatusOK, "fail")
 		return
 	}
@@ -345,8 +349,9 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrInvalid) ||
 			errors.Is(err, store.ErrNotFound) {
-			s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay",
-				"event rejected by the order state machine")
+			if !s.rejectEpayNotify(w, "event rejected by the order state machine") {
+				return
+			}
 			writeEpayAck(w, http.StatusOK, "fail")
 			return
 		}
@@ -460,4 +465,16 @@ func orderStateFilter(raw string) (model.OrderState, bool) {
 		return "", true
 	}
 	return state, model.ValidOrderState(state)
+}
+
+// rejectEpayNotify records one rejected notification and reports whether the
+// row is durable. A poisoned journal answers 503 with "fail" so the gateway
+// retries instead of treating an unrecorded rejection as delivered.
+func (s *Server) rejectEpayNotify(w http.ResponseWriter, detail string) bool {
+	if err := s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "epay", detail); err != nil {
+		s.logger.Error("webhook_audit_persist_failed", "provider", "epay", "error", err)
+		writeEpayAck(w, http.StatusServiceUnavailable, "fail")
+		return false
+	}
+	return true
 }

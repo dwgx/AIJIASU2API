@@ -114,7 +114,7 @@ func (s *Store) SetRefundPolicy(policy RefundPolicy) {
 // deactivation cannot change what this order costs or grants. One
 // awaiting/paid/unexpired-active order per user is allowed; an expired active
 // order permits a renewal.
-func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor string) (model.Order, bool, error) {
+func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor string) (created model.Order, replayed bool, err error) {
 	tenantID = strings.TrimSpace(tenantID)
 	userID = strings.TrimSpace(userID)
 	planID = strings.TrimSpace(planID)
@@ -139,6 +139,11 @@ func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor stri
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			created, replayed, err = model.Order{}, false, flushErr
+		}
+	}()
 
 	if keyHash != "" {
 		for i := range s.orders {
@@ -222,6 +227,9 @@ func (s *Store) CreateOrder(tenantID, userID, planID, idempotencyKey, actor stri
 			"amount":   fmt.Sprintf("%d", plan.AmountMinor),
 			"currency": plan.Currency,
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, false, err
+	}
 	return cloneOrder(order), false, nil
 }
 
@@ -431,6 +439,9 @@ func (s *Store) MarkOrderCheckout(tenantID, orderID, provider string) (model.Ord
 	s.addAuditLocked(model.SeverityInfo, "tenant:"+tenantID, "order.checkout", order.ID,
 		"checkout provider selected",
 		map[string]string{"orderId": order.ID, "provider": provider})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -508,6 +519,9 @@ func (s *Store) cancelOrderLocked(idx int, actor string) (model.Order, error) {
 				"from":     string(model.OrderAwaitingPayment),
 				"to":       string(model.OrderCancelled),
 			})
+		if err := s.commitLocked(); err != nil {
+			return model.Order{}, err
+		}
 		return cloneOrder(*order), nil
 	default:
 		return model.Order{}, conflictf("order %q is %s; only awaiting_payment can be cancelled",
@@ -544,7 +558,14 @@ func (s *Store) RecordManualRefund(orderID, reference, reason, actor string) (mo
 		Currency:    order.Plan.Currency,
 		OccurredAt:  iso(s.now()),
 	}
-	return s.applyEventLocked(idx, event, reason, actor)
+	result, err := s.applyEventLocked(idx, event, reason, actor)
+	if err != nil {
+		return model.Order{}, err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
+	return result, nil
 }
 
 // RecordManualChargeback records external chargeback evidence. It never
@@ -575,7 +596,14 @@ func (s *Store) RecordManualChargeback(orderID, reference, reason, actor string)
 		Currency:    order.Plan.Currency,
 		OccurredAt:  iso(s.now()),
 	}
-	return s.applyEventLocked(idx, event, reason, actor)
+	result, err := s.applyEventLocked(idx, event, reason, actor)
+	if err != nil {
+		return model.Order{}, err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
+	return result, nil
 }
 
 // ApplyPaymentEvent applies one provider fact through the single store-level
@@ -606,7 +634,14 @@ func (s *Store) ApplyPaymentEvent(provider string, event model.PaymentEvent, act
 	if idx < 0 {
 		return model.Order{}, notFoundf("order %q not found", event.OrderID)
 	}
-	return s.applyEventLocked(idx, event, "", actor)
+	order, err := s.applyEventLocked(idx, event, "", actor)
+	if err != nil {
+		return model.Order{}, err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
+	return order, nil
 }
 
 // applyEventLocked is the locked command transaction: it validates the event
@@ -1091,13 +1126,18 @@ func (s *Store) activateOrderLocked(idx int, actor string) error {
 // or repeated re-issues cannot allocate a second lease. A grant whose term has
 // expired is refused as well: restoring an expired order would be service
 // without a valid entitlement.
-func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lease, error) {
+func (s *Store) ReissueOrderLease(orderID, actor string) (replacement model.Order, lease model.Lease, err error) {
 	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
 		return model.Order{}, model.Lease{}, invalidf("orderId is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			replacement, lease, err = model.Order{}, model.Lease{}, flushErr
+		}
+	}()
 
 	idx := s.orderIndexLocked(orderID)
 	if idx < 0 {
@@ -1219,6 +1259,9 @@ func (s *Store) reissueOrderLeaseLocked(idx int, actor string) (model.Order, mod
 			"expiresAt":       lease.ExpiresAt,
 			"reason":          s.leaseEndReasonLocked(oldLeaseID),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, model.Lease{}, err
+	}
 	return cloneOrder(*order), lease, nil
 }
 
@@ -1266,6 +1309,9 @@ func (s *Store) RollbackOrderReissue(orderID, leaseID, previousLeaseID, reason s
 			"slot":       strconv.Itoa(lease.Slot),
 			"generation": strconv.FormatUint(lease.Generation, 10), "reason": detail,
 		})
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1309,7 +1355,7 @@ func (e *FulfilmentRefusal) Unwrap() error { return e.Err }
 // outlive. An initial job enqueued after that term already ended is recorded
 // directly as dead-lettered, so the payment/refund liability stays visible
 // instead of being silently dropped.
-func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (model.Order, error) {
+func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (updated model.Order, err error) {
 	orderID = strings.TrimSpace(orderID)
 	mode = model.FulfilmentMode(strings.TrimSpace(string(mode)))
 	switch {
@@ -1321,6 +1367,11 @@ func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (mo
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			updated, err = model.Order{}, flushErr
+		}
+	}()
 	idx := s.orderIndexLocked(orderID)
 	if idx < 0 {
 		return model.Order{}, notFoundf("order %q not found", orderID)
@@ -1388,6 +1439,9 @@ func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (mo
 			"paid term ended before fulfilment", now)
 	}
 	order.Fulfilment = job
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1408,7 +1462,7 @@ func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (mo
 // RecordFulfilmentRefusal, which consumes the attempt and schedules the next
 // one; keeping that policy in the caller lets this gate stay a pure
 // reserve-or-refuse operation.
-func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
+func (s *Store) BeginFulfilment(orderID string) (attempt FulfilmentAttempt, err error) {
 	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
 		return FulfilmentAttempt{}, invalidf("orderId is required")
@@ -1416,6 +1470,11 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			attempt, err = FulfilmentAttempt{}, flushErr
+		}
+	}()
 	idx := s.orderIndexLocked(orderID)
 	if idx < 0 {
 		return FulfilmentAttempt{}, notFoundf("order %q not found", orderID)
@@ -1484,6 +1543,9 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 	if !expires.After(now) {
 		s.deadLetterFulfilmentLocked(order, job, model.FulfilmentReasonEntitlementExpired,
 			"paid term ended at "+job.EntitlementExpiresAt, now)
+		if err := s.commitLocked(); err != nil {
+			return FulfilmentAttempt{}, err
+		}
 		return FulfilmentAttempt{}, conflictf("order %q entitlement expired at %s",
 			order.ID, job.EntitlementExpiresAt)
 	}
@@ -1541,6 +1603,9 @@ func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
 	// is in flight the abort schedules the next one.
 	job.NextAttemptAt = nil
 	job.UpdatedAt = iso(now)
+	if err := s.commitLocked(); err != nil {
+		return FulfilmentAttempt{}, err
+	}
 	return FulfilmentAttempt{
 		OrderID:         order.ID,
 		Mode:            job.Mode,
@@ -1612,6 +1677,9 @@ func (s *Store) AbortFulfilment(orderID, attemptLeaseID string, reason model.Ful
 	if !retryable || job.Attempts >= MaxFulfilmentAttempts {
 		s.recordFulfilmentBlockedLocked(order, job, previous, reason, detail, nil)
 		s.deadLetterFulfilmentLocked(order, job, reason, detail, now)
+		if err := s.commitLocked(); err != nil {
+			return model.Order{}, err
+		}
 		return cloneOrder(*order), nil
 	}
 
@@ -1625,6 +1693,9 @@ func (s *Store) AbortFulfilment(orderID, attemptLeaseID string, reason model.Ful
 	job.NextAttemptAt = ptrString(iso(next))
 	job.UpdatedAt = iso(now)
 	s.recordFulfilmentRetryLocked(order, job, previous, reason, detail, &next)
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1682,6 +1753,9 @@ func (s *Store) MarkFulfilmentPublished(orderID, attemptLeaseID string) (model.O
 	job.PublishedLeaseID = attemptLeaseID
 	job.PublishedAccountID = lease.AccountID
 	job.UpdatedAt = iso(now)
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1745,6 +1819,9 @@ func (s *Store) RetryPublishedFulfilment(orderID, attemptLeaseID string, reason 
 	job.NextAttemptAt = ptrString(iso(next))
 	job.UpdatedAt = iso(now)
 	s.recordFulfilmentRetryLocked(order, job, previous, reason, detail, &next)
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1815,6 +1892,9 @@ func (s *Store) MarkFulfilmentCleanupPending(orderID, attemptLeaseID string, rea
 			"leaseId":       attemptLeaseID,
 			"nextAttemptAt": iso(next),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1862,6 +1942,9 @@ func (s *Store) CompleteFulfilmentCleanup(orderID, attemptLeaseID string, reason
 	s.releaseProvisionalLeaseLocked(attemptLeaseID, order.UserID, "fulfilment_dead_letter")
 	s.recordFulfilmentBlockedLocked(order, job, previous, reason, detail, nil)
 	s.deadLetterFulfilmentLocked(order, job, reason, detail, now)
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1949,6 +2032,9 @@ func (s *Store) RetainPublishedFulfilment(orderID, attemptLeaseID, accountID str
 			"accountId":     accountID,
 			"nextAttemptAt": iso(next),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -1979,6 +2065,9 @@ func (s *Store) RecordFulfilmentCleanupOrphan(orderID, leaseID, accountID, detai
 			"leaseId":   leaseID,
 			"accountId": strings.TrimSpace(accountID),
 		})
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2022,6 +2111,9 @@ func (s *Store) RecordFulfilmentRefusal(orderID string, reason model.FulfilmentR
 	if !retryable || job.Attempts >= MaxFulfilmentAttempts {
 		s.recordFulfilmentBlockedLocked(order, job, previous, reason, detail, nil)
 		s.deadLetterFulfilmentLocked(order, job, reason, detail, now)
+		if err := s.commitLocked(); err != nil {
+			return model.Order{}, err
+		}
 		return cloneOrder(*order), nil
 	}
 
@@ -2032,6 +2124,9 @@ func (s *Store) RecordFulfilmentRefusal(orderID string, reason model.FulfilmentR
 	job.NextAttemptAt = ptrString(iso(next))
 	job.UpdatedAt = iso(now)
 	s.recordFulfilmentRetryLocked(order, job, previous, reason, detail, &next)
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -2312,6 +2407,9 @@ func (s *Store) CommitFulfilment(orderID, attemptLeaseID string) (model.Order, e
 			"attempts": strconv.Itoa(attempts),
 			"leaseId":  lease.ID,
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
 	return cloneOrder(*order), nil
 }
 
@@ -2360,6 +2458,7 @@ func (s *Store) RecoverFulfilments() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	changed := false
 	published := make(map[string]struct{})
 	for i := range s.orders {
 		order := &s.orders[i].Order
@@ -2376,7 +2475,9 @@ func (s *Store) RecoverFulfilments() error {
 		if _, keep := published[lease.ID]; keep {
 			continue
 		}
-		s.releaseProvisionalLeaseLocked(lease.ID, lease.UserID, "fulfilment_interrupted")
+		if s.releaseProvisionalLeaseLocked(lease.ID, lease.UserID, "fulfilment_interrupted") {
+			changed = true
+		}
 	}
 	for i := range s.orders {
 		order := &s.orders[i].Order
@@ -2386,6 +2487,7 @@ func (s *Store) RecoverFulfilments() error {
 		}
 		if terminalOrderState(order.State) {
 			order.Fulfilment = nil
+			changed = true
 			continue
 		}
 		if job.PublishedLeaseID != "" {
@@ -2399,6 +2501,7 @@ func (s *Store) RecoverFulfilments() error {
 				job.LastError = ""
 			}
 			job.UpdatedAt = iso(now)
+			changed = true
 			s.addAuditLocked(model.SeverityWarn, "system", "fulfilment.interrupted", order.ID,
 				"published attempt interrupted by restart; commit retried without republishing",
 				map[string]string{
@@ -2420,6 +2523,7 @@ func (s *Store) RecoverFulfilments() error {
 		job.LastError = ""
 		job.NextAttemptAt = ptrString(iso(now))
 		job.UpdatedAt = iso(now)
+		changed = true
 		s.addAuditLocked(model.SeverityWarn, "system", "fulfilment.interrupted", order.ID,
 			"publication interrupted by restart; attempt requeued without incrementing attempts",
 			map[string]string{
@@ -2427,6 +2531,11 @@ func (s *Store) RecoverFulfilments() error {
 				"mode":     string(job.Mode),
 				"attempts": strconv.Itoa(job.Attempts),
 			})
+	}
+	if changed {
+		if err := s.commitLocked(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

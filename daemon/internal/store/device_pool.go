@@ -930,6 +930,9 @@ func (s *Store) UpdateDevice(id string, label, notes *string) (DeviceRecord, err
 		}
 		rec.Notes = *notes
 	}
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -1239,6 +1242,9 @@ func (s *Store) MigrateDevices() error {
 	}
 	s.addAuditLocked(model.SeverityInfo, "system", "device.migrated", "pool",
 		fmt.Sprintf("from=snapshot_v1 count=%d", len(records)))
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1479,6 +1485,9 @@ func (s *Store) ReconcileDeviceMaterials() error {
 				"account="+s.deviceAccountLabelLocked(rec.AssignedAccountID))
 		}
 	}
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1563,6 +1572,9 @@ func (s *Store) GCDevices(now time.Time, retentionDays int) (int, error) {
 		s.addAuditLocked(model.SeverityInfo, "system", "device.gc", "pool",
 			fmt.Sprintf("removed=%d retention_days=%d oldest=%s newest=%s",
 				removed, retentionDays, oldest, newest))
+		if err := s.commitLocked(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		s.mu.Unlock()
 	}
 	return removed, firstErr
@@ -1765,7 +1777,11 @@ func (s *Store) ExportDevicePool(opts DeviceExportOptions, actor ...string) (Dev
 	s.mu.Lock()
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.export", "pool",
 		fmt.Sprintf("count=%d scope=%s sha256=%s", len(payload.Devices), scope, envelope.PayloadSHA256[:16]))
+	commitErr := s.commitLocked()
 	s.mu.Unlock()
+	if commitErr != nil {
+		return DeviceExportEnvelope{}, commitErr
+	}
 	return envelope, nil
 }
 
@@ -2284,6 +2300,10 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions, actor ..
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.import", "pool",
 		fmt.Sprintf("added=%d skipped=%d bound=%d conflicts=%d dryRun=false sha256=%s",
 			result.Added, result.Skipped, result.Bound, result.Conflicts, envelope.PayloadSHA256[:16]))
+	if err := s.commitLocked(); err != nil {
+		s.mu.Unlock()
+		return DeviceImportResult{}, err
+	}
 	s.mu.Unlock()
 	return result, nil
 }
@@ -2556,6 +2576,9 @@ func (s *Store) GenerateDevices(in DeviceGenerateInput) ([]DeviceRecord, error) 
 	for i, rec := range records {
 		out[i] = cloneDeviceRecord(rec)
 	}
+	if err := s.commitLocked(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -2655,6 +2678,9 @@ func (s *Store) ReleaseDevice(deviceID string, actor ...string) (DeviceRecord, e
 		"account="+label+" slot="+key.String())
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.release", rec.ID,
 		fmt.Sprintf("account=%s reused=%t slot=%s", label, reused, key.String()))
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -2705,6 +2731,9 @@ func (s *Store) RetireDevice(deviceID, reason string, actor ...string) (DeviceRe
 	rec.RetiredReason = reason
 	s.deviceAppendEventLocked(rec, "retired", auditActorArg(actor), "reason="+reason)
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.retire", rec.ID, "reason="+reason)
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -2740,6 +2769,9 @@ func (s *Store) QuarantineDevice(deviceID, reason string, actor ...string) (Devi
 	rec.RetiredReason = ""
 	s.deviceAppendEventLocked(rec, "quarantined", auditActorArg(actor), "reason="+reason)
 	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "device.quarantine", rec.ID, "reason="+reason)
+	if err := s.commitLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
 	return cloneDeviceRecord(*rec), nil
 }
 
@@ -2797,6 +2829,9 @@ func (s *Store) PurgeDevice(deviceID string, actor ...string) error {
 		}
 	}
 	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "device.purge", deviceID, "reason=purge")
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 

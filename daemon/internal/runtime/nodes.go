@@ -1005,7 +1005,10 @@ func (c *NodeController) revokeLeasesAfterCloseLocked(key model.SlotKey, nodeID,
 	if len(c.store.NodeLeases(nodeID)) == 0 {
 		return
 	}
-	revoked := c.store.InvalidateNodeLeases(nodeID, "slot_closed:"+reason)
+	revoked, revokeErr := c.store.InvalidateNodeLeases(nodeID, "slot_closed:"+reason)
+	if revokeErr != nil {
+		c.logger.Error("lease_revoke_persist_failed", "node_id", nodeID, "error", revokeErr)
+	}
 	if node, ok := c.store.Node(nodeID); ok {
 		node.State = model.NodeDown
 		node.GatePort = 0
@@ -1031,8 +1034,10 @@ func (c *NodeController) revokeLeasesAfterCloseLocked(key model.SlotKey, nodeID,
 		}
 		meta["leaseIds"] = strings.Join(ids, ",")
 	}
-	c.store.WriteAudit(model.SeverityWarn, "system", "slot.leases_revoked", nodeID,
-		"Slot closed with no target · lease that appeared during close revoked", meta)
+	if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "system", "slot.leases_revoked", nodeID,
+		"Slot closed with no target · lease that appeared during close revoked", meta); auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", nodeID, "error", auditErr)
+	}
 	c.logger.Warn("slot_leases_revoked_after_close", "account_id", key.AccountID,
 		"slot", key.String(), "node_id", nodeID, "leases", len(revoked), "reason", reason)
 }
@@ -1450,7 +1455,10 @@ func (c *NodeController) containKickLocked(id string, running *nodeGate, detail 
 		c.logger.Warn("slot_state_write_failed", "slot", running.slot.String(),
 			"reason", detail, "error", err)
 	}
-	revoked := c.store.InvalidateNodeLeases(id, detail)
+	revoked, revokeErr := c.store.InvalidateNodeLeases(id, detail)
+	if revokeErr != nil {
+		c.logger.Error("lease_revoke_persist_failed", "node_id", id, "error", revokeErr)
+	}
 	c.debug.Record(newDebugTrace(model.DebugKindSessionLost, running.slot, running.generation,
 		id, running.serverID, "liveness", model.DebugStateLost, detail, "", 0))
 	if err == nil {
@@ -1475,12 +1483,14 @@ func (c *NodeController) closeOrphanLocked(id string, running *nodeGate) {
 	if current, ok := c.slotGates[running.slot]; ok && current == id {
 		delete(c.slotGates, running.slot)
 	}
-	c.store.WriteAudit(model.SeverityWarn, "system", "slot.orphan_closed", id,
+	if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "system", "slot.orphan_closed", id,
 		"Gate closed · account row is gone", map[string]string{
 			"nodeId":    id,
 			"accountId": running.accountID,
 			"slot":      running.slot.String(),
-		})
+		}); auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", id, "error", auditErr)
+	}
 	c.logger.Warn("orphan_gate_closed", "node_id", id, "account_id", running.accountID,
 		"slot", running.slot.String(), "server_id", running.serverID)
 }

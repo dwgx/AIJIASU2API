@@ -245,7 +245,10 @@ func (r epayQueryResponse) status() EpayOrderStatus {
 type EpayReconcileStore interface {
 	PendingEpayOrders() []model.Order
 	ApplyPaymentEvent(provider string, event model.PaymentEvent, actor string) (model.Order, error)
-	RecordAudit(severity model.Severity, actor, action, target, detail string)
+	RecordAudit(severity model.Severity, actor, action, target, detail string) error
+	// DurabilityError reports a failed journal commit. A non-nil value stops
+	// the pass: the store is poisoned and every later write is refused.
+	DurabilityError() error
 }
 
 // EpayReconcilerConfig wires the poller. Interval defaults to 60s; MaxOrders
@@ -391,6 +394,12 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// A mutation or audit row that could not be committed poisons the
+		// store; stop querying the gateway instead of accumulating
+		// observations the journal cannot hold.
+		if err := r.store.DurabilityError(); err != nil {
+			return err
+		}
 		queryCtx, cancel := context.WithTimeout(ctx, epayQueryTimeout)
 		status, err := r.provider.QueryOrder(queryCtx, order.ID)
 		cancel()
@@ -403,20 +412,26 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 			// A wrong PID/key stops every query, so make it visible instead
 			// of silently skipping the whole queue.
 			logger.Error("epay_reconcile_auth_failed", "order_id", order.ID, "error", err)
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway rejected the merchant credentials; check AJS_EPAY_PID/AJS_EPAY_KEY")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway rejected the merchant credentials; check AJS_EPAY_PID/AJS_EPAY_KEY"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		case errors.Is(err, ErrQueryTransient), errors.Is(err, ErrQueryFailed):
 			logger.Warn("epay_reconcile_query_failed", "order_id", order.ID, "error", err)
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway query failed; will retry")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway query failed; will retry"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		case errors.Is(err, ErrDisabled):
 			return ErrDisabled
 		default:
 			logger.Warn("epay_reconcile_query_failed", "order_id", order.ID, "error", err)
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway query failed; will retry")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway query failed; will retry"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		if !status.Paid() {
@@ -425,25 +440,33 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		// Epay money has no currency; a non-CNY snapshot must never be
 		// settled as if it were CNY.
 		if !strings.EqualFold(strings.TrimSpace(order.Plan.Currency), "CNY") {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"order currency is not CNY; epay settlement skipped")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"order currency is not CNY; epay settlement skipped"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		if status.OutTradeNo != "" && status.OutTradeNo != order.ID {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway returned a different out_trade_no")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway returned a different out_trade_no"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		amount, err := ParseMoneyMinor(status.Money)
 		if err != nil || amount != order.Plan.AmountMinor {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway amount does not match the order snapshot")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway amount does not match the order snapshot"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		tradeNo := strings.TrimSpace(status.TradeNo)
 		if tradeNo == "" || len(tradeNo) > 128 || strings.ContainsAny(tradeNo, "\r\n\t") {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway response has no usable trade_no")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway response has no usable trade_no"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		event := model.PaymentEvent{
@@ -458,25 +481,33 @@ func (r *EpayReconciler) ReconcileOnce(ctx context.Context) error {
 		}
 		after, err := r.store.ApplyPaymentEvent(model.ProviderEpay, event, "system")
 		if err != nil {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway reported TRADE_SUCCESS but the settlement was rejected")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway reported TRADE_SUCCESS but the settlement was rejected"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		if after.ReviewRequired {
-			r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
-				"gateway reported TRADE_SUCCESS; settlement requires review")
+			if auditErr := r.store.RecordAudit(model.SeverityWarn, "system", "epay.reconcile", order.ID,
+				"gateway reported TRADE_SUCCESS; settlement requires review"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
 		if after.State == model.OrderPaid {
 			// The money is recorded but no entitlement serves yet: an initial
 			// fulfilment job owns the remaining work. Reporting "settled" here
 			// would claim service the customer does not have.
-			r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,
-				"gateway reported TRADE_SUCCESS; payment recorded, entitlement pending fulfilment")
+			if auditErr := r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,
+				"gateway reported TRADE_SUCCESS; payment recorded, entitlement pending fulfilment"); auditErr != nil {
+				return auditErr
+			}
 			continue
 		}
-		r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,
-			"gateway reported TRADE_SUCCESS; settlement applied")
+		if auditErr := r.store.RecordAudit(model.SeverityInfo, "system", "epay.reconcile", order.ID,
+			"gateway reported TRADE_SUCCESS; settlement applied"); auditErr != nil {
+			return auditErr
+		}
 	}
 	return nil
 }

@@ -444,8 +444,12 @@ func (c *NodeController) DisconnectSlot(ctx context.Context, key model.SlotKey) 
 		meta["leases"] = strconv.Itoa(len(leases))
 		meta["leaseIds"] = strings.Join(ids, ",")
 	}
-	result.AuditID = c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
+	auditID, auditErr := c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
 		entry.NodeID, "Session disconnected · target kept", meta)
+	if auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", entry.NodeID, "error", auditErr)
+	}
+	result.AuditID = auditID
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
 		c.logger.Warn("catalog_reconcile_failed", "account_id", acct.ID, "action", "disconnect", "error", reconcileErr)
 		result.Warnings = append(result.Warnings, ReasonReconcileFailed)
@@ -539,8 +543,12 @@ func (c *NodeController) DisconnectAccount(ctx context.Context, accountID string
 			meta[prefix+"leaseIds"] = strings.Join(audit.leaseIDs, ",")
 		}
 	}
-	result.AuditID = c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
+	auditID, auditErr := c.store.WriteAudit(model.SeverityInfo, "operator", "catalog.disconnect",
 		auditTarget, "Session disconnected · target kept", meta)
+	if auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", auditTarget, "error", auditErr)
+	}
+	result.AuditID = auditID
 	if reconcileErr := c.reconcileLocked(ctx); reconcileErr != nil {
 		c.logger.Warn("catalog_reconcile_failed", "account_id", accountID, "action", "disconnect", "error", reconcileErr)
 		result.Warnings = append(result.Warnings, ReasonReconcileFailed)
@@ -648,10 +656,12 @@ func (c *NodeController) switchSlotLocked(ctx context.Context, acct model.Accoun
 		if errs := c.closeSlotLocked(key); len(errs) > 0 {
 			warnings = append(warnings, "orphan_gate")
 			c.logger.Warn("catalog_switch_cleanup_failed", "account_id", acct.ID, "node_id", oldNodeID, "error", errors.Join(errs...))
-			c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.switch_cleanup_failed",
+			if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.switch_cleanup_failed",
 				oldNodeID, "Old gate did not close · switch committed", map[string]string{
 					"errorClass": "gate",
-				})
+				}); auditErr != nil {
+				c.logger.Error("catalog_audit_persist_failed", "node_id", oldNodeID, "error", auditErr)
+			}
 		}
 		delete(c.running, oldNodeID)
 		delete(c.slotGates, key)
@@ -915,7 +925,10 @@ func (c *NodeController) failSlotSwitch(ctx context.Context, acct model.Account,
 // whose only local endpoint just died. It never touches a sibling slot's
 // publication or lease.
 func (c *NodeController) revokeClosedSlotLocked(ctx context.Context, key model.SlotKey, oldNodeID, oldServerID, reason string) []string {
-	revoked := c.store.InvalidateNodeLeases(oldNodeID, "switch_failed:"+reason)
+	revoked, revokeErr := c.store.InvalidateNodeLeases(oldNodeID, "switch_failed:"+reason)
+	if revokeErr != nil {
+		c.logger.Error("lease_revoke_persist_failed", "node_id", oldNodeID, "error", revokeErr)
+	}
 	if node, ok := c.store.Node(oldNodeID); ok {
 		node.State = model.NodeDown
 		node.GatePort = 0
@@ -946,8 +959,10 @@ func (c *NodeController) revokeClosedSlotLocked(ctx context.Context, key model.S
 		}
 		meta["leaseIds"] = strings.Join(ids, ",")
 	}
-	c.store.WriteAudit(model.SeverityWarn, "operator", "slot.switch_failed", oldNodeID,
-		"Switch failed after the old session closed · lease revoked", meta)
+	if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "operator", "slot.switch_failed", oldNodeID,
+		"Switch failed after the old session closed · lease revoked", meta); auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", oldNodeID, "error", auditErr)
+	}
 	c.logger.Warn("catalog_switch_revoked", "account_id", key.AccountID, "slot", key.String(),
 		"node_id", oldNodeID, "server_id", oldServerID, "leases", len(revoked), "reason", reason)
 
@@ -958,12 +973,14 @@ func (c *NodeController) revokeClosedSlotLocked(ctx context.Context, key model.S
 	}
 	if err := withdrawer.WithdrawLease(ctx, key.AccountID); err != nil {
 		warnings = append(warnings, ReasonLeaseWithdrawFailed)
-		c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.lease_withdraw_failed", oldNodeID,
+		if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.lease_withdraw_failed", oldNodeID,
 			"Switch failed after the old session closed · external lease withdrawal failed",
 			map[string]string{
 				"slot": key.String(), "nodeId": oldNodeID, "serverId": oldServerID,
 				"accountId": key.AccountID, "reason": reason, "errorClass": "resin",
-			})
+			}); auditErr != nil {
+			c.logger.Error("catalog_audit_persist_failed", "node_id", oldNodeID, "error", auditErr)
+		}
 		c.logger.Warn("catalog_lease_withdraw_failed", "account_id", key.AccountID,
 			"slot", key.String(), "node_id", oldNodeID, "error", err)
 	}
@@ -1010,8 +1027,10 @@ func (c *NodeController) recordReconcileLoss(res *SwitchResult, trigger string, 
 	if res.PrevNodeID != "" {
 		meta["prevNodeId"] = res.PrevNodeID
 	}
-	c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.reconcile_failed", target,
-		"Switch left the store consistent but the Resin publication failed · a dead endpoint may stay advertised", meta)
+	if _, auditErr := c.store.WriteAudit(model.SeverityWarn, "operator", "catalog.reconcile_failed", target,
+		"Switch left the store consistent but the Resin publication failed · a dead endpoint may stay advertised", meta); auditErr != nil {
+		c.logger.Error("catalog_audit_persist_failed", "node_id", target, "error", auditErr)
+	}
 }
 
 // annotateSwitchError copies the failed switch's warnings and slot/generation

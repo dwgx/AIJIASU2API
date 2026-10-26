@@ -216,7 +216,14 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 // is a different server. Both paths keep the cooldown, the one-session break
 // before make, the slot lock and metadata-only containment.
 func (s *Server) runSelectNode(operation model.Operation, serverID, trigger string, reconnect bool, timeout time.Duration) {
-	if !s.store.MarkOperationRunning(operation.ID) {
+	started, err := s.store.MarkOperationRunning(operation.ID)
+	if err != nil {
+		// The record could not be made durable: the store is poisoned and the
+		// daemon is terminating, so the vendor must not be touched.
+		s.logger.Error("operation_start_persist_failed", "operation_id", operation.ID, "error", err)
+		return
+	}
+	if !started {
 		// Canceled before dispatch: never touch the vendor.
 		return
 	}
@@ -226,9 +233,11 @@ func (s *Server) runSelectNode(operation model.Operation, serverID, trigger stri
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			s.logger.Error("operation_panic", "operation_id", operation.ID, "panic", recovered)
-			s.store.FinishOperation(operation.ID, model.OperationFailed, []model.OperationStep{
+			if _, _, finishErr := s.store.FinishOperation(operation.ID, model.OperationFailed, []model.OperationStep{
 				{Name: "switch", State: model.OperationStepFailed},
-			}, nil, &model.OperationError{Code: "INTERNAL", Message: "internal error"})
+			}, nil, &model.OperationError{Code: "INTERNAL", Message: "internal error"}); finishErr != nil {
+				s.logger.Error("operation_finish_persist_failed", "operation_id", operation.ID, "error", finishErr)
+			}
 			s.persistAfterOperation()
 		}
 	}()
@@ -242,10 +251,7 @@ func (s *Server) runSelectNode(operation model.Operation, serverID, trigger stri
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var (
-		result runtime.SwitchResult
-		err    error
-	)
+	var result runtime.SwitchResult
 	if reconnect {
 		result, err = s.cfg.Catalog.ReconnectAccount(ctx, operation.AccountID, "", trigger)
 	} else {
@@ -264,13 +270,17 @@ func (s *Server) runSelectNode(operation model.Operation, serverID, trigger stri
 			partial.Changed = false
 			partial.SessionHealthy = false
 		}
-		s.store.FinishOperation(operation.ID, model.OperationFailed, steps, partial,
-			operationErrorFrom(err, ctx))
+		if _, _, finishErr := s.store.FinishOperation(operation.ID, model.OperationFailed, steps, partial,
+			operationErrorFrom(err, ctx)); finishErr != nil {
+			s.logger.Error("operation_finish_persist_failed", "operation_id", operation.ID, "error", finishErr)
+		}
 		s.persistAfterOperation()
 		return
 	}
-	s.store.FinishOperation(operation.ID, model.OperationSucceeded, steps,
-		s.selectNodeResultFromSwitch(result), nil)
+	if _, _, finishErr := s.store.FinishOperation(operation.ID, model.OperationSucceeded, steps,
+		s.selectNodeResultFromSwitch(result), nil); finishErr != nil {
+		s.logger.Error("operation_finish_persist_failed", "operation_id", operation.ID, "error", finishErr)
+	}
 	// Follow the new gate only after the durable record is terminal, so a
 	// wait:true caller is not blocked by the health sampler.
 	s.observeConnect(result)

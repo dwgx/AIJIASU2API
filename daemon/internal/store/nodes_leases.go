@@ -85,6 +85,9 @@ func (s *Store) PutNode(node model.ProxyNode) (model.ProxyNode, error) {
 		s.nodes = append(s.nodes, node)
 	}
 	s.syncAccountCountsLocked()
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, err
+	}
 	return node, nil
 }
 
@@ -162,6 +165,9 @@ func (s *Store) DeleteNode(id string) error {
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
 		fmt.Sprintf("Node removed · account %s", node.AccountID), s.nodeAuditMetaLocked(node))
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -221,6 +227,9 @@ func (s *Store) DeleteNodeUnleased(id string) (bool, error) {
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, "system", "node.delete", node.Label,
 		fmt.Sprintf("Node removed · account %s", node.AccountID), s.nodeAuditMetaLocked(node))
+	if err := s.commitLocked(); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -316,6 +325,9 @@ func (s *Store) DemoteNode(id string) (model.ProxyNode, []model.Lease, bool, err
 	s.addAuditLocked(model.SeverityWarn, "system", "node.recovered_stale", node.Label,
 		fmt.Sprintf("Restart recovery · no gate bound · %s → STALE · %d leases revoked", previous, len(revoked)),
 		meta)
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, nil, false, err
+	}
 	return *node, revoked, true, nil
 }
 
@@ -338,6 +350,9 @@ func (s *Store) DrainNode(id string, actor ...string) (model.ProxyNode, error) {
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "node.drain", node.Label,
 		fmt.Sprintf("Drain requested · %d in-flight flows", node.InUse))
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, err
+	}
 	return *node, nil
 }
 
@@ -362,6 +377,9 @@ func (s *Store) UndrainNode(id string, actor ...string) (model.ProxyNode, error)
 	node.LastProbeAt = iso(s.now())
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "node.undrain", node.Label, "Node returned to service")
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, err
+	}
 	return *node, nil
 }
 
@@ -383,6 +401,9 @@ func (s *Store) ProbeNode(id string) (model.ProxyNode, error) {
 	node.LastProbeAt = iso(s.now())
 	s.addAuditLocked(model.SeverityInfo, "system", "node.probe", node.Label,
 		"Probe timestamp touched · no upstream probe performed")
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, err
+	}
 	return *node, nil
 }
 
@@ -408,6 +429,9 @@ func (s *Store) RotateLease(id string, actor ...string) (model.Lease, error) {
 		fmt.Sprintf("synthetic rotation without Resin · %s → %s", oldIP, lease.EgressIP))
 	out := *lease
 	s.normalizeLeaseLocked(&out)
+	if err := s.commitLocked(); err != nil {
+		return model.Lease{}, err
+	}
 	return out, nil
 }
 
@@ -442,5 +466,8 @@ func (s *Store) ApplyLeaseRotation(id, egressIP, expiresAt string, requests int6
 		fmt.Sprintf("%s → %s", oldIP, lease.EgressIP))
 	out := *lease
 	s.normalizeLeaseLocked(&out)
+	if err := s.commitLocked(); err != nil {
+		return model.Lease{}, err
+	}
 	return out, nil
 }

@@ -31,6 +31,8 @@ type fakeEpayStore struct {
 	applied  []model.PaymentEvent
 	audits   []epayAuditRow
 	applyErr error
+	// durabilityErr makes the reconciler's poison check testable.
+	durabilityErr error
 }
 
 func (f *fakeEpayStore) PendingEpayOrders() []model.Order {
@@ -58,10 +60,17 @@ func (f *fakeEpayStore) ApplyPaymentEvent(provider string, event model.PaymentEv
 	return out, nil
 }
 
-func (f *fakeEpayStore) RecordAudit(severity model.Severity, actor, action, target, detail string) {
+func (f *fakeEpayStore) RecordAudit(severity model.Severity, actor, action, target, detail string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.audits = append(f.audits, epayAuditRow{severity, actor, action, target, detail})
+	return nil
+}
+
+func (f *fakeEpayStore) DurabilityError() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.durabilityErr
 }
 
 func (f *fakeEpayStore) snapshot() ([]model.PaymentEvent, []epayAuditRow) {
@@ -462,5 +471,24 @@ func TestEpayQueryResponseShape(t *testing.T) {
 	}
 	if response.code() != 1 || !response.status().Paid() {
 		t.Fatalf("response = %+v", response)
+	}
+}
+
+// TestEpayReconcileStopsWhenStoreIsPoisoned proves the loop checks the poison
+// before every query: the gateway is unreachable on purpose, so an audit row
+// would appear if a query had been attempted.
+func TestEpayReconcileStopsWhenStoreIsPoisoned(t *testing.T) {
+	poison := errors.New("journal commit failed")
+	fake := &fakeEpayStore{pending: []model.Order{testEpayOrder()}, durabilityErr: poison}
+	provider := NewEpay(EpayConfig{Gateway: "http://127.0.0.1:1", PID: "1001", Key: epayTestKey})
+	reconciler := NewEpayReconciler(EpayReconcilerConfig{
+		Provider: provider, Store: fake,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err := reconciler.ReconcileOnce(context.Background()); !errors.Is(err, poison) {
+		t.Fatalf("ReconcileOnce error = %v, want the durability error", err)
+	}
+	if applied, audits := fake.snapshot(); len(applied) != 0 || len(audits) != 0 {
+		t.Fatalf("poisoned store still queried: applied=%d audits=%d", len(applied), len(audits))
 	}
 }

@@ -181,7 +181,13 @@ func (s *Store) slotWithBindingLocked(slot model.AccountSlot) model.AccountSlot 
 func (s *Store) UpsertSlot(slot model.AccountSlot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.upsertSlotLocked(slot)
+	if err := s.upsertSlotLocked(slot); err != nil {
+		return err
+	}
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // upsertSlotLocked is the body of UpsertSlot for callers that already hold the
@@ -365,6 +371,9 @@ func (s *Store) CommitSlotStart(commit SlotStartCommit) (model.ProxyNode, error)
 			})
 	}
 	s.syncAccountCountsLocked()
+	if err := s.commitLocked(); err != nil {
+		return model.ProxyNode{}, err
+	}
 	return node, nil
 }
 
@@ -437,6 +446,9 @@ func (s *Store) RecordSlotKick(kick SlotKick) (model.AccountSlot, error) {
 	}
 	s.addAuditLocked(model.SeverityWarn, "system", "slot.vendor_kick", kick.Key.String(),
 		"Slot session lost · "+detail, meta)
+	if err := s.commitLocked(); err != nil {
+		return model.AccountSlot{}, err
+	}
 	return s.slotWithBindingLocked(slot), nil
 }
 
@@ -494,6 +506,9 @@ func (s *Store) SetSlotFailure(key model.SlotKey, serverID, reason string) error
 	}
 	s.addAuditLocked(model.SeverityWarn, "system", "slot.failure", key.String(),
 		"Slot down · "+detail, meta)
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -543,6 +558,9 @@ func (s *Store) DisableSlot(key model.SlotKey) error {
 	}
 	s.addAuditLocked(model.SeverityInfo, "operator", "slot.disable", key.String(),
 		"Slot disabled · capacity reduced", meta)
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -572,6 +590,9 @@ func (s *Store) SetSlotState(key model.SlotKey, state model.SlotState, health mo
 		slot.LastError = clientMessage(detail)
 	}
 	s.accountSlots[key] = slot
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -609,6 +630,9 @@ func (s *Store) SetSlotPorts(key model.SlotKey, socks, httpPort int) error {
 	slot.GatePort = socks
 	slot.HTTPPort = httpPort
 	s.accountSlots[key] = slot
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -632,6 +656,9 @@ func (s *Store) DeleteSlot(key model.SlotKey) error {
 		}
 	}
 	delete(s.accountSlots, key)
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -683,6 +710,9 @@ func (s *Store) EnsureAccountSlots(accountID string, capacity int) ([]model.Acco
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	if err := s.commitLocked(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

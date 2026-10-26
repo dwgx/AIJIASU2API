@@ -21,8 +21,9 @@ const (
 
 // AppendWebhookDelivery records one delivery attempt. The row is prepended
 // (newest first) and both retention caps are enforced by dropping the oldest
-// rows. The append only touches memory: the periodic snapshot carries it to
-// disk, so a delivery never waits on a write or an fsync.
+// rows. The row is committed before this returns: a delivery breadcrumb is
+// persisted state, and a commit failure poisons the store rather than being
+// dropped.
 //
 // An unknown endpoint id is accepted on purpose: the dispatcher lets queued
 // attempts finish after a receiver is deleted, and those attempts must still be
@@ -63,6 +64,9 @@ func (s *Store) AppendWebhookDelivery(delivery model.WebhookDelivery) error {
 			continue
 		}
 		i++
+	}
+	if err := s.commitLocked(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -36,7 +36,7 @@ func TestAppendRequestStampsAndCaps(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	st := &Store{now: func() time.Time { return now }}
 
-	first := st.AppendRequest(model.RequestLog{
+	first, err := st.AppendRequest(model.RequestLog{
 		Source:       model.SourceGate,
 		AccountLabel: "Northwind Ops",
 		Target:       "example.com:443",
@@ -44,10 +44,16 @@ func TestAppendRequestStampsAndCaps(t *testing.T) {
 		Bytes:        8,
 		LatencyMs:    3,
 	})
+	if err != nil {
+		t.Fatalf("AppendRequest: %v", err)
+	}
 	if first.ID == "" || first.TS != "2026-10-25T12:00:00Z" {
 		t.Fatalf("stamped row = %+v, want a non-empty id and the store clock", first)
 	}
-	second := st.AppendRequest(model.RequestLog{ID: "caller-id", TS: "2026-10-24T00:00:00Z", Source: model.SourceGate})
+	second, err := st.AppendRequest(model.RequestLog{ID: "caller-id", TS: "2026-10-24T00:00:00Z", Source: model.SourceGate})
+	if err != nil {
+		t.Fatalf("AppendRequest: %v", err)
+	}
 	if second.ID != "caller-id" || second.TS != "2026-10-24T00:00:00Z" {
 		t.Fatalf("caller identity was overwritten: %+v", second)
 	}

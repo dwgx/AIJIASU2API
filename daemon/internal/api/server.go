@@ -835,7 +835,14 @@ func (s *Server) auth(next http.Handler) http.Handler {
 				"scoped key is not allowed to read this account")
 			return
 		}
-		s.store.MarkScopedKeyUsed(key.ID)
+		if err := s.store.MarkScopedKeyUsed(key.ID); err != nil {
+			// The key state could not be committed: the store is poisoned and
+			// main is terminating, so fail the request closed instead of
+			// serving on state the journal does not contain.
+			s.logger.Error("scoped_key_use_persist_failed", "key_id", key.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, CodeInternal, "state persistence unavailable")
+			return
+		}
 		next.ServeHTTP(w, withAuthIdentity(r, authIdentity{key: key}))
 	})
 }

@@ -29,8 +29,11 @@ func TestAuditHookFiresOnlyForCriticalRows(t *testing.T) {
 		t.Fatalf("hook fired for non-critical rows: %+v", received)
 	}
 
-	auditID := st.WriteAudit(model.SeverityCritical, "operator", "secret.rotate", "key-1",
+	auditID, err := st.WriteAudit(model.SeverityCritical, "operator", "secret.rotate", "key-1",
 		"master key rotated", map[string]string{"scope": "secrets"})
+	if err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

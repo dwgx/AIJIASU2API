@@ -141,6 +141,9 @@ func (s *Store) SignupTenant(in model.TenantSignupInput) error {
 	}
 	s.tenants = append([]tenantRecord{rec}, s.tenants...)
 	s.addAuditLocked(model.SeverityInfo, "portal", "tenant.signup", email, "pending approval")
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -203,6 +206,9 @@ func (s *Store) CreateTenantInvite(in model.TenantInviteCreateRequest, actor ...
 	s.addAuditLocked(model.SeverityInfo, rec.CreatedBy, "invite.created", email,
 		"one-time activation code issued, expires "+rec.ExpiresAt,
 		map[string]string{"inviteId": rec.ID, "expiresAt": rec.ExpiresAt})
+	if err := s.commitLocked(); err != nil {
+		return model.TenantInviteCreated{}, err
+	}
 	return model.TenantInviteCreated{Invite: cloneTenantInvite(rec.TenantInvite), Code: code}, nil
 }
 
@@ -333,6 +339,9 @@ func (s *Store) RedeemTenantInvite(code string, in model.TenantInviteActivateReq
 	s.addAuditLocked(model.SeverityInfo, actor, "invite.redeemed", recPtr.Email,
 		"tenant "+tenant.ID+" created pending approval",
 		map[string]string{"inviteId": recPtr.ID, "tenantId": tenant.ID})
+	if err := s.commitLocked(); err != nil {
+		return model.Tenant{}, err
+	}
 	return cloneTenant(tenant.Tenant), nil
 }
 
@@ -421,6 +430,9 @@ func (s *Store) CreatePortalSession(tenantID string) (cookie string, csrf string
 	if len(s.portalSessions) > MaxPortalSessions {
 		s.portalSessions = s.portalSessions[:MaxPortalSessions]
 	}
+	if err := s.commitLocked(); err != nil {
+		return "", "", err
+	}
 	return cookie, csrf, nil
 }
 
@@ -442,41 +454,58 @@ func (s *Store) AuthenticatePortalSession(cookie string, now time.Time) (model.P
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrUnauthorized
 	}
 	session := &s.portalSessions[idx]
-	revoke := func() {
+	revoke := func() error {
 		if session.RevokedAt == nil {
 			session.RevokedAt = ptrString(iso(now))
+			return s.commitLocked()
 		}
+		return nil
 	}
 	if session.RevokedAt != nil || portalSessionExpired(*session, now) {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrUnauthorized
 	}
 	tenantIdx := s.tenantIndexLocked(session.TenantID)
 	if tenantIdx < 0 {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrUnauthorized
 	}
 	rec := &s.tenants[tenantIdx]
 	if rec.invalid != "" {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrUnauthorized
 	}
 	if rec.Status != model.TenantActive {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrForbidden
 	}
 	if rec.UserID == nil {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrForbidden
 	}
 	userIdx := s.userIndexLocked(*rec.UserID)
 	if userIdx < 0 || !s.users[userIdx].Enabled {
-		revoke()
+		if err := revoke(); err != nil {
+			return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+		}
 		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, ErrForbidden
 	}
 
 	session.LastSeenAt = iso(now)
 	out := *session
+	if err := s.commitLocked(); err != nil {
+		return model.PortalSession{}, model.Tenant{}, model.PanelUser{}, err
+	}
 	return out, cloneTenant(rec.Tenant), s.withDerivedUsage(cloneUser(s.users[userIdx])), nil
 }
 
@@ -504,6 +533,9 @@ func (s *Store) EnsurePortalCSRF(idHash string) (string, error) {
 	}
 	session.CSRFToken = raw
 	session.CSRFHash = hash
+	if err := s.commitLocked(); err != nil {
+		return "", err
+	}
 	return raw, nil
 }
 
@@ -518,6 +550,9 @@ func (s *Store) RevokePortalSession(idHash string) error {
 	}
 	if s.portalSessions[idx].RevokedAt == nil {
 		s.portalSessions[idx].RevokedAt = ptrString(iso(s.now()))
+		if err := s.commitLocked(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -595,6 +630,9 @@ func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserI
 	rec.SuspendedAt = nil
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "tenant.approve", rec.Email,
 		"linked user "+userID)
+	if err := s.commitLocked(); err != nil {
+		return model.Tenant{}, err
+	}
 	return cloneTenant(rec.Tenant), nil
 }
 
@@ -653,6 +691,9 @@ func (s *Store) SuspendTenant(id string, actor ...string) (model.Tenant, error) 
 	rec.SuspendedAt = ptrString(now)
 	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "tenant.suspend", rec.Email,
 		fmt.Sprintf("%d sessions revoked · %d keys revoked", sessionsRevoked, keysRevoked))
+	if err := s.commitLocked(); err != nil {
+		return model.Tenant{}, err
+	}
 	return cloneTenant(rec.Tenant), nil
 }
 
@@ -684,6 +725,9 @@ func (s *Store) ResumeTenant(id string, actor ...string) (model.Tenant, error) {
 	rec.Status = model.TenantActive
 	rec.SuspendedAt = nil
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "tenant.resume", rec.Email, "tenant reactivated")
+	if err := s.commitLocked(); err != nil {
+		return model.Tenant{}, err
+	}
 	return cloneTenant(rec.Tenant), nil
 }
 
@@ -716,7 +760,14 @@ func (s *Store) CreateTenantKey(userID, label string) (model.APIKey, string, err
 		return model.APIKey{}, "", &Error{Kind: ErrQuota,
 			Message: fmt.Sprintf("a tenant may hold at most %d active keys", MaxTenantKeys)}
 	}
-	return s.createKeyLocked(userID, label)
+	key, secret, err := s.createKeyLocked(userID, label)
+	if err != nil {
+		return model.APIKey{}, "", err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.APIKey{}, "", err
+	}
+	return key, secret, nil
 }
 
 // RevokeTenantKey revokes one key only when it belongs to userID. A foreign or
@@ -735,6 +786,9 @@ func (s *Store) RevokeTenantKey(userID, keyID string) error {
 	key.RevokedAt = ptrString(iso(s.now()))
 	s.addAuditLocked(model.SeverityInfo, "portal", "key.revoke", key.UserName,
 		"Key prefix "+key.Prefix+" revoked")
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -78,6 +78,9 @@ func (s *Store) CreateWebhookEndpoint(in model.WebhookEndpointInput) (model.Webh
 		CreatedAt:   s.now().UTC().Format(time.RFC3339),
 	}
 	s.webhookEndpoints = append(s.webhookEndpoints, endpoint)
+	if err := s.commitLocked(); err != nil {
+		return model.WebhookEndpoint{}, err
+	}
 	return cloneWebhookEndpoint(endpoint), nil
 }
 
@@ -91,6 +94,9 @@ func (s *Store) SetWebhookEndpointEnabled(id string, enabled bool) (model.Webhoo
 		return model.WebhookEndpoint{}, notFoundf("webhook %q not found", id)
 	}
 	s.webhookEndpoints[idx].Enabled = enabled
+	if err := s.commitLocked(); err != nil {
+		return model.WebhookEndpoint{}, err
+	}
 	return cloneWebhookEndpoint(s.webhookEndpoints[idx]), nil
 }
 
@@ -110,6 +116,9 @@ func (s *Store) DeleteWebhookEndpoint(id string) error {
 	s.webhookDeliveries = slices.DeleteFunc(s.webhookDeliveries, func(delivery model.WebhookDelivery) bool {
 		return delivery.EndpointID == id
 	})
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 

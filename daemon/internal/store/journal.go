@@ -33,9 +33,10 @@ import (
 // first sequence number, so a log can never be spliced onto another
 // generation.
 //
-// This slice implements the format, open/replay/append/checkpoint helpers and
-// the directory lock. Store mutators still persist through the periodic
-// state.json export; AJS-433 wires commitLocked to Append/Checkpoint.
+// This file implements the format, open/replay/append/checkpoint helpers and
+// the directory lock. Store.commitLocked is the live writer: money, grant,
+// lease, quota and audit mutations append their post-state through it, while
+// the periodic Checkpoint compacts the log and refreshes the state.json export.
 const (
 	// journalFormatVersion is the only frame, body and pointer format this
 	// build writes and accepts. It is repeated in the log header, every frame
@@ -57,6 +58,13 @@ const (
 	journalCheckpointDir = "checkpoints"
 	journalCurrentMax    = 4 << 10
 )
+
+// journalCheckpointLogBytes is the log-size trigger: Store.commitLocked
+// compacts as soon as the active log passes it, independently of the 30 s
+// timer, so a burst of large frames cannot leave a very long recovery tail. It
+// is a variable only so the internal test can lower it instead of writing 64
+// MiB; production never changes it.
+var journalCheckpointLogBytes int64 = 64 << 20
 
 // ErrStateLocked reports that another process, or another Journal in this
 // process, holds the state-directory lock. Startup must fail closed instead of
@@ -105,6 +113,10 @@ type Journal struct {
 	log       *os.File
 	logExists bool
 	logStart  uint64
+	// logBytes is the active log's size, header included. It drives the
+	// size-triggered checkpoint so a burst of large frames cannot leave a very
+	// long recovery tail between timer ticks.
+	logBytes int64
 
 	// frames counts the complete frames replayed by OpenJournal.
 	frames int
@@ -537,10 +549,18 @@ func (j *Journal) generationHex() string {
 //
 // The snapshot is validated by a fresh, hook-free Store before st is touched,
 // and st must not have any hook installed yet: replay runs no business method
-// and no external call.
+// and no external call. A store with a hook installed is refused rather than
+// risking an event from replayed state.
+//
+// Recover must finish before the Store is attached with AttachJournal: it holds
+// the journal lock while it takes the store lock, whereas a live commit takes
+// them in the opposite order.
 func (j *Journal) Recover(st *Store) (JournalRecovery, error) {
 	if st == nil {
 		return JournalRecovery{}, errors.New("journal recovery needs a store")
+	}
+	if st.hooksInstalled() {
+		return JournalRecovery{}, errors.New("journal recovery needs a store without hooks installed")
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -620,7 +640,17 @@ func (j *Journal) Append(snapshot []byte) (uint64, error) {
 		return 0, j.poisoned
 	}
 	j.seq = seq
+	j.logBytes += int64(len(frame))
 	return seq, nil
+}
+
+// LogBytes reports the active log's size, header included. The caller uses it
+// to compact before the log grows past its bound; it takes the journal lock, so
+// it must not be called from inside a journal write.
+func (j *Journal) LogBytes() int64 {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.logBytes
 }
 
 // Checkpoint writes the current post-state at the last committed sequence as
@@ -844,6 +874,7 @@ func (j *Journal) createLogLocked(startSeq uint64) error {
 	j.log = file
 	j.logExists = true
 	j.logStart = startSeq
+	j.logBytes = journalHeaderBytes
 	return nil
 }
 

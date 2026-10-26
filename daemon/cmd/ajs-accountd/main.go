@@ -179,8 +179,10 @@ func run() error {
 	}
 	// The journal, when enabled, takes the state-directory lock before any
 	// sealed secret file is opened and recovers committed state before the
-	// listener starts. The default remains the state.json snapshot load; the
-	// mutator commit path is wired separately (AJS-433).
+	// listener starts. The default remains the state.json snapshot load. With
+	// the journal, every critical mutation commits its post-state through
+	// Store.commitLocked, the 30 s checkpoint compacts the log, and a poisoned
+	// store fails readiness and terminates without a final save.
 	statePath := stateFilePath()
 	var journal *store.Journal
 	if *journalEnabled {
@@ -209,7 +211,7 @@ func run() error {
 	// state.json — not on the interval ticker, not on a bulk persist and not
 	// on the shutdown save.
 	restoreApplied := &api.RestoreFlag{}
-	snapshots := &stateSaver{st: st, path: statePath, logger: logger, restore: restoreApplied}
+	snapshots := &stateSaver{st: st, journal: journal, path: statePath, logger: logger, restore: restoreApplied}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		return fmt.Errorf("state directory %s: %w", filepath.Dir(statePath), err)
 	}
@@ -309,6 +311,19 @@ func run() error {
 	snapshotEvery, err := snapshotInterval()
 	if err != nil {
 		return err
+	}
+	if journal != nil {
+		// The journal's checkpoint cadence is fixed (PersistenceDesign §2): the
+		// 30 s checkpoint is what compacts the log, and state.json is refreshed
+		// only after a successful checkpoint. A different AJS_SNAPSHOT_INTERVAL
+		// still parses (it is the export cadence in the default mode) but does
+		// not shorten the durability window.
+		if snapshotEvery != journalCheckpointInterval {
+			logger.Info("journal_checkpoint_interval_fixed",
+				"configured", snapshotEvery.String(),
+				"interval", journalCheckpointInterval.String())
+		}
+		snapshotEvery = journalCheckpointInterval
 	}
 	stopSnapshots := make(chan struct{})
 	snapshotsDone := make(chan struct{})
@@ -643,6 +658,7 @@ func run() error {
 		StatePath:            statePath,
 		AllowBackupRestore:   os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1",
 		Restore:              restoreApplied,
+		ReadyChecks:          journalReadyChecks(st, journal),
 		TenantPortal:         *tenantPortal,
 		TenantOrigin:         tenantOriginValue,
 		TrustedProxies:       trustedProxyValues,
@@ -765,6 +781,20 @@ func run() error {
 			}
 		}
 		return nil
+	case <-st.DurabilityFault():
+		// A commit or checkpoint failed. The store is poisoned: readiness has
+		// already turned false and the in-memory panel may lead the journal, so
+		// the process stops without a final save instead of serving or writing
+		// state that was never committed (PersistenceDesign §2).
+		fault := st.DurabilityError()
+		logger.Error("state_durability_failed", "error", fault)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+		if tlsServer != nil {
+			_ = tlsServer.Shutdown(shutdownCtx)
+		}
+		return fmt.Errorf("state durability failed: %w", fault)
 	case err := <-errCh:
 		// One listener failing must not leave the daemon half-served: close
 		// the sibling so the process exits instead of answering on one port.
@@ -1676,6 +1706,34 @@ func validateLoginHosts(hosts []string) error {
 // AJS_SNAPSHOT_INTERVAL is unset.
 const defaultSnapshotInterval = 30 * time.Second
 
+// journalCheckpointInterval is the fixed journal checkpoint cadence
+// (PersistenceDesign §2): it bounds log growth and is the compaction point the
+// state.json export follows. It is deliberately not configurable: a longer
+// window would lengthen recovery, a shorter one would rewrite the whole state
+// more often.
+const journalCheckpointInterval = 30 * time.Second
+
+// journalReadyChecks reports the journal commit state to /readyz. A poisoned
+// store has already refused the failed mutation and main is terminating, so
+// readiness must fail at once instead of accepting traffic that cannot be
+// committed. The reason is deliberately generic: the journal error can carry a
+// filesystem path, and readiness reasons never do.
+func journalReadyChecks(st *store.Store, journal *store.Journal) []api.ReadyCheck {
+	if journal == nil {
+		return nil
+	}
+	return []api.ReadyCheck{{
+		Name:     "journal",
+		Required: true,
+		Check: func(context.Context) error {
+			if st.DurabilityError() != nil {
+				return errors.New("state journal commit failed")
+			}
+			return nil
+		},
+	}}
+}
+
 // stateFilePath resolves AJS_STATE_FILE, defaulting to
 // $AJS_STATE_DIR/state.json next to the sealed-secret file.
 func stateFilePath() string {
@@ -1748,17 +1806,24 @@ func pruneSecrets(secrets *secret.Store, st *store.Store, logger *slog.Logger) {
 // refused: the in-memory store still holds the panel the restore replaced, so
 // writing it would silently undo the restore. The refusal is logged once, so
 // the interval ticker cannot flood the log ring.
+//
+// With a journal the save is the export step of a checkpoint: the store
+// compacts first, and only a successful checkpoint refreshes state.json. A
+// poisoned store refuses both: readiness already failed and the process is
+// terminating without a final save.
 type stateSaver struct {
 	st      *store.Store
+	journal *store.Journal
 	path    string
 	logger  *slog.Logger
 	restore *api.RestoreFlag
 	skipped sync.Once
+	faulted sync.Once
 }
 
-// save writes the full snapshot and logs the outcome, or records the one-time
-// suppression notice after a restore. Neither the log line nor the error
-// carries a credential: the document only holds sealed envelopes and key
+// save checkpoints (journal mode) and writes the full snapshot, or records the
+// one-time suppression notice after a restore. Neither the log line nor the
+// error carries a credential: the document only holds sealed envelopes and key
 // hashes.
 func (w *stateSaver) save(reason string) {
 	if w.restore != nil && w.restore.Restored() {
@@ -1766,6 +1831,19 @@ func (w *stateSaver) save(reason string) {
 			w.logger.Warn("state_save_suppressed_after_restore", "path", w.path, "reason", reason)
 		})
 		return
+	}
+	if err := w.st.DurabilityError(); err != nil {
+		w.faulted.Do(func() {
+			w.logger.Error("state_save_refused_after_durability_failure",
+				"path", w.path, "reason", reason, "error", err)
+		})
+		return
+	}
+	if w.journal != nil {
+		if err := w.st.Checkpoint(); err != nil {
+			w.logger.Error("journal_checkpoint_failed", "path", w.path, "reason", reason, "error", err)
+			return
+		}
 	}
 	if err := w.st.Save(w.path); err != nil {
 		w.logger.Error("state_save_failed", "path", w.path, "reason", reason, "error", err)
@@ -1775,9 +1853,10 @@ func (w *stateSaver) save(reason string) {
 }
 
 // stopSnapshotWriter stops the interval goroutine and writes the final
-// snapshot. A successful restore has marked the shared flag by then, so the
-// last save is refused and the restored state.json survives a graceful stop
-// (RESTORE-DRILL.md hazard H1).
+// checkpoint and snapshot. A successful restore has marked the shared flag by
+// then, so the last save is refused and the restored state.json survives a
+// graceful stop (RESTORE-DRILL.md hazard H1). A poisoned store refuses both
+// steps, which is what "terminate without a final save" requires.
 func stopSnapshotWriter(saver *stateSaver, stop chan struct{}, done <-chan struct{}) {
 	close(stop)
 	<-done

@@ -83,43 +83,49 @@ func (s *Store) BeginOperation(in model.Operation) (model.Operation, *model.Oper
 			"serverId":  op.Target.ServerID,
 		})
 	s.pruneOperationsLocked(now)
+	if err := s.commitLocked(); err != nil {
+		return model.Operation{}, nil, err
+	}
 	return cloneOperation(op), nil, nil
 }
 
 // MarkOperationRunning performs queued → running. It returns false when the
 // operation was canceled before the executor started, in which case the
 // executor must not touch the vendor.
-func (s *Store) MarkOperationRunning(id string) bool {
+func (s *Store) MarkOperationRunning(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op := s.operationByIDLocked(id)
 	if op == nil || op.State != model.OperationQueued {
-		return false
+		return false, nil
 	}
 	op.State = model.OperationRunning
 	op.StartedAt = iso(s.now())
-	return true
+	if err := s.commitLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // FinishOperation performs running → succeeded|failed. It is a no-op when the
 // record is already terminal, so a late executor cannot overwrite a cancel.
-func (s *Store) FinishOperation(id string, state model.OperationState, steps []model.OperationStep, result *model.SelectNodeResult, opErr *model.OperationError) (model.Operation, bool) {
+func (s *Store) FinishOperation(id string, state model.OperationState, steps []model.OperationStep, result *model.SelectNodeResult, opErr *model.OperationError) (model.Operation, bool, error) {
 	if !state.Terminal() || state == model.OperationCanceled {
-		return model.Operation{}, false
+		return model.Operation{}, false, nil
 	}
 	// A failed row without an error code cannot be restored (validation
 	// rejects it) and a succeeded row must not carry one.
 	if state == model.OperationFailed && opErr == nil {
-		return model.Operation{}, false
+		return model.Operation{}, false, nil
 	}
 	if state == model.OperationSucceeded && opErr != nil {
-		return model.Operation{}, false
+		return model.Operation{}, false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op := s.operationByIDLocked(id)
 	if op == nil || op.State != model.OperationRunning {
-		return model.Operation{}, false
+		return model.Operation{}, false, nil
 	}
 	now := s.now()
 	op.State = state
@@ -144,7 +150,10 @@ func (s *Store) FinishOperation(id string, state model.OperationState, steps []m
 	}
 	s.addAuditLocked(severity, "system", "operation.finish", op.ID, detail, meta)
 	s.pruneOperationsLocked(now)
-	return cloneOperation(*op), true
+	if err := s.commitLocked(); err != nil {
+		return model.Operation{}, false, err
+	}
+	return cloneOperation(*op), true, nil
 }
 
 // CancelOperation is the best-effort DELETE. A queued operation is canceled
@@ -173,6 +182,9 @@ func (s *Store) CancelOperation(id string) (model.Operation, error) {
 				"type":      op.Type,
 				"accountId": op.AccountID,
 			})
+		if err := s.commitLocked(); err != nil {
+			return model.Operation{}, err
+		}
 		return cloneOperation(*op), nil
 	case model.OperationRunning:
 		return cloneOperation(*op), conflictf("operation %s is running and cannot be canceled at a step boundary", id)

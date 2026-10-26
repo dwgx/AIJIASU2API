@@ -169,5 +169,8 @@ func (s *Store) EnsureAccountDevice(id string, dev DeviceIdentity) (DeviceIdenti
 	s.deviceAppendEventLocked(rec, "assigned", "system", "source=legacy")
 	s.addAuditLocked(model.SeverityInfo, "system", "device.create", rec.ID,
 		"profile="+profile+" algorithm="+DeviceAlgorithmLegacy)
+	if err := s.commitLocked(); err != nil {
+		return DeviceIdentity{}, err
+	}
 	return dev, nil
 }

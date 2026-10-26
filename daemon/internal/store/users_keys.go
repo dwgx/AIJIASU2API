@@ -20,7 +20,14 @@ import (
 func (s *Store) CreateUser(in model.CreateUserInput, actor ...string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createUserLocked(in, actor...)
+	user, err := s.createUserLocked(in, actor...)
+	if err != nil {
+		return model.PanelUser{}, err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.PanelUser{}, err
+	}
+	return user, nil
 }
 
 // createUserLocked is CreateUser without the lock. Approval uses it to create
@@ -135,6 +142,9 @@ func (s *Store) UpdateUser(id string, patch model.UserPatch, actor ...string) (m
 	}
 	s.users[idx] = user
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.update", user.Name, "fields: "+strings.Join(changed, ", "))
+	if err := s.commitLocked(); err != nil {
+		return model.PanelUser{}, err
+	}
 	return s.withDerivedUsage(cloneUser(user)), nil
 }
 
@@ -180,6 +190,9 @@ func (s *Store) DeleteUser(id string, actor ...string) error {
 	s.forgetUserUsageLocked(id)
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.delete", name,
 		fmt.Sprintf("%d leases released · %d keys revoked", leasesRemoved, keysRevoked))
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -198,6 +211,9 @@ func (s *Store) SetUserEnabled(id string, enabled bool, actor ...string) (model.
 		s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.resume", user.Name, "Kill switch released")
 	} else {
 		s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.PanelUser{}, err
 	}
 	return s.withDerivedUsage(cloneUser(*user)), nil
 }
@@ -219,6 +235,9 @@ func (s *Store) SetUserAllowlist(id string, allowlist []string, actor ...string)
 	user.Allowlist = normalized
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.allowlist", user.Name,
 		fmt.Sprintf("%d entries", len(normalized)))
+	if err := s.commitLocked(); err != nil {
+		return model.PanelUser{}, err
+	}
 	return s.withDerivedUsage(cloneUser(*user)), nil
 }
 
@@ -226,7 +245,14 @@ func (s *Store) SetUserAllowlist(id string, allowlist []string, actor ...string)
 func (s *Store) CreateKey(userID, label string, actor ...string) (model.APIKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createKeyLocked(userID, label, actor...)
+	key, secret, err := s.createKeyLocked(userID, label, actor...)
+	if err != nil {
+		return model.APIKey{}, "", err
+	}
+	if err := s.commitLocked(); err != nil {
+		return model.APIKey{}, "", err
+	}
+	return key, secret, nil
 }
 
 // createKeyLocked is CreateKey without the lock, so the portal path can apply
@@ -282,6 +308,9 @@ func (s *Store) RevokeKey(id string, actor ...string) error {
 	}
 	key.RevokedAt = ptrString(iso(s.now()))
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.revoke", key.UserName, "Key prefix "+key.Prefix+" revoked")
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -337,6 +366,9 @@ func (s *Store) CreateMutation(in model.MutationLabInput, actor ...string) (mode
 	s.prependRequestLocked(entry)
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "request.mutation", node.Label,
 		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
+	if err := s.commitLocked(); err != nil {
+		return model.RequestLog{}, err
+	}
 	return entry, nil
 }
 
@@ -353,14 +385,19 @@ var gateRequestSeq atomic.Uint64
 // A gate row advances the durable monthly counters for its user and account
 // unless MeteredLive reports that the relay already did so. Eviction of an old
 // row never decrements those counters: retention is a display bound, not a
-// quota bound.
+// quota bound. Because the non-live path is a quota mutation, the row and the
+// counters are committed before this returns; the error is the durability
+// failure (the store is already poisoned).
 //
 // The caller owns the row's content. The gate meter passes host:port targets
 // only (never a URL, header or credential) and sets SourceGate.
-func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
+func (s *Store) AppendRequest(entry model.RequestLog) (model.RequestLog, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.durabilityErr != nil {
+		return entry, s.durabilityErr
+	}
 	if entry.ID == "" {
 		entry.ID = fmt.Sprintf("req-gate-%d-%d", s.now().UnixNano(), gateRequestSeq.Add(1))
 	}
@@ -371,7 +408,10 @@ func (s *Store) AppendRequest(entry model.RequestLog) model.RequestLog {
 	// rollover triggers reads s.requests, which must not contain this row yet.
 	s.advanceUsageLocked(entry)
 	s.prependRequestLocked(entry)
-	return entry
+	if err := s.commitLocked(); err != nil {
+		return entry, err
+	}
+	return entry, nil
 }
 
 // prependRequestLocked inserts one request row under the retention cap. A full
@@ -440,6 +480,9 @@ func (s *Store) UpdateSettings(patch model.SettingsPatch, actor ...string) (mode
 	}
 	s.settings = next
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "settings.update", "runtime", "fields: "+strings.Join(changed, ", "))
+	if err := s.commitLocked(); err != nil {
+		return model.PanelSettings{}, err
+	}
 	return next, nil
 }
 

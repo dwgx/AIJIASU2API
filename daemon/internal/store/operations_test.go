@@ -32,15 +32,15 @@ func beginTestOperation(t *testing.T, st *Store, accountID, serverID string) mod
 
 func finishTestOperation(t *testing.T, st *Store, id string, result *model.SelectNodeResult) model.Operation {
 	t.Helper()
-	if !st.MarkOperationRunning(id) {
-		t.Fatalf("MarkOperationRunning(%q) = false", id)
+	if started, err := st.MarkOperationRunning(id); err != nil || !started {
+		t.Fatalf("MarkOperationRunning(%q) = %v, %v", id, started, err)
 	}
-	op, ok := st.FinishOperation(id, model.OperationSucceeded, []model.OperationStep{
+	op, ok, err := st.FinishOperation(id, model.OperationSucceeded, []model.OperationStep{
 		{Name: "validate", State: model.OperationStepOK, DurationMs: 3},
 		{Name: "switch", State: model.OperationStepOK, DurationMs: 40},
 	}, result, nil)
-	if !ok {
-		t.Fatalf("FinishOperation(%q) = false", id)
+	if err != nil || !ok {
+		t.Fatalf("FinishOperation(%q) = %v, %v", id, ok, err)
 	}
 	return op
 }
@@ -119,10 +119,10 @@ func TestOperationStoreCancel(t *testing.T) {
 	if len(canceled.Steps) != 2 || canceled.Steps[1].State != model.OperationStepCanceled {
 		t.Fatalf("canceled steps = %+v", canceled.Steps)
 	}
-	if st.MarkOperationRunning(op.ID) {
+	if started, _ := st.MarkOperationRunning(op.ID); started {
 		t.Fatal("MarkOperationRunning succeeded after cancel")
 	}
-	if _, ok := st.FinishOperation(op.ID, model.OperationSucceeded, nil, nil, nil); ok {
+	if _, ok, _ := st.FinishOperation(op.ID, model.OperationSucceeded, nil, nil, nil); ok {
 		t.Fatal("FinishOperation overwrote a canceled record")
 	}
 	if _, err := st.CancelOperation(op.ID); !errors.Is(err, ErrConflict) {
@@ -133,8 +133,8 @@ func TestOperationStoreCancel(t *testing.T) {
 	}
 
 	running := beginTestOperation(t, st, account.ID, "srv-b")
-	if !st.MarkOperationRunning(running.ID) {
-		t.Fatal("MarkOperationRunning(running) = false")
+	if started, err := st.MarkOperationRunning(running.ID); err != nil || !started {
+		t.Fatalf("MarkOperationRunning(running) = %v, %v", started, err)
 	}
 	if _, err := st.CancelOperation(running.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("running cancel error = %v, want ErrConflict", err)
@@ -185,8 +185,8 @@ func TestOperationStoreDurability(t *testing.T) {
 		Changed: true, AccountID: account.ID, ServerID: "srv-a", GatePort: 13002,
 	})
 	interrupted := beginTestOperation(t, st, account.ID, "srv-b")
-	if !st.MarkOperationRunning(interrupted.ID) {
-		t.Fatal("MarkOperationRunning = false")
+	if started, err := st.MarkOperationRunning(interrupted.ID); err != nil || !started {
+		t.Fatalf("MarkOperationRunning = %v, %v", started, err)
 	}
 
 	data, err := st.Snapshot()

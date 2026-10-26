@@ -83,6 +83,9 @@ func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string
 	s.scopedKeyHashes[key.ID] = hex.EncodeToString(sum[:])
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.create", key.UserName,
 		"Scoped key prefix "+key.Prefix)
+	if err := s.commitLocked(); err != nil {
+		return model.ScopedKey{}, "", err
+	}
 	return cloneScopedKey(key), secret, nil
 }
 
@@ -125,6 +128,9 @@ func (s *Store) RevokeScopedKey(id string, actor ...string) error {
 	key.RevokedAt = ptrString(iso(s.now()))
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.revoke", key.UserName,
 		"Scoped key prefix "+key.Prefix+" revoked")
+	if err := s.commitLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -167,8 +173,21 @@ func (s *Store) AuthenticateScopedKey(secret string) (model.ScopedKey, bool) {
 
 // MarkScopedKeyUsed records lastUsedAt at most once per minute per key. The
 // throttle map has its own mutex, so the common path takes no store write
-// lock; only the first use in a minute does.
-func (s *Store) MarkScopedKeyUsed(id string) {
+// lock; only the first use in a minute does. The error is the durability
+// failure: the caller answers 503 instead of serving a request whose key state
+// could not be committed.
+func (s *Store) MarkScopedKeyUsed(id string) error {
+	// The throttle fast path below returns before touching the write lock, so
+	// check the poison first: after a failed commit every request must fail
+	// closed instead of bypassing the middleware's guard for the rest of the
+	// minute.
+	s.mu.RLock()
+	poisoned := s.durabilityErr
+	s.mu.RUnlock()
+	if poisoned != nil {
+		return poisoned
+	}
+
 	now := s.now()
 	minute := now.Unix() / 60
 
@@ -178,7 +197,7 @@ func (s *Store) MarkScopedKeyUsed(id string) {
 	}
 	if s.scopedKeyUse[id] == minute {
 		s.scopedKeyUseMu.Unlock()
-		return
+		return nil
 	}
 	s.scopedKeyUse[id] = minute
 	s.scopedKeyUseMu.Unlock()
@@ -187,9 +206,12 @@ func (s *Store) MarkScopedKeyUsed(id string) {
 	defer s.mu.Unlock()
 	idx := s.scopedKeyIndexLocked(id)
 	if idx < 0 || s.scopedKeys[idx].RevokedAt != nil {
-		return
+		return nil
 	}
 	s.scopedKeys[idx].LastUsedAt = ptrString(iso(now))
+	// The throttle keeps this to one commit per key per minute; the timestamp
+	// is persisted state, so it commits like every other mutation.
+	return s.commitLocked()
 }
 
 func (s *Store) scopedKeyIndexLocked(id string) int {

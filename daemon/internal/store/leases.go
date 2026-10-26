@@ -202,6 +202,9 @@ func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, erro
 		return model.Account{}, notFoundf("account %q not found", id)
 	}
 	s.accounts[idx].UseCount = normalizeAccountUseCount(useCount)
+	if err := s.commitLocked(); err != nil {
+		return model.Account{}, err
+	}
 	return cloneAccount(s.accounts[idx]), nil
 }
 
@@ -224,9 +227,14 @@ func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, erro
 // active lease. Only a LIVE node with a bound gate port is a target: READY is
 // the seeded/demo state and still carries the node's recorded egress and port,
 // but no listener, so leasing it would advertise a dead endpoint.
-func (s *Store) CreateLease(in model.CreateLeaseInput, actor ...string) (model.Lease, bool, error) {
+func (s *Store) CreateLease(in model.CreateLeaseInput, actor ...string) (allocated model.Lease, replayed bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			allocated, replayed, err = model.Lease{}, false, flushErr
+		}
+	}()
 
 	now := s.now()
 	s.sweepExpiredLocked(now)
@@ -344,15 +352,23 @@ func (s *Store) CreateLease(in model.CreateLeaseInput, actor ...string) (model.L
 			"slot":       strconv.Itoa(lease.Slot),
 			"generation": strconv.FormatUint(lease.Generation, 10),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Lease{}, false, err
+	}
 	return lease, false, nil
 }
 
 // RevokeLease removes a lease and returns its slot to the node. The returned
 // row carries Status=revoked; only active rows are stored, so the row is gone
 // from later reads.
-func (s *Store) RevokeLease(id string, actor ...string) (model.Lease, error) {
+func (s *Store) RevokeLease(id string, actor ...string) (revoked model.Lease, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if flushErr := s.flushSweepLocked(); flushErr != nil {
+			revoked, err = model.Lease{}, flushErr
+		}
+	}()
 
 	s.sweepExpiredLocked(s.now())
 	idx := s.leaseIndexLocked(id)
@@ -375,6 +391,9 @@ func (s *Store) RevokeLease(id string, actor ...string) (model.Lease, error) {
 			"slot":       strconv.Itoa(lease.Slot),
 			"generation": strconv.FormatUint(lease.Generation, 10),
 		})
+	if err := s.commitLocked(); err != nil {
+		return model.Lease{}, err
+	}
 	return lease, nil
 }
 
@@ -426,6 +445,9 @@ func (s *Store) RollbackLease(id, reason string) (model.Lease, error) {
 	// caller, which answers an error instead of a lease.
 	lease.Status = model.LeaseRevoked
 	s.normalizeLeaseLocked(&lease)
+	if err := s.commitLocked(); err != nil {
+		return model.Lease{}, err
+	}
 	return lease, nil
 }
 
@@ -458,10 +480,10 @@ func (s *Store) NodeLeases(nodeID string) []model.Lease {
 //
 // The hook installed by SetLeaseExpiryHook is deliberately not called: this is
 // a revocation, not an expiry, and the lease.expired event would mislabel it.
-func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
+func (s *Store) InvalidateNodeLeases(nodeID, reason string) ([]model.Lease, error) {
 	nodeID = strings.TrimSpace(nodeID)
 	if nodeID == "" {
-		return nil
+		return nil, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -496,7 +518,12 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
 	if idx := s.nodeIndexLocked(nodeID); idx >= 0 {
 		s.nodes[idx].InUse = inUse
 	}
-	return revoked
+	if len(revoked) > 0 {
+		if err := s.commitLocked(); err != nil {
+			return revoked, err
+		}
+	}
+	return revoked, nil
 }
 
 // allocateLeaseLocked appends one lease row and takes its node's slot in the
@@ -819,11 +846,17 @@ func (s *Store) sweepExpiredLocked(now time.Time) int {
 		// Normalize before the hook so a seed row that predates Platform
 		// still reports the account's platform on the event.
 		s.normalizeLeaseLocked(&lease)
-		if s.leaseExpiryHook != nil {
-			s.leaseExpiryHook(lease)
-		}
+		s.queueLeaseExpiryHookLocked(lease)
 	}
 	s.leases = kept
+	if closed > 0 {
+		// The release joins the enclosing mutation's frame instead of opening
+		// one of its own: a compound call (settlement, order create) must
+		// commit one atomic post-state. A caller that returns before its own
+		// mutation flushes this flag through flushSweepLocked, so an early
+		// return still commits exactly one sweep-only frame.
+		s.sweepDirty = true
+	}
 	return closed
 }
 

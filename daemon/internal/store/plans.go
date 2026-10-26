@@ -80,6 +80,9 @@ func (s *Store) CreatePlan(in model.PlanInput, actor ...string) (model.Plan, err
 		fmt.Sprintf("%s %s · ttl %ds · quota %d bytes · active %t",
 			formatMinor(amount, currency), currency, ttl, quota, active),
 		map[string]string{"planId": plan.ID})
+	if err := s.commitLocked(); err != nil {
+		return model.Plan{}, err
+	}
 	return clonePlan(plan), nil
 }
 
@@ -136,6 +139,9 @@ func (s *Store) UpdatePlan(id string, patch model.PlanPatch, actor ...string) (m
 			formatMinor(plan.AmountMinor, plan.Currency), plan.LeaseTTLSeconds,
 			plan.QuotaBytes, plan.Active),
 		map[string]string{"planId": plan.ID})
+	if err := s.commitLocked(); err != nil {
+		return model.Plan{}, err
+	}
 	return clonePlan(plan), nil
 }
 
@@ -159,6 +165,9 @@ func (s *Store) DeactivatePlan(id string, actor ...string) (model.Plan, error) {
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "plan.deactivated", plan.Name,
 		"new orders refused; existing snapshots unchanged",
 		map[string]string{"planId": plan.ID})
+	if err := s.commitLocked(); err != nil {
+		return model.Plan{}, err
+	}
 	return clonePlan(*plan), nil
 }
 

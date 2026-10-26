@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -72,6 +73,11 @@ func userFlowCapFromEnv() int {
 // available. It returns false when the flow must stop; the gate then closes the
 // tunnel and records quota_exceeded.
 //
+// A durability failure also returns false: the chunk could not be committed, so
+// the panel could never bill or admit against it, and the store is already
+// poisoned for main to terminate. Continuing the relay would acknowledge
+// traffic the journal does not contain.
+//
 // The cache entries are advanced before either check so a refusal leaves every
 // cached total in step with the durable counter. The store is the source of
 // truth; this method only saves the reads a populated cache can answer.
@@ -79,7 +85,9 @@ func (m *FlowMeter) Progress(userID, accountID string, n int64) bool {
 	if m == nil || m.store == nil || n <= 0 {
 		return true
 	}
-	m.store.AddUsage(userID, accountID, n)
+	if err := m.store.AddUsage(userID, accountID, n); err != nil {
+		return false
+	}
 	if m.quota != nil && accountID != "" {
 		m.quota.advance(accountID, n)
 	}
@@ -122,7 +130,14 @@ func (m *FlowMeter) GateFactory() GateFactory {
 	return func(cfg gate.Config, session gate.Session) (Gate, error) {
 		nodeID, accountID := cfg.NodeID, cfg.AccountID
 		cfg.OnFlow = func(record gate.FlowRecord) {
-			m.observe(nodeID, accountID, record)
+			if err := m.observe(nodeID, accountID, record); err != nil {
+				// The completion row could not be committed: the store is
+				// poisoned and main is terminating. The relay already finished,
+				// so there is nothing to stop; the failure is logged rather than
+				// dropped.
+				slog.Error("flow_record_persist_failed",
+					"node", nodeID, "account", accountID, "error", err)
+			}
 		}
 		if m.quota != nil {
 			cfg.QuotaCheck = m.quota.Check
@@ -146,10 +161,11 @@ func (m *FlowMeter) GateFactory() GateFactory {
 
 // observe appends one row for an accepted flow. It runs in the gate's flow
 // goroutine after the relay finished, so the work is two short store reads and
-// one bounded append.
-func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
+// one bounded append. The error is the row's durability failure; the caller
+// logs it because the relay itself has already ended.
+func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) error {
 	if m == nil || m.store == nil || record.Status != gate.FlowStatusOK {
-		return
+		return nil
 	}
 	node, found := m.store.Node(nodeID)
 	accountLabel, nodeLabel, region := "", "", ""
@@ -162,7 +178,7 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		// flow can beat it. The account label is still authoritative.
 		accountLabel = account.Label
 	}
-	m.store.AppendRequest(model.RequestLog{
+	_, err := m.store.AppendRequest(model.RequestLog{
 		// TS stays empty: AppendRequest stamps the completion instant. Using
 		// StartedAt would prepend a long flow ahead of rows it started after
 		// and break every chronological consumer.
@@ -186,6 +202,7 @@ func (m *FlowMeter) observe(nodeID, accountID string, record gate.FlowRecord) {
 		// a log entry only and must not be counted again.
 		MeteredLive: true,
 	})
+	return err
 }
 
 // flowTarget renders a flow destination as host:port. The gate only ever

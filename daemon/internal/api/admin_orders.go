@@ -250,18 +250,21 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 			"stripe webhook is not configured")
 		return
 	case errors.Is(err, payment.ErrUnsupportedEvent):
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe",
-			"unsupported event type")
+		if !s.rejectStripeWebhook(w, "unsupported event type") {
+			return
+		}
 		writeJSON(w, http.StatusOK, webhookAck{Received: true, Ignored: true})
 		return
 	case errors.Is(err, payment.ErrInvalidSignature):
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe",
-			"invalid signature")
+		if !s.rejectStripeWebhook(w, "invalid signature") {
+			return
+		}
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "invalid webhook signature")
 		return
 	case errors.Is(err, payment.ErrInvalidEvent):
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe",
-			"invalid event")
+		if !s.rejectStripeWebhook(w, "invalid event") {
+			return
+		}
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "invalid webhook event")
 		return
 	default:
@@ -273,16 +276,18 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 
 	before, ok := s.store.Order(event.OrderID)
 	if !ok {
-		s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe",
-			"unknown order")
+		if !s.rejectStripeWebhook(w, "unknown order") {
+			return
+		}
 		writeJSON(w, http.StatusOK, webhookAck{Received: true, Ignored: true})
 		return
 	}
 	after, err := s.store.ApplyPaymentEvent(s.cfg.StripeWebhooks.Name(), event, "system")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrInvalid) {
-			s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe",
-				"event rejected by the order state machine")
+			if !s.rejectStripeWebhook(w, "event rejected by the order state machine") {
+				return
+			}
 			writeError(w, http.StatusBadRequest, CodeInvalidArgument, "webhook event rejected")
 			return
 		}
@@ -321,4 +326,16 @@ func (s *Server) writePaymentError(w http.ResponseWriter, err error) {
 		s.logger.Error("payment_provider_error", "error", err)
 		writeError(w, http.StatusInternalServerError, CodeInternal, "payment provider failed")
 	}
+}
+
+// rejectStripeWebhook records one rejected webhook and reports whether the row
+// is durable. A poisoned journal answers 503 so the provider retries instead
+// of treating an unrecorded rejection as processed.
+func (s *Server) rejectStripeWebhook(w http.ResponseWriter, detail string) bool {
+	if err := s.store.RecordAudit(model.SeverityWarn, "system", "webhook.rejected", "stripe", detail); err != nil {
+		s.logger.Error("webhook_audit_persist_failed", "provider", "stripe", "error", err)
+		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "state is not durable")
+		return false
+	}
+	return true
 }
