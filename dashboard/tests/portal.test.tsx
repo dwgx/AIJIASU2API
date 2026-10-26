@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { formatNumber } from '../src/lib/format'
+import { setMockEpayEnabled } from '../src/lib/order-mock'
 import {
   MOCK_PENDING_EMAIL,
   MOCK_PORTAL_EMAIL,
@@ -52,6 +53,19 @@ async function openDashboard() {
   window.history.pushState({}, '', '/portal')
   render(<App />)
   return screen.findByRole('heading', { name: 'My portal', level: 1 })
+}
+
+async function findRow(id: string): Promise<HTMLElement> {
+  const cell = await screen.findByText(id)
+  const row = cell.closest('tr')
+  if (!row) throw new Error(`order row ${id} is not mounted`)
+  return row
+}
+
+function rowForSync(id: string): HTMLElement {
+  const row = screen.getByText(id).closest('tr')
+  if (!row) throw new Error(`order row ${id} is not mounted`)
+  return row
 }
 
 beforeEach(async () => {
@@ -433,5 +447,93 @@ describe('portal UI — own data', () => {
     expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument()
     expect(screen.getByText('还没有账号？')).toBeInTheDocument()
     expect(document.documentElement.lang).toBe('zh-CN')
+  })
+})
+
+describe('portal UI — payment channel', () => {
+  async function openOrders() {
+    const user = userEvent.setup()
+    await openDashboard()
+    await user.click(await screen.findByRole('tab', { name: 'Orders' }))
+    return user
+  }
+
+  it('pays with Alipay by default and with WeChat Pay once selected', async () => {
+    await signInMockTenant()
+    const order = await portalApi.createOrder('plan-01', 'channel-default')
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue({} as Window)
+    const user = await openOrders()
+
+    let row = await findRow(order.id)
+    const selector = within(row).getByRole('group', {
+      name: `Payment channel for order ${order.id}`,
+    })
+    expect(within(selector).getByRole('button', { name: 'Alipay' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(within(selector).getByRole('button', { name: 'WeChat Pay' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+
+    await user.click(within(row).getByRole('button', { name: 'Pay now' }))
+    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1))
+    expect(String(openSpy.mock.calls[0][0])).toContain('type=alipay')
+
+    // The selected channel applies to this order's next checkout attempt.
+    row = await findRow(order.id)
+    await waitFor(() =>
+      expect(within(row).getByRole('button', { name: 'Pay now' })).toBeEnabled(),
+    )
+    await user.click(within(row).getByRole('button', { name: 'WeChat Pay' }))
+    expect(within(row).getByRole('button', { name: 'WeChat Pay' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await user.click(within(row).getByRole('button', { name: 'Pay now' }))
+    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(2))
+    expect(String(openSpy.mock.calls[1][0])).toContain('type=wxpay')
+  })
+
+  it('hides Pay now and the channel selector once 易支付 reports disabled', async () => {
+    await signInMockTenant()
+    const order = await portalApi.createOrder('plan-01', 'channel-disabled')
+    setMockEpayEnabled(false)
+    const openSpy = vi.spyOn(window, 'open')
+    const user = await openOrders()
+
+    const row = await findRow(order.id)
+    expect(
+      within(row).getByRole('group', { name: `Payment channel for order ${order.id}` }),
+    ).toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: 'Pay now' }))
+
+    await waitFor(() =>
+      expect(within(rowForSync(order.id)).getByText('Offline settlement')).toBeInTheDocument(),
+    )
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(
+      within(rowForSync(order.id)).queryByRole('button', { name: 'Pay now' }),
+    ).not.toBeInTheDocument()
+    expect(within(rowForSync(order.id)).queryByRole('group')).not.toBeInTheDocument()
+  })
+
+  it('labels the channels in Chinese', async () => {
+    localStorage.setItem('ajs.lang', 'zh')
+    await signInMockTenant()
+    const order = await portalApi.createOrder('plan-01', 'channel-zh')
+    window.history.pushState({}, '', '/portal')
+    render(<App />)
+    await screen.findByRole('heading', { name: '客户中心', level: 1 })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('tab', { name: '订单' }))
+
+    const row = await findRow(order.id)
+    expect(
+      within(row).getByRole('group', { name: `订单 ${order.id} 的支付渠道` }),
+    ).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '支付宝' })).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '微信支付' })).toBeInTheDocument()
   })
 })

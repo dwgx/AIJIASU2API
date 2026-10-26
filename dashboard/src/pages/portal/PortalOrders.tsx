@@ -11,6 +11,7 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  SegmentedControl,
   TableSkeleton,
 } from '../../components/primitives'
 import { formatDate } from '../../lib/format'
@@ -31,6 +32,21 @@ const LEASE_REASON_KEYS: Record<string, string> = {
   operator_revoke: 'portal.orders.reason.operator_revoke',
   expired: 'portal.orders.reason.expired',
 }
+
+/**
+ * Hosted-checkout channels the daemon accepts. Stripe is never offered: the
+ * backend answers 503 until a secret is configured.
+ */
+type CheckoutChannel = 'alipay' | 'wxpay'
+
+const CHECKOUT_CHANNELS: ReadonlyArray<CheckoutChannel> = ['alipay', 'wxpay']
+
+const CHANNEL_LABEL_KEYS: Record<CheckoutChannel, string> = {
+  alipay: 'portal.orders.channel.alipay',
+  wxpay: 'portal.orders.channel.wxpay',
+}
+
+const DEFAULT_CHANNEL: CheckoutChannel = 'alipay'
 
 /**
  * True when the order is still paid/active but the lease backing its grant
@@ -73,6 +89,7 @@ export default function PortalOrders() {
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [paying, setPaying] = useState<string | null>(null)
+  const [channels, setChannels] = useState<Record<string, CheckoutChannel>>({})
   const [epayDisabled, setEpayDisabled] = useState(false)
   const [restoring, setRestoring] = useState<string | null>(null)
 
@@ -82,7 +99,10 @@ export default function PortalOrders() {
   const pay = async (order: Order) => {
     setPaying(order.id)
     try {
-      const { payUrl } = await portalApi.checkoutOrder(order.id, 'alipay')
+      const { payUrl } = await portalApi.checkoutOrder(
+        order.id,
+        channels[order.id] ?? DEFAULT_CHANNEL,
+      )
       const opened = window.open(payUrl, '_blank')
       if (!opened) {
         push(t('portal.orders.payBlocked'), 'default')
@@ -239,13 +259,26 @@ export default function PortalOrders() {
                   {t('portal.orders.offlineSettlement')}
                 </span>
               ) : (
-                <Button
-                  variant="primary"
-                  loading={paying === order.id}
-                  onClick={() => pay(order)}
-                >
-                  {paying === order.id ? t('portal.orders.paying') : t('portal.orders.pay')}
-                </Button>
+                <>
+                  <SegmentedControl
+                    label={t('portal.orders.channelFor', { id: order.id })}
+                    value={channels[order.id] ?? DEFAULT_CHANNEL}
+                    options={CHECKOUT_CHANNELS.map((channel) => ({
+                      value: channel,
+                      label: t(CHANNEL_LABEL_KEYS[channel]),
+                    }))}
+                    onChange={(next) =>
+                      setChannels((current) => ({ ...current, [order.id]: next }))
+                    }
+                  />
+                  <Button
+                    variant="primary"
+                    loading={paying === order.id}
+                    onClick={() => pay(order)}
+                  >
+                    {paying === order.id ? t('portal.orders.paying') : t('portal.orders.pay')}
+                  </Button>
+                </>
               )}
               <Button variant="ghost" onClick={() => setCancelTarget(order)}>
                 {t('portal.orders.cancel')}
