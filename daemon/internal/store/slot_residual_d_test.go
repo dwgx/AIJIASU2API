@@ -178,13 +178,20 @@ func TestRestoreDemotesUnboundReadySlotAndDropsLease(t *testing.T) {
 		t.Fatalf("CreateLease after restore = %v, want no_capacity", err)
 	}
 	actions := map[string]bool{}
+	var revoked model.AuditEvent
 	for _, event := range restored.Audit(1000) {
 		actions[event.Action] = true
+		if event.Action == "lease.revoke" {
+			revoked = event
+		}
 	}
-	for _, want := range []string{"slot.recovered_unbound", "lease.unbound_dropped"} {
+	for _, want := range []string{"slot.recovered_unbound", "lease.revoke"} {
 		if !actions[want] {
 			t.Fatalf("audit actions = %v, want %q", actions, want)
 		}
+	}
+	if revoked.Meta["reason"] != "daemon_restart" || revoked.Meta["detail"] != "slot is down" {
+		t.Fatalf("lease.revoke meta = %v, want reason daemon_restart detail slot is down", revoked.Meta)
 	}
 }
 

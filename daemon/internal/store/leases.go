@@ -19,6 +19,91 @@ const (
 	maxIdempotencyKeyLen   = 128
 )
 
+// LeaseEndRetention bounds the durable lease-outcome log. The active lease
+// collection is small; the end log is history, so it is capped independently
+// and keeps the newest rows first.
+const LeaseEndRetention = 200
+
+// LeaseEnd records one lease that left the active collection together with the
+// machine-readable reason and the instant. Active rows live in Snapshot.Leases;
+// an ended row lives here so a daemon restart cannot erase the customer-visible
+// outcome (the lease id, user, node, slot/generation and why it ended).
+type LeaseEnd struct {
+	model.Lease
+	Reason  string `json:"reason"`
+	EndedAt string `json:"endedAt"`
+}
+
+// LeaseEnds returns a copy of the durable lease-outcome log, newest first.
+func (s *Store) LeaseEnds() []LeaseEnd {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]LeaseEnd, len(s.leaseEnds))
+	copy(out, s.leaseEnds)
+	return out
+}
+
+// SetLeaseRevokeHook installs the sink for leases revoked by startup recovery
+// or a restore. Revocations recorded before the hook exists (the startup path
+// loads the snapshot before the webhook dispatcher is built) are queued in
+// memory and delivered exactly once, in order, when the hook is installed.
+// The hook runs without s.mu held and must not call back into the Store.
+func (s *Store) SetLeaseRevokeHook(hook func(model.Lease)) {
+	s.mu.Lock()
+	s.leaseRevokeHook = hook
+	s.mu.Unlock()
+	if hook != nil {
+		s.flushLeaseRevocations()
+	}
+}
+
+// flushLeaseRevocations drains the pending revoke queue through the installed
+// hook. It always releases s.mu before calling the hook: the webhook sink
+// persists its outbox through the same Store, so a hook under the store lock
+// would deadlock.
+func (s *Store) flushLeaseRevocations() {
+	s.mu.Lock()
+	hook := s.leaseRevokeHook
+	var pending []model.Lease
+	if hook != nil && len(s.leaseRevokePending) > 0 {
+		pending = s.leaseRevokePending
+		s.leaseRevokePending = nil
+	}
+	s.mu.Unlock()
+	for _, lease := range pending {
+		hook(lease)
+	}
+}
+
+// deliverLeaseRevocations publishes the rows a restore revoked. With no hook
+// yet (startup) the rows stay queued for SetLeaseRevokeHook.
+func (s *Store) deliverLeaseRevocations(leases []model.Lease) {
+	if len(leases) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.leaseRevokePending = append(s.leaseRevokePending, leases...)
+	s.mu.Unlock()
+	s.flushLeaseRevocations()
+}
+
+// recordLeaseEndLocked appends one lease to the durable outcome log and queues
+// its revoke event. The caller holds s.mu; the event is delivered only after
+// the caller releases the lock (DemoteNode calls flushLeaseRevocations, and
+// SetLeaseRevokeHook drains the queue installed later). The returned copy
+// carries Status=revoked and the platform filled in for a pre-platform row.
+func (s *Store) recordLeaseEndLocked(lease model.Lease, reason string) model.Lease {
+	lease.Status = model.LeaseRevoked
+	s.normalizeLeaseLocked(&lease)
+	s.leaseEnds = prependCapped(s.leaseEnds, LeaseEnd{
+		Lease:   lease,
+		Reason:  reason,
+		EndedAt: iso(s.now()),
+	}, LeaseEndRetention)
+	s.leaseRevokePending = append(s.leaseRevokePending, lease)
+	return lease
+}
+
 // Account slot bounds. The vendor sells UseCount between 1 and 2000; the
 // operator cap AJS_ACCOUNT_SLOTS uses the same range and defaults to one.
 const (
@@ -366,14 +451,7 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) []model.Lease {
 		revoked = append(revoked, lease)
 		s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
 			fmt.Sprintf("Lease on %s revoked · %s", lease.NodeLabel, detail),
-			map[string]string{
-				"leaseId":    lease.ID,
-				"accountId":  lease.AccountID,
-				"nodeId":     lease.NodeID,
-				"slot":       strconv.Itoa(lease.Slot),
-				"generation": strconv.FormatUint(lease.Generation, 10),
-				"reason":     detail,
-			})
+			leaseAuditMeta(lease, detail))
 	}
 	s.leases = kept
 	// InUse is derived from the active rows, so it cannot drift after a partial
@@ -564,15 +642,24 @@ func (s *Store) accountLeaseCountLocked(accountID string) int {
 // runs under the store lock and revoked rows leave the slice.
 func (s *Store) nextLeaseIDLocked() string {
 	max := 0
-	for _, lease := range s.leases {
-		raw, ok := strings.CutPrefix(lease.ID, "lease-")
+	bump := func(id string) {
+		raw, ok := strings.CutPrefix(id, "lease-")
 		if !ok {
-			continue
+			return
 		}
 		value, err := strconv.Atoi(raw)
 		if err == nil && value > max {
 			max = value
 		}
+	}
+	for _, lease := range s.leases {
+		bump(lease.ID)
+	}
+	// LeaseEnds keeps the outcome of a revoked lease; its id must never be
+	// handed to a new active row, or the snapshot would contain the same id in
+	// both collections and fail validation on the next load.
+	for _, end := range s.leaseEnds {
+		bump(end.Lease.ID)
 	}
 	return fmt.Sprintf("lease-%02d", max+1)
 }

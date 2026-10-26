@@ -79,11 +79,15 @@ type Store struct {
 	accounts []model.Account
 	nodes    []model.ProxyNode
 	leases   []model.Lease
-	users    []model.PanelUser
-	keys     []model.APIKey
-	requests []model.RequestLog
-	audit    []model.AuditEvent
-	settings model.PanelSettings
+	// leaseEnds is the durable outcome log for leases that left the active
+	// collection during a restart or restore. It is persisted in the snapshot
+	// so the customer-visible reason survives beyond the audit retention ring.
+	leaseEnds []LeaseEnd
+	users     []model.PanelUser
+	keys      []model.APIKey
+	requests  []model.RequestLog
+	audit     []model.AuditEvent
+	settings  model.PanelSettings
 
 	// auditHook receives every critical audit event after it is appended. It
 	// is set once during startup (SetAuditHook) and invoked with s.mu held, so
@@ -97,6 +101,14 @@ type Store struct {
 	// neither block nor call back into the Store; the webhook sink only
 	// enqueues. The hook is not part of the snapshot.
 	leaseExpiryHook func(model.Lease)
+
+	// leaseRevokeHook receives leases revoked by startup recovery or a
+	// restore. It is installed once after the webhook sink exists; rows
+	// revoked before that are queued in leaseRevokePending and delivered when
+	// SetLeaseRevokeHook installs the sink. The hook is invoked without s.mu
+	// held, so it may enqueue but must not call back into the Store.
+	leaseRevokeHook    func(model.Lease)
+	leaseRevokePending []model.Lease
 
 	// scopedKeys are the least-privilege keys; scopedKeyHashes maps their id to
 	// the SHA-256 of the secret, never the secret itself.

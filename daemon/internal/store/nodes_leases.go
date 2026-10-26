@@ -179,11 +179,15 @@ func (s *Store) nodeAuditMetaLocked(node model.ProxyNode) map[string]string {
 }
 
 // leaseAuditMeta is the attribution every lease.revoke row carries: the lease,
-// the account and node it served, and the slot/generation the customer was
-// sold. A legacy lease reports slot 0 / generation 0.
+// the user, the account and node it served, and the slot/generation the
+// customer was sold. A legacy lease reports slot 0 / generation 0. userId is
+// part of the meta because the customer portal attributes audit rows through
+// it after the active lease row is gone (portalAuditScope rebuilds lease ids
+// from the active collection only).
 func leaseAuditMeta(lease model.Lease, reason string) map[string]string {
 	return map[string]string{
 		"leaseId":    lease.ID,
+		"userId":     lease.UserID,
 		"accountId":  lease.AccountID,
 		"nodeId":     lease.NodeID,
 		"slot":       strconv.Itoa(lease.Slot),
@@ -258,32 +262,41 @@ func validNodeState(state model.NodeState) bool {
 // DemoteNode records that no in-process gate serves a persisted node after a
 // restart: the state becomes STALE, the gate port and egress address are
 // cleared, the flow count is zeroed (those flows died with the process) and
-// every lease of the node is closed. Only a LIVE or DRAINING row is demoted,
-// so a repeated boot is a no-op that writes no second audit row. Exactly one
-// node.recovered_stale audit row (actor "system") is written when the row
-// changes.
-func (s *Store) DemoteNode(id string) (model.ProxyNode, bool, error) {
+// every lease of the node is revoked explicitly. Only a LIVE or DRAINING row
+// is demoted, so a repeated boot is a no-op that writes no second audit row.
+// Exactly one node.recovered_stale audit row (actor "system") is written when
+// the row changes, plus one lease.revoke row per revoked lease with reason
+// daemon_restart. The revoked rows are returned so the caller counts what the
+// same locked step actually closed instead of pre-counting across a race.
+func (s *Store) DemoteNode(id string) (model.ProxyNode, []model.Lease, bool, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		s.flushLeaseRevocations()
+	}()
 
 	idx := s.nodeIndexLocked(id)
 	if idx < 0 {
-		return model.ProxyNode{}, false, notFoundf("node %q not found", id)
+		return model.ProxyNode{}, nil, false, notFoundf("node %q not found", id)
 	}
 	node := &s.nodes[idx]
 	if node.State != model.NodeLive && node.State != model.NodeDraining {
-		return *node, false, nil
+		return *node, nil, false, nil
 	}
 	previous := node.State
 	node.State = model.NodeStale
 	node.GatePort = 0
 	node.EgressIP = ""
 	node.InUse = 0
-	closed := 0
+	var revoked []model.Lease
 	kept := s.leases[:0]
 	for _, lease := range s.leases {
 		if lease.NodeID == id {
-			closed++
+			ended := s.recordLeaseEndLocked(lease, "daemon_restart")
+			revoked = append(revoked, ended)
+			s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
+				fmt.Sprintf("Lease on %s revoked · daemon_restart", lease.NodeLabel),
+				leaseAuditMeta(lease, "daemon_restart"))
 			continue
 		}
 		kept = append(kept, lease)
@@ -291,16 +304,19 @@ func (s *Store) DemoteNode(id string) (model.ProxyNode, bool, error) {
 	s.leases = kept
 	// A LIVE slot row over a gate-less node would keep satisfying admission,
 	// so the matching slot leaves LIVE in the same step as the node.
-	meta := map[string]string{"previousState": string(previous), "leasesClosed": strconv.Itoa(closed)}
+	meta := map[string]string{
+		"previousState": string(previous),
+		"leasesClosed":  strconv.Itoa(len(revoked)),
+	}
 	if slot, changed := s.demoteSlotForNodeLocked(*node); changed {
 		meta["slot"] = slot.SlotKey.String()
 		meta["slotState"] = string(slot.State)
 	}
 	s.syncAccountCountsLocked()
 	s.addAuditLocked(model.SeverityWarn, "system", "node.recovered_stale", node.Label,
-		fmt.Sprintf("Restart recovery · no gate bound · %s → STALE · %d leases closed", previous, closed),
+		fmt.Sprintf("Restart recovery · no gate bound · %s → STALE · %d leases revoked", previous, len(revoked)),
 		meta)
-	return *node, true, nil
+	return *node, revoked, true, nil
 }
 
 // DrainNode moves a node to DRAINING. In-flight flows are left untouched; this

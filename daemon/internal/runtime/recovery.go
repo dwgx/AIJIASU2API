@@ -31,23 +31,28 @@ type GateSource interface {
 	Snapshot() []NodeRuntime
 }
 
-// RecoveryResult summarises one startup recovery pass. Both slices keep the
-// store's node order and hold node ids.
+// RecoveryResult summarises one startup recovery pass. Demoted and Kept keep
+// the store's node order and hold node ids; Revoked holds the lease rows the
+// same demotions ended.
 type RecoveryResult struct {
 	// Demoted holds the nodes that were moved to STALE.
 	Demoted []string
 	// Kept holds the LIVE/DRAINING nodes a running gate still serves.
 	Kept []string
-	// Leases is the number of lease rows closed by the demotions.
+	// Leases is the number of lease rows revoked by the demotions.
 	Leases int
+	// Revoked holds the actual lease rows revoked in the same locked
+	// DemoteNode step. It is the authoritative count; callers must not
+	// pre-count leases from a separate read.
+	Revoked []model.Lease
 }
 
 // RecoverOnStartup makes the persisted node set honest after a restart: every
 // LIVE or DRAINING node that no in-process gate serves is demoted to STALE
-// (gate port and egress cleared, leases closed, one node.recovered_stale audit
-// row). A node a gate still serves keeps its state, so the call is also safe
-// outside the first boot. Repeating it is a no-op: only LIVE/DRAINING rows are
-// considered, and a demoted row is STALE.
+// (gate port and egress cleared, leases revoked with reason daemon_restart,
+// one node.recovered_stale audit row). A node a gate still serves keeps its
+// state, so the call is also safe outside the first boot. Repeating it is a
+// no-op: only LIVE/DRAINING rows are considered, and a demoted row is STALE.
 //
 // The caller runs this before the first panel reconcile: the panel renders
 // LIVE rows, so demoting afterwards would publish a gate that does not exist.
@@ -58,6 +63,10 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Keep the old recovery side effect: a read sweeps expired leases (and
+	// fires the expiry hook) before any node is demoted. The rows are not
+	// used for counting; DemoteNode reports what it actually revokes.
+	_ = st.Leases()
 	serving := make(map[string]struct{})
 	if gates != nil {
 		for _, node := range gates.Snapshot() {
@@ -65,10 +74,6 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 				serving[node.NodeID] = struct{}{}
 			}
 		}
-	}
-	leases := make(map[string]int)
-	for _, lease := range st.Leases() {
-		leases[lease.NodeID]++
 	}
 
 	var result RecoveryResult
@@ -81,7 +86,7 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 			result.Kept = append(result.Kept, node.ID)
 			continue
 		}
-		demoted, changed, err := st.DemoteNode(node.ID)
+		demoted, revoked, changed, err := st.DemoteNode(node.ID)
 		if err != nil {
 			// A node removed between the snapshot and the write is not a
 			// recovery failure; every other error is.
@@ -94,9 +99,10 @@ func RecoverOnStartup(st *store.Store, gates GateSource, logger *slog.Logger) (R
 			continue
 		}
 		result.Demoted = append(result.Demoted, demoted.ID)
-		result.Leases += leases[demoted.ID]
+		result.Leases += len(revoked)
+		result.Revoked = append(result.Revoked, revoked...)
 		logger.Info("node_recovered_stale", "node_id", demoted.ID, "account_id", demoted.AccountID,
-			"label", demoted.Label, "previous_state", string(node.State))
+			"label", demoted.Label, "previous_state", string(node.State), "leases_closed", len(revoked))
 	}
 	if len(result.Demoted) > 0 {
 		logger.Info("startup_recovery",

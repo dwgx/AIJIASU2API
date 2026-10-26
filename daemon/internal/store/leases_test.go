@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -445,5 +447,134 @@ func TestLeaseExpiryHookFiresOncePerLease(t *testing.T) {
 	}
 	if len(expired) != 1 {
 		t.Fatalf("removed hook fired again: %+v", expired)
+	}
+}
+
+// TestDemoteNodeRecordsDurableLeaseEnd proves the snapshot carries the
+// restart outcome after the active row is gone: the same lease id, user,
+// node, slot/generation and the daemon_restart reason survive a save/load
+// cycle. A lease end is not an active lease, so Leases() stays empty.
+func TestDemoteNodeRecordsDurableLeaseEnd(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 1)
+	st := fixture.st
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	node, revoked, changed, err := st.DemoteNode(lease.NodeID)
+	if err != nil || !changed || node.State != model.NodeStale {
+		t.Fatalf("DemoteNode = %+v/%+v/%v/%v, want a changed STALE node", node, revoked, changed, err)
+	}
+	if len(revoked) != 1 || revoked[0].ID != lease.ID || revoked[0].Status != model.LeaseRevoked {
+		t.Fatalf("revoked = %+v, want one revoked %s", revoked, lease.ID)
+	}
+	ends := st.LeaseEnds()
+	if len(ends) != 1 || ends[0].Lease.ID != lease.ID || ends[0].Reason != "daemon_restart" ||
+		ends[0].Lease.Status != model.LeaseRevoked {
+		t.Fatalf("lease ends = %+v, want one daemon_restart row for %s", ends, lease.ID)
+	}
+
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if len(snap.LeaseEnds) != 1 || snap.LeaseEnds[0].Lease.ID != lease.ID ||
+		snap.LeaseEnds[0].Reason != "daemon_restart" {
+		t.Fatalf("snapshot leaseEnds = %+v, want the daemon_restart row", snap.LeaseEnds)
+	}
+
+	restored := newEmptyWithClock(func() time.Time { return now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if leases := restored.Leases(); len(leases) != 0 {
+		t.Fatalf("restored active leases = %+v, want none", leases)
+	}
+	restoredEnds := restored.LeaseEnds()
+	if len(restoredEnds) != 1 || restoredEnds[0].Lease.ID != lease.ID ||
+		restoredEnds[0].Reason != "daemon_restart" || restoredEnds[0].EndedAt != ends[0].EndedAt {
+		t.Fatalf("restored lease ends = %+v, want the durable outcome", restoredEnds)
+	}
+	again, err := restored.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot after restore: %v", err)
+	}
+	if !bytes.Equal(data, again) {
+		t.Fatalf("leaseEnds snapshot round-trip is not byte-identical:\nfirst:\n%s\nsecond:\n%s", data, again)
+	}
+}
+
+// TestLeaseRevokeHookFlushesPendingRestartRows pins the startup ordering: the
+// recovery path revokes before the webhook sink exists, so the rows wait in
+// memory and are delivered exactly once when the hook is installed.
+func TestLeaseRevokeHookFlushesPendingRestartRows(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 1)
+	st := fixture.st
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if _, _, _, err := st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+
+	var events []model.Lease
+	st.SetLeaseRevokeHook(func(got model.Lease) { events = append(events, got) })
+	if len(events) != 1 || events[0].ID != lease.ID || events[0].Status != model.LeaseRevoked {
+		t.Fatalf("pending hook events = %+v, want one revoked %s", events, lease.ID)
+	}
+	// A second installation must not replay the already delivered row.
+	st.SetLeaseRevokeHook(func(got model.Lease) { events = append(events, got) })
+	if len(events) != 1 {
+		t.Fatalf("hook replayed a delivered row: %+v", events)
+	}
+}
+
+// TestLeaseIDsDoNotReuseEndedIDs pins the outcome log's id space: a revoked
+// lease id remains in leaseEnds, so a new active lease must skip it instead
+// of creating a snapshot with the same id in both collections.
+func TestLeaseIDsDoNotReuseEndedIDs(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	fixture := newLeaseFixture(t, &now, model.PlatformAndroid, 2)
+	st := fixture.st
+	first, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(first): %v", err)
+	}
+	if _, _, _, err := st.DemoteNode(first.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	second, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: fixture.user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(second): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("new lease reused ended id %s", first.ID)
+	}
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore with active lease + leaseEnds: %v", err)
+	}
+	if leases := restored.Leases(); len(leases) != 1 || leases[0].ID != second.ID {
+		t.Fatalf("restored active leases = %+v, want %s", leases, second.ID)
 	}
 }

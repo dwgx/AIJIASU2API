@@ -152,13 +152,17 @@ func TestRestoreDropsLegacyLeaseOnUnboundNode(t *testing.T) {
 			}
 			restored := restoreMutated(t, st, func(snap *Snapshot) { tc.mutate(snap, lease) })
 			if leases := restored.Leases(); len(leases) != 0 {
-				t.Fatalf("restored leases = %+v, want the unbound legacy claim dropped", leases)
+				t.Fatalf("restored leases = %+v, want the unbound legacy claim revoked", leases)
 			}
-			event := findAudit(t, restored, "lease.unbound_dropped", func(event model.AuditEvent) bool {
+			event := findAudit(t, restored, "lease.revoke", func(event model.AuditEvent) bool {
 				return event.Target == lease.ID
 			})
-			if event.Meta["reason"] != tc.reason || event.Meta["slot"] != "legacy" {
-				t.Fatalf("audit meta = %v, want reason %q slot legacy", event.Meta, tc.reason)
+			if event.Meta["reason"] != "daemon_restart" || event.Meta["detail"] != tc.reason || event.Meta["slot"] != "0" {
+				t.Fatalf("audit meta = %v, want reason daemon_restart detail %q slot 0", event.Meta, tc.reason)
+			}
+			ends := restored.LeaseEnds()
+			if len(ends) != 1 || ends[0].Lease.ID != lease.ID || ends[0].Reason != "daemon_restart" {
+				t.Fatalf("lease ends = %+v, want one daemon_restart row for %s", ends, lease.ID)
 			}
 		})
 	}

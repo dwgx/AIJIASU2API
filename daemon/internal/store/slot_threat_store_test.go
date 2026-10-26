@@ -107,9 +107,9 @@ func TestRestartDemotionLeavesNoLiveSlot(t *testing.T) {
 	key := liveSlot(t, st, account.ID, 1, 14000, 1)
 	node := putSlotNode(t, st, account.ID, 1, "s1", model.NodeLive, 14000)
 
-	demoted, changed, err := st.DemoteNode(node.ID)
-	if err != nil || !changed {
-		t.Fatalf("DemoteNode = %+v/%v/%v, want a changed STALE node", demoted, changed, err)
+	demoted, revoked, changed, err := st.DemoteNode(node.ID)
+	if err != nil || !changed || len(revoked) != 0 {
+		t.Fatalf("DemoteNode = %+v/%v/%v/%v, want a changed STALE node with no lease", demoted, revoked, changed, err)
 	}
 	slot, ok := st.Slot(key)
 	if !ok || slot.State == model.SlotLive {

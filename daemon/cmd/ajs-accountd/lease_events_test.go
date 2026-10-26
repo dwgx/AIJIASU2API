@@ -109,3 +109,26 @@ func TestLeaseSweepReachesWebhookSink(t *testing.T) {
 		t.Fatalf("events = %+v, want %+v", got, want)
 	}
 }
+
+// TestEmitLeaseRevokeMapsOntoWebhookCatalogue pins the restart/restore event
+// wire name and payload. The store queues revocations before the webhook sink
+// exists; the daemon flushes them through this mapping as lease.revoked.
+func TestEmitLeaseRevokeMapsOntoWebhookCatalogue(t *testing.T) {
+	sink := &renewalRecordingSink{}
+	emitLeaseRevoke(sink, model.Lease{
+		ID: "lease-04", UserID: "user-02", Platform: model.PlatformWindows,
+		AccountID: "acc-03", ExpiresAt: "2026-10-26T04:00:00Z", Status: model.LeaseRevoked,
+	})
+	emitLeaseRevoke(nil, model.Lease{ID: "lease-ignored"})
+
+	want := []renewalSinkCall{{event: webhook.EventLeaseRevoked, data: map[string]any{
+		"leaseId":   "lease-04",
+		"userId":    "user-02",
+		"platform":  "windows",
+		"accountId": "acc-03",
+		"expiresAt": "2026-10-26T04:00:00Z",
+	}}}
+	if got := sink.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %+v, want %+v", got, want)
+	}
+}

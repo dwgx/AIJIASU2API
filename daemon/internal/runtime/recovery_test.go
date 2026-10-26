@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -197,8 +198,8 @@ func TestRecoverOnStartupDemotesUngatedNodes(t *testing.T) {
 	if len(result.Kept) != 0 {
 		t.Fatalf("kept = %v, want none without a gate", result.Kept)
 	}
-	if result.Leases != wantLeases {
-		t.Fatalf("leases closed = %d, want %d", result.Leases, wantLeases)
+	if result.Leases != wantLeases || len(result.Revoked) != wantLeases {
+		t.Fatalf("leases revoked = %d/%d, want %d", result.Leases, len(result.Revoked), wantLeases)
 	}
 
 	for _, id := range demotable {
@@ -233,32 +234,319 @@ func TestRecoverOnStartupDemotesUngatedNodes(t *testing.T) {
 	}
 
 	events := st.Audit(store.AuditRetention)
-	if got := len(events) - auditsBefore; got != len(demotable) {
-		t.Fatalf("recovery audit rows = %d, want %d (one per node)", got, len(demotable))
+	if got := len(events) - auditsBefore; got != len(demotable)+wantLeases {
+		t.Fatalf("recovery audit rows = %d, want %d (one per node plus one per revoked lease)",
+			got, len(demotable)+wantLeases)
 	}
 	labels := make(map[string]struct{}, len(demotable))
 	for _, id := range demotable {
 		node, _ := st.Node(id)
 		labels[node.Label] = struct{}{}
 	}
-	for _, event := range events[:len(demotable)] {
-		if event.Action != "node.recovered_stale" || event.Actor != "system" || event.Severity != model.SeverityWarn {
-			t.Fatalf("audit = %+v, want node.recovered_stale by system at warn", event)
-		}
-		if _, ok := labels[event.Target]; !ok {
-			t.Fatalf("audit target = %q, want a demoted node label", event.Target)
-		}
-		delete(labels, event.Target)
-		previous := event.Meta["previousState"]
-		if previous != string(model.NodeLive) && previous != string(model.NodeDraining) {
-			t.Fatalf("audit meta previousState = %q", previous)
-		}
-		if _, err := strconv.Atoi(event.Meta["leasesClosed"]); err != nil {
-			t.Fatalf("audit meta leasesClosed = %q: %v", event.Meta["leasesClosed"], err)
+	nodeRows, leaseRows := 0, 0
+	for _, event := range events {
+		switch event.Action {
+		case "node.recovered_stale":
+			nodeRows++
+			if event.Actor != "system" || event.Severity != model.SeverityWarn {
+				t.Fatalf("audit = %+v, want node.recovered_stale by system at warn", event)
+			}
+			if _, ok := labels[event.Target]; !ok {
+				t.Fatalf("audit target = %q, want a demoted node label", event.Target)
+			}
+			delete(labels, event.Target)
+			previous := event.Meta["previousState"]
+			if previous != string(model.NodeLive) && previous != string(model.NodeDraining) {
+				t.Fatalf("audit meta previousState = %q", previous)
+			}
+			if _, err := strconv.Atoi(event.Meta["leasesClosed"]); err != nil {
+				t.Fatalf("audit meta leasesClosed = %q: %v", event.Meta["leasesClosed"], err)
+			}
+		case "lease.revoke":
+			leaseRows++
+			if event.Meta["reason"] != "daemon_restart" {
+				t.Fatalf("lease.revoke meta = %v, want reason daemon_restart", event.Meta)
+			}
 		}
 	}
 	if len(labels) != 0 {
 		t.Fatalf("nodes without an audit row: %v", labels)
+	}
+	if nodeRows != len(demotable) {
+		t.Fatalf("node.recovered_stale rows = %d, want %d", nodeRows, len(demotable))
+	}
+	if leaseRows != wantLeases {
+		t.Fatalf("lease.revoke rows = %d, want %d", leaseRows, wantLeases)
+	}
+}
+
+// TestRecoverOnStartupRacesLeaseCreate pins the store/runtime boundary: a
+// lease created in the window between the node read and the demotion is either
+// refused (node already STALE) or revoked by the same DemoteNode lock, never
+// left active on a gate-less node. The recovery count must match the rows it
+// actually returned, not a pre-read.
+func TestRecoverOnStartupRacesLeaseCreate(t *testing.T) {
+	st := store.NewEmpty()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Race Lease", Username: "race-lease",
+		Password: "local-placeholder", Platform: model.PlatformAndroid, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-race-lease", AccountID: account.ID, Label: "cn-gz-race",
+		Region: "cn-gz", State: model.NodeLive, EgressIP: "203.0.113.34",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13034,
+	}); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "race.lease"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _, _ = st.CreateLease(model.CreateLeaseInput{
+			UserID: user.ID, Platform: model.PlatformAndroid,
+		})
+	}()
+	var result runtime.RecoveryResult
+	go func() {
+		defer wg.Done()
+		result, _ = runtime.RecoverOnStartup(st, nil, discardLogger())
+	}()
+	wg.Wait()
+
+	if result.Leases != len(result.Revoked) {
+		t.Fatalf("recovery count = %d, revoked rows = %d", result.Leases, len(result.Revoked))
+	}
+	if leases := st.Leases(); len(leases) != 0 {
+		t.Fatalf("active leases after the race = %+v, want none", leases)
+	}
+	for _, end := range st.LeaseEnds() {
+		if end.Reason != "daemon_restart" {
+			t.Fatalf("lease end reason = %q, want daemon_restart", end.Reason)
+		}
+	}
+}
+
+// TestDaemonRestartPersistsLeaseOutcome walks the release-rehearsal shape
+// end to end: a saved snapshot with one LIVE node and one active lease is
+// loaded, startup recovery runs, and the next snapshot still names the lease
+// in leaseEnds with reason daemon_restart while the active collection is empty.
+func TestDaemonRestartPersistsLeaseOutcome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	st := store.NewEmpty()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Restart Durable", Username: "restart-durable",
+		Password: "local-placeholder", Platform: model.PlatformAndroid, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	node, err := st.PutNode(model.ProxyNode{
+		ID: "node-restart-durable", AccountID: account.ID, Label: "cn-sz-restart",
+		Region: "cn-sz", State: model.NodeLive, EgressIP: "203.0.113.33",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13033,
+	})
+	if err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "restart.durable"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if lease.NodeID != node.ID {
+		t.Fatalf("lease node = %s, want %s", lease.NodeID, node.ID)
+	}
+	if err := st.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// The new process loads the file and owns no gate yet.
+	restarted := store.NewEmpty()
+	if err := restarted.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := restarted.Leases(); len(got) != 1 || got[0].ID != lease.ID {
+		t.Fatalf("loaded leases = %+v, want the active %s", got, lease.ID)
+	}
+	if _, err := runtime.RecoverOnStartup(restarted, nil, discardLogger()); err != nil {
+		t.Fatalf("RecoverOnStartup: %v", err)
+	}
+	if err := restarted.Save(path); err != nil {
+		t.Fatalf("Save after recovery: %v", err)
+	}
+
+	// A second load proves the outcome is in the document, not just memory.
+	reloaded := store.NewEmpty()
+	if err := reloaded.Load(path); err != nil {
+		t.Fatalf("Load after recovery: %v", err)
+	}
+	if got := reloaded.Leases(); len(got) != 0 {
+		t.Fatalf("active leases after restart = %+v, want none", got)
+	}
+	ends := reloaded.LeaseEnds()
+	if len(ends) != 1 || ends[0].Lease.ID != lease.ID || ends[0].Reason != "daemon_restart" ||
+		ends[0].Lease.CreatedAt != lease.CreatedAt {
+		t.Fatalf("leaseEnds after restart = %+v, want the original %s with daemon_restart", ends, lease.ID)
+	}
+	var audit model.AuditEvent
+	for _, event := range reloaded.Audit(store.AuditRetention) {
+		if event.Action == "lease.revoke" && event.Meta["leaseId"] == lease.ID {
+			audit = event
+		}
+	}
+	if audit.Action == "" || audit.Meta["reason"] != "daemon_restart" {
+		t.Fatalf("audit after restart = %+v, want lease.revoke daemon_restart", audit)
+	}
+}
+
+// TestRecoverOnStartupWritesPerLeaseRevokeAudit is the AJS-390 falsifier: on
+// the old code DemoteNode filtered the lease row out and wrote only a
+// leasesClosed count on the node.recovered_stale row, so the test fails with
+// no per-lease audit. The new path must write one lease.revoke row with
+// reason daemon_restart for every revoked entitlement.
+func TestRecoverOnStartupWritesPerLeaseRevokeAudit(t *testing.T) {
+	st := store.NewEmpty()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Restart Lease", Username: "restart-lease",
+		Password: "local-placeholder", Platform: model.PlatformAndroid, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	node, err := st.PutNode(model.ProxyNode{
+		ID: "node-restart-lease", AccountID: account.ID, Label: "cn-sh-restart",
+		Region: "cn-sh", State: model.NodeLive, EgressIP: "203.0.113.31",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13031,
+	})
+	if err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "restart.customer"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformAndroid,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if lease.NodeID != node.ID {
+		t.Fatalf("lease node = %s, want %s", lease.NodeID, node.ID)
+	}
+
+	if _, err := runtime.RecoverOnStartup(st, nil, discardLogger()); err != nil {
+		t.Fatalf("RecoverOnStartup: %v", err)
+	}
+
+	var revoked model.AuditEvent
+	for _, event := range st.Audit(store.AuditRetention) {
+		if event.Action == "lease.revoke" && event.Meta["leaseId"] == lease.ID {
+			revoked = event
+		}
+	}
+	if revoked.Action == "" {
+		t.Fatal("restart wrote no per-lease lease.revoke audit row")
+	}
+	if revoked.Meta["reason"] != "daemon_restart" || revoked.Meta["userId"] != user.ID ||
+		revoked.Meta["nodeId"] != node.ID || revoked.Meta["slot"] != "0" {
+		t.Fatalf("lease.revoke meta = %v, want daemon_restart/user/node/slot", revoked.Meta)
+	}
+	if got := st.Leases(); len(got) != 0 {
+		t.Fatalf("leases after restart = %+v, want none", got)
+	}
+
+	// The same row is visible through the admin audit API, so an operator can
+	// see why the lease ended without reading the state file.
+	ts := httptest.NewServer(api.New(api.Config{AllowInsecure: true}, st, discardLogger()))
+	t.Cleanup(ts.Close)
+	resp, err := ts.Client().Get(ts.URL + "/v1/audit?limit=50")
+	if err != nil {
+		t.Fatalf("GET /v1/audit: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read audit body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/audit status = %d (body %s)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"action":"lease.revoke"`) ||
+		!strings.Contains(string(body), `"reason":"daemon_restart"`) {
+		t.Fatalf("audit API does not show the restart revocation: %s", body)
+	}
+}
+
+// TestRecoverOnStartupRecordsLeaseEndAndEvent proves the durable outcome and
+// the event side of the same transition: the leaseEnds snapshot row keeps the
+// lease id, user and reason, and the store's revoke hook fires once with the
+// row (the daemon maps that hook onto lease.revoked).
+func TestRecoverOnStartupRecordsLeaseEndAndEvent(t *testing.T) {
+	st := store.NewEmpty()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label: "Restart Outcome", Username: "restart-outcome",
+		Password: "local-placeholder", Platform: model.PlatformLinux, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	node, err := st.PutNode(model.ProxyNode{
+		ID: "node-restart-outcome", AccountID: account.ID, Label: "cn-hk-restart",
+		Region: "cn-hk", State: model.NodeLive, EgressIP: "203.0.113.32",
+		Protocol: model.ProtocolSOCKS5, GatePort: 13032,
+	})
+	if err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{Name: "restart.outcome"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformLinux,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	if lease.NodeID != node.ID {
+		t.Fatalf("lease node = %s, want %s", lease.NodeID, node.ID)
+	}
+
+	var events []model.Lease
+	st.SetLeaseRevokeHook(func(got model.Lease) { events = append(events, got) })
+	result, err := runtime.RecoverOnStartup(st, nil, discardLogger())
+	if err != nil {
+		t.Fatalf("RecoverOnStartup: %v", err)
+	}
+	if result.Leases != 1 || len(result.Revoked) != 1 || result.Revoked[0].ID != lease.ID {
+		t.Fatalf("recovery result = %+v, want one revoked %s", result, lease.ID)
+	}
+	if len(events) != 1 || events[0].ID != lease.ID || events[0].Status != model.LeaseRevoked {
+		t.Fatalf("revoke events = %+v, want one revoked %s", events, lease.ID)
+	}
+	ends := st.LeaseEnds()
+	if len(ends) != 1 {
+		t.Fatalf("lease ends = %+v, want one row", ends)
+	}
+	if ends[0].Lease.ID != lease.ID || ends[0].Lease.UserID != user.ID ||
+		ends[0].Lease.Status != model.LeaseRevoked || ends[0].Reason != "daemon_restart" ||
+		ends[0].EndedAt == "" {
+		t.Fatalf("lease end = %+v, want the daemon_restart outcome for %s", ends[0], lease.ID)
 	}
 }
 
@@ -405,14 +693,14 @@ func TestRecoverOnStartupStaleInNodesView(t *testing.T) {
 func TestDemoteNodeGuards(t *testing.T) {
 	st := store.New()
 	audits := len(st.Audit(store.AuditRetention))
-	node, changed, err := st.DemoteNode("node-03") // READY
-	if err != nil || changed || node.State != model.NodeReady {
-		t.Fatalf("DemoteNode(READY) = %+v/%v/%v, want an untouched READY node", node, changed, err)
+	node, revoked, changed, err := st.DemoteNode("node-03") // READY
+	if err != nil || changed || node.State != model.NodeReady || len(revoked) != 0 {
+		t.Fatalf("DemoteNode(READY) = %+v/%v/%v/%v, want an untouched READY node", node, revoked, changed, err)
 	}
 	if got := len(st.Audit(store.AuditRetention)); got != audits {
 		t.Fatalf("a READY demote wrote %d audit rows", got-audits)
 	}
-	if _, _, err := st.DemoteNode("node-99"); !errors.Is(err, store.ErrNotFound) {
+	if _, _, _, err := st.DemoteNode("node-99"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("DemoteNode(unknown) error = %v, want ErrNotFound", err)
 	}
 }

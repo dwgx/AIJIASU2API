@@ -349,6 +349,13 @@ func run() error {
 	st.SetLeaseExpiryHook(func(lease model.Lease) {
 		emitLeaseExpiry(events, lease)
 	})
+	// Startup recovery and restore run before this sink exists, so the store
+	// queues the leases they revoke. Installing the hook here delivers those
+	// rows once as lease.revoked events instead of letting a restart erase an
+	// active lease with no event.
+	st.SetLeaseRevokeHook(func(lease model.Lease) {
+		emitLeaseRevoke(events, lease)
+	})
 
 	panel, err := startResinPanel(ctx, st, logger, resinOptions{
 		url:              *resinURL,
@@ -1383,16 +1390,28 @@ func renewalEventData(reminder schedule.ReminderEvent) map[string]any {
 	}
 }
 
-// emitLeaseExpiry maps one lease released by the store expiry sweep onto
-// lease.expired. The sweep removes the row, so the hook fires once per lease;
-// a nil sink is a daemon without webhooks. The payload is the shared lease
-// contract (ids, platform, expiry) and never carries a credential.
-func emitLeaseExpiry(events api.EventSink, lease model.Lease) {
+// emitLeaseTransition maps one store-side lease transition onto its webhook
+// event. The row has already left the active collection, so the hook fires
+// once per lease; a nil sink is a daemon without webhooks. The payload is the
+// shared lease contract (ids, platform, expiry) and never carries a credential.
+func emitLeaseTransition(events api.EventSink, event webhook.EventType, lease model.Lease) {
 	if events == nil {
 		return
 	}
-	events.Emit(webhook.EventLeaseExpired, webhook.LeaseEventData(
+	events.Emit(event, webhook.LeaseEventData(
 		lease.ID, lease.UserID, string(lease.Platform), lease.AccountID, lease.ExpiresAt))
+}
+
+// emitLeaseExpiry maps one lease released by the store expiry sweep onto
+// lease.expired.
+func emitLeaseExpiry(events api.EventSink, lease model.Lease) {
+	emitLeaseTransition(events, webhook.EventLeaseExpired, lease)
+}
+
+// emitLeaseRevoke maps one lease revoked by startup recovery or a restore onto
+// lease.revoked.
+func emitLeaseRevoke(events api.EventSink, lease model.Lease) {
+	emitLeaseTransition(events, webhook.EventLeaseRevoked, lease)
 }
 
 func envOr(key, fallback string) string {

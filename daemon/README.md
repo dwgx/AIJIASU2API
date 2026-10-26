@@ -92,7 +92,9 @@ checkout, signed form notify and 60-second query reconciliation beside those pat
   existing snapshot once, before serving. Sealed account secrets are inside the
   snapshot and, when `AJS_MASTER_KEY` is set, also in `$AJS_STATE_DIR/secrets.json`;
   device material lives in `$AJS_STATE_DIR/device-secrets.json` under a key
-  derived from the same master key
+  derived from the same master key. The additive `leaseEnds` collection is the
+  durable outcome log for leases a restart or restore could not keep active
+  (lease id, user, node, slot/generation, reason, endedAt)
 - Wire contract: `dashboard/src/lib/types.ts` field names and
   `dashboard/src/lib/api.ts` paths/methods
 
@@ -111,7 +113,7 @@ internal/store/persist.go    versioned JSON snapshot: Save/Load, atomic 0600
 internal/store/device.go     stable per-account device identity (snapshot-backed)
 internal/store/device_pool.go  sealed device pool: states, restore, retire/GC, migration, import/export
 internal/store/account_io.go  account export/import formats, encrypted envelope, bulk-delete apply
-internal/store/leases.go     lease allocation: guards, idempotency replay, node placement, revoke
+internal/store/leases.go     lease allocation: guards, idempotency replay, node placement, revoke, durable leaseEnds outcome log
 internal/store/catalog.go    selection + per-server connect counters
 internal/store/schedules.go  schedule/run/fire/reminder retention and CRUD
 internal/catalog/            offline exact-match city index for the catalog geo aggregate
@@ -1041,8 +1043,14 @@ observe it:
 - Every `LIVE` or `DRAINING` node that no in-process gate serves is demoted to
   `STALE` by `store.DemoteNode`: `gatePort` and `egressIp` are cleared,
   `inUse` is zeroed (those flows died with the process) and every lease of the
-  node is removed. Exactly one `node.recovered_stale` audit row per node
-  (actor `system`, severity `warn`, meta `previousState`/`leasesClosed`).
+  node is **revoked explicitly**, never filtered out silently. Each revoked
+  lease produces one `lease.revoke` audit row (actor `system`, severity `warn`,
+  reason `daemon_restart`, with `leaseId`/`userId`/`accountId`/`nodeId`/
+  `slot`/`generation`), one `lease.revoked` webhook/ring event, and one durable
+  `leaseEnds` snapshot row carrying the full lease plus `reason`/`endedAt`.
+  Exactly one `node.recovered_stale` audit row per node remains
+  (`previousState`/`leasesClosed`); its `leasesClosed` count is the number of
+  rows the same locked demotion actually revoked, not a pre-read estimate.
 - It runs in `run()` right after the snapshot is loaded (and after
   `AJS_DROP_DEMO`), before the Resin panel's startup reconcile and before the
   listener: the panel renders `LIVE` rows, so demoting afterwards would
@@ -1051,6 +1059,12 @@ observe it:
 - It is idempotent: only `LIVE`/`DRAINING` rows are considered, so a second
   boot (or a crash-loop) writes no extra audit row and closes no extra lease.
   A `READY` or `DOWN` row never claimed a gate and is left untouched.
+- The restore-side loader (`Snapshot.reconcileSlotClaims`) applies the same
+  semantic: an active lease whose node is missing, on another account, not
+  `LIVE` or not bound to the slot is revoked with reason `daemon_restart` (one
+  `lease.revoke` audit row, one `leaseEnds` row and one `lease.revoked` event
+  through the same queued hook), not dropped as an anonymous repair. Duplicate
+  and over-capacity snapshot claims keep their distinct explicit audit actions.
 - `RecoverOnStartup` takes a `GateSource` (`*NodeController` implements it).
   A node a gate still serves keeps its state, which keeps the function safe
   outside the first boot; the daemon passes `nil` because a fresh process owns
@@ -1086,9 +1100,13 @@ Optional auto-login (`AJS_AUTO_LOGIN=1`, default off, requires
   `TestAutoLoginUsesSelectionWithoutNode` and
   `TestAutoLoginSerializesConcurrentRuns` cover the runner, and
   `TestRecoverOnStartupDemotesUngatedNodes`, `TestRecoverOnStartupIsIdempotent`,
-  `TestRecoverOnStartupKeepsGatedNode`, `TestRecoverOnStartupStaleInNodesView`
-  and `TestDemoteNodeGuards` cover the demotion (state, cleared gate/egress,
-  closed leases, one audit row per node, unchanged `READY`/`DOWN` rows, and
+  `TestRecoverOnStartupKeepsGatedNode`, `TestRecoverOnStartupStaleInNodesView`,
+  `TestRecoverOnStartupWritesPerLeaseRevokeAudit`,
+  `TestRecoverOnStartupRecordsLeaseEndAndEvent`,
+  `TestRecoverOnStartupRacesLeaseCreate` and `TestDemoteNodeGuards`
+  cover the demotion (state, cleared gate/egress, per-lease `lease.revoke`
+  audit rows with `daemon_restart`, the durable `leaseEnds` outcome and event,
+  one `node.recovered_stale` row per node, unchanged `READY`/`DOWN` rows, and
   the `STALE` value in `GET /v1/nodes`).
 
 ### Multi-slot containment (AJS-350)
@@ -1317,11 +1335,26 @@ expiry sweep has no request handler, so the store calls its expiry hook and the 
 `lease.expired` once per released row. All three share the payload `{leaseId, userId, platform,
 accountId, expiresAt}` and carry no key, token or credential.
 
+**Restart durability.** A restart is an explicit end, not a silent deletion. Startup recovery
+(`store.DemoteNode`) and the restore-side loader (`Snapshot.reconcileSlotClaims`) revoke every
+active lease they cannot serve with reason `daemon_restart`. Each revocation writes one
+`lease.revoke` audit row whose meta carries `leaseId`, `userId`, `accountId`, `nodeId`, `slot`,
+`generation` and `reason`, emits one `lease.revoked` event, and appends one `leaseEnds` row to the
+snapshot with the full lease and `endedAt`. The admin `GET /v1/audit` shows the row and meta; the
+customer `GET /v1/portal/audit` shows the row because the `userId` meta attributes it even after the
+active lease row is gone (the portal's lease-id scope only covers active rows). `leaseEnds` is
+additive and bounded (`LeaseEndRetention`, newest first), so it survives the audit ring and a later
+snapshot load. The store queues the revoke events until `SetLeaseRevokeHook` installs the webhook
+sink, because the snapshot is loaded before the dispatcher exists; the daemon maps that hook onto
+`lease.revoked` beside the expiry hook.
+
 `internal/store/leases_test.go` covers allocation, replay, duplicate user/platform, user quota,
-account concurrency, no capacity, a suspended user, revoke/expire releasing the node and snapshot
-survival; `internal/api/leases_test.go` covers the HTTP retry/conflict contract, both 429 reasons,
-validation, the `confirm` gate, the fail-closed publication rollback (store row, node slot, audit
-row, no event, retry allocates again) and the `leases:write` scope. `internal/runtime/mutations_test.go`
+account concurrency, no capacity, a suspended user, revoke/expire releasing the node, snapshot
+survival, the durable `leaseEnds` outcome, the revoke-hook flush and lease-id non-reuse after an
+ended row; `internal/api/leases_test.go`
+covers the HTTP retry/conflict contract, both 429 reasons, validation, the `confirm` gate, the
+fail-closed publication rollback (store row, node slot, audit row, no event, retry allocates again)
+and the `leases:write` scope. `internal/runtime/mutations_test.go`
 covers `PublishLease` (rendered node reaches Resin, unpublished node is 409, Resin failure is
 upstream).
 
@@ -4145,9 +4178,10 @@ header or credential). No live vendor call was made.
   controller's gate map still live in process memory: a restart keeps the
   persisted rows but no gate is bound. Startup recovery now says so instead of
   claiming `LIVE` — every unserved `LIVE`/`DRAINING` node becomes `STALE` with
-  its gate port/egress cleared and its leases closed (see “Startup recovery
-  (AJS-239)”) — and `AJS_AUTO_LOGIN=1` optionally reopens the sessions with one
-  guarded login per account; the node supervisor is not wired. Lease
+  its gate port/egress cleared and its leases revoked with reason
+  `daemon_restart` (see “Startup recovery (AJS-239)”) — and `AJS_AUTO_LOGIN=1`
+  optionally reopens the sessions with one guarded login per account; the node
+  supervisor is not wired. Lease
   rotate/release and node drain/undrain write
   through Resin when a panel is configured; account, user, key and settings
   mutations remain store-only, and `/v1/reconcile` (or, with

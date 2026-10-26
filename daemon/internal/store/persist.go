@@ -34,9 +34,15 @@ const SnapshotVersion = 2
 type Snapshot struct {
 	Version int `json:"version"`
 
-	Accounts   []model.Account     `json:"accounts"`
-	Nodes      []model.ProxyNode   `json:"nodes"`
-	Leases     []model.Lease       `json:"leases"`
+	Accounts []model.Account   `json:"accounts"`
+	Nodes    []model.ProxyNode `json:"nodes"`
+	Leases   []model.Lease     `json:"leases"`
+	// LeaseEnds is the durable outcome log for leases that a restart or a
+	// restore could not keep active. It is additive and omitempty: an older
+	// snapshot loads with an empty log, and an older build ignores it. Each
+	// row carries the full revoked lease plus the reason and the end instant,
+	// so the customer-visible explanation survives the audit retention ring.
+	LeaseEnds  []LeaseEnd          `json:"leaseEnds,omitempty"`
 	Users      []model.PanelUser   `json:"users"`
 	Keys       []model.APIKey      `json:"keys"`
 	ScopedKeys []model.ScopedKey   `json:"scopedKeys,omitempty"`
@@ -146,6 +152,11 @@ type Snapshot struct {
 	// enters the document.
 	quarantinedOrders []string
 
+	// revokedLeases is process-only: the leases reconcileSlotClaims ended
+	// while loading this document, so Restore can publish one lease.revoked
+	// event per row after the store is installed. It never enters the file.
+	revokedLeases []model.Lease
+
 	AccountSeq   int `json:"accountSeq"`
 	UserSeq      int `json:"userSeq"`
 	KeySeq       int `json:"keySeq"`
@@ -168,6 +179,7 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	snap.Nodes = append([]model.ProxyNode(nil), s.nodes...)
 	snap.Leases = append([]model.Lease(nil), s.leases...)
+	snap.LeaseEnds = append([]LeaseEnd(nil), s.leaseEnds...)
 	snap.Users = make([]model.PanelUser, len(s.users))
 	for i, user := range s.users {
 		snap.Users[i] = cloneUser(user)
@@ -371,6 +383,7 @@ func (s *Store) Restore(data []byte) error {
 	s.accounts = snap.Accounts
 	s.nodes = snap.Nodes
 	s.leases = snap.Leases
+	s.leaseEnds = snap.LeaseEnds
 	s.users = snap.Users
 	s.keys = snap.Keys
 	s.scopedKeys = snap.ScopedKeys
@@ -531,6 +544,11 @@ func (s *Store) Restore(data []byte) error {
 	s.usageMu.Unlock()
 	s.syncAccountCountsLocked()
 	s.mu.Unlock()
+	// Rows reconcileSlotClaims ended while loading this document become
+	// lease.revoked events only after the store is installed and the lock is
+	// released. At startup no hook exists yet; deliverLeaseRevocations queues
+	// them for SetLeaseRevokeHook.
+	s.deliverLeaseRevocations(snap.revokedLeases)
 	// Material presence is checked after the index is installed: a corrupt
 	// sealed file degrades the affected records, it does not brick the panel.
 	_ = s.ReconcileDeviceMaterials()
@@ -691,6 +709,25 @@ func (snap *Snapshot) validate() error {
 				return fmt.Errorf("state snapshot lease %q names node %q of account %q, lease account is %q",
 					lease.ID, lease.NodeID, account, lease.AccountID)
 			}
+		}
+	}
+	leaseEnds := make(map[string]struct{}, len(snap.LeaseEnds))
+	for i, end := range snap.LeaseEnds {
+		if end.Lease.ID == "" {
+			return fmt.Errorf("state snapshot lease end %d has no lease id", i)
+		}
+		if _, ok := leases[end.Lease.ID]; ok {
+			return fmt.Errorf("state snapshot lease %q is both active and ended", end.Lease.ID)
+		}
+		if _, ok := leaseEnds[end.Lease.ID]; ok {
+			return fmt.Errorf("state snapshot has duplicate lease end %q", end.Lease.ID)
+		}
+		leaseEnds[end.Lease.ID] = struct{}{}
+		if strings.TrimSpace(end.Reason) == "" {
+			return fmt.Errorf("state snapshot lease end %q has no reason", end.Lease.ID)
+		}
+		if end.Lease.Status != model.LeaseRevoked {
+			return fmt.Errorf("state snapshot lease end %q status %q, want revoked", end.Lease.ID, end.Lease.Status)
 		}
 	}
 	users := make(map[string]struct{}, len(snap.Users))
@@ -1206,8 +1243,10 @@ func (snap *Snapshot) migrateDeviceSlotBindings() {
 //     slot's gate port; a READY/STALE node has no bound listener, so the row
 //     is demoted to DOWN (this is the persisted shape a crash or a hand-edited
 //     document can leave behind);
-//   - an active slot lease must point at a LIVE node bound to the LIVE slot
-//     row; otherwise the entitlement is dropped instead of advertised;
+//   - an active lease must point at a LIVE node with a bound listener (and, for
+//     a slot lease, the LIVE slot row); otherwise it is revoked with reason
+//     daemon_restart — one lease.revoke audit row, one leaseEnds entry and one
+//     lease.revoked event — instead of disappearing as an anonymous repair;
 //   - at most one active lease may hold an (account, index) slot; later
 //     duplicates are dropped;
 //   - a surviving slot lease carries its slot's serving generation and the
@@ -1301,16 +1340,31 @@ func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
 	heldSlots := make(map[model.SlotKey]struct{}, len(snap.Leases))
 	heldLegacyNodes := make(map[string]struct{}, len(snap.Leases))
 	active := make(map[string]int, len(accounts))
+	// endRestartLease is the restore-side counterpart of DemoteNode's
+	// revocation: an active lease that this process cannot serve is ended
+	// explicitly with reason daemon_restart, one lease.revoke audit row and a
+	// durable leaseEnds entry. It is never removed as an anonymous repair.
+	endRestartLease := func(lease model.Lease, detail string) {
+		lease.Status = model.LeaseRevoked
+		if lease.Platform == "" {
+			if account, ok := accounts[lease.AccountID]; ok {
+				lease.Platform = account.Platform
+			}
+		}
+		snap.LeaseEnds = prependCapped(snap.LeaseEnds, LeaseEnd{
+			Lease: lease, Reason: "daemon_restart", EndedAt: iso(now),
+		}, LeaseEndRetention)
+		snap.revokedLeases = append(snap.revokedLeases, lease)
+		meta := leaseAuditMeta(lease, "daemon_restart")
+		meta["detail"] = detail
+		audit("lease.revoke", lease.ID,
+			fmt.Sprintf("Lease on %s revoked · daemon_restart: %s", lease.NodeLabel, detail),
+			meta)
+	}
 	kept := snap.Leases[:0]
 	for _, lease := range snap.Leases {
 		if _, ok := accounts[lease.AccountID]; !ok {
-			audit("lease.unbound_dropped", lease.ID,
-				"Restore dropped an active lease for an unknown account",
-				map[string]string{
-					"leaseId": lease.ID, "nodeId": lease.NodeID,
-					"accountId": lease.AccountID, "slot": "legacy",
-					"reason": "account row is missing",
-				})
+			endRestartLease(lease, "account row is missing")
 			repaired++
 			continue
 		}
@@ -1357,12 +1411,7 @@ func (snap *Snapshot) reconcileSlotClaims(now time.Time) int {
 			}
 		}
 		if reason != "" {
-			audit("lease.unbound_dropped", lease.ID,
-				"Restore dropped an active lease with no bound endpoint: "+reason,
-				map[string]string{
-					"leaseId": lease.ID, "nodeId": lease.NodeID,
-					"accountId": lease.AccountID, "slot": slotID, "reason": reason,
-				})
+			endRestartLease(lease, reason)
 			repaired++
 			continue
 		}
@@ -1692,6 +1741,11 @@ func (snap *Snapshot) normalize() {
 	}
 	for _, event := range snap.Audit {
 		snap.AuditSeq = max(snap.AuditSeq, sequenceOf(event.ID, "audit-"))
+	}
+	// The outcome log is newest first. A snapshot written by an older build
+	// (or edited by hand) is cut to the retention window, never the reverse.
+	if len(snap.LeaseEnds) > LeaseEndRetention {
+		snap.LeaseEnds = snap.LeaseEnds[:LeaseEndRetention]
 	}
 }
 
