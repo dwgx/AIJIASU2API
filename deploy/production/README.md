@@ -216,7 +216,11 @@ The examples assume Debian/Ubuntu nginx, systemd 247 or newer (for
 ```bash
 # 1. User, directories, binary
 sudo useradd --system --user-group --home /var/lib/ajs --shell /usr/sbin/nologin ajs
-sudo install -d -m 0750 -o root -g root /etc/ajs /etc/ajs/tls
+# /etc/ajs is root:ajs 0750 so the daemon can traverse it to open the
+# root:ajs 0640 hash file; /etc/ajs/tls stays root:root and is read by the
+# root nginx master only.
+sudo install -d -m 0750 -o root -g ajs /etc/ajs
+sudo install -d -m 0750 -o root -g root /etc/ajs/tls
 sudo install -d -m 0700 -o ajs -g ajs /var/lib/ajs
 sudo install -m 0755 ajs-accountd-linux-amd64 /usr/local/bin/ajs-accountd
 
@@ -253,7 +257,9 @@ sudo -e /etc/ajs/admin-operators          # replace every placeholder secret
 sudo sh deploy/production/render-admin-operators.sh
 # The renderer detects the nginx worker group; AJS_HTPASSWD_GROUP overrides it.
 # It writes root:<nginx group> 0640 htpasswd, root:root 0600 bearer map and
-# root:ajs 0640 token hashes. No plaintext token is printed.
+# root:ajs 0640 token hashes, and repairs /etc/ajs to root:ajs 0750 so the
+# daemon can traverse to the hashes. AJS_DAEMON_GROUP overrides the `ajs`
+# directory group. No plaintext token is printed.
 
 # 7. Validate and start strict per-operator RBAC
 sudo nginx -t && sudo systemctl reload nginx
@@ -392,7 +398,17 @@ sudo systemctl restart ajs-accountd
 
 The combined renderer writes the Basic htpasswd, nginx bearer map and daemon
 hash file without printing secrets. The htpasswd is root:nginx-group `0640`;
-the bearer map is root:root `0600`; the hash file is root:ajs `0640`.
+the bearer map is root:root `0600`; the hash file is root:ajs `0640`. The
+containing `/etc/ajs` directory is root:ajs `0750` (group overridable with
+`AJS_DAEMON_GROUP`) because the daemon runs as `User=ajs Group=ajs` and the
+kernel requires search permission on every path component: a root:root `0750`
+directory blocks the daemon from opening its own `0640` hash file even though
+the file bits are correct. `/etc/ajs/tls` stays root:root `0750`; only the
+root nginx master reads the certificates. Both output directories are
+canonicalized before anything is written: a symlinked, `.`/`..` or
+duplicate-slash path is refused, the hash and map directories must be the same
+directory or disjoint, and only the canonical hash directory's ownership and
+mode are repaired.
 
 `render-admin-htpasswd.sh` refuses placeholder or short passwords, duplicate
 usernames and characters outside `A-Z a-z 0-9 . _ - @ +`, writes the htpasswd
