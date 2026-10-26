@@ -1,0 +1,60 @@
+# AJS production deployment inputs (non-secret).
+#
+# Copy to inventory.yml and edit. check.sh validates this example with a YAML
+# parser when one is available. Nothing here is a credential: tokens, keys and
+# certificate private keys are supplied separately on the host (see README).
+
+environment: production
+
+portal:
+  # Exact public origin. Must equal AJS_TENANT_ORIGIN and the nginx
+  # server_name in ajs-portal.conf. No path, query or trailing slash.
+  origin: https://panel.example.com
+  domain: panel.example.com
+  # DNS: A/AAAA record(s) for this name must point at the host.
+  listen: 443
+  bundle_root: /var/lib/ajs/production/portal
+
+admin:
+  # Private name; no public DNS record is required. Reach it through the
+  # loopback listener or a VPN address.
+  origin: https://admin.example.com
+  domain: admin.example.com
+  listen: 127.0.0.1:8443
+  bundle_root: /var/lib/ajs/production/admin
+  # CIDRs allowed by nginx `allow` and by the firewall admin set.
+  allow_cidrs:
+    - 127.0.0.1
+    - ::1
+    - 10.8.0.0/24
+
+tls:
+  # Directory layout: /etc/ajs/tls/<domain>/{fullchain.pem,privkey.pem}
+  root: /etc/ajs/tls
+  # How the Owner supplies certificates: letsencrypt, commercial, or self-signed.
+  source: letsencrypt
+  renewal: certbot
+  # DNS challenge or HTTP-01; HTTP-01 needs port 80 reachable.
+  challenge: http-01
+  email: ops@example.com
+
+daemon:
+  listen: 127.0.0.1:2261
+  state_dir: /var/lib/ajs
+  service_user: ajs
+  service_group: ajs
+  binary: /usr/local/bin/ajs-accountd
+  environment_file: /etc/ajs/accountd.env
+  tenant_portal: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+
+firewall:
+  table: ajs_production
+  lan_cidr: 192.168.11.0/24
+  management_cidrs:
+    - 192.168.11.0/24
+    - 10.8.0.0/24
+  admin_cidrs:
+    - 10.8.0.0/24

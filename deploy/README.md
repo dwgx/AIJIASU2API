@@ -418,7 +418,9 @@ missing rule and a malformed asset.
 - **No macOS/Windows containers or service wrappers.** This compose stack is Linux containers
   only. [`package.sh`](package.sh) produces standalone Linux, Windows and macOS binaries plus
   the dashboard bundle, but there is no Windows service, launchd unit or systemd unit; see
-  [`packaging.md`](packaging.md).
+  [`packaging.md`](packaging.md). For the Docker-free production kit (nginx TLS, token-free
+  portal bundle, admin bearer injection, systemd hardening, firewall and `check.sh`), see
+  [`production/README.md`](production/README.md).
 - The dashboard's live mode is a build-time choice; changing `VITE_*` in `.env` requires
   `docker compose build dashboard`.
 

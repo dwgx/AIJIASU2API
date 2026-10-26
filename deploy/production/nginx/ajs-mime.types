@@ -1,0 +1,18 @@
+# Minimal MIME map for the AJS static bundles. Kept in the kit so nginx -t in a
+# throwaway prefix does not depend on the distribution's mime.types file.
+types {
+    text/html                             html htm;
+    text/css                              css;
+    application/javascript               js mjs;
+    application/json                     json map;
+    image/svg+xml                        svg svgz;
+    image/png                            png;
+    image/jpeg                            jpg jpeg;
+    image/webp                            webp;
+    image/x-icon                         ico;
+    font/woff                            woff;
+    font/woff2                           woff2;
+    text/plain                           txt;
+    application/wasm                     wasm;
+    application/manifest+json            webmanifest;
+}

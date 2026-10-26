@@ -1,0 +1,58 @@
+#!/usr/sbin/nft -f
+# AJS production firewall table (standalone template).
+#
+# This is a COMPLETE table, not a fragment: applying it creates
+# `table inet ajs_production`. It does not modify any other table. If the host
+# already has a firewall, merge these rules into it instead of applying this
+# file blindly; a `policy drop` table that misses the SSH path will lock you
+# out. Keep an existing SSH session open and test with `nft -c -f` first:
+#
+#   sudo nft -c -f deploy/production/firewall/ajs-production.nft
+#   sudo nft -f  deploy/production/firewall/ajs-production.nft
+#
+# The AJS LAN rule below is byte-for-byte the rule owned by
+# deploy/nftables/ajs-panel.nft (comments aside): 2261 (ajs-accountd admin API)
+# and 18082 (dashboard preview) from 192.168.11.0/24 only. deploy/production/
+# check.sh fails if the two drift apart.
+
+table inet ajs_production {
+    # Management sources: the existing LAN plus the VPN client range. Adjust
+    # both sets to the real site before applying.
+    set mgmt_sources {
+        type ipv4_addr
+        flags interval
+        elements = { 192.168.11.0/24, 10.8.0.0/24 }
+    }
+
+    set admin_sources {
+        type ipv4_addr
+        flags interval
+        elements = { 10.8.0.0/24 }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        iif "lo" accept
+
+        # ICMP is needed for path MTU and diagnostics.
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # SSH from the management LAN or VPN only.
+        ip saddr @mgmt_sources tcp dport 22 accept comment "SSH management"
+
+        # Customer portal and ACME HTTP-01.
+        tcp dport { 80, 443 } accept comment "AJS portal HTTP/HTTPS"
+
+        # The repo-owned AJS LAN block — keep in sync with deploy/nftables/ajs-panel.nft.
+        ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept
+
+        # Optional VPN-bound admin listener (see nginx/sites-available/ajs-admin.conf).
+        ip saddr @admin_sources tcp dport 8443 accept comment "AJS admin UI (VPN)"
+
+        # Drop and count everything else so `nft list ruleset` shows the hits.
+        counter drop
+    }
+}

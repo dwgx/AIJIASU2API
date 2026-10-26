@@ -1,0 +1,10 @@
+# Build output and host-local inputs for the production kit.
+dist/
+dist-test/
+inventory.yml
+*.pem
+*.key
+token-test.conf
+
+# Rendered on the host; never commit
+nginx/snippets/ajs-admin-token.conf

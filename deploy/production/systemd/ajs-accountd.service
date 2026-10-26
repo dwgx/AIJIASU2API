@@ -1,0 +1,60 @@
+[Unit]
+Description=AJS account daemon (ajs-accountd control plane)
+Documentation=file:/opt/ajs/deploy/production/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ajs
+Group=ajs
+WorkingDirectory=/var/lib/ajs
+EnvironmentFile=/etc/ajs/accountd.env
+ExecStart=/usr/local/bin/ajs-accountd
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=mixed
+LimitNOFILE=65535
+UMask=0077
+
+# --- hardening -----------------------------------------------------------------
+# The daemon is a plain network service: no privileged ports, no capabilities,
+# no writable system paths beyond its state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=false
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# StateDirectory creates /var/lib/ajs owned by ajs:ajs with mode 0700 and is
+# the only writable path the service gets under ProtectSystem=strict.
+StateDirectory=ajs
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/ajs
+
+# TLS material is read-only and never written by the daemon.
+ReadOnlyPaths=/etc/ajs
+
+[Install]
+WantedBy=multi-user.target

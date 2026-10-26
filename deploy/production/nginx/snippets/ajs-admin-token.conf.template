@@ -1,0 +1,12 @@
+# TEMPLATE — never commit the rendered file.
+#
+# The admin vhost includes this snippet inside every /v1/ location, so the
+# browser never receives and never needs AJS_ADMIN_TOKEN. Render it on the
+# host from the environment with deploy/production/render-admin-token.sh:
+#
+#   sudo AJS_ADMIN_TOKEN="$(cat /etc/ajs/admin.token)" \
+#       sh deploy/production/render-admin-token.sh
+#
+# The rendered file must be root-owned, mode 0600, and readable only by the
+# nginx master (it is read at config load, not by worker processes).
+proxy_set_header Authorization "Bearer ${AJS_ADMIN_TOKEN}";
