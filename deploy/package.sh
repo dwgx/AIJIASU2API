@@ -369,10 +369,11 @@ STAGE_DIR=""
 
 # Package the operator-facing deploy kit. The archive contains the deploy/
 # tree under a top-level deploy/ directory, so extracting it and running
-# `bash deploy/production/check.sh` works exactly like the checkout. With Git
-# available only tracked files are copied; the fallback excludes local
-# secrets and build output by name, so a deploy/.env, inventory.yml, *.pem or
-# rendered admin-token snippet never leaks into a release artifact.
+# `sudo -E bash deploy/production/check.sh` (root is required) works exactly
+# like the checkout. With Git available only tracked files are copied; the
+# fallback excludes local secrets and build output by name, so a deploy/.env,
+# inventory.yml, *.pem or rendered admin-token snippet never leaks into a
+# release artifact.
 printf 'Packaging deploy kit\n'
 STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ajs-deploy-kit.XXXXXX") \
   || die "cannot create a temporary staging directory"

@@ -32,9 +32,10 @@ whose manifest is not a live, token-free build (`mode: live`, `mock: false`,
 In addition to the six release files, the script writes `deploy-kit.tar.gz`: an LF-normalized
 copy of the `deploy/` tree under a top-level `deploy/` directory. It contains the nginx
 configuration, systemd unit, nftables tables, compose files, update/check scripts and the
-`deploy/production` kit, so extracting it and running `bash deploy/production/check.sh` works the
-same way as in a checkout. The deploy kit is an operator convenience, not one of the six release
-assets; its size and SHA-256 are recorded in `MANIFEST.txt`, which `SHA256SUMS` covers in turn.
+`deploy/production` kit, so extracting it and running `sudo -E bash deploy/production/check.sh`
+(root is required) works the same way as in a checkout. The deploy kit is an operator
+convenience, not one of the six release assets; its size and SHA-256 are recorded in
+`MANIFEST.txt`, which `SHA256SUMS` covers in turn.
 
 The output directory is build output: use a path outside the tree (for example
 `--out /tmp/ajs-pkg`) or keep it untracked. Only the script, the doc and the workflow belong in
