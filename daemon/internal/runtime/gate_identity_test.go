@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -117,7 +118,13 @@ func newIdentityFixture(t *testing.T, allowlist []string, quota *int64) *identit
 
 func (f *identityFixture) dial(t *testing.T) net.Conn {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", f.server.Addr().String(), 2*time.Second)
+	return dialGate(t, f.server)
+}
+
+// dialGate opens one connection to a started gate with the test deadline.
+func dialGate(t *testing.T, server *gate.Server) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", server.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial gate: %v", err)
 	}
@@ -334,8 +341,10 @@ func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 				Gates:    capture.build,
 				GateAuth: tc.mode,
 			}
+			var identity *GateIdentity
 			if tc.withID {
-				config.GateIdentity = NewGateIdentity(st)
+				identity = NewGateIdentity(st)
+				config.GateIdentity = identity
 			}
 			controller, err := NewNodeController(config)
 			if err != nil {
@@ -360,6 +369,26 @@ func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 			wired := capture.cfg.Authenticator != nil && capture.cfg.UserPolicy != nil
 			if wired != tc.wantWiring {
 				t.Fatalf("gate identity wired = %v, want %v", wired, tc.wantWiring)
+			}
+			if tc.wantWiring {
+				// The controller must hand the gate the identity bound to that
+				// gate's account, never the bare *GateIdentity: only the
+				// wrapper resolves the user's lease, so a bare identity would
+				// admit a credential without one.
+				authenticator, ok := capture.cfg.Authenticator.(*GateAccountIdentity)
+				if !ok {
+					t.Fatalf("gate authenticator = %T, want *GateAccountIdentity", capture.cfg.Authenticator)
+				}
+				policy, ok := capture.cfg.UserPolicy.(*GateAccountIdentity)
+				if !ok {
+					t.Fatalf("gate policy = %T, want *GateAccountIdentity", capture.cfg.UserPolicy)
+				}
+				if authenticator.accountID != "acc-01" || policy.accountID != "acc-01" {
+					t.Fatalf("gate binding = %q/%q, want acc-01", authenticator.accountID, policy.accountID)
+				}
+				if authenticator.identity != identity || policy.identity != identity {
+					t.Fatal("gate wrapper does not share the controller's identity service")
+				}
 			}
 			if capture.cfg.Listen != "127.0.0.1:13000" {
 				t.Fatalf("gate Listen = %q, want the loopback default port", capture.cfg.Listen)
@@ -837,4 +866,699 @@ func TestGateIdentityConcurrentFlowsAndUpdates(t *testing.T) {
 	if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 2 {
 		t.Fatalf("CONNECT after allowlist replacement = %#x, want 0x02", rep)
 	}
+}
+
+// scopedGateFixture is one account with a live node, one user holding a scoped
+// proxy:connect key plus a legacy panel key, and exactly one active lease. The
+// gate is built through FlowMeter.GateFactory with no explicit authenticator or
+// policy, so the production default — the account-bound wrapper — is what runs.
+type scopedGateFixture struct {
+	store       *store.Store
+	account     model.Account
+	user        model.PanelUser
+	secret      string
+	panelSecret string
+	lease       model.Lease
+	identity    *GateIdentity
+	server      *gate.Server
+	session     *identityEchoSession
+}
+
+func newScopedGateFixture(t *testing.T) *scopedGateFixture {
+	t.Helper()
+	st := store.NewEmpty()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label:       "acc-scoped",
+		Username:    "vendor-scoped",
+		Password:    "scoped-test-password",
+		Platform:    model.PlatformLinux,
+		Concurrency: 4,
+		Regions:     []string{"cn-zj"},
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-scoped", AccountID: account.ID, Label: "cn-zj-01", Region: "cn-zj",
+		State: model.NodeLive, EgressIP: "203.0.113.30", Protocol: model.ProtocolSOCKS5, GatePort: 13031,
+	}); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{
+		Name: "scoped-gate", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	_, secret, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID:     user.ID,
+		Label:      "gate",
+		Scopes:     []model.Scope{model.ScopeProxyConnect},
+		AccountIDs: []string{account.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey: %v", err)
+	}
+	_, panelSecret, err := st.CreateKey(user.ID, "legacy")
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformLinux, AccountID: account.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+	meter := NewFlowMeter(st)
+	session := &identityEchoSession{}
+	built, err := meter.GateFactory()(gate.Config{
+		NodeID:    "node-scoped",
+		AccountID: account.ID,
+		Listen:    "127.0.0.1:0",
+		AuthMode:  gate.AuthUserPass,
+	}, session)
+	if err != nil {
+		t.Fatalf("GateFactory: %v", err)
+	}
+	server, ok := built.(*gate.Server)
+	if !ok {
+		t.Fatalf("gate factory built %T, want *gate.Server", built)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	return &scopedGateFixture{
+		store:       st,
+		account:     account,
+		user:        user,
+		secret:      secret,
+		panelSecret: panelSecret,
+		lease:       lease,
+		identity:    meter.Identity(),
+		server:      server,
+		session:     session,
+	}
+}
+
+func (f *scopedGateFixture) dial(t *testing.T) net.Conn {
+	t.Helper()
+	return dialGate(t, f.server)
+}
+
+// addForeignLease creates a second account with a live node, a second user and
+// one active lease on that account, so a principal can name a lease that is
+// real but not the gate's.
+func addForeignLease(t *testing.T, st *store.Store) (model.Account, model.PanelUser, model.Lease) {
+	t.Helper()
+	account, err := st.CreateAccount(model.CreateAccountInput{
+		Label:       "acc-foreign",
+		Username:    "vendor-foreign",
+		Password:    "foreign-test-password",
+		Platform:    model.PlatformLinux,
+		Concurrency: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(foreign): %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-foreign", AccountID: account.ID, Label: "cn-zj-02", Region: "cn-zj",
+		State: model.NodeLive, EgressIP: "203.0.113.31", Protocol: model.ProtocolSOCKS5, GatePort: 13032,
+	}); err != nil {
+		t.Fatalf("PutNode(foreign): %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{
+		Name: "foreign-gate", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(foreign): %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformLinux, AccountID: account.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(foreign): %v", err)
+	}
+	return account, user, lease
+}
+
+// expireLeases rewrites every lease expiry into the past and restores the
+// document into a fresh store, so the next read sweeps the rows as expired
+// without waiting out a TTL. Restore keeps the row; the store's sweep is what
+// removes it, exactly as it would after the real deadline.
+func expireLeases(t *testing.T, st *store.Store) *store.Store {
+	t.Helper()
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	leases, ok := doc["leases"].([]any)
+	if !ok || len(leases) == 0 {
+		t.Fatalf("snapshot carries no leases")
+	}
+	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	for _, raw := range leases {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("snapshot lease is %T, want an object", raw)
+		}
+		record["expiresAt"] = past
+	}
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	restored := store.NewEmpty()
+	if err := restored.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	return restored
+}
+
+// TestGateIdentityScopedKey is the gate half of AJS-450: a scoped key carrying
+// proxy:connect authenticates at its account's gate and binds to the user's
+// lease, while a key without the scope, a key issued to another user, a key
+// granted another account and a revoked key are refused with the same answer.
+func TestGateIdentityScopedKey(t *testing.T) {
+	f := newScopedGateFixture(t)
+	bound := f.identity.ForAccount(f.account.ID)
+
+	principal, ok := bound.Authenticate(f.user.ID, f.secret)
+	if !ok {
+		t.Fatal("valid scoped key rejected")
+	}
+	if principal.UserID != f.user.ID || principal.UserName != f.user.Name {
+		t.Fatalf("principal = %q/%q, want %q/%q", principal.UserID, principal.UserName, f.user.ID, f.user.Name)
+	}
+	if principal.LeaseID != f.lease.ID {
+		t.Fatalf("principal lease = %q, want %q", principal.LeaseID, f.lease.ID)
+	}
+
+	// The same credential relays over the wire and is attributed to its user.
+	conn := f.dial(t)
+	if status := authenticate(t, conn, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("auth status = %#x, want 0x00", status)
+	}
+	if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+		t.Fatalf("CONNECT reply = %#x, want success", rep)
+	}
+	echoBytes(t, conn, []byte("scoped-key"))
+	_ = conn.Close()
+	rows := waitUserRows(t, f.store, 1)
+	if rows[0].UserID != f.user.ID || rows[0].UserName != f.user.Name {
+		t.Fatalf("row attribution = %q/%q, want %q/%q", rows[0].UserID, rows[0].UserName, f.user.ID, f.user.Name)
+	}
+
+	other, err := f.store.CreateUser(model.CreateUserInput{
+		Name: "other-user", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(other): %v", err)
+	}
+	elsewhere, err := f.store.CreateAccount(model.CreateAccountInput{
+		Label: "acc-elsewhere", Username: "vendor-elsewhere", Password: "elsewhere-test-password",
+		Platform: model.PlatformLinux, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(elsewhere): %v", err)
+	}
+	_, noScope, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: f.user.ID, Label: "no gate scope",
+		Scopes: []model.Scope{model.ScopeLeasesRead}, AccountIDs: []string{f.account.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(no scope): %v", err)
+	}
+	_, elsewhereKey, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: f.user.ID, Label: "other account",
+		Scopes: []model.Scope{model.ScopeProxyConnect}, AccountIDs: []string{elsewhere.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(elsewhere): %v", err)
+	}
+	revokedKey, revokedSecret, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: f.user.ID, Label: "revoked",
+		Scopes: []model.Scope{model.ScopeProxyConnect}, AccountIDs: []string{f.account.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(revoked): %v", err)
+	}
+	if err := f.store.RevokeScopedKey(revokedKey.ID); err != nil {
+		t.Fatalf("RevokeScopedKey: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		user string
+		pass string
+	}{
+		{"missing proxy:connect", f.user.ID, noScope},
+		{"wrong user", other.ID, f.secret},
+		{"wrong account grant", f.user.ID, elsewhereKey},
+		{"revoked key", f.user.ID, revokedSecret},
+		{"unknown secret", f.user.ID, "ajs_sk_not-a-real-secret"},
+	}
+	for _, tc := range cases {
+		if principal, ok := bound.Authenticate(tc.user, tc.pass); ok {
+			t.Fatalf("%s authenticated as %+v", tc.name, principal)
+		}
+	}
+
+	// Every refusal is the same wire answer: 01 01.
+	rejected := f.dial(t)
+	if status := authenticate(t, rejected, f.user.ID, noScope); status != 1 {
+		t.Fatalf("auth status for a key without proxy:connect = %#x, want 0x01", status)
+	}
+	if opens := f.session.recorded(); len(opens) != 1 {
+		t.Fatalf("OpenFlow calls = %d, want only the admitted flow", len(opens))
+	}
+
+	// The admin grant covers every account, so an admin+proxy:connect key with
+	// a nonmatching grant still reaches this gate: admin behavior is unchanged.
+	_, adminSecret, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: f.user.ID, Label: "admin gate",
+		Scopes:     []model.Scope{model.ScopeAdmin, model.ScopeProxyConnect},
+		AccountIDs: []string{elsewhere.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(admin): %v", err)
+	}
+	adminPrincipal, adminOK := bound.Authenticate(f.user.ID, adminSecret)
+	if !adminOK || adminPrincipal.LeaseID != f.lease.ID {
+		t.Fatalf("admin proxy key = %+v/%v, want the lease-bound principal", adminPrincipal, adminOK)
+	}
+	// The admin grant never substitutes for proxy:connect.
+	_, adminNoScope, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: f.user.ID, Label: "admin without gate scope",
+		Scopes: []model.Scope{model.ScopeAdmin},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(admin no scope): %v", err)
+	}
+	if principal, ok := bound.Authenticate(f.user.ID, adminNoScope); ok {
+		t.Fatalf("admin key without proxy:connect authenticated as %+v", principal)
+	}
+}
+
+// TestGateIdentityLeaseBinding is the entitlement half of AJS-450: a credential
+// admits a flow only through exactly one active lease of (user, gate account),
+// the lease is re-read at admission, and zero, ambiguous, foreign or expired
+// leases all fail closed for both credential kinds.
+func TestGateIdentityLeaseBinding(t *testing.T) {
+	f := newScopedGateFixture(t)
+	bound := f.identity.ForAccount(f.account.ID)
+
+	// The legacy panel key is still a credential during migration, and it is
+	// bound to the same lease.
+	principal, ok := bound.Authenticate(f.user.ID, f.panelSecret)
+	if !ok {
+		t.Fatal("legacy panel key with an active lease rejected")
+	}
+	if principal.LeaseID != f.lease.ID {
+		t.Fatalf("legacy principal lease = %q, want %q", principal.LeaseID, f.lease.ID)
+	}
+	if ok, class, _, _ := bound.Admit(principal, "127.0.0.1"); !ok {
+		t.Fatalf("legacy admission refused: %q", class)
+	}
+
+	// A credential without a lease on this account is refused.
+	noLeaseUser, err := f.store.CreateUser(model.CreateUserInput{
+		Name: "no-lease", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(no lease): %v", err)
+	}
+	_, noLeaseSecret, err := f.store.CreateKey(noLeaseUser.ID, "no lease")
+	if err != nil {
+		t.Fatalf("CreateKey(no lease): %v", err)
+	}
+	if _, ok := bound.Authenticate(noLeaseUser.ID, noLeaseSecret); ok {
+		t.Fatal("panel key without a lease authenticated")
+	}
+	_, noLeaseScoped, err := f.store.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: noLeaseUser.ID, Label: "no lease scoped",
+		Scopes: []model.Scope{model.ScopeProxyConnect}, AccountIDs: []string{f.account.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey(no lease): %v", err)
+	}
+	if principal, ok := bound.Authenticate(noLeaseUser.ID, noLeaseScoped); ok {
+		t.Fatalf("scoped key without a lease authenticated as %+v", principal)
+	}
+
+	// Zero, one and many: only exactly one active lease for the pair resolves.
+	if _, ok := singleActiveLease(nil, f.user.ID, f.account.ID); ok {
+		t.Fatal("no lease resolved")
+	}
+	if got, ok := singleActiveLease([]model.Lease{f.lease}, f.user.ID, f.account.ID); !ok || got.ID != f.lease.ID {
+		t.Fatalf("single lease resolved to %+v/%v", got, ok)
+	}
+	ambiguous := []model.Lease{
+		f.lease,
+		{ID: "lease-99", UserID: f.user.ID, AccountID: f.account.ID, Status: model.LeaseActive},
+	}
+	if _, ok := singleActiveLease(ambiguous, f.user.ID, f.account.ID); ok {
+		t.Fatal("two active leases resolved to one")
+	}
+	foreignPair := []model.Lease{
+		{ID: "lease-98", UserID: f.user.ID, AccountID: "acc-other", Status: model.LeaseActive},
+		{ID: "lease-97", UserID: "u-other", AccountID: f.account.ID, Status: model.LeaseActive},
+	}
+	if _, ok := singleActiveLease(foreignPair, f.user.ID, f.account.ID); ok {
+		t.Fatal("a lease of another user/account resolved")
+	}
+
+	// A principal naming a real lease of another user or another account is
+	// refused at admission, and so is a principal with no lease id.
+	_, foreignUser, foreignLease := addForeignLease(t, f.store)
+	for _, p := range []gate.Principal{
+		{UserID: f.user.ID, UserName: f.user.Name, LeaseID: foreignLease.ID},
+		{UserID: foreignUser.ID, UserName: foreignUser.Name, LeaseID: foreignLease.ID},
+		{UserID: f.user.ID, UserName: f.user.Name},
+	} {
+		if ok, class, _, _ := bound.Admit(p, "127.0.0.1"); ok || class != gate.FlowErrorLease {
+			t.Fatalf("admission for %+v = %v/%q, want lease_inactive", p, ok, class)
+		}
+	}
+
+	// The same gate account, another user's active lease: only the user half of
+	// the check can refuse this, so it pins that half on its own.
+	_, sameAccountLease := addSameAccountLease(t, f.store, f.account.ID)
+	if sameAccountLease.AccountID != f.account.ID || sameAccountLease.UserID == f.user.ID {
+		t.Fatalf("same-account lease = %+v, want another user's active lease on the gate account", sameAccountLease)
+	}
+	if ok, class, _, _ := bound.Admit(gate.Principal{
+		UserID: f.user.ID, UserName: f.user.Name, LeaseID: sameAccountLease.ID,
+	}, "127.0.0.1"); ok || class != gate.FlowErrorLease {
+		t.Fatalf("admission on another user's lease of this account = %v/%q, want lease_inactive", ok, class)
+	}
+	// The gate user's own lease is still the one that admits.
+	if principal, ok := bound.Authenticate(f.user.ID, f.secret); !ok || principal.LeaseID != f.lease.ID {
+		t.Fatalf("gate user after a second account lease = %+v/%v, want %q", principal, ok, f.lease.ID)
+	}
+
+	// A lease revoked between the handshake and CONNECT refuses the flow
+	// before any vendor call.
+	pending := f.dial(t)
+	if status := authenticate(t, pending, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("auth status = %#x, want 0x00", status)
+	}
+	if _, err := f.store.RevokeLease(f.lease.ID); err != nil {
+		t.Fatalf("RevokeLease: %v", err)
+	}
+	if rep := connectIPv4(t, pending, net.IPv4(127, 0, 0, 1), 443); rep != 2 {
+		t.Fatalf("CONNECT after lease revoke = %#x, want 0x02", rep)
+	}
+	if opens := f.session.recorded(); len(opens) != 0 {
+		t.Fatalf("OpenFlow calls = %v, want none for a lease-less flow", opens)
+	}
+	records := f.server.Flows(0)
+	if len(records) != 1 || records[0].Status != gate.FlowStatusRejected || records[0].ErrorClass != gate.FlowErrorLease {
+		t.Fatalf("flow records = %+v, want one rejected lease_inactive record", records)
+	}
+
+	// With the lease gone, the next handshake has nothing to bind to.
+	after := f.dial(t)
+	if status := authenticate(t, after, f.user.ID, f.secret); status != 1 {
+		t.Fatalf("auth status after lease revoke = %#x, want 0x01", status)
+	}
+
+	// An expired lease is not an entitlement either, for both credential kinds.
+	g := newScopedGateFixture(t)
+	expired := NewGateIdentity(expireLeases(t, g.store)).ForAccount(g.account.ID)
+	if _, ok := expired.Authenticate(g.user.ID, g.secret); ok {
+		t.Fatal("scoped key with an expired lease authenticated")
+	}
+	if _, ok := expired.Authenticate(g.user.ID, g.panelSecret); ok {
+		t.Fatal("panel key with an expired lease authenticated")
+	}
+
+	// Two active leases for the same (user, account) are ambiguous: the scoped
+	// credential cannot resolve one and is refused. Only a hand-edited or
+	// corrupted snapshot can carry that shape.
+	h := newScopedGateFixture(t)
+	dup := duplicateActiveLease(t, h.store)
+	duplicateIdentity := NewGateIdentity(dup).ForAccount(h.account.ID)
+	if leases := dup.Leases(); len(leases) != 2 {
+		t.Fatalf("restored leases = %d, want 2", len(leases))
+	}
+	if principal, ok := duplicateIdentity.Authenticate(h.user.ID, h.secret); ok {
+		t.Fatalf("scoped key with two active leases authenticated as %+v", principal)
+	}
+	// Dropping the duplicate restores the exactly-one binding.
+	if _, err := dup.RevokeLease("lease-99"); err != nil {
+		t.Fatalf("RevokeLease(duplicate): %v", err)
+	}
+	principal, ok = duplicateIdentity.Authenticate(h.user.ID, h.secret)
+	if !ok || principal.LeaseID != h.lease.ID {
+		t.Fatalf("after dropping the duplicate = %+v/%v, want %q", principal, ok, h.lease.ID)
+	}
+}
+
+// TestFlowMeterBindsAccountLease proves the production wiring: the metered
+// factory installs the account-bound wrapper by default, so a scoped key relays
+// only while its lease lives, the legacy panel key relays through the same
+// gate, and a lease revoked after the handshake refuses the CONNECT.
+func TestFlowMeterBindsAccountLease(t *testing.T) {
+	f := newScopedGateFixture(t)
+
+	conn := f.dial(t)
+	if status := authenticate(t, conn, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("scoped auth status = %#x, want 0x00", status)
+	}
+	if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+		t.Fatalf("scoped CONNECT reply = %#x, want success", rep)
+	}
+	echoBytes(t, conn, []byte("scoped"))
+	_ = conn.Close()
+	rows := waitUserRows(t, f.store, 1)
+	if rows[0].UserID != f.user.ID || rows[0].AccountLabel != f.account.Label {
+		t.Fatalf("row attribution = %q/%q, want %q/%q",
+			rows[0].UserID, rows[0].AccountLabel, f.user.ID, f.account.Label)
+	}
+
+	legacy := f.dial(t)
+	if status := authenticate(t, legacy, f.user.ID, f.panelSecret); status != 0 {
+		t.Fatalf("legacy auth status = %#x, want 0x00", status)
+	}
+	if rep := connectIPv4(t, legacy, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+		t.Fatalf("legacy CONNECT reply = %#x, want success", rep)
+	}
+	echoBytes(t, legacy, []byte("legacy"))
+	_ = legacy.Close()
+	if rows := waitUserRows(t, f.store, 2); len(rows) != 2 {
+		t.Fatalf("gate rows = %d, want 2", len(rows))
+	}
+
+	// The lease is re-read at admission: revoking it after the handshake
+	// refuses the CONNECT and never calls OpenFlow.
+	pending := f.dial(t)
+	if status := authenticate(t, pending, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("pending auth status = %#x, want 0x00", status)
+	}
+	if _, err := f.store.RevokeLease(f.lease.ID); err != nil {
+		t.Fatalf("RevokeLease: %v", err)
+	}
+	if rep := connectIPv4(t, pending, net.IPv4(127, 0, 0, 1), 443); rep != 2 {
+		t.Fatalf("CONNECT after lease revoke = %#x, want 0x02", rep)
+	}
+	if opens := f.session.recorded(); len(opens) != 2 {
+		t.Fatalf("OpenFlow calls = %v, want the two admitted flows only", opens)
+	}
+	records := f.server.Flows(0)
+	refused := false
+	for _, record := range records {
+		if record.Status == gate.FlowStatusRejected && record.ErrorClass == gate.FlowErrorLease {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatalf("flow records = %+v, want a rejected lease_inactive record", records)
+	}
+
+	// Nothing is left to bind to, so the next handshake is refused outright.
+	after := f.dial(t)
+	if status := authenticate(t, after, f.user.ID, f.secret); status != 1 {
+		t.Fatalf("auth status after lease revoke = %#x, want 0x01", status)
+	}
+}
+
+// stripScopedKeyGrants rewrites every scoped key's accountIds/regions to empty
+// and restores the document into a fresh store. Creation rejects that shape, so
+// only a restored or hand-edited snapshot can carry it.
+func stripScopedKeyGrants(t *testing.T, st *store.Store) *store.Store {
+	t.Helper()
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	keys, ok := doc["scopedKeys"].([]any)
+	if !ok || len(keys) == 0 {
+		t.Fatalf("snapshot carries no scoped keys")
+	}
+	for _, raw := range keys {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("snapshot scoped key is %T, want an object", raw)
+		}
+		record["accountIds"] = []any{}
+		record["regions"] = []any{}
+	}
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	restored := store.NewEmpty()
+	if err := restored.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	return restored
+}
+
+// TestGateIdentityRestoredUngrantedProxyKeyFailsClosed pins the grant-shape
+// rule at the gate. Creation rejects a proxy:connect key without an account or
+// region grant, so a restored snapshot that carries one must fail closed like
+// the API's scopedKeyDenial: an empty grant list can never mean "every
+// account" for a customer credential.
+func TestGateIdentityRestoredUngrantedProxyKeyFailsClosed(t *testing.T) {
+	f := newScopedGateFixture(t)
+	restored := stripScopedKeyGrants(t, f.store)
+
+	keys := restored.ScopedKeys()
+	if len(keys) != 1 {
+		t.Fatalf("restored scoped keys = %d, want 1", len(keys))
+	}
+	if !keys[0].RequiresAccountGrant() || keys[0].HasAccountGrant() {
+		t.Fatalf("restored key shape = %+v, want requires-grant-with-none", keys[0])
+	}
+	// The secret must still resolve after the restore, so the refusal below is
+	// the grant shape and not a lost hash.
+	if resolved, ok := restored.AuthenticateScopedKey(f.secret); !ok || resolved.ID != keys[0].ID {
+		t.Fatalf("restored secret resolved to %+v/%v, want the ungranted key", resolved, ok)
+	}
+
+	bound := NewGateIdentity(restored).ForAccount(f.account.ID)
+	if principal, ok := bound.Authenticate(f.user.ID, f.secret); ok {
+		t.Fatalf("restored proxy:connect key without a grant authenticated as %+v", principal)
+	}
+
+	// Control: the same restored store still admits the legacy panel key, so
+	// the refusal is the missing grant, not the restore.
+	principal, ok := bound.Authenticate(f.user.ID, f.panelSecret)
+	if !ok || principal.LeaseID != f.lease.ID {
+		t.Fatalf("legacy key after restore = %+v/%v, want the lease-bound principal", principal, ok)
+	}
+}
+
+// addSameAccountLease gives accountID a second live node and one active lease
+// held by another user, so a principal can name a lease that is active on the
+// gate's own account but belongs to someone else. Capacity is raised for the
+// test (AJS_ACCOUNT_SLOTS=2 plus a use count of 2), which is exactly what the
+// second serving node would allow in production.
+func addSameAccountLease(t *testing.T, st *store.Store, accountID string) (model.PanelUser, model.Lease) {
+	t.Helper()
+	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
+	if _, err := st.SetAccountUseCount(accountID, 2); err != nil {
+		t.Fatalf("SetAccountUseCount: %v", err)
+	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-scoped-2", AccountID: accountID, Label: "cn-zj-03", Region: "cn-zj",
+		State: model.NodeLive, EgressIP: "203.0.113.32", Protocol: model.ProtocolSOCKS5, GatePort: 13033,
+	}); err != nil {
+		t.Fatalf("PutNode(second): %v", err)
+	}
+	user, err := st.CreateUser(model.CreateUserInput{
+		Name: "same-account-other", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(same account): %v", err)
+	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformLinux, AccountID: accountID,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease(same account): %v", err)
+	}
+	return user, lease
+}
+
+// duplicateActiveLease restores a document that carries a second active lease
+// for the fixture's user on a second live node of the same account. CreateLease
+// refuses that shape (one lease per user and platform), so only a hand-edited
+// or corrupted snapshot can hold it; the document also raises the account's
+// capacity so the restore keeps both rows instead of dropping one.
+func duplicateActiveLease(t *testing.T, st *store.Store) *store.Store {
+	t.Helper()
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	accounts, ok := doc["accounts"].([]any)
+	if !ok || len(accounts) != 1 {
+		t.Fatalf("snapshot accounts = %v, want one", doc["accounts"])
+	}
+	account, ok := accounts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot account is %T, want an object", accounts[0])
+	}
+	accountID, _ := account["id"].(string)
+	accountLabel, _ := account["label"].(string)
+	account["useCount"] = 2
+
+	nodes, ok := doc["nodes"].([]any)
+	if !ok {
+		t.Fatalf("snapshot nodes = %v, want a list", doc["nodes"])
+	}
+	doc["nodes"] = append(nodes, map[string]any{
+		"id": "node-scoped-2", "accountId": accountID, "accountLabel": accountLabel,
+		"label": "cn-zj-03", "region": "cn-zj", "state": string(model.NodeLive),
+		"egressIp": "203.0.113.32", "protocol": string(model.ProtocolSOCKS5), "gatePort": 13033,
+	})
+
+	leases, ok := doc["leases"].([]any)
+	if !ok || len(leases) != 1 {
+		t.Fatalf("snapshot leases = %v, want one", doc["leases"])
+	}
+	original, ok := leases[0].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot lease is %T, want an object", leases[0])
+	}
+	userID, _ := original["userId"].(string)
+	userName, _ := original["userName"].(string)
+	now := time.Now().UTC()
+	doc["leases"] = append(leases, map[string]any{
+		"id": "lease-99", "userId": userID, "userName": userName,
+		"accountId": accountID, "accountLabel": accountLabel,
+		"platform": string(model.PlatformLinux), "nodeId": "node-scoped-2",
+		"nodeLabel": "cn-zj-03", "region": "cn-zj", "egressIp": "203.0.113.32",
+		"protocol": string(model.ProtocolSOCKS5), "gatePort": 13033,
+		"ttlSeconds": 3600, "expiresAt": now.Add(time.Hour).Format(time.RFC3339),
+		"sticky": true, "status": string(model.LeaseActive),
+		"idempotencyKey": "", "createdAt": now.Format(time.RFC3339),
+	})
+
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	// Restore derives capacity from AJS_ACCOUNT_SLOTS, so the second serving
+	// node must count before the duplicate row is admitted.
+	t.Setenv("AJS_ACCOUNT_SLOTS", "2")
+	restored := store.NewEmpty()
+	if err := restored.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	return restored
 }

@@ -373,3 +373,68 @@ func TestDeleteUserRevokesScopedKeys(t *testing.T) {
 		t.Fatal("scoped key was not revoked with its user")
 	}
 }
+
+// TestScopedKeyProxyConnect pins the gate credential scope: proxy:connect is
+// part of the vocabulary, it is account-bound like the account/catalog/lease
+// scopes (a non-admin key must name a grant and that grant narrows the gate
+// account), and only an active key resolves through AuthenticateScopedKey.
+func TestScopedKeyProxyConnect(t *testing.T) {
+	st := New()
+
+	// A proxy key without a grant would mean "every account"; the create rule
+	// refuses it like any other account-bound scope.
+	if _, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: "u-01", Label: "gate without grant", Scopes: []model.Scope{model.ScopeProxyConnect},
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("proxy:connect without a grant error = %v, want ErrInvalid", err)
+	}
+
+	key, secret, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID:     "u-01",
+		Label:      "gate",
+		Scopes:     []model.Scope{model.ScopeProxyConnect},
+		AccountIDs: []string{"acc-01"},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey: %v", err)
+	}
+	if !key.HasScope(model.ScopeProxyConnect) {
+		t.Fatalf("scopes = %v, want proxy:connect", key.Scopes)
+	}
+	if key.HasScope(model.ScopeLeasesRead) {
+		t.Fatal("HasScope granted a scope the key does not carry")
+	}
+	if !key.RequiresAccountGrant() || !key.HasAccountGrant() {
+		t.Fatalf("proxy:connect key = %+v, want an account grant requirement", key)
+	}
+	if !key.AllowsAccount(model.Account{ID: "acc-01"}) {
+		t.Fatal("proxy:connect key does not allow its granted account")
+	}
+	if key.AllowsAccount(model.Account{ID: "acc-02"}) {
+		t.Fatal("proxy:connect key allows an account outside its grant")
+	}
+
+	active, ok := st.AuthenticateScopedKey(secret)
+	if !ok || active.ID != key.ID || !active.HasScope(model.ScopeProxyConnect) {
+		t.Fatalf("AuthenticateScopedKey = %+v, %v; want the active proxy key", active, ok)
+	}
+
+	// A key without proxy:connect is a valid key that simply cannot open a gate.
+	reader, _, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+		UserID: "u-01", Label: "reader", Scopes: []model.Scope{model.ScopeLeasesRead},
+		AccountIDs: []string{"acc-01"},
+	})
+	if err != nil {
+		t.Fatalf("CreateScopedKey reader: %v", err)
+	}
+	if reader.HasScope(model.ScopeProxyConnect) {
+		t.Fatal("leases:read key reports proxy:connect")
+	}
+
+	if err := st.RevokeScopedKey(key.ID); err != nil {
+		t.Fatalf("RevokeScopedKey: %v", err)
+	}
+	if _, ok := st.AuthenticateScopedKey(secret); ok {
+		t.Fatal("revoked proxy:connect key authenticated")
+	}
+}

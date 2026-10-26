@@ -28,7 +28,7 @@ RBAC tokens are a third, separate world — see [`RBAC.md`](RBAC.md)):
 | Credential | Format | Authority |
 |---|---|---|
 | Admin token | `AJS_ADMIN_TOKEN` (at least 32 characters, not a documented placeholder) | Full admin: every route |
-| Scoped key | `ajs_sk_...`, returned once by `POST /v1/scoped-keys` | Only the routes its scopes name, bound to its `userId` and narrowed to its account/region grants |
+| Scoped key | `ajs_sk_...`, returned once by `POST /v1/scoped-keys` | Only the routes its scopes name, bound to its `userId` and narrowed to its account/region grants; the gate accepts it only with `proxy:connect` |
 
 In a strict-RBAC deployment (`AJS_RBAC_STRICT=1`) the shared `AJS_ADMIN_TOKEN` is retired; use an
 operator `admin` token from [`RBAC.md`](RBAC.md) instead. Scoped keys keep their own policy.
@@ -65,13 +65,14 @@ The response is `{"key": {...}, "secret": "ajs_sk_..."}`. The secret is shown ex
 its SHA-256 is persisted. Revoke with `DELETE /v1/scoped-keys/{id}` (204), also admin-only.
 
 The key is bound to `userId` and must name at least one `accountIds` or `regions` entry when its
-scopes include an `accounts:*`, `catalog:*` or `leases:*` grant; without one the create answers
-`400 INVALID_ARGUMENT`. See [Key subject and grants](#key-subject-and-grants).
+scopes include an `accounts:*`, `catalog:*`, `leases:*` or `proxy:connect` grant; without one the
+create answers `400 INVALID_ARGUMENT`. See [Key subject and grants](#key-subject-and-grants).
 
 ## Scopes
 
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the
 table, and the admin token bypasses it by definition. Routes absent from the table are admin-only.
+`proxy:connect` is the one scope with no HTTP route: it authorizes the loopback gate.
 
 | Scope | Grants | Representative routes |
 |---|---|---|
@@ -81,6 +82,7 @@ table, and the admin token bypasses it by definition. Routes absent from the tab
 | `catalog:write` | Selection and guarded switch; node drain/probe; operation cancel | `PUT /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/connect`, `POST .../select-node`, `POST /v1/nodes/{id}/actions/drain` |
 | `leases:read` | List the key user's leases | `GET /v1/leases` |
 | `leases:write` | Create/rotate/revoke the key user's leases | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
+| `proxy:connect` | Authenticate at a loopback gate and connect through the key user's lease | `SOCKS5 127.0.0.1:<gatePort>`, `HTTP CONNECT 127.0.0.1:<gatePort+offset>` |
 | `requests:read` | Read the request log | `GET /v1/requests` |
 | `audit:read` | Read and export the audit log | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics | `GET /metrics`, `GET /v1/metrics` |
@@ -121,8 +123,8 @@ A scoped key has two boundaries: the user it belongs to (`userId`) and the accou
   `userId`, and no customer key owns them.
 
 **An account-bound key must name a grant.** A new non-admin key carrying an `accounts:*`,
-`catalog:*` or `leases:*` scope must name at least one `accountIds` or `regions` entry;
-`POST /v1/scoped-keys` answers `400 INVALID_ARGUMENT` otherwise. A key whose scopes are all
+`catalog:*`, `leases:*` or `proxy:connect` scope must name at least one `accountIds` or `regions`
+entry; `POST /v1/scoped-keys` answers `400 INVALID_ARGUMENT` otherwise. A key whose scopes are all
 global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`,
 `lab:read`, `renewal:read`, `health:read`) may omit both lists, which then means "not narrowed by
 account".
@@ -136,7 +138,7 @@ Both lists narrow **reads and writes**; for an account-bound key at least one of
 (see above):
 
 - Empty `accountIds` and empty `regions` mean "not narrowed by account". A non-admin key with an
-  account, catalog or lease scope cannot be minted that way.
+  account, catalog, lease or `proxy:connect` scope cannot be minted that way.
 - An account matches when the id list is empty or contains its id, **and** the region list is
   empty or overlaps the account's `regions`.
 - The filter covers the account path, the renewal account path and the `account_id`/`accountId`
@@ -346,19 +348,32 @@ The example values are illustrative; read the current `nodeId`, `gatePort` and `
 lease you created.
 
 Dial `127.0.0.1:<gatePort>` with SOCKS5. With the default `AJS_GATE_AUTH=userpass`, the username is
-the panel user id and the password is an **active API-key secret** (created through `/v1/apikeys`;
-scoped keys are for the admin API, not the gate). The gate enforces that user's allowlist and
-monthly quota before admitting a flow:
+the panel user id and the password is a **scoped key secret** carrying `proxy:connect`:
 
 ```bash
-curl --socks5-hostname 127.0.0.1:13012 -U "usr-1:$API_KEY_SECRET" https://example.com/
+curl --socks5-hostname 127.0.0.1:13012 -U "usr-1:$SCOPED_KEY_SECRET" https://example.com/
 ```
+
+The key must be active, belong to that user, carry `proxy:connect` and allow the gate's account
+through its `accountIds`/`regions` grant; a `proxy:connect` key with no grant is refused, exactly as
+on the API. The flow is then bound to the user's **single active lease on that account**: a user
+with no lease, a lease on another account, or more than one active lease for the same account is
+refused, and the gate re-checks the lease at CONNECT so a revoked or expired lease refuses the flow
+instead of relaying it. The gate also enforces that user's allowlist and monthly quota. The lease
+id is the only entitlement detail the gate keeps; the secret is not retained in the principal, the
+flow records or the logs.
+
+During migration a panel API-key secret created through `/v1/apikeys` is still accepted as the
+password, but it is no longer the documented customer credential: it is bound to the same
+single-lease rule and will be removed once keys are reissued as scoped keys. Explicit
+`AJS_GATE_AUTH=loopback` is the insecure compatibility mode: the no-auth wire, no user identity, no
+allowlist and no user quota, intended only for a same-host operator process.
 
 `AJS_GATE_HTTP=1` adds an HTTP CONNECT listener at `gatePort + AJS_GATE_HTTP_OFFSET` (default
 offset 1000) with the same admission pipeline and Basic credentials:
 
 ```bash
-curl -x http://127.0.0.1:14012 -U "usr-1:$API_KEY_SECRET" https://example.com/
+curl -x http://127.0.0.1:14012 -U "usr-1:$SCOPED_KEY_SECRET" https://example.com/
 ```
 
 **All gates bind `127.0.0.1`.** There is no public listener, tunnel or router in this archive, and

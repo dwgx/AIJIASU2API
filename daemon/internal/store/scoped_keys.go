@@ -13,14 +13,15 @@ import (
 )
 
 // CreateScopedKey issues a least-privilege secret, stores only its SHA-256 and
-// returns the secret once. The scopes decide which routes the key may call;
-// the account and region lists narrow that grant to the named accounts on
-// every account-scoped route, read and write alike, with global unattributed
-// surfaces refused rather than guessed. A non-admin key that carries an
-// account, catalog or lease scope must name at least one account or region:
-// for a customer principal an empty list cannot mean "every account". A key
-// whose scopes are all global keeps the empty-list meaning "not narrowed by
-// account", and the admin scope is never narrowed.
+// returns the secret once. The scopes decide which routes the key may call and
+// whether it may connect at a gate (proxy:connect); the account and region
+// lists narrow that grant to the named accounts on every account-scoped route,
+// read and write alike, with global unattributed surfaces refused rather than
+// guessed. A non-admin key that carries an account, catalog, lease or
+// proxy:connect scope must name at least one account or region: for a customer
+// principal an empty list cannot mean "every account". A key whose scopes are
+// all global keeps the empty-list meaning "not narrowed by account", and the
+// admin scope is never narrowed.
 func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string) (model.ScopedKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +56,7 @@ func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string
 	shape := model.ScopedKey{Scopes: scopes, AccountIDs: accountIDs, Regions: regions}
 	if shape.RequiresAccountGrant() && !shape.HasAccountGrant() {
 		return model.ScopedKey{}, "", invalidf(
-			"accountIds or regions is required for a non-admin key with accounts, catalog or leases scopes")
+			"accountIds or regions is required for a non-admin key with accounts, catalog, leases or proxy scopes")
 	}
 	rateLimit, err := normalizeRateLimit(in.RateLimitPerMin)
 	if err != nil {
@@ -257,6 +258,7 @@ func validScope(scope model.Scope) bool {
 	case model.ScopeAccountsRead, model.ScopeAccountsWrite,
 		model.ScopeCatalogRead, model.ScopeCatalogWrite,
 		model.ScopeLeasesRead, model.ScopeLeasesWrite,
+		model.ScopeProxyConnect,
 		model.ScopeRequestsRead, model.ScopeAuditRead,
 		model.ScopeMetricsRead, model.ScopeLabRead,
 		model.ScopeSettingsRead, model.ScopeSettingsWrite,

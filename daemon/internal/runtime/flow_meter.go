@@ -125,7 +125,10 @@ func (m *FlowMeter) Identity() *GateIdentity {
 // policy and (in userpass mode) the RFC 1929 identity service to every gate the
 // node controller starts. Passing the result as NodeControllerConfig.Gates is
 // the whole wiring; a nil factory keeps the default unmetered, unenforced gate.
-// An explicitly configured authenticator or policy is never replaced.
+// The identity defaults are bound to the gate's own account
+// (GateIdentity.ForAccount), so authentication and admission require the user's
+// single active lease on that account; an explicitly configured authenticator
+// or policy is never replaced.
 func (m *FlowMeter) GateFactory() GateFactory {
 	return func(cfg gate.Config, session gate.Session) (Gate, error) {
 		nodeID, accountID := cfg.NodeID, cfg.AccountID
@@ -148,11 +151,12 @@ func (m *FlowMeter) GateFactory() GateFactory {
 			cfg.UserFlowRelease = m.identity.ReleaseFlow
 		}
 		if cfg.AuthMode == gate.AuthUserPass && m.identity != nil {
+			bound := m.identity.ForAccount(cfg.AccountID)
 			if cfg.Authenticator == nil {
-				cfg.Authenticator = m.identity
+				cfg.Authenticator = bound
 			}
 			if cfg.UserPolicy == nil {
-				cfg.UserPolicy = m.identity
+				cfg.UserPolicy = bound
 			}
 		}
 		return gate.NewServer(cfg, session)

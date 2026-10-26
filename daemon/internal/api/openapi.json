@@ -12640,7 +12640,7 @@
       },
       "Scope": {
         "type": "string",
-        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, events:read reaches GET /v1/events and GET /v1/events/stream, and accountIds/regions still narrow every account-scoped route, read or write. A write restricted to another account answers 403 with error.reason=scoped_key_restricted and mutates nothing. A key restricted by accountIds/regions is refused the global event stream. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
+        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, events:read reaches GET /v1/events and GET /v1/events/stream, and accountIds/regions still narrow every account-scoped route, read or write. proxy:connect is the gate credential: a non-admin key must carry it to authenticate at a SOCKS5/HTTP gate, it is narrowed by accountIds/regions like the other account-bound scopes, and the flow is bound to the key user's single active lease on the gate account. A write restricted to another account answers 403 with error.reason=scoped_key_restricted and mutates nothing. A key restricted by accountIds/regions is refused the global event stream. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
         "enum": [
           "accounts:read",
           "accounts:write",
@@ -12648,6 +12648,7 @@
           "catalog:write",
           "leases:read",
           "leases:write",
+          "proxy:connect",
           "requests:read",
           "audit:read",
           "metrics:read",
@@ -12690,14 +12691,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Empty means not narrowed by account. A non-admin key whose scopes include an accounts, catalog or leases grant must name at least one accountIds or regions entry at creation; a key with only global scopes may leave both empty. A non-empty list narrows both reads and writes to these accounts; a mutation of any other account is refused with 403 and error.reason=scoped_key_restricted."
+            "description": "Empty means not narrowed by account. A non-admin key whose scopes include an accounts, catalog, leases or proxy:connect grant must name at least one accountIds or regions entry at creation; a key with only global scopes may leave both empty. A non-empty list narrows both reads and writes to these accounts; a mutation of any other account is refused with 403 and error.reason=scoped_key_restricted."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Empty means not narrowed by region. A non-admin key whose scopes include an accounts, catalog or leases grant must name at least one accountIds or regions entry at creation. A non-empty list narrows both reads and writes to accounts with an overlapping region."
+            "description": "Empty means not narrowed by region. A non-admin key whose scopes include an accounts, catalog, leases or proxy:connect grant must name at least one accountIds or regions entry at creation. A non-empty list narrows both reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",
@@ -12760,7 +12761,7 @@
       },
       "ScopedKeyCreateRequest": {
         "type": "object",
-        "description": "The key is bound to userId, which is the lease owner: GET /v1/leases returns only that user's leases, POST /v1/leases fills an empty userId with it and refuses a different one, and lease revoke/rotate answer 404 for another user's lease. accountIds and regions narrow the key to the named accounts on every account-scoped route, reads and writes alike: the same list that filters GET /v1/accounts also refuses PATCH/DELETE /v1/accounts/{id}, the login/logout/connect/disconnect/reconnect/select-node actions, lease create/rotate/revoke, node drain/undrain/probe and operation cancel on any account outside it, with 403 and error.reason=scoped_key_restricted. A non-admin key carrying an accounts, catalog or leases scope must name at least one accountIds or regions entry; without one the create answers 400 INVALID_ARGUMENT. POST /v1/leases must name an allowed accountId; a restricted key that omits it is refused because the store would otherwise pick any free account. A key carrying the admin scope ignores both lists and may leave them empty. A key minted before the grant rule with an accounts, catalog or leases scope and no grant fails closed with 403 and error.reason=scoped_key_restricted on every non-admin route until it is reissued.",
+        "description": "The key is bound to userId, which is the lease owner: GET /v1/leases returns only that user's leases, POST /v1/leases fills an empty userId with it and refuses a different one, and lease revoke/rotate answer 404 for another user's lease. accountIds and regions narrow the key to the named accounts on every account-scoped route, reads and writes alike: the same list that filters GET /v1/accounts also refuses PATCH/DELETE /v1/accounts/{id}, the login/logout/connect/disconnect/reconnect/select-node actions, lease create/rotate/revoke, node drain/undrain/probe and operation cancel on any account outside it, with 403 and error.reason=scoped_key_restricted. A non-admin key carrying an accounts, catalog, leases or proxy:connect scope must name at least one accountIds or regions entry; without one the create answers 400 INVALID_ARGUMENT. POST /v1/leases must name an allowed accountId; a restricted key that omits it is refused because the store would otherwise pick any free account. A key carrying the admin scope ignores both lists and may leave them empty. A key minted before the grant rule with an accounts, catalog, leases or proxy:connect scope and no grant fails closed with 403 and error.reason=scoped_key_restricted on every non-admin route until it is reissued.",
         "properties": {
           "userId": {
             "type": "string"
@@ -12779,14 +12780,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Empty means not narrowed by account. A non-admin key with an accounts, catalog or leases scope must name at least one accountIds or regions entry."
+            "description": "Empty means not narrowed by account. A non-admin key with an accounts, catalog, leases or proxy:connect scope must name at least one accountIds or regions entry."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Empty means not narrowed by region. A non-admin key with an accounts, catalog or leases scope must name at least one accountIds or regions entry. A non-empty list narrows reads and writes to accounts with an overlapping region."
+            "description": "Empty means not narrowed by region. A non-admin key with an accounts, catalog, leases or proxy:connect scope must name at least one accountIds or regions entry. A non-empty list narrows reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",

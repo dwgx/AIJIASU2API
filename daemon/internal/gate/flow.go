@@ -39,6 +39,11 @@ const (
 	FlowErrorUserDisabled      = "user_disabled"
 	FlowErrorAllowlist         = "allowlist"
 	FlowErrorUserQuota         = "user_quota_exceeded"
+	// FlowErrorLease is the refusal for a flow whose bound lease stopped being
+	// the one active lease for (user, gate account): revoked, expired, moved or
+	// never resolved. The credential was valid when the handshake completed, so
+	// the class names the entitlement, not the key.
+	FlowErrorLease = "lease_inactive"
 )
 
 // Flow protocols name the listener that admitted a flow. A gate can serve the

@@ -243,6 +243,10 @@ type APIKey struct {
 // needs an account or settings grant. events:read reaches the replay ring and
 // the SSE stream and is refused to keys restricted by accountIds/regions,
 // because the ring is global and an event is not attributed to one account.
+// proxy:connect is the gate credential: it is not an HTTP route scope but the
+// permission the SOCKS5/HTTP gate requires before it admits a flow, and the
+// lease that flow is bound to must belong to the key's user on the gate's
+// account.
 type Scope string
 
 const (
@@ -252,6 +256,7 @@ const (
 	ScopeCatalogWrite  Scope = "catalog:write"
 	ScopeLeasesRead    Scope = "leases:read"
 	ScopeLeasesWrite   Scope = "leases:write"
+	ScopeProxyConnect  Scope = "proxy:connect"
 	ScopeRequestsRead  Scope = "requests:read"
 	ScopeAuditRead     Scope = "audit:read"
 	ScopeMetricsRead   Scope = "metrics:read"
@@ -293,14 +298,24 @@ type ScopedKey struct {
 // surface: the account, catalog/node/operation or lease routes. Those routes
 // resolve a concrete account, so a non-admin key carrying one of them is
 // narrowed by its accountIds/regions and must name at least one grant.
+// proxy:connect is account-bound for the same reason: a gate serves exactly one
+// account, and the key's grant decides whether that account is reachable.
 func isAccountBoundScope(scope Scope) bool {
 	switch scope {
 	case ScopeAccountsRead, ScopeAccountsWrite,
 		ScopeCatalogRead, ScopeCatalogWrite,
-		ScopeLeasesRead, ScopeLeasesWrite:
+		ScopeLeasesRead, ScopeLeasesWrite,
+		ScopeProxyConnect:
 		return true
 	}
 	return false
+}
+
+// HasScope reports whether the key carries scope. It is the one membership
+// test the gate uses for proxy:connect, so an empty or unknown grant never
+// reads as a permission.
+func (k ScopedKey) HasScope(scope Scope) bool {
+	return slices.Contains(k.Scopes, scope)
 }
 
 // HasAccountGrant reports whether the key names at least one account or

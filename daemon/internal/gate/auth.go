@@ -51,9 +51,14 @@ func ParseAuthMode(raw string) (AuthMode, error) {
 // Principal is the authenticated identity of one flow. It carries attribution
 // only: the RFC 1929 frame and the API-key secret are erased before a
 // Principal exists, so no credential can reach a FlowRecord or a log line.
+//
+// LeaseID is the one active lease the credential was resolved against at the
+// gate's account; it is an identifier, never a secret. Admission re-reads that
+// lease so a flow cannot outlive the entitlement it was authenticated for.
 type Principal struct {
 	UserID   string
 	UserName string
+	LeaseID  string
 }
 
 // Authenticated reports whether p names a panel user.

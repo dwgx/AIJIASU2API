@@ -264,7 +264,9 @@ type NodeControllerConfig struct {
 	// compatibility wire.
 	GateAuth gate.AuthMode
 	// GateIdentity authenticates RFC 1929 credentials and evaluates the
-	// per-user allowlist and quota in userpass mode. Nil fails closed.
+	// per-user allowlist and quota in userpass mode. Nil fails closed. The
+	// controller binds it to each gate's account (GateIdentity.ForAccount), so
+	// a flow also needs exactly one active lease for (user, account).
 	GateIdentity *GateIdentity
 	// Debug receives the real-time trace entries behind /v1/debug. Nil is a
 	// no-op recorder: the instrumentation stays in the code path, but a test
@@ -1746,8 +1748,12 @@ func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, sessi
 		cfg.HTTPListen = net.JoinHostPort("127.0.0.1", strconv.Itoa(addrs.http))
 	}
 	if c.gateAuth == gate.AuthUserPass && c.identity != nil {
-		cfg.Authenticator = c.identity
-		cfg.UserPolicy = c.identity
+		// The identity is bound to this gate's account: a credential alone
+		// never admits a flow, the user's single active lease on this account
+		// does.
+		bound := c.identity.ForAccount(key.AccountID)
+		cfg.Authenticator = bound
+		cfg.UserPolicy = bound
 	}
 	var lastErr error
 	for range 2 {
@@ -2394,4 +2400,156 @@ func (g *GateIdentity) overQuota(userID string) bool {
 		return false
 	}
 	return g.monthlyUsage(userID) >= *user.QuotaBytesMonth
+}
+
+// GateAccountIdentity is the gate.Authenticator and gate.UserPolicy for one
+// gate account. The store-backed GateIdentity answers "who is this user and
+// what may they reach"; this wrapper answers "and which entitlement admits
+// them here". A gate serves exactly one account, so a credential alone is not
+// enough: the user must hold exactly one active lease on that account and the
+// flow is bound to it.
+//
+// Both credential kinds pass through the same lease resolution:
+//
+//   - the legacy panel API key stays accepted during migration, so an existing
+//     deployment keeps relaying while keys are reissued as scoped keys;
+//   - otherwise the secret must be an active scoped key owned by the username,
+//     carrying proxy:connect, whose accountIds/regions allow the gate account.
+//
+// A zero or ambiguous (more than one active) lease fails closed. Admission
+// re-reads the lease before opening a flow, so a revoke or expiry between the
+// handshake and CONNECT refuses the flow instead of relaying on a dead
+// entitlement.
+type GateAccountIdentity struct {
+	identity  *GateIdentity
+	accountID string
+}
+
+var (
+	_ gate.Authenticator = (*GateAccountIdentity)(nil)
+	_ gate.UserPolicy    = (*GateAccountIdentity)(nil)
+)
+
+// ForAccount binds the identity to one gate account. It shares the parent's
+// store, key index, policy cache and usage counters, so every gate keeps one
+// view of the process.
+func (g *GateIdentity) ForAccount(accountID string) *GateAccountIdentity {
+	return &GateAccountIdentity{identity: g, accountID: accountID}
+}
+
+// Authenticate verifies one RFC 1929 credential pair against the gate account.
+// Every rejection is the same wire answer: an unknown user, a wrong secret, a
+// revoked key, a key without proxy:connect, a key granted another account and
+// a user without a lease are indistinguishable to the client.
+func (a *GateAccountIdentity) Authenticate(user, pass string) (gate.Principal, bool) {
+	if a == nil || a.identity == nil || a.accountID == "" || user == "" || pass == "" {
+		return gate.Principal{}, false
+	}
+	principal, ok := a.identity.Authenticate(user, pass)
+	if !ok {
+		principal, ok = a.identity.scopedKeyPrincipal(user, pass, a.accountID)
+		if !ok {
+			return gate.Principal{}, false
+		}
+	}
+	lease, ok := a.identity.activeLease(principal.UserID, a.accountID)
+	if !ok {
+		return gate.Principal{}, false
+	}
+	principal.LeaseID = lease.ID
+	return principal, true
+}
+
+// Admit delegates the enabled/allowlist/quota stages to the shared identity
+// and then revalidates the lease the handshake bound the flow to. A lease that
+// was revoked, expired or rebound since authentication refuses the flow with
+// FlowErrorLease before a gate slot or vendor flow is taken.
+func (a *GateAccountIdentity) Admit(principal gate.Principal, host string) (bool, string, int64, int64) {
+	if a == nil || a.identity == nil {
+		return false, gate.FlowErrorPolicyUnavailable, 0, 0
+	}
+	ok, errorClass, used, budget := a.identity.Admit(principal, host)
+	if !ok {
+		return ok, errorClass, used, budget
+	}
+	if !a.leaseAdmits(principal) {
+		return false, gate.FlowErrorLease, 0, 0
+	}
+	return true, "", used, budget
+}
+
+// leaseAdmits reports whether principal still names the one active lease of
+// this gate's account that belongs to the principal's user.
+func (a *GateAccountIdentity) leaseAdmits(principal gate.Principal) bool {
+	if principal.LeaseID == "" || principal.UserID == "" {
+		return false
+	}
+	lease, ok := a.identity.store.Lease(principal.LeaseID)
+	if !ok || lease.Status != model.LeaseActive {
+		return false
+	}
+	return lease.UserID == principal.UserID && lease.AccountID == a.accountID
+}
+
+// scopedKeyPrincipal resolves one scoped-key secret to the key's panel user.
+// The key must be active, owned by the username and carry proxy:connect; the
+// gate account must pass the same grant predicate the API uses, so a key
+// restricted to another account never reaches this gate.
+func (g *GateIdentity) scopedKeyPrincipal(user, pass, accountID string) (gate.Principal, bool) {
+	if g == nil || g.store == nil {
+		return gate.Principal{}, false
+	}
+	key, ok := g.store.AuthenticateScopedKey(pass)
+	if !ok || key.UserID != user || !key.HasScope(model.ScopeProxyConnect) {
+		return gate.Principal{}, false
+	}
+	// The admin grant covers every account, so it ignores accountIds/regions
+	// exactly as the API does; it still needs proxy:connect, the key's own user
+	// and the lease. For a non-admin key, creation rejects a proxy:connect key
+	// without an account or region grant, so a key that still has none was
+	// restored or edited by hand: fail closed like the API's scopedKeyDenial
+	// instead of letting an empty list mean "every account" at the gate.
+	if !key.HasScope(model.ScopeAdmin) {
+		if key.RequiresAccountGrant() && !key.HasAccountGrant() {
+			return gate.Principal{}, false
+		}
+		account, ok := g.store.Account(accountID)
+		if !ok || !key.AllowsAccount(account) {
+			return gate.Principal{}, false
+		}
+	}
+	panelUser, ok := g.store.User(key.UserID)
+	if !ok {
+		return gate.Principal{}, false
+	}
+	return gate.Principal{UserID: panelUser.ID, UserName: panelUser.Name}, true
+}
+
+// activeLease returns the single active lease of (userID, accountID). The
+// store snapshot already sweeps expired rows and fails closed on a durability
+// failure, so an empty result means "no entitlement" either way. More than one
+// match is refused rather than guessed: a flow must belong to one lease.
+func (g *GateIdentity) activeLease(userID, accountID string) (model.Lease, bool) {
+	if g == nil || g.store == nil || userID == "" || accountID == "" {
+		return model.Lease{}, false
+	}
+	return singleActiveLease(g.store.Leases(), userID, accountID)
+}
+
+// singleActiveLease is the pure selection rule behind activeLease, kept
+// separate so the zero/one/many cases are testable without a store.
+func singleActiveLease(leases []model.Lease, userID, accountID string) (model.Lease, bool) {
+	var found model.Lease
+	count := 0
+	for _, lease := range leases {
+		if lease.UserID != userID || lease.AccountID != accountID || lease.Status != model.LeaseActive {
+			continue
+		}
+		found = lease
+		count++
+	}
+	if count != 1 {
+		return model.Lease{}, false
+	}
+	return found, true
 }
