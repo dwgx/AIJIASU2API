@@ -117,8 +117,9 @@ func TestScopedPlatformReadScopeMatrix(t *testing.T) {
 
 // TestScopedPlatformReadsRespectAccountRestriction pins the least-privilege
 // half of the new scopes: a key restricted to acc-01 reads its own renewal
-// state and health rows, and is refused everywhere else. Usage is refused
-// outright because its rows are attributed by label alone (AJS-427).
+// state and health rows, and is refused everywhere else. Usage is per-user
+// (AJS-451): the key reads its own rows, and an account filter is 400 because
+// the log has no stable account id.
 func TestScopedPlatformReadsRespectAccountRestriction(t *testing.T) {
 	ts, _, sampler := newScopedPlatformServer(t)
 	for id, port := range map[string]int{"node-01": 13000, "node-04": 13003} {
@@ -142,19 +143,20 @@ func TestScopedPlatformReadsRespectAccountRestriction(t *testing.T) {
 	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/renewal/accounts/acc-unknown", nil)
 	requireStatus(t, resp, http.StatusNotFound)
 
-	// Usage: the request log is attributed by account label alone and labels
-	// are not unique, so a restricted key cannot be served an honest aggregate.
-	// The whole surface is refused, with or without an account filter.
+	// Usage: the key is served its own rows only. An account filter is
+	// INVALID_ARGUMENT for every value, because the log stores a recyclable
+	// label rather than a stable account id.
+	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
 	for _, path := range []string{
-		"/v1/usage",
 		"/v1/usage?account=acc-01",
 		"/v1/usage?account=acc-02",
 		"/v1/usage?account=Field+Lab",
 		"/v1/usage?account=nobody",
 	} {
 		resp, body = scopedCall(t, ts, created.Secret, http.MethodGet, path, nil)
-		requireStatus(t, resp, http.StatusForbidden)
-		requireErrorCode(t, body, CodeForbidden)
+		requireStatus(t, resp, http.StatusBadRequest)
+		requireErrorCode(t, body, CodeInvalidArgument)
 	}
 
 	// Health: only the visible account's watched node is reported.

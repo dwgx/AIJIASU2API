@@ -80,7 +80,7 @@ table, and the admin token bypasses it by definition. Routes absent from the tab
 | `accounts:write` | Create/patch/delete accounts; login/logout | `POST /v1/accounts`, `PATCH /v1/accounts/{id}`, `POST /v1/accounts/{id}/actions/login` |
 | `catalog:read` | Read catalog, nodes, operations, topology, debug trace | `GET /v1/accounts/{id}/servers`, `GET /v1/nodes`, `GET /v1/operations`, `GET /v1/topology` |
 | `catalog:write` | Selection and guarded switch; node drain/probe; operation cancel | `PUT /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/connect`, `POST .../select-node`, `POST /v1/nodes/{id}/actions/drain` |
-| `leases:read` | List the key user's leases | `GET /v1/leases` |
+| `leases:read` | List and read the key user's leases | `GET /v1/leases`, `GET /v1/leases/{id}` |
 | `leases:write` | Create/rotate/revoke the key user's leases | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `proxy:connect` | Authenticate at a loopback gate and connect through the key user's lease | `SOCKS5 127.0.0.1:<gatePort>`, `HTTP CONNECT 127.0.0.1:<gatePort+offset>` |
 | `requests:read` | Read the request log | `GET /v1/requests` |
@@ -116,9 +116,11 @@ A scoped key has two boundaries: the user it belongs to (`userId`) and the accou
 - `POST /v1/leases` fills an empty `userId` with the key's user; a different `userId` is refused
   with the same `403` before anything is allocated. An `Idempotency-Key` replay is re-checked
   against both the user and the account grant, so a retry never returns another user's lease.
-- `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner before any
-  panel or store side effect. A missing id and another user's lease answer the same `404
-  NOT_FOUND`; the key's own lease on an account outside its grant answers `403`.
+- `GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and
+  `POST /v1/leases/{id}/actions/rotate` resolve the owner first. A missing id and another user's
+  lease answer the same `404 NOT_FOUND`; the key's own lease on an account outside its grant
+  answers `403`. The detail read returns the lease plus its loopback `connection` block and never
+  the scoped-key secret.
 - Accounts and nodes are operator assets: they are filtered by the key's grants, never by
   `userId`, and no customer key owns them.
 
@@ -156,9 +158,14 @@ Both lists narrow **reads and writes**; for an account-bound key at least one of
   exists. Lease ids are different: a missing id and another user's lease both answer `404`, so a
   lease id cannot be probed either. Reads keep `404` for an unknown id and `403` for a known
   account outside the key.
-- Global, unattributed surfaces are refused to a restricted key rather than guessed:
-  `GET /v1/requests`, `GET /v1/usage`, `GET /v1/audit`, `GET /metrics` and the event stream.
-  `/v1/topology` is projected to the key's visible nodes, and `/v1/health/nodes` is filtered.
+- `GET /v1/usage` and `GET /v1/requests` are per-user, not per-account: a non-admin scoped key
+  is served the rows whose exact `RequestLog.UserID` is its own subject, filtered before
+  aggregation or pagination. A query naming another `userId` answers `403`, and a scoped
+  `account=` usage filter answers `400 INVALID_ARGUMENT` because the log stores a recyclable
+  label, not a stable account id.
+- Global, unattributed surfaces are still refused to a restricted key rather than guessed:
+  `GET /v1/audit`, `GET /metrics` and the event stream. `/v1/topology` is projected to the key's
+  visible nodes, and `/v1/health/nodes` is filtered.
 - Admin tokens and keys carrying the `admin` scope ignore both lists: the grant already covers
   every account.
 - `POST /v1/accounts` (create) is not narrowed by the lists: the new id cannot be in the key's
@@ -250,6 +257,10 @@ curl -sS -X POST "$BASE/v1/leases" \
   -H "Content-Type: application/json" \
   -d '{"userId":"usr-1","platform":"linux","ttlSeconds":3600}'
 
+# Detail: the lease plus the loopback endpoint to dial
+curl -sS "$BASE/v1/leases/$LEASE_ID" \
+  -H "Authorization: Bearer $AJS_TOKEN"
+
 # Revoke (explicit confirmation)
 curl -sS -X DELETE "$BASE/v1/leases/$LEASE_ID" \
   -H "Authorization: Bearer $AJS_TOKEN" \
@@ -257,6 +268,13 @@ curl -sS -X DELETE "$BASE/v1/leases/$LEASE_ID" \
   -H "Content-Type: application/json" \
   -d '{"confirm":true}'
 ```
+
+Detail answers `200 {"lease": {...}, "connection": {"host": "127.0.0.1", "port": 13012,
+"protocol": "socks5", "username": "usr-1", "credentialKind": "ajs_sk"}}`. `port` is the gate the
+lease currently points at, so a switch that rebinds the lease also moves it. The secret is never
+returned: `credentialKind` names the shape, and the password is the caller's own `ajs_sk_` key
+carrying `proxy:connect`. A missing id and another user's lease are both `404` for a non-admin
+scoped key; a lease on an account outside its grant is `403`.
 
 Create answers `201 {"lease": {...}, "warning"?: "...", "replayed"?: true}`. `accountId` is an
 optional pin for an operator caller (must be active and match the platform); a non-admin scoped
@@ -295,16 +313,25 @@ curl -sS "$BASE/v1/usage?from=2026-10-01&to=2026-10-31&account=acc-07" \
 
 `/v1/requests` returns newest-first `RequestLog` rows: `id`, `ts`, `userId`, `userName`,
 `accountLabel`, `nodeLabel`, `region`, `method`, `target`, `status`, `bytes`, `latencyMs`,
-`source` (`proxy`, `mutation-lab`, `gate`). The store caps history at 10,000 rows; a restricted key
-is refused this surface.
+`source` (`proxy`, `mutation-lab`, `gate`). The store caps history at 10,000 rows. A non-admin
+scoped key sees only rows whose exact `userId` is its own subject, filtered before pagination; a
+`user_id`/`userId` naming another user answers `403` with `reason: "scoped_key_restricted"`. An
+operator caller reads the global log.
 
 `/v1/usage` accepts RFC 3339 timestamps or bare UTC dates (a bare `from` is 00:00:00Z, a bare `to`
 is the end of that day). An empty `to` defaults to now, an empty `from` to 30 days before `to`, and
 the widest window is 366 days.
 The response carries `from`, `to`, `requests`, `bytes`, `errors`, `accounts[]`, `users[]`,
 `days[]`, `topTargets[]`, `truncated`, `rowsRetained` (10,000), `retentionDays` and
-`quotaEnforced`. `truncated:true` means the row cap clipped the window. A restricted key is refused
-this surface too, because the log stores a recyclable account label rather than a stable id.
+`quotaEnforced`. `truncated:true` means the row cap clipped the window.
+
+A non-admin scoped key is served the same summary over its own rows only: the exact
+`RequestLog.UserID` filter runs before aggregation, so no other user's traffic reaches the totals,
+the day series or the target list. A `userId`/`user_id` naming another user answers `403` with
+`reason: "scoped_key_restricted"`. The log stores a recyclable account label rather than a stable
+account id, so a scoped `account=` filter answers `400 INVALID_ARGUMENT` for every value; account
+roll-ups in the response still cover only the accounts the caller's own rows touched. Operator
+callers keep the global summary and the optional account filter.
 
 ### Topology and gate health
 
@@ -344,8 +371,24 @@ The API is the control plane. A lease names the data plane:
 }
 ```
 
-The example values are illustrative; read the current `nodeId`, `gatePort` and `egressIp` from the
-lease you created.
+The example values are illustrative; `GET /v1/leases/{id}` returns the current `lease` together
+with the endpoint to dial:
+
+```json
+{
+  "lease": { "id": "lease-...", "nodeId": "acc-07:srv-a", "gatePort": 13012, "...": "..." },
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 13012,
+    "protocol": "socks5",
+    "username": "usr-1",
+    "credentialKind": "ajs_sk"
+  }
+}
+```
+
+`port` follows the lease: a switch that rebinds it to another gate updates the value, and the
+secret is never included.
 
 Dial `127.0.0.1:<gatePort>` with SOCKS5. With the default `AJS_GATE_AUTH=userpass`, the username is
 the panel user id and the password is a **scoped key secret** carrying `proxy:connect`:

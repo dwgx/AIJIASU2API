@@ -199,6 +199,30 @@ type Lease struct {
 	Generation uint64 `json:"generation,omitempty"`
 }
 
+// LeaseCredentialKindScopedKey is the credentialKind of a lease connection
+// whose RFC 1929 password is an ajs_sk_ scoped key carrying proxy:connect. It
+// names the credential shape only; the secret is never part of a lease read.
+const LeaseCredentialKindScopedKey = "ajs_sk"
+
+// LeaseConnection is the loopback data-plane endpoint of one lease. Host is
+// always 127.0.0.1: gates never bind a public address. Username is the panel
+// user id the gate authenticates and Port is the gate listener the lease
+// currently points at, so a switch that rebinds the lease also moves the port.
+type LeaseConnection struct {
+	Host           string        `json:"host"`
+	Port           int           `json:"port"`
+	Protocol       ProxyProtocol `json:"protocol"`
+	Username       string        `json:"username"`
+	CredentialKind string        `json:"credentialKind"`
+}
+
+// LeaseDetail is the GET /v1/leases/{id} body: the entitlement plus the
+// endpoint a client dials for it. The scoped-key secret is never included.
+type LeaseDetail struct {
+	Lease      Lease           `json:"lease"`
+	Connection LeaseConnection `json:"connection"`
+}
+
 // CreateLeaseInput is the body accepted by POST /v1/leases. TTLSeconds 0 asks
 // the store for the user's sticky TTL, then the panel lease TTL.
 type CreateLeaseInput struct {

@@ -185,7 +185,7 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 // that did not happen.
 func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
-	lease, denied := s.authorizeLeaseMutation(w, r, id)
+	lease, _, denied := s.authorizeLease(w, r, id)
 	if denied {
 		return
 	}

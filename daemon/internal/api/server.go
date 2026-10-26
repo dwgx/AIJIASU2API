@@ -499,6 +499,7 @@ func (s *Server) routes(rt *router) {
 
 	rt.handle(http.MethodGet, "/v1/leases", s.handleListLeases)
 	rt.handle(http.MethodPost, "/v1/leases", s.handleCreateLease)
+	rt.handle(http.MethodGet, "/v1/leases/{id}", s.handleGetLease)
 	rt.handle(http.MethodPost, "/v1/leases/{id}/actions/rotate", s.handleRotateLease)
 	rt.handle(http.MethodDelete, "/v1/leases/{id}", s.handleRevokeLease)
 

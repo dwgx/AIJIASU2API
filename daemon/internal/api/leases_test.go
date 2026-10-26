@@ -577,6 +577,15 @@ func TestLeaseScopes(t *testing.T) {
 		map[string]any{"userId": fixture.user.ID, "platform": "android", "accountId": fixture.account.ID})
 	requireStatus(t, resp, http.StatusCreated)
 	created := decodeBody[leaseCreateResult](t, body)
+
+	// leases:read reaches the detail route; the read key sees the same lease.
+	resp, body = scopedCall(t, ts, readKey.Secret, http.MethodGet, "/v1/leases/"+created.Lease.ID, nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[model.LeaseDetail](t, body); got.Lease.ID != created.Lease.ID ||
+		got.Connection.Username != fixture.user.ID {
+		t.Fatalf("lease detail = %+v, want %s for %s", got, created.Lease.ID, fixture.user.ID)
+	}
+
 	resp, _ = scopedCall(t, ts, writeKey.Secret, http.MethodDelete,
 		"/v1/leases/"+created.Lease.ID, map[string]any{"confirm": true})
 	requireStatus(t, resp, http.StatusNoContent)
@@ -657,4 +666,132 @@ func TestLeaseLifecycleEmitsWebhookEvents(t *testing.T) {
 	if !reflect.DeepEqual(events[1].data, wantData) {
 		t.Fatalf("lease.revoked payload = %#v, want %#v", events[1].data, wantData)
 	}
+}
+
+// TestGetLeaseConnection pins the lease detail contract: the owner reads its
+// lease plus the loopback gate it currently points at, a foreign id and an
+// unknown id are the same 404, an account outside the grant is 403, the port
+// follows a switch, and the scoped-key secret never appears in the response.
+func TestGetLeaseConnection(t *testing.T) {
+	ts, _ := newTestServer(t)
+	key := mustIssueScopedKey(t, ts, []string{"leases:read"}, []string{"acc-01"}, nil)
+
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases/lease-01", nil)
+	requireStatus(t, resp, http.StatusOK)
+	detail := decodeBody[model.LeaseDetail](t, body)
+	if detail.Lease.ID != "lease-01" || detail.Lease.UserID != "u-01" {
+		t.Fatalf("lease = %+v, want lease-01 for u-01", detail.Lease)
+	}
+	want := model.LeaseConnection{
+		Host: "127.0.0.1", Port: 13000, Protocol: model.ProtocolSOCKS5,
+		Username: "u-01", CredentialKind: model.LeaseCredentialKindScopedKey,
+	}
+	if detail.Connection != want {
+		t.Fatalf("connection = %+v, want %+v", detail.Connection, want)
+	}
+	if strings.Contains(string(body), key.Secret) {
+		t.Fatalf("lease detail returned the scoped-key secret: %s", body)
+	}
+	if strings.Contains(strings.ToLower(string(body)), "secret") || strings.Contains(string(body), "hash") {
+		t.Fatalf("lease detail carries credential material: %s", body)
+	}
+
+	// Another user's lease on the same granted account and an unknown id are
+	// the same 404, so the id cannot be probed.
+	for _, id := range []string{"lease-06", "lease-missing"} {
+		resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases/"+id, nil)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	}
+	// The key's own lease on an account outside its grant is 403.
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases/lease-02", nil)
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+
+	// An operator keeps the global contract.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/leases/lease-06", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[model.LeaseDetail](t, body); got.Lease.ID != "lease-06" {
+		t.Fatalf("admin lease = %+v, want lease-06", got.Lease)
+	}
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/leases/lease-missing", nil)
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, body, CodeNotFound)
+
+	// A switch rebinds the lease row, so the detail read must report the new
+	// gate rather than the port it was created with.
+	t.Run("port follows a switch", func(t *testing.T) {
+		st := store.NewEmpty()
+		account, err := st.CreateAccount(model.CreateAccountInput{
+			Label: "Switch Ops", Username: "switch-ops", Password: "local-placeholder",
+			Platform: model.PlatformAndroid, Concurrency: 2,
+		})
+		if err != nil {
+			t.Fatalf("CreateAccount: %v", err)
+		}
+		if _, err := st.SetAccountUseCount(account.ID, 2); err != nil {
+			t.Fatalf("SetAccountUseCount: %v", err)
+		}
+		slot := model.SlotKey{AccountID: account.ID, Index: 1}
+		if err := st.UpsertSlot(model.AccountSlot{
+			SlotKey: slot, ServerID: "s1", GatePort: 14000,
+			State: model.SlotLive, Health: model.SlotHealthHealthy, Generation: 1,
+		}); err != nil {
+			t.Fatalf("UpsertSlot: %v", err)
+		}
+		if _, err := st.PutNode(model.ProxyNode{
+			ID: slot.NodeID("s1"), AccountID: account.ID, Label: "switch-1", Region: "cn",
+			State: model.NodeLive, GatePort: 14000, ServerID: "s1", Slot: 1,
+			Capacity: 4, Protocol: model.ProtocolSOCKS5,
+		}); err != nil {
+			t.Fatalf("PutNode(s1): %v", err)
+		}
+		user, err := st.CreateUser(model.CreateUserInput{Name: "switch-user"})
+		if err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		lease, _, err := st.CreateLease(model.CreateLeaseInput{
+			UserID: user.ID, Platform: model.PlatformAndroid, AccountID: account.ID,
+		})
+		if err != nil {
+			t.Fatalf("CreateLease: %v", err)
+		}
+		server := New(Config{AdminToken: testToken}, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		ts := httptest.NewServer(server)
+		t.Cleanup(ts.Close)
+		created, _ := mustCreateScopedKey(t, ts, map[string]any{
+			"userId": user.ID, "label": "switch leases", "scopes": []string{"leases:read"},
+			"accountIds": []string{account.ID},
+		})
+
+		read := func() model.LeaseDetail {
+			t.Helper()
+			resp, body := scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/leases/"+lease.ID, nil)
+			requireStatus(t, resp, http.StatusOK)
+			return decodeBody[model.LeaseDetail](t, body)
+		}
+		if got := read(); got.Connection.Port != 14000 {
+			t.Fatalf("pre-switch port = %d, want 14000", got.Connection.Port)
+		}
+		if _, _, err := st.CommitSwitch(store.SwitchCommit{
+			Node: model.ProxyNode{
+				ID: slot.NodeID("s2"), AccountID: account.ID, Label: "switch-2", Region: "cn",
+				State: model.NodeLive, GatePort: 14001, ServerID: "s2", Slot: 1,
+				Capacity: 4, Protocol: model.ProtocolSOCKS5,
+			},
+			Slot: slot,
+			SlotState: &model.AccountSlot{
+				SlotKey: slot, ServerID: "s2", GatePort: 14001,
+				State: model.SlotLive, Health: model.SlotHealthHealthy, Generation: 2,
+			},
+			Actor: "operator", Action: "catalog.switch", Target: slot.NodeID("s2"),
+			Detail: "Switched · one session live",
+		}); err != nil {
+			t.Fatalf("CommitSwitch: %v", err)
+		}
+		after := read()
+		if after.Connection.Port != 14001 || after.Lease.NodeID != slot.NodeID("s2") {
+			t.Fatalf("post-switch detail = %+v, want port 14001 on %s", after, slot.NodeID("s2"))
+		}
+	})
 }

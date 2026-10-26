@@ -1903,7 +1903,7 @@ secret by its hash. A missing or unknown token is 401 `UNAUTHORIZED`; `/healthz`
 | `accounts:write` | `POST /v1/accounts`, `PATCH`/`DELETE /v1/accounts/{id}`, login/logout, `POST /v1/accounts/import`, `POST /v1/accounts/bulk-delete` |
 | `catalog:read` | `GET /v1/nodes`, `GET /v1/accounts/{id}/servers`, `GET /v1/accounts/{id}/selection`, `GET /v1/topology`, `GET /v1/operations`, `GET /v1/operations/{id}`, `GET /v1/debug/trace`, `GET /v1/debug/stream` |
 | `catalog:write` | `PUT`/`DELETE /v1/accounts/{id}/selection`, connect/disconnect/reconnect, select-node, `DELETE /v1/operations/{id}`, node drain/undrain/probe |
-| `leases:read` | `GET /v1/leases` (the key user's leases only) |
+| `leases:read` | `GET /v1/leases`, `GET /v1/leases/{id}` (the key user's leases only) |
 | `leases:write` | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` (the key user's leases only) |
 | `requests:read` | `GET /v1/requests` |
 | `audit:read` | `GET /v1/audit`, `GET /v1/audit/export.csv` |
@@ -1936,16 +1936,18 @@ scope is a 400, and a create needs at least one scope.
 A non-admin key is also bound to its user subject (`userId`): `GET /v1/leases` returns only that
 user's leases and refuses a `user_id` naming another user with 403; `POST /v1/leases` fills an
 empty `userId` with the key's user and refuses a different one, and requires an explicit allowed
-`accountId`; `DELETE /v1/leases/{id}` and rotate answer 404 for a missing id and for another
-user's lease alike (403 when the key's own lease sits on an account outside its grant). Accounts
-and nodes stay operator assets filtered by grants, never by `userId`. The three platform reads
-follow the same rule:
-`GET /v1/renewal/accounts/{id}` answers 403 for an account outside the key's list (404 when the id
-is unknown), `GET /v1/usage` aggregates only visible accounts — an explicit out-of-scope `account`
-filter is a 403, and an unknown label yields an empty 200 summary — and `GET /v1/health/nodes`
-omits nodes belonging to invisible accounts. `GET /v1/events` and `GET /v1/events/stream` cannot
-be narrowed that way, so a restricted key is refused both. The scope vocabulary is the OpenAPI
-`Scope` enum; the four read scopes were appended after `settings:write` and before `admin`.
+`accountId`; `GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and rotate answer 404 for a missing
+id and for another user's lease alike (403 when the key's own lease sits on an account outside its
+grant). Accounts and nodes stay operator assets filtered by grants, never by `userId`. The platform
+reads are narrowed to the key's own data: `GET /v1/renewal/accounts/{id}` answers 403 for an
+account outside the key's list (404 when the id is unknown); `GET /v1/usage` and
+`GET /v1/requests` are per-user, serving only rows whose exact `userId` is the key's subject,
+filtered before aggregation/pagination, with a foreign `userId`/`user_id` answered 403 and a
+scoped `account=` usage filter answered 400 `INVALID_ARGUMENT` (the log stores a recyclable label,
+not a stable account id); `GET /v1/health/nodes` omits nodes belonging to invisible accounts.
+`GET /v1/events` and `GET /v1/events/stream` cannot be narrowed that way, so a restricted key is
+refused both. The scope vocabulary is the OpenAPI `Scope` enum; the four read scopes were appended
+after `settings:write` and before `admin`.
 
 Each key also carries a per-minute request budget: `rateLimitPerMin` (default **60**; an explicit
 `0` means unlimited). The token bucket is per key, and every scoped-key response carries
@@ -2655,6 +2657,7 @@ authority by setting it.
 | POST | `/v1/nodes/{id}/actions/undrain` | with `AJS_ACCOUNT_LOGIN=1`: controller reopens the gate first (hook failure → 500, node unchanged); → `LIVE` (DOWN → `READY`); republishes when configured |
 | POST | `/v1/nodes/{id}/actions/probe` | refresh `lastProbeAt`; DOWN → 503 |
 | GET | `/v1/leases` | list; filter `user_id`; a non-admin scoped key sees only its own user's leases and a foreign `user_id` → 403 |
+| GET | `/v1/leases/{id}` | `{lease, connection:{host:"127.0.0.1", port, protocol, username, credentialKind:"ajs_sk"}}`; `port` is the gate the lease currently points at (a switch rebinds it), the secret is never returned; a non-admin scoped key may read only its own user's lease (missing/foreign id → 404, account outside the grant → 403) |
 | POST | `/v1/leases` | `{userId, platform, accountId?, ttlSeconds?, idempotencyKey?}` → 201 `{lease, replayed?, warning?}`; `Idempotency-Key` header is the same channel as the body field (a mismatch → 400), a replay returns the original lease with `Idempotency-Replayed: true`, and the guards are documented under [Lease allocation](#lease-allocation). A non-admin scoped key fills an empty `userId` with its own user, refuses another with 403, and must name an allowed `accountId`. 409 `lease_conflict`/`user_disabled`/`account_unavailable`/`idempotency_conflict`; 429 `quota_exceeded`/`concurrency_exceeded`/`account_slots_exhausted`/`no_capacity`; `warning: multi_session_unimplemented` when display capacity effectiveSlots > 1 |
 | POST | `/v1/leases/{id}/actions/rotate` | panel: filter exclusion + Resin lease read; fallback: next egress IP, expiry refresh, requests +17; a non-admin scoped key may rotate only its own user's lease on a granted account (missing/foreign id → 404) |
 | DELETE | `/v1/leases/{id}` | body `{confirm:true}` → 204; panel: delete Resin lease (404 idempotent), then store row; fallback: store release; decrement node `inUse`; a missing confirm → 400; a non-admin scoped key may revoke only its own user's lease on a granted account (missing/foreign id → 404) |
@@ -2672,7 +2675,7 @@ authority by setting it.
 | POST | `/v1/scoped-keys` | `{userId,label,scopes[],accountIds[],regions[],expiresAt,rateLimitPerMin}` → 201 `{key,secret}`; secret shown once; `rateLimitPerMin` defaults to 60, `0` = unlimited; a non-admin key with an `accounts:*`, `catalog:*` or `leases:*` scope needs at least one `accountIds`/`regions` entry (400 `INVALID_ARGUMENT`) |
 | GET | `/v1/scoped-keys/{id}` | one key |
 | DELETE | `/v1/scoped-keys/{id}` | revoke (`revokedAt` set; row retained) → 204 |
-| GET | `/v1/requests` | request log, newest first; a metered gate row carries `protocol` (`socks5`/`http`), `userId`/`userName` attribution (empty in `loopback` mode), `target` as `host:port` and `source` (`gate`/`mutation-lab`/`proxy`) — never a URL, header or credential |
+| GET | `/v1/requests` | request log, newest first; a non-admin scoped key sees only rows whose exact `userId` is its own subject (filtered before pagination; a foreign `user_id`/`userId` → 403); a metered gate row carries `protocol` (`socks5`/`http`), `userId`/`userName` attribution (empty in `loopback` mode), `target` as `host:port` and `source` (`gate`/`mutation-lab`/`proxy`) — never a URL, header or credential |
 | POST | `/v1/requests/mutations` | append a `mutation-lab` row + audit event |
 | GET | `/v1/audit?limit=` | newest-first audit, default 20, max 500 |
 | GET | `/v1/audit/export.csv?from=&to=&severity=` | retained audit history as CSV (`ts,severity,actor,action,target,detail,meta`), oldest-first, `text/csv` with an attachment filename and `no-store`. `from`/`to` are RFC 3339 and inclusive; absent `from` = seven days before `to` (or now); a reversed or >366-day window → 400, an unknown `severity` → 400; over 50 000 matching rows the older ones are dropped with `X-Truncated: true` |

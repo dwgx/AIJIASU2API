@@ -203,46 +203,92 @@ func TestUsageDateOnlyBoundsCoverFinalDay(t *testing.T) {
 	}
 }
 
-// TestUsageRestrictedScopedKeysAreForbidden pins the AJS-427 fix: the request
-// log attributes rows by account label alone and labels are not unique, so a
-// restricted key cannot be served an honest aggregate. The whole surface is
-// refused, the same rule as /v1/audit and /metrics, while admin tokens,
-// admin-scoped keys and unrestricted scoped keys keep their summary.
-func TestUsageRestrictedScopedKeysAreForbidden(t *testing.T) {
-	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
+// TestScopedKeyPerUserUsage pins AJS-451: a non-admin scoped key is served its
+// own rows, filtered by the exact RequestLog.UserID before aggregation, while a
+// query naming another user answers 403, an account= filter answers 400 (the
+// log has no stable account id), and operator callers keep the global summary.
+func TestScopedKeyPerUserUsage(t *testing.T) {
+	ts, st := newPlatformServer(t, Config{Usage: usageAggregator()})
 
-	restricted := mustIssueScopedKey(t, ts, []string{"usage:read"}, []string{"acc-01"}, nil)
-	for _, path := range []string{"/v1/usage", "/v1/usage?account=acc-01"} {
-		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
-		requireStatus(t, resp, http.StatusForbidden)
-		requireErrorCode(t, body, CodeForbidden)
-		if strings.Contains(string(body), "Northwind Ops") || strings.Contains(string(body), "Field Lab") {
-			t.Fatalf("%s refused summary leaked an account label: %s", path, body)
+	all := st.Requests()
+	wantRows, wantBytes := 0, int64(0)
+	for _, row := range all {
+		if row.UserID == "u-01" {
+			wantRows++
+			wantBytes += row.Bytes
+		}
+	}
+	if wantRows == 0 || wantRows == len(all) {
+		t.Fatalf("seed has %d u-01 rows of %d; the fixture cannot tell per-user from global", wantRows, len(all))
+	}
+
+	key := mustIssueScopedKey(t, ts, []string{"usage:read"}, []string{"acc-01"}, nil)
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+	summary := decodeBody[usage.Summary](t, body)
+	if summary.Requests != wantRows || summary.Bytes != wantBytes {
+		t.Fatalf("scoped usage = %d requests / %d bytes, want %d / %d (body %s)",
+			summary.Requests, summary.Bytes, wantRows, wantBytes, body)
+	}
+	if len(summary.Users) != 1 || summary.Users[0].UserID != "u-01" {
+		t.Fatalf("scoped usage users = %+v, want only u-01", summary.Users)
+	}
+	for _, name := range []string{"build-bot", "qa.pipeline", "field.lab"} {
+		if strings.Contains(string(body), name) {
+			t.Fatalf("scoped usage leaked user %q: %s", name, body)
 		}
 	}
 
-	// Labels carry no region, so a region-only restriction is the same
-	// disclosure risk and is refused too.
-	region := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, []string{"hk"})
-	resp, body := scopedCall(t, ts, region.Secret, http.MethodGet, "/v1/usage", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorCode(t, body, CodeForbidden)
-
-	// An unrestricted scoped key keeps the full summary.
-	open := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, nil)
-	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/usage", nil)
+	// Naming another user is refused; naming the key's own user is the same as
+	// omitting the filter.
+	for _, path := range []string{"/v1/usage?userId=u-02", "/v1/usage?user_id=u-02"} {
+		resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	}
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/usage?userId=u-01", nil)
 	requireStatus(t, resp, http.StatusOK)
-	if summary := decodeBody[usageSummary](t, body); len(summary.Accounts) == 0 {
-		t.Fatalf("unrestricted usage summary has no account rows (body %s)", body)
+	if got := decodeBody[usage.Summary](t, body); got.Requests != wantRows {
+		t.Fatalf("own-user filter = %d requests, want %d", got.Requests, wantRows)
 	}
 
-	// An admin-scoped key stays admin even with accountIds attached.
-	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, []string{"acc-01"}, nil)
-	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodGet, "/v1/usage", nil)
-	requireStatus(t, resp, http.StatusOK)
+	// An account filter is refused for every value: the request log stores a
+	// recyclable label, not a stable account id, so a scoped roll-up cannot be
+	// narrowed by account.
+	for _, path := range []string{
+		"/v1/usage?account=acc-01",
+		"/v1/usage?account=acc-02",
+		"/v1/usage?account=Field+Lab",
+		"/v1/usage?account=nobody",
+	} {
+		resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusBadRequest)
+		requireErrorCode(t, body, CodeInvalidArgument)
+	}
 
-	resp, _ = apiCall(t, ts, http.MethodGet, "/v1/usage", nil)
+	// A region-only key is the same per-user view, not a refusal.
+	region := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, []string{"hk"})
+	resp, body = scopedCall(t, ts, region.Secret, http.MethodGet, "/v1/usage", nil)
 	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[usage.Summary](t, body); got.Requests != wantRows ||
+		len(got.Users) != 1 || got.Users[0].UserID != "u-01" {
+		t.Fatalf("region-key usage = %d requests / users %+v, want only u-01's %d",
+			got.Requests, got.Users, wantRows)
+	}
+
+	// Operator callers keep the global summary.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[usage.Summary](t, body); got.Requests != len(all) || len(got.Users) != 4 {
+		t.Fatalf("admin usage = %d requests / %d users, want %d / 4",
+			got.Requests, len(got.Users), len(all))
+	}
+	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, []string{"acc-01"}, nil)
+	resp, body = scopedCall(t, ts, adminKey.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[usage.Summary](t, body); got.Requests != len(all) {
+		t.Fatalf("admin-scoped usage = %d requests, want the global %d", got.Requests, len(all))
+	}
 }
 
 // usageSummary mirrors the fields this test asserts; the wire type itself is

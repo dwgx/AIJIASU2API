@@ -180,35 +180,67 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filtered[start:end])
 }
 
-// authorizeLeaseMutation resolves the lease a revoke or rotate addresses and
+// leaseConnectionHost is the only address a gate binds; the connection block
+// of a lease detail never advertises a public endpoint.
+const leaseConnectionHost = "127.0.0.1"
+
+// handleGetLease serves GET /v1/leases/{id}. It applies the same ownership
+// rule as a mutation (P0-01): a customer scoped key reads only its own subject,
+// an unknown id and another user's lease answer the same 404, and a lease on an
+// account outside the key's grant answers 403. The connection block is derived
+// on every read from the stored row, which a switch commit rebinds, so the port
+// is the current gate rather than a cached one. The scoped-key secret is never
+// part of the response: only its kind is.
+func (s *Server) handleGetLease(w http.ResponseWriter, r *http.Request) {
+	lease, found, denied := s.authorizeLease(w, r, pathParam(r, "id"))
+	if denied {
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, CodeNotFound, "lease not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, model.LeaseDetail{
+		Lease: lease,
+		Connection: model.LeaseConnection{
+			Host:           leaseConnectionHost,
+			Port:           lease.GatePort,
+			Protocol:       lease.Protocol,
+			Username:       lease.UserID,
+			CredentialKind: model.LeaseCredentialKindScopedKey,
+		},
+	})
+}
+
+// authorizeLease resolves the lease a read, revoke or rotate addresses and
 // binds it to the caller before any side effect. Operator callers (admin token
-// or admin-scope key) keep the stored row and their existing contract. A
-// customer scoped key may only mutate its own subject: an unknown id and
-// another user's lease answer the same 404, so a mutation cannot probe for
-// lease ids, and a lease on an account outside the key's grant answers 403
-// before the store or the panel is touched. It reports whether the response was
-// written.
-func (s *Server) authorizeLeaseMutation(w http.ResponseWriter, r *http.Request, id string) (model.Lease, bool) {
-	lease, found := s.store.Lease(id)
+// or admin-scope key) keep the stored row and their existing contract; found is
+// false for an unknown id so the caller keeps its own 404. A customer scoped key
+// may only touch its own subject: an unknown id and another user's lease answer
+// the same 404, so the id cannot be probed, and a lease on an account outside
+// the key's grant answers 403 before the store or the panel is touched. It
+// reports whether the response was written.
+func (s *Server) authorizeLease(w http.ResponseWriter, r *http.Request, id string) (lease model.Lease, found, denied bool) {
+	lease, found = s.store.Lease(id)
 	key, customer := customerKey(r)
 	if !customer {
-		return lease, false
+		return lease, found, false
 	}
 	if !found || lease.UserID != key.UserID {
 		writeError(w, http.StatusNotFound, CodeNotFound, "lease not found")
-		return model.Lease{}, true
+		return model.Lease{}, false, true
 	}
 	if !s.scopedKeyAllowsAccount(r, lease.AccountID) {
 		writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
 			"scoped key is restricted to named accounts; the lease belongs to another account", nil)
-		return model.Lease{}, true
+		return model.Lease{}, false, true
 	}
-	return lease, false
+	return lease, true, false
 }
 
 func (s *Server) handleRotateLease(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
-	if _, denied := s.authorizeLeaseMutation(w, r, id); denied {
+	if _, _, denied := s.authorizeLease(w, r, id); denied {
 		return
 	}
 	if s.cfg.Panel != nil {

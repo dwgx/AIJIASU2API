@@ -115,23 +115,25 @@ func (s *Server) handleRenewalAccount(w http.ResponseWriter, r *http.Request) {
 // unparsable bound, a reversed window and a window longer than
 // usage.MaxWindowDays all answer 400 with the aggregator's reason.
 //
-// A scoped key restricted by accountIds/regions is refused outright; admin
-// tokens, admin-scoped keys and unrestricted scoped keys keep the full summary.
+// A non-admin scoped key is served its own subject only: rows are filtered by
+// the exact RequestLog.UserID before aggregation, and a query naming another
+// userId is refused without revealing whether that user has usage. The log's
+// account label is not stable attribution, so a scoped account= filter answers
+// 400 INVALID_ARGUMENT until a stable AccountID exists in the log. Admin
+// tokens, admin-scoped keys and unrestricted callers keep the global summary.
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Usage == nil {
 		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
 			"usage aggregation is not configured")
 		return
 	}
-	// The request log stores only AccountLabel, and labels are not unique: a
-	// label taken over by another account makes every restricted roll-up a
-	// guess about ownership. A restricted aggregate therefore cannot be honest,
-	// so the whole surface is refused instead of filtered — the same rule as
-	// /v1/audit and /metrics.
-	if s.denyGlobalRead(w, r, "usage by account") {
+	query := r.URL.Query()
+	key, customer := customerKey(r)
+	if customer && strings.TrimSpace(query.Get("account")) != "" {
+		writeError(w, http.StatusBadRequest, CodeInvalidArgument,
+			"account filtering is not available to a scoped key; usage is reported for the key's own userId")
 		return
 	}
-	query := r.URL.Query()
 	from, ok := parseUsageTime(w, query.Get("from"), "from", false)
 	if !ok {
 		return
@@ -144,28 +146,41 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		userID = query.Get("user_id")
 	}
+	userID = strings.TrimSpace(userID)
+	if customer {
+		if userID != "" && userID != key.UserID {
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+				"scoped key is bound to its own userId; userId must match it", nil)
+			return
+		}
+		userID = key.UserID
+	}
 	// The request log stores the account label; accept an account id too so a
-	// dashboard link with acc-01 works as expected.
+	// dashboard link with acc-01 works as expected. Only an operator caller
+	// reaches this branch: a customer key was answered above.
 	accountFilter := strings.TrimSpace(query.Get("account"))
 	if account, ok := s.accountByIDOrLabel(accountFilter); ok {
 		accountFilter = account.Label
 	}
-	// Only unrestricted callers reach this point, so the aggregate covers every
-	// account; a restricted key was refused above before any store read.
 	rows := s.store.Requests()
+	if customer {
+		// Exact subject filter before aggregation, not inside it: no other
+		// user's row can reach the totals, the day series or the target list.
+		rows = requestsForUser(rows, userID)
+	}
 	users := s.usageUsers()
 	summary, err := s.cfg.Usage.Aggregate(rows, usage.Query{
 		From:    from,
 		To:      to,
 		Account: accountFilter,
-		UserID:  strings.TrimSpace(userID),
+		UserID:  userID,
 		Quotas:  usageQuotas(users),
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, err.Error())
 		return
 	}
-	quotas, enforced := s.usageAccountQuotas()
+	quotas, enforced := s.usageAccountQuotas(key, customer)
 	summary.QuotaEnforced = enforced
 	applyAccountQuotas(&summary, quotas)
 	applyUserUsage(&summary, users)
@@ -249,15 +264,20 @@ type accountQuotaView struct {
 	used   int64
 }
 
-// usageAccountQuotas returns every account's budget and current UTC month gate
+// usageAccountQuotas returns each account's budget and current UTC month gate
 // usage keyed by account label (the request log's attribution unit). enforced
-// reports whether at least one account has a budget. Only unrestricted callers
-// reach the usage handler, so every account is in scope.
-func (s *Server) usageAccountQuotas() (map[string]accountQuotaView, bool) {
+// reports whether at least one returned account has a budget. An operator
+// caller sees every account; a customer key is narrowed to the accounts its
+// grant covers, so a historical row on an account outside the grant cannot
+// disclose that account's budget.
+func (s *Server) usageAccountQuotas(key model.ScopedKey, customer bool) (map[string]accountQuotaView, bool) {
 	accounts := s.store.Accounts()
 	quotas := make(map[string]accountQuotaView, len(accounts))
 	enforced := false
 	for _, account := range accounts {
+		if customer && !key.AllowsAccount(account) {
+			continue
+		}
 		view := accountQuotaView{used: s.store.MonthlyUsage(account.ID)}
 		if account.TrafficBudgetBytes != nil {
 			budget := *account.TrafficBudgetBytes

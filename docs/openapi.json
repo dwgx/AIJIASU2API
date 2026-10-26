@@ -2685,6 +2685,44 @@
       }
     },
     "/v1/leases/{id}": {
+      "get": {
+        "operationId": "getLease",
+        "tags": [
+          "Leases"
+        ],
+        "summary": "Read one lease and the loopback gate it currently points at.",
+        "description": "Requires leases:read for a scoped key. Ownership follows the same subject rule as a mutation: a non-admin scoped key reads only a lease whose userId is its own subject, an unknown id and another user's lease answer the same 404 NOT_FOUND, and a lease on an account outside the key's grant answers 403 with error.reason=scoped_key_restricted. The connection block names the loopback gate the lease currently points at and the credential shape; a switch that rebinds the lease also moves the port. The scoped-key secret is never returned.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "The lease and the endpoint a client dials for it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeaseDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          }
+        ]
+      },
       "delete": {
         "operationId": "releaseLease",
         "tags": [
@@ -3182,6 +3220,7 @@
           "Requests"
         ],
         "summary": "List recorded requests, newest first.",
+        "description": "Requires requests:read for a scoped key. A non-admin scoped key is served its own subject only: rows are filtered by the exact RequestLog.UserID before pagination, and a user_id/userId naming another user answers 403 FORBIDDEN with error.reason=scoped_key_restricted without revealing whether that user has rows. An operator caller keeps the global log and ignores the user filter.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -3223,6 +3262,14 @@
           },
           {
             "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact user id; userId is accepted as an alias. A non-admin scoped key must name its own user and only ever sees its own rows; another id answers 403 with error.reason=scoped_key_restricted. An operator caller ignores the filter and reads the global log."
           }
         ]
       }
@@ -4537,7 +4584,7 @@
           "Usage"
         ],
         "summary": "Aggregate the request log over an inclusive UTC window.",
-        "description": "Requires usage:read for a scoped key. The request log attributes rows by account label alone and labels are not unique, so a key restricted by accountIds/regions is refused outright with 403 FORBIDDEN and error.reason=scoped_key_restricted rather than served a filtered or partial aggregate; an explicit account filter cannot re-enable it. Admin tokens, admin-scoped keys and unrestricted scoped keys get the full summary.",
+        "description": "Requires usage:read for a scoped key. A non-admin scoped key is served its own subject only: rows are filtered by the exact RequestLog.UserID before aggregation, and a userId/user_id naming another user answers 403 FORBIDDEN with error.reason=scoped_key_restricted without revealing whether that user has usage. The request log stores a recyclable account label rather than a stable account id, so a scoped account= filter answers 400 INVALID_ARGUMENT. Admin tokens, admin-scoped keys and unrestricted callers get the global summary.",
         "x-implementation-phase": "P0",
         "responses": {
           "200": {
@@ -4589,7 +4636,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Exact account label; an account id is resolved to its label."
+            "description": "Exact account label; an account id is resolved to its label. Operator callers only: a non-admin scoped key answers 400 INVALID_ARGUMENT for any value because the log has no stable account id."
           },
           {
             "name": "userId",
@@ -4597,7 +4644,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Exact user id. user_id is accepted as an alias."
+            "description": "Exact user id. user_id is accepted as an alias. A non-admin scoped key must name its own user and only ever sees its own rows; another id answers 403 with error.reason=scoped_key_restricted."
           }
         ]
       }
@@ -8511,6 +8558,59 @@
           "status",
           "idempotencyKey",
           "createdAt"
+        ]
+      },
+      "LeaseConnection": {
+        "type": "object",
+        "description": "The loopback data-plane endpoint of one lease. The scoped-key secret is never part of this object: credentialKind only names the credential shape, and the password is the caller's own ajs_sk_ key carrying proxy:connect.",
+        "properties": {
+          "host": {
+            "type": "string",
+            "enum": [
+              "127.0.0.1"
+            ],
+            "description": "Gates bind loopback only; a remote client needs an operator-provided tunnel."
+          },
+          "port": {
+            "type": "integer",
+            "description": "The gate listener the lease currently points at. A switch that rebinds the lease updates it."
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/ProxyProtocol"
+          },
+          "username": {
+            "type": "string",
+            "description": "Panel user id; the RFC 1929 username for the gate handshake."
+          },
+          "credentialKind": {
+            "type": "string",
+            "enum": [
+              "ajs_sk"
+            ],
+            "description": "The password is an ajs_sk_ scoped key carrying proxy:connect."
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "protocol",
+          "username",
+          "credentialKind"
+        ]
+      },
+      "LeaseDetail": {
+        "type": "object",
+        "properties": {
+          "lease": {
+            "$ref": "#/components/schemas/Lease"
+          },
+          "connection": {
+            "$ref": "#/components/schemas/LeaseConnection"
+          }
+        },
+        "required": [
+          "lease",
+          "connection"
         ]
       },
       "CreateLeaseInput": {

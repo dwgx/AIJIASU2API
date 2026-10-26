@@ -86,6 +86,7 @@ var routeScopes = map[string]model.Scope{
 
 	http.MethodGet + " /v1/leases":                      model.ScopeLeasesRead,
 	http.MethodPost + " /v1/leases":                     model.ScopeLeasesWrite,
+	http.MethodGet + " /v1/leases/{id}":                 model.ScopeLeasesRead,
 	http.MethodPost + " /v1/leases/{id}/actions/rotate": model.ScopeLeasesWrite,
 	http.MethodDelete + " /v1/leases/{id}":              model.ScopeLeasesWrite,
 
@@ -200,10 +201,11 @@ func hasScope(scopes []model.Scope, scope model.Scope) bool {
 // which accounts those verbs may reach, so a key scoped to acc-A cannot delete,
 // connect, lease, drain, rotate or cancel on acc-B. It covers the account path
 // (including the action sub-routes), the renewal account path, the
-// account_id/accountId query, the usage page's account filter, and the node and
-// operation paths, which are resolved to their account through the store. Lease
-// create and lease mutations carry their own subject/account check in the
-// handlers, before any side effect.
+// account_id/accountId query, and the node and operation paths, which are
+// resolved to their account through the store. Lease create, lease reads and
+// lease mutations carry their own subject/account check in the handlers, before
+// any side effect, and a usage account filter is the handler's 400: the
+// customer surface is per-user, not per-account.
 func (s *Server) scopedKeyDenial(key model.ScopedKey, r *http.Request) string {
 	if key.RequiresAccountGrant() && !key.HasAccountGrant() {
 		return "scoped key has no accountIds or regions; reissue it with an explicit account grant"
@@ -233,17 +235,6 @@ func (s *Server) scopedKeyDenial(key model.ScopedKey, r *http.Request) string {
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 2 || parts[0] != "v1" {
-		return ""
-	}
-	if len(parts) == 2 && parts[1] == "usage" {
-		// The usage filter accepts an account id or its exact label; only a
-		// value that names an account outside the key is refused, so an
-		// unknown label still answers an empty summary instead of 403.
-		if value := strings.TrimSpace(r.URL.Query().Get("account")); value != "" {
-			if account, ok := s.accountByIDOrLabel(value); ok && !key.AllowsAccount(account) {
-				return "scoped key is not allowed to use this account"
-			}
-		}
 		return ""
 	}
 	if len(parts) < 3 {
@@ -375,6 +366,25 @@ func customerKey(r *http.Request) (model.ScopedKey, bool) {
 		return model.ScopedKey{}, false
 	}
 	return key, true
+}
+
+// requestsForUser keeps the rows whose exact RequestLog.UserID matches the
+// subject. It is the one per-user filter shared by the usage aggregate and the
+// request log: both are attributed by UserID, never by the recyclable account
+// label, so a customer key is served its own rows instead of a guess.
+func requestsForUser(rows []model.RequestLog, userID string) []model.RequestLog {
+	// A key without a subject must match nothing: unattributed rows (loopback
+	// gate mode leaves UserID empty) are not the key's own traffic.
+	if userID == "" {
+		return []model.RequestLog{}
+	}
+	filtered := make([]model.RequestLog, 0, len(rows))
+	for _, row := range rows {
+		if row.UserID == userID {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 // restrictedKey returns the scoped key installed by the auth middleware when it

@@ -24,15 +24,15 @@ func requireErrorReason(t *testing.T, body []byte, want string) {
 // TestScopedKeyForbiddenReasons pins AJS-440: every refused global read
 // carries error.reason=scoped_key_restricted, a key missing the route scope
 // carries error.reason=scope_required, the human-readable message is
-// unchanged, and admin/unrestricted callers still get 200.
+// unchanged, and admin/unrestricted callers still get 200. Usage and the
+// request log are per-user reads (AJS-451), so they are served rather than
+// refused; a scoped account= usage filter is the handler's 400.
 func TestScopedKeyForbiddenReasons(t *testing.T) {
 	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
 
 	globalReads := []string{
-		"/v1/usage",
 		"/v1/audit",
 		"/v1/audit/export.csv",
-		"/v1/requests",
 		"/metrics",
 	}
 
@@ -49,23 +49,28 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 		}
 	}
 
-	// The usage account filter naming an account outside the key is refused by
-	// the auth middleware before the handler; that refusal carries the same
-	// reason and keeps its own message.
+	// Usage and the request log are per-user reads, not refused global ones.
+	for _, path := range []string{"/v1/usage", "/v1/requests"} {
+		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusOK)
+		if strings.Contains(string(body), "scoped key is restricted to named accounts") {
+			t.Fatalf("%s still carries a restriction refusal: %s", path, body)
+		}
+	}
+
+	// A scoped account= usage filter is INVALID_ARGUMENT: the log has no
+	// stable account id, so the handler refuses the filter instead of guessing.
 	resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, "/v1/usage?account=acc-02", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorCode(t, body, CodeForbidden)
-	requireErrorReason(t, body, ReasonScopedKeyRestricted)
-	if !strings.Contains(string(body), "scoped key is not allowed to use this account") {
+	requireStatus(t, resp, http.StatusBadRequest)
+	requireErrorCode(t, body, CodeInvalidArgument)
+	if !strings.Contains(string(body), "account filtering is not available to a scoped key") {
 		t.Fatalf("account-filter message changed: %s", body)
 	}
 
-	// A region-only restriction is the same refusal: the request log carries
-	// no region, so a region-restricted aggregate cannot be honest either.
+	// A region-only restriction is the same per-user view, not a refusal.
 	region := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, []string{"hk"})
 	resp, body = scopedCall(t, ts, region.Secret, http.MethodGet, "/v1/usage", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	requireStatus(t, resp, http.StatusOK)
 
 	// A key with the wrong scope is refused by the router before the handler
 	// runs, and the reason names the missing grant.

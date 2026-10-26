@@ -328,67 +328,103 @@ func mustIssueScopedKey(t *testing.T, ts *httptest.Server, scopes []string, acco
 	return created
 }
 
-// TestScopedKeyRestrictedRequestsAreForbidden pins the deny-on-ambiguity rule:
-// a request row has no stable account id, so a restricted key cannot be served
-// a filtered log at all. An unrestricted requests:read key keeps its page.
-func TestScopedKeyRestrictedRequestsAreForbidden(t *testing.T) {
-	ts, _ := newTestServer(t)
-	key := mustIssueScopedKey(t, ts, []string{"requests:read"}, []string{"acc-01"}, nil)
-	resp, body := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/requests?limit=5", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorCode(t, body, CodeForbidden)
-
-	open := mustIssueScopedKey(t, ts, []string{"requests:read"}, nil, nil)
-	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/requests?limit=5", nil)
-	requireStatus(t, resp, http.StatusOK)
-	if page := decodeBody[[]model.RequestLog](t, body); len(page) != 5 {
-		t.Fatalf("unrestricted page = %d rows, want 5", len(page))
-	}
-}
-
-// TestScopedKeyRestrictedRequestsDenyHistoricalLabelReuse reproduces the gate
-// finding: rows carry the label they were written with, so a label recycled by
-// another account would hand that account's history to whoever holds it now.
-// The restricted read is refused; the row is still readable without a
-// restriction, which proves the refusal is the restriction and not a missing
-// row.
-func TestScopedKeyRestrictedRequestsDenyHistoricalLabelReuse(t *testing.T) {
+// TestScopedKeyPerUserRequests pins AJS-451: a non-admin scoped key reads only
+// rows whose exact RequestLog.UserID matches the key's user, filtered before
+// pagination, and a query naming another user is refused. The account label is
+// ignored even when it names an account the key may use, an empty grant is
+// still a per-user view, and operator callers keep the global log.
+func TestScopedKeyPerUserRequests(t *testing.T) {
 	ts, st := newTestServer(t)
 	const (
 		privateTarget = "tenant-b-private.example:443"
 		secretID      = "tenant-b-secret-request"
 	)
+	// The row has no UserID but carries the label of the account the key may
+	// use: a label filter would hand it to u-01, an exact UserID filter does
+	// not. It stays readable to an operator, so absence is not mistaken for a
+	// missing row.
 	st.AppendRequest(model.RequestLog{
 		ID:           secretID,
-		AccountLabel: "Field Lab",
-		NodeLabel:    "jp-tyo-01",
-		Region:       "jp-tyo",
+		AccountLabel: "Northwind Ops",
+		NodeLabel:    "cn-zj-01",
+		Region:       "cn-zj",
 		Target:       privateTarget,
 		Source:       model.SourceProxy,
 	})
-	// B releases the label, then A takes it. Every row written under the old
-	// label belongs to B, but a current-label filter for A now matches it.
-	released, taken := "Field Lab (released)", "Field Lab"
-	if _, err := st.UpdateAccount("acc-02", model.AccountPatch{Label: &released}); err != nil {
-		t.Fatalf("rename acc-02: %v", err)
+	wantRows := 0
+	for _, row := range st.Requests() {
+		if row.UserID == "u-01" {
+			wantRows++
+		}
 	}
-	if _, err := st.UpdateAccount("acc-01", model.AccountPatch{Label: &taken}); err != nil {
-		t.Fatalf("rename acc-01: %v", err)
+	if wantRows == 0 || wantRows == len(st.Requests()) {
+		t.Fatalf("seed has %d u-01 rows of %d; the fixture cannot tell per-user from global",
+			wantRows, len(st.Requests()))
 	}
 
 	key := mustIssueScopedKey(t, ts, []string{"requests:read"}, []string{"acc-01"}, nil)
 	resp, body := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/requests?limit=0", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorCode(t, body, CodeForbidden)
+	requireStatus(t, resp, http.StatusOK)
+	rows := decodeBody[[]model.RequestLog](t, body)
+	if len(rows) != wantRows {
+		t.Fatalf("scoped request log = %d rows, want %d", len(rows), wantRows)
+	}
+	for _, row := range rows {
+		if row.UserID != "u-01" {
+			t.Fatalf("scoped request log leaked user %q: %+v", row.UserID, row)
+		}
+	}
+	for _, name := range []string{"build-bot", "qa.pipeline", "field.lab"} {
+		if strings.Contains(string(body), name) {
+			t.Fatalf("scoped request log leaked user %q: %s", name, body)
+		}
+	}
 	if strings.Contains(string(body), privateTarget) || strings.Contains(string(body), secretID) {
-		t.Fatalf("refused request log leaked a foreign row: %s", body)
+		t.Fatalf("scoped request log leaked a row with no matching UserID: %s", body)
 	}
 
+	// The page size applies after the filter, not to the global log.
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/requests?limit=3", nil)
+	requireStatus(t, resp, http.StatusOK)
+	page := decodeBody[[]model.RequestLog](t, body)
+	if len(page) != 3 {
+		t.Fatalf("?limit=3 = %d rows, want 3", len(page))
+	}
+	for _, row := range page {
+		if row.UserID != "u-01" {
+			t.Fatalf("paged row belongs to %q", row.UserID)
+		}
+	}
+
+	// Naming another user is refused; the key's own user is the same as
+	// omitting the filter.
+	for _, path := range []string{"/v1/requests?user_id=u-02", "/v1/requests?userId=u-02"} {
+		resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	}
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/requests?user_id=u-01&limit=0", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.RequestLog](t, body); len(got) != wantRows {
+		t.Fatalf("own-user filter = %d rows, want %d", len(got), wantRows)
+	}
+
+	// An empty grant keeps the per-user view; it never widens to the log.
 	open := mustIssueScopedKey(t, ts, []string{"requests:read"}, nil, nil)
 	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/requests?limit=0", nil)
 	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.RequestLog](t, body); len(got) != wantRows {
+		t.Fatalf("ungranted key = %d rows, want its own %d", len(got), wantRows)
+	}
+
+	// Operator callers keep the global log, including the unattributed row.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/requests?limit=0", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if got := decodeBody[[]model.RequestLog](t, body); len(got) != len(st.Requests()) {
+		t.Fatalf("admin log = %d rows, want %d", len(got), len(st.Requests()))
+	}
 	if !strings.Contains(string(body), privateTarget) {
-		t.Fatalf("unrestricted log lost the appended row: %s", body)
+		t.Fatalf("admin log lost the appended row: %s", body)
 	}
 }
 
@@ -671,14 +707,20 @@ func TestScopedKeyAdminAndUnrestrictedCompatibility(t *testing.T) {
 	}
 
 	// Both lists empty means all accounts, not none, but each route still needs
-	// its own scope.
+	// its own scope. The request log stays per-user: the key reads its own
+	// subject's rows, never the global log.
 	open := mustIssueScopedKey(t, ts, []string{"requests:read"}, nil, nil)
 	resp, body := scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/requests?limit=0", nil)
 	requireStatus(t, resp, http.StatusOK)
 	visible := decodeBody[[]model.RequestLog](t, body)
-	_, adminBody := apiCall(t, ts, http.MethodGet, "/v1/requests?limit=0", nil)
-	if total := len(decodeBody[[]model.RequestLog](t, adminBody)); len(visible) != total {
-		t.Fatalf("unrestricted request rows = %d, want %d", len(visible), total)
+	wantRows := 0
+	for _, row := range st.Requests() {
+		if row.UserID == "u-01" {
+			wantRows++
+		}
+	}
+	if len(visible) != wantRows {
+		t.Fatalf("ungranted request rows = %d, want its own %d", len(visible), wantRows)
 	}
 	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/metrics", nil)
 	requireStatus(t, resp, http.StatusForbidden)

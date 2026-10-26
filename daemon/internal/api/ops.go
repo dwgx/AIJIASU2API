@@ -234,15 +234,24 @@ func (s *Server) writeFulfilmentMetrics(b *strings.Builder) {
 const defaultRequestsPageSize = 200
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
-	// A request row stores the account label it was written with, not the
-	// account id, and labels are recyclable: after B releases a label and A
-	// takes it, filtering A's rows by its current label would return B's
-	// history. There is no stable attribution in the log, so a restricted key
-	// is refused instead of served a guess. The unrestricted read is unchanged.
-	if s.denyGlobalRead(w, r, "the request log") {
-		return
-	}
 	requests := s.store.Requests()
+	// A non-admin scoped key is served its own subject only. The row's exact
+	// UserID is the attribution unit, not the recyclable account label, so the
+	// filter runs before pagination and a query naming another user is refused
+	// without revealing whether that user has rows. Operator callers keep the
+	// global log.
+	if key, ok := customerKey(r); ok {
+		userID := r.URL.Query().Get("user_id")
+		if userID == "" {
+			userID = r.URL.Query().Get("userId")
+		}
+		if userID = strings.TrimSpace(userID); userID != "" && userID != key.UserID {
+			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+				"scoped key is bound to its own userId; user_id must match it", nil)
+			return
+		}
+		requests = requestsForUser(requests, key.UserID)
+	}
 	start, end, ok := paginateWithLimit(w, r, len(requests), defaultRequestsPageSize)
 	if !ok {
 		return
