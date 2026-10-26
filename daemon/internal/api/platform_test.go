@@ -203,6 +203,48 @@ func TestUsageDateOnlyBoundsCoverFinalDay(t *testing.T) {
 	}
 }
 
+// TestUsageRestrictedScopedKeysAreForbidden pins the AJS-427 fix: the request
+// log attributes rows by account label alone and labels are not unique, so a
+// restricted key cannot be served an honest aggregate. The whole surface is
+// refused, the same rule as /v1/audit and /metrics, while admin tokens,
+// admin-scoped keys and unrestricted scoped keys keep their summary.
+func TestUsageRestrictedScopedKeysAreForbidden(t *testing.T) {
+	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
+
+	restricted := mustIssueScopedKey(t, ts, []string{"usage:read"}, []string{"acc-01"}, nil)
+	for _, path := range []string{"/v1/usage", "/v1/usage?account=acc-01"} {
+		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+		if strings.Contains(string(body), "Northwind Ops") || strings.Contains(string(body), "Field Lab") {
+			t.Fatalf("%s refused summary leaked an account label: %s", path, body)
+		}
+	}
+
+	// Labels carry no region, so a region-only restriction is the same
+	// disclosure risk and is refused too.
+	region := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, []string{"hk"})
+	resp, body := scopedCall(t, ts, region.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorCode(t, body, CodeForbidden)
+
+	// An unrestricted scoped key keeps the full summary.
+	open := mustIssueScopedKey(t, ts, []string{"usage:read"}, nil, nil)
+	resp, body = scopedCall(t, ts, open.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if summary := decodeBody[usageSummary](t, body); len(summary.Accounts) == 0 {
+		t.Fatalf("unrestricted usage summary has no account rows (body %s)", body)
+	}
+
+	// An admin-scoped key stays admin even with accountIds attached.
+	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, []string{"acc-01"}, nil)
+	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	resp, _ = apiCall(t, ts, http.MethodGet, "/v1/usage", nil)
+	requireStatus(t, resp, http.StatusOK)
+}
+
 // usageSummary mirrors the fields this test asserts; the wire type itself is
 // usage.Summary.
 type usageSummary struct {

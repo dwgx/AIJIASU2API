@@ -355,23 +355,6 @@ func (s *Server) filterAccountsForRequest(r *http.Request, accounts []model.Acco
 	return filtered
 }
 
-// visibleAccountLabels returns the account labels a restricted key may read.
-// The request log stores labels, not ids, so usage aggregation filters on this
-// set. The bool is false when the key is unrestricted.
-func (s *Server) visibleAccountLabels(r *http.Request) (map[string]struct{}, bool) {
-	ids, restricted := s.visibleAccountIDs(r)
-	if !restricted {
-		return nil, false
-	}
-	labels := make(map[string]struct{}, len(ids))
-	for _, account := range s.store.Accounts() {
-		if _, ok := ids[account.ID]; ok {
-			labels[account.Label] = struct{}{}
-		}
-	}
-	return labels, true
-}
-
 func (s *Server) handleListScopedKeys(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {

@@ -116,7 +116,8 @@ func TestScopedPlatformReadScopeMatrix(t *testing.T) {
 
 // TestScopedPlatformReadsRespectAccountRestriction pins the least-privilege
 // half of the new scopes: a key restricted to acc-01 reads its own renewal
-// state, usage rows and health rows, and is refused everywhere else.
+// state and health rows, and is refused everywhere else. Usage is refused
+// outright because its rows are attributed by label alone (AJS-427).
 func TestScopedPlatformReadsRespectAccountRestriction(t *testing.T) {
 	ts, _, sampler := newScopedPlatformServer(t)
 	for id, port := range map[string]int{"node-01": 13000, "node-04": 13003} {
@@ -140,29 +141,20 @@ func TestScopedPlatformReadsRespectAccountRestriction(t *testing.T) {
 	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/renewal/accounts/acc-unknown", nil)
 	requireStatus(t, resp, http.StatusNotFound)
 
-	// Usage: the unfiltered summary carries only the visible account's rows.
-	resp, body = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage", nil)
-	requireStatus(t, resp, http.StatusOK)
-	summary := decodeBody[usageSummary](t, body)
-	if len(summary.Accounts) == 0 {
-		t.Fatalf("restricted usage summary has no account rows (body %s)", body)
+	// Usage: the request log is attributed by account label alone and labels
+	// are not unique, so a restricted key cannot be served an honest aggregate.
+	// The whole surface is refused, with or without an account filter.
+	for _, path := range []string{
+		"/v1/usage",
+		"/v1/usage?account=acc-01",
+		"/v1/usage?account=acc-02",
+		"/v1/usage?account=Field+Lab",
+		"/v1/usage?account=nobody",
+	} {
+		resp, body = scopedCall(t, ts, created.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
 	}
-	for _, account := range summary.Accounts {
-		if account.Account != "Northwind Ops" {
-			t.Fatalf("restricted usage summary leaked account %q", account.Account)
-		}
-	}
-	// An explicit filter outside the key is refused by id and by label.
-	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage?account=acc-01", nil)
-	requireStatus(t, resp, http.StatusOK)
-	resp, body = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage?account=acc-02", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	requireErrorCode(t, body, CodeForbidden)
-	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage?account=Field+Lab", nil)
-	requireStatus(t, resp, http.StatusForbidden)
-	// An unknown label is not an account, so it answers an empty summary.
-	resp, _ = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/usage?account=nobody", nil)
-	requireStatus(t, resp, http.StatusOK)
 
 	// Health: only the visible account's watched node is reported.
 	resp, body = scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/health/nodes", nil)
