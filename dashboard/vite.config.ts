@@ -5,18 +5,25 @@ import { defineConfig } from 'vitest/config'
 /**
  * Production build guard and build manifest.
  *
- * `VITE_USE_MOCK` is mock-first: anything except the exact string "false"
- * selects the in-browser demo data. That default is useful for development
- * but dangerous for a release, so every build records its resolved mode in
- * `ajs-build.json`. `deploy/production/build-bundles.sh` and
- * `deploy/package.sh` refuse to package a bundle whose manifest is not
- * `mode: live`, `mock: false`, `panelToken: false`; the production kit recipe
- * additionally requires `apiBase: ""` (same origin).
+ * `VITE_USE_MOCK` is mock-first at runtime: anything except the exact string
+ * "false" selects the in-browser demo data. That default is useful for `vite`
+ * dev and Vitest, but it must never reach a release artifact, so a build fails
+ * closed unless it is either an explicit demo (`--mode mock`, the
+ * `npm run build:mock` recipe) or a live build (`VITE_USE_MOCK=false`, the
+ * `npm run build` release path). A bare `npm run build` therefore exits
+ * non-zero before any asset is written instead of silently emitting the demo.
  *
- * A non-empty VITE_PANEL_TOKEN is a build error: Vite inlines every VITE_*
- * value into public JavaScript, so a token-bearing bundle must never exist.
+ * Every successful build records its resolved mode in `ajs-build.json`.
+ * `deploy/production/build-bundles.sh` and `deploy/package.sh` refuse to
+ * package a bundle whose manifest is not `mode: live`, `mock: false`,
+ * `panelToken: false`; the production kit recipe additionally requires
+ * `apiBase: ""` (same origin).
+ *
+ * A non-empty VITE_PANEL_TOKEN is a build error in every mode: Vite inlines
+ * every VITE_* value into public JavaScript, so a token-bearing bundle must
+ * never exist.
  */
-function productionBuildGuard(env: Record<string, string>): Plugin {
+function productionBuildGuard(mode: string, env: Record<string, string>): Plugin {
   return {
     name: 'ajs-production-build-guard',
     apply: 'build',
@@ -24,6 +31,12 @@ function productionBuildGuard(env: Record<string, string>): Plugin {
       if (env.VITE_PANEL_TOKEN) {
         throw new Error(
           'VITE_PANEL_TOKEN is set for a bundle build; Vite would inline the admin bearer into public JavaScript. Unset it and let nginx inject the bearer.',
+        )
+      }
+      if (mode !== 'mock' && env.VITE_USE_MOCK !== 'false') {
+        throw new Error(
+          `Refusing a demo bundle: a ${mode} build requires VITE_USE_MOCK=false. ` +
+            'Run `VITE_USE_MOCK=false npm run build` for a live bundle, or `npm run build:mock` for the in-browser demo.',
         )
       }
     },
@@ -48,7 +61,7 @@ function productionBuildGuard(env: Record<string, string>): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '')
   return {
-    plugins: [react(), productionBuildGuard(env)],
+    plugins: [react(), productionBuildGuard(mode, env)],
     server: {
       host: '127.0.0.1',
       port: 5173,

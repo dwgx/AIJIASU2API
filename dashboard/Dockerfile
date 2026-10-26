@@ -15,7 +15,8 @@ COPY tests ./tests
 # Vite inlines every VITE_* value into public JavaScript, so VITE_PANEL_TOKEN
 # is deliberately not a build argument. The mock console is a development
 # mode (`npm run dev`, or dashboard/compose.yml with the explicit
-# AJS_ALLOW_MOCK_BUILD=true opt-in), not a release artifact.
+# AJS_ALLOW_MOCK_BUILD=true opt-in, which builds through `npm run build:mock`),
+# not a release artifact.
 ARG VITE_USE_MOCK=false
 ARG VITE_API_BASE=
 ARG AJS_ALLOW_MOCK_BUILD=false
@@ -26,7 +27,7 @@ RUN if [ "$VITE_USE_MOCK" != "false" ] && [ "$AJS_ALLOW_MOCK_BUILD" != "true" ];
       echo "dashboard image refuses a mock build; set VITE_USE_MOCK=false (release) or AJS_ALLOW_MOCK_BUILD=true (local demo only)" >&2; \
       exit 1; \
     fi \
- && npm run build
+ && if [ "$VITE_USE_MOCK" = "false" ]; then npm run build; else npm run build:mock; fi
 
 FROM nginx:1.29-alpine AS runtime
 

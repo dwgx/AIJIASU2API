@@ -2,10 +2,11 @@
 
 Operator dashboard for `ajs-accountd` — accounts, nodes, leases, orders and plans, the device pool,
 users, usage, request telemetry, the audit trail, schedules, webhook receivers, gate health and a
-read-only Lab instrument in one graphite-and-mint APC surface. **Mock-first:** the default build runs on
-deterministic in-memory data and never contacts AJiaSu, a vendor binary or a live daemon. A live
-mode against the local `ajs-accountd` skeleton is also built and verified; it is opt-in through
-build-time environment variables (see [Modes](#modes) and [Live mode](#live-mode)).
+read-only Lab instrument in one graphite-and-mint APC surface. **Mock-first:** `npm run dev` and
+`npm run build:mock` run on deterministic in-memory data and never contact AJiaSu, a vendor binary
+or a live daemon. A live mode against the local `ajs-accountd` skeleton is also built and verified;
+it is the release path (`VITE_USE_MOCK=false npm run build`), and a bare `npm run build` fails
+closed instead of emitting the demo (see [Modes](#modes) and [Live mode](#live-mode)).
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
@@ -21,8 +22,11 @@ The mode is fixed at build time; there is no runtime switch.
 
 | Mode | Build trigger | Data source | Reset |
 |---|---|---|---|
-| Mock (default) | `VITE_USE_MOCK` unset or `true` | deterministic in-browser store (`src/lib/mock.ts`), seeded on page load | **Settings → Reset dataset**, or a full reload |
-| Live | `VITE_USE_MOCK=false` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` must be unset (the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
+| Mock | `npm run dev`, or `npm run build:mock` (`vite build --mode mock`) | deterministic in-browser store (`src/lib/mock.ts`), seeded on page load | **Settings → Reset dataset**, or a full reload |
+| Live | `VITE_USE_MOCK=false npm run build` plus `VITE_API_BASE`; `VITE_PANEL_TOKEN` must be unset (the runtime token gate asks on 401) | `ajs-accountd` over HTTP under `/v1/...` | not offered; the reset card is not rendered |
+
+`vite build --mode mock` is the only demo recipe: every other build mode fails closed unless
+`VITE_USE_MOCK=false`, so a bare `npm run build` exits non-zero without writing `dist/`.
 
 The shell reports the active mode with the topbar pill (`mock data` or `live API`); the sidebar
 shows the APC mark, the full name and the language/theme controls, and a desktop toggle collapses
@@ -73,15 +77,17 @@ The console ships in English and Chinese. Both switches are always visible:
 
 ```bash
 npm ci             # installs exactly the committed package-lock.json
-npm run dev        # http://127.0.0.1:5173
-npm run build      # tsc -b && vite build → dist/ (mock mode unless VITE_USE_MOCK=false)
+npm run dev        # http://127.0.0.1:5173 (mock data)
+npm run build:mock # tsc -b && vite build --mode mock → dist/ demo console
+VITE_USE_MOCK=false npm run build   # tsc -b && vite build → dist/ live bundle
 npm run preview    # http://127.0.0.1:4173, serves dist/
 npm test           # Vitest, 480 tests in 54 files
 npm run typecheck  # tsc -b
 ```
 
-Node 24 / npm 11 is the reference toolchain. `VITE_USE_MOCK` defaults to `true`; the default build
-needs no backend for any page.
+Node 24 / npm 11 is the reference toolchain. `VITE_USE_MOCK` is mock-first at runtime, so
+`npm run dev` and the demo build need no backend for any page; a production `npm run build`
+requires `VITE_USE_MOCK=false` and otherwise fails closed.
 
 ## Live mode
 
@@ -699,6 +705,9 @@ which varies per session (`claimed=10.98.206.1` on the current run, `10.78.248.1
 run), so it renders `match:false` (verified vs claimed).
 
 ## Verification (recorded 2026-10-23)
+
+These records predate the fail-closed build guard (2026-10-27): the mock builds below ran as bare
+`npm run build` then, while the demo recipe today is `npm run build:mock`.
 
 Build and test were executed on the HMC build host, not on the Windows product tree:
 
@@ -1368,15 +1377,15 @@ authoritative.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VITE_USE_MOCK` | `true` | Use the deterministic in-browser store |
+| `VITE_USE_MOCK` | `true` (dev/test) | Use the deterministic in-browser store; a production build requires `false` |
 | `VITE_API_BASE` | empty (same origin) | Base URL for `ajs-accountd` |
 | `VITE_PANEL_TOKEN` | unset | Must stay unset: the build aborts if it is set |
 
 **Security note:** a Vite `VITE_*` value is embedded in the client bundle. `vite.config.ts`
 refuses any bundle build with `VITE_PANEL_TOKEN` set, because that would ship the shared admin
 bearer to every browser. The runtime token gate keeps a token in `sessionStorage` per tab
-instead, and production should still terminate auth in a BFF or reverse proxy. The default build
-remains mock-only and embeds no token.
+instead, and production should still terminate auth in a BFF or reverse proxy. The demo build
+(`npm run build:mock`) embeds no token, and a release build requires `VITE_USE_MOCK=false`.
 
 Every unsafe live request also sends `X-AJS-CSRF: 1`. The daemon requires that non-simple header
 on admin mutations and, when the browser supplies `Origin`, validates it exactly against

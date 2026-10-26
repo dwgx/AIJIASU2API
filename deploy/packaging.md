@@ -76,12 +76,14 @@ with the exact `npm ci`/build command instead of installing dependencies implici
 
 ## Mock-mode guard
 
-`VITE_USE_MOCK` is mock-first: anything except the exact string `false` selects the in-browser
-demo data. Every build therefore emits `ajs-build.json`, and both
-`deploy/production/build-bundles.sh` and `deploy/package.sh` refuse a bundle whose manifest is
-not `mode: live`, `mock: false`, `panelToken: false`. `deploy/package.sh --build-dashboard`
-always uses the single live recipe. A `VITE_PANEL_TOKEN` value in the build environment aborts
-the build in `vite.config.ts`: Vite would inline the bearer into public JavaScript.
+`VITE_USE_MOCK` is mock-first at runtime: anything except the exact string `false` selects the
+in-browser demo data. A production build therefore fails closed unless `VITE_USE_MOCK=false`;
+the only demo recipe is `npm run build:mock` (`vite build --mode mock`). Every successful build
+emits `ajs-build.json`, and both `deploy/production/build-bundles.sh` and `deploy/package.sh`
+refuse a bundle whose manifest is not `mode: live`, `mock: false`, `panelToken: false`.
+`deploy/package.sh --build-dashboard` always uses the single live recipe. A `VITE_PANEL_TOKEN`
+value in the build environment aborts the build in `vite.config.ts`: Vite would inline the bearer
+into public JavaScript.
 
 ## Build flags and reproducibility
 
@@ -307,9 +309,10 @@ python3 -m http.server 18081 --bind 127.0.0.1
 location / { try_files $uri $uri/ /index.html; }
 ```
 
-The bundle mode is fixed at build time. A plain `npm run build` produces the mock console; it
-needs no daemon and contacts no network, but it is not packageable as a release artifact. For a
-live bundle use the single production recipe:
+The bundle mode is fixed at build time. A demo build (`npm run build:mock`) produces the mock
+console; it needs no daemon and contacts no network, but it is not packageable as a release
+artifact. A plain `npm run build` fails closed unless `VITE_USE_MOCK=false`. For a live bundle use
+the single production recipe:
 
 ```bash
 bash deploy/production/build-bundles.sh --out /tmp/ajs-bundles

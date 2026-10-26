@@ -72,8 +72,10 @@ Then edit `.env`:
 - `AJS_TLS_CERT` / `AJS_TLS_KEY` / `AJS_TLS_LISTEN` — optional HTTPS admin listener. Leave them
   empty to keep the plaintext loopback listener only; see
   [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276).
-- `VITE_USE_MOCK` — `false` (default) builds the dashboard in live mode against `VITE_API_BASE`.
-  `true` is refused by the dashboard image; use `npm run dev` for the mock console.
+- `VITE_USE_MOCK` — `false` (default) builds the dashboard in live mode against `VITE_API_BASE`;
+  a bare `npm run build` without it fails closed. `true` is refused by the release image unless the
+  explicit `AJS_ALLOW_MOCK_BUILD=true` local-demo opt-in is set, which builds with
+  `npm run build:mock`; use `npm run dev` for the mock console.
 - `VITE_PANEL_TOKEN` — deliberately not a build argument. A `VITE_*` token would be readable by
   anyone who can fetch the bundle; the image build fails if it is set.
 - `RESIN_ADMIN_TOKEN` / `RESIN_PROXY_TOKEN` — Resin admin and SOCKS5 credentials, resin profile only.
@@ -493,7 +495,9 @@ Image tags and IDs from `docker images`:
 
 The dashboard build fails if `VITE_PANEL_TOKEN` is set: a Vite `VITE_*` value is compiled into
 public JavaScript, and the production image is token-free. A mock build (`VITE_USE_MOCK=true`)
-is refused for the same reason — the mock console is a development mode, not a release image.
+is refused for the same reason unless the explicit `AJS_ALLOW_MOCK_BUILD=true` local-demo opt-in
+is set, which builds through `npm run build:mock` — the mock console is a development mode, not a
+release image.
 
 Accountd image metadata (`docker image inspect ajs-accountd:test`):
 
@@ -538,11 +542,12 @@ dashboard_root=200
 dashboard_spa_fallback=200
 ```
 
-Build-mode guard check: `VITE_PANEL_TOKEN=local-test-token npm run build` exits 1 before Vite
-starts, and a plain `npm run build` emits `ajs-build.json` with `mode: mock`. A live build
-(`VITE_USE_MOCK=false`) emits `mode: live`, `mock: false`, `panelToken: false`. (The literal
-`127.0.0.1:2261` exists in both because the UI prints it as static text in `Sidebar.tsx` and
-`Settings.tsx`.)
+Build-mode guard check (re-verified 2026-10-27): `VITE_PANEL_TOKEN=local-test-token npm run build`
+exits 1 before Vite starts, and a bare `npm run build` (no `VITE_USE_MOCK=false`) also exits 1
+without emitting `dist/`. The demo recipe is `npm run build:mock` (`ajs-build.json` with
+`mode: mock`); a live build (`VITE_USE_MOCK=false`) emits `mode: live`, `mock: false`,
+`panelToken: false`. (The literal `127.0.0.1:2261` exists in both because the UI prints it as
+static text in `Sidebar.tsx` and `Settings.tsx`.)
 
 The compose `dashboard` service itself was built but not started, because the standalone dashboard
 container owns `127.0.0.1:18081` on HMC; see the port-collision note above. The compose `accountd`

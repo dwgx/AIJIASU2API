@@ -317,10 +317,12 @@ VITE_PANEL_TOKEN=       # deliberately empty
 ```
 
 The build requires `dashboard/package-lock.json` and a `node_modules` tree
-installed with `npm ci`. Every build emits `dist/ajs-build.json`; the script
-refuses to copy a bundle unless the manifest says `mode: live`, `mock: false`,
-`panelToken: false` and an empty `apiBase`. A plain `npm run build` is mock
-mode and cannot be packaged.
+installed with `npm ci`. Every successful build emits `dist/ajs-build.json`; the
+script refuses to copy a bundle unless the manifest says `mode: live`,
+`mock: false`, `panelToken: false` and an empty `apiBase`. A plain
+`npm run build` fails closed and writes no `dist/`. `npm run build:mock` is the
+explicit demo recipe and is never packageable. The live build is
+`VITE_USE_MOCK=false npm run build`.
 
 A Vite `VITE_*` value is compiled into public JavaScript. Shipping
 `VITE_PANEL_TOKEN` would hand the admin bearer to every customer who opens
@@ -641,8 +643,9 @@ requirement.
   with an empty npm cache (206 packages installed). `build-bundles.sh` was
   exercised against `dashboard/`; it produced `mode: live`, `mock: false`,
   `panelToken: false`, `apiBase: ""` and the portal/admin copies are
-  byte-identical by design. A plain `npm run build` produced `mode: mock`;
-  `deploy/package.sh` refused it.
+  byte-identical by design. Pre-guard (2026-10-27), a plain `npm run build`
+  produced `mode: mock`; `deploy/package.sh` refused it. Today's demo recipe is
+  `npm run build:mock`.
 - `deploy/package.sh --build-dashboard` packaged a live bundle and all six
   release files; `MANIFEST.txt` records `dashboard_mode: live` and the
   `ajs-build.json` digest. All five SHA-256 entries verified.
