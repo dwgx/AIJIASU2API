@@ -96,6 +96,32 @@ skip() {
 }
 section() { printf '\n== %s ==\n' "$*"; }
 
+# Prove a file is readable by a specific identity. Root bypasses permission
+# checks, so a mode/owner assertion alone cannot show that the service user can
+# open the file: this drops to the uid/gid and clears supplementary groups.
+# Returns 0 when readable, 1 when the identity is denied, 2 when this host
+# offers no way to switch identity (the caller decides skip vs required FAIL).
+identity_can_read() {
+    local file=$1 user=$2 group=$3 uid gid
+    gid=$(getent group "$group" 2>/dev/null | cut -d: -f3)
+    uid=$(id -u "$user" 2>/dev/null)
+    [ -n "$gid" ] && [ -n "$uid" ] || return 2
+    if command -v setpriv >/dev/null 2>&1; then
+        setpriv --reuid="$uid" --regid="$gid" --clear-groups -- \
+            sh -c 'test -r "$1" && head -c 1 "$1" >/dev/null' sh "$file" 2>/dev/null && return 0
+        return 1
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- sh -c 'test -r "$1" && head -c 1 "$1" >/dev/null' sh "$file" 2>/dev/null && return 0
+        return 1
+    fi
+    if command -v su >/dev/null 2>&1; then
+        su -s /bin/sh -c "test -r '$file' && head -c 1 '$file' >/dev/null" "$user" 2>/dev/null && return 0
+        return 1
+    fi
+    return 2
+}
+
 printf 'check: mode=%s\n' "$mode"
 
 # ---------------------------------------------------------------------------
@@ -276,10 +302,15 @@ section "nginx configuration (nginx -t)"
 nginx_tmp=""
 auth_tmp=""
 htpasswd_tmp=""
+unit_tmp=""
+rbac_tmp=""
 cleanup() {
     [ -n "$nginx_tmp" ] && rm -rf "$nginx_tmp"
     [ -n "$auth_tmp" ] && rm -rf "$auth_tmp"
     [ -n "$htpasswd_tmp" ] && rm -rf "$htpasswd_tmp"
+    [ -n "$unit_tmp" ] && rm -rf "$unit_tmp"
+    [ -n "$rbac_tmp" ] && rm -rf "$rbac_tmp"
+    return 0
 }
 trap cleanup 0 HUP INT TERM
 
@@ -970,6 +1001,11 @@ if command -v systemd-analyze >/dev/null 2>&1; then
             fail "systemd-analyze verify: $(tr '\n' ' ' < "$unit_tmp/out" | cut -c1-500)"
         fi
         rm -rf "$unit_tmp"
+        unit_tmp=""
+    else
+        # A production gate must never omit a required check: without a
+        # directory the unit is not verified, so this is a FAIL, not a skip.
+        fail "cannot create a temporary directory for systemd-analyze verify"
     fi
 else
     skip "systemd-analyze not installed; unit syntax not verified"
@@ -1141,6 +1177,13 @@ fi
 section "AJS-412 production renderer"
 # TestAJS412ProductionRenderer (shell acceptance): valid inventory produces
 # separate Basic/bearer/hash artifacts; no plaintext reaches the daemon file.
+# The daemon opens the hash file as the unit's User=/Group=, so the proof uses
+# that identity: root:root 0640 passes a mode-only assertion and still leaves
+# strict RBAC unable to read the hashes.
+daemon_user=$(sed -n 's/^[[:space:]]*User=//p' "$kit/systemd/ajs-accountd.service" 2>/dev/null | sed -n '1p')
+daemon_group=$(sed -n 's/^[[:space:]]*Group=//p' "$kit/systemd/ajs-accountd.service" 2>/dev/null | sed -n '1p')
+[ -n "$daemon_user" ] || daemon_user=ajs
+[ -n "$daemon_group" ] || daemon_group=$daemon_user
 if [ "$(id -u)" -ne 0 ]; then
     if [ "$mode" = production ]; then
         fail "TestAJS412ProductionRenderer: root is required for the ownership assertion (run with sudo -E)"
@@ -1149,55 +1192,78 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 elif ! command -v openssl >/dev/null 2>&1 || ! command -v getent >/dev/null 2>&1; then
     skip "TestAJS412ProductionRenderer needs openssl and getent"
+elif ! getent group "$daemon_group" >/dev/null 2>&1; then
+    skip "TestAJS412ProductionRenderer: daemon group '$daemon_group' does not exist, so the hash file cannot be proven readable"
+elif ! id -u "$daemon_user" >/dev/null 2>&1; then
+    skip "TestAJS412ProductionRenderer: daemon user '$daemon_user' does not exist, so the hash file cannot be proven readable"
 else
-    rbac_tmp=$(mktemp -d)
-    chmod 0711 "$rbac_tmp"
-    rbac_token=$(openssl rand -hex 32)
-    rbac_digest=$(printf '%s' "$rbac_token" | openssl dgst -sha256 -r | awk '{print $1}')
-    printf 'alice:viewer:%s:alice-runtime-password\n' "$rbac_token" > "$rbac_tmp/inventory"
-    chmod 0600 "$rbac_tmp/inventory"
-    if AJS_OPERATOR_HASH_FILE="$rbac_tmp/operators.hashes" \
-       AJS_OPERATOR_MAP_FILE="$rbac_tmp/operators.map" \
-       AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
-       AJS_DAEMON_GROUP="$(id -gn)" AJS_HTPASSWD_GROUP="$(id -gn)" \
-       sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/render.log" 2>&1; then
-        if [ "$(stat -c '%a' "$rbac_tmp/operators.hashes")" = 640 ] && \
-           [ "$(stat -c '%a' "$rbac_tmp/operators.map")" = 600 ] && \
-           [ "$(stat -c '%a' "$rbac_tmp/htpasswd")" = 640 ] && \
-           grep -qx "alice:viewer:$rbac_digest" "$rbac_tmp/operators.hashes" && \
-           grep -q '\$apr1\$' "$rbac_tmp/htpasswd"; then
-            pass "TestAJS412ProductionRenderer: roles, hashes, map and ownership modes"
-        else
-            fail "TestAJS412ProductionRenderer: invalid artifacts or modes"
-        fi
-        if ! grep -q "$rbac_token" "$rbac_tmp/operators.hashes" && \
-           ! grep -q "$rbac_token" "$rbac_tmp/render.log" && \
-           ! grep -q 'alice-runtime-password' "$rbac_tmp/render.log"; then
-            pass "TestAJS412ProductionRenderer: daemon hashes and log contain no plaintext"
-        else
-            fail "TestAJS412ProductionRenderer: plaintext token/password leaked"
-        fi
-        # Two hashes may overlap during rotation, but nginx must have exactly
-        # one current key for the person, not a duplicate-key syntax error.
-        next_token=$(openssl rand -hex 32)
-        printf 'alice:viewer:%s:alice-runtime-password\nalice:viewer:%s:alice-runtime-password\n' "$rbac_token" "$next_token" > "$rbac_tmp/inventory"
+    rbac_tmp=$(mktemp -d) || rbac_tmp=""
+    if [ -z "$rbac_tmp" ]; then
+        fail "cannot create a temporary directory for the AJS-412 renderer proof"
+    else
+        chmod 0711 "$rbac_tmp"
+        rbac_token=$(openssl rand -hex 32)
+        rbac_digest=$(printf '%s' "$rbac_token" | openssl dgst -sha256 -r | awk '{print $1}')
+        printf 'alice:viewer:%s:alice-runtime-password\n' "$rbac_token" > "$rbac_tmp/inventory"
+        chmod 0600 "$rbac_tmp/inventory"
         if AJS_OPERATOR_HASH_FILE="$rbac_tmp/operators.hashes" \
            AJS_OPERATOR_MAP_FILE="$rbac_tmp/operators.map" \
            AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
-           AJS_DAEMON_GROUP="$(id -gn)" AJS_HTPASSWD_GROUP="$(id -gn)" \
-           sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/rotate.log" 2>&1 && \
-           [ "$(wc -l < "$rbac_tmp/operators.hashes")" -eq 2 ] && \
-           [ "$(wc -l < "$rbac_tmp/operators.map")" -eq 1 ] && \
-           [ "$(wc -l < "$rbac_tmp/htpasswd")" -eq 1 ] && \
-           grep -q "$next_token" "$rbac_tmp/operators.map"; then
-            pass "TestAJS412ProductionRenderer: two-generation rotation has one current nginx token"
+           AJS_DAEMON_GROUP="$daemon_group" AJS_HTPASSWD_GROUP="$(id -gn)" \
+           sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/render.log" 2>&1; then
+            # Keep the fixture directory traversable by the daemon identity so
+            # this proof isolates the hash file's own group bits from the
+            # parent-directory question.
+            chmod 0711 "$rbac_tmp"
+            rbac_hash_stat=$(stat -c '%U:%G %a' "$rbac_tmp/operators.hashes" 2>/dev/null)
+            if [ "$(stat -c '%a' "$rbac_tmp/operators.hashes")" = 640 ] && \
+               [ "$(stat -c '%U' "$rbac_tmp/operators.hashes")" = root ] && \
+               [ "$(stat -c '%G' "$rbac_tmp/operators.hashes")" = "$daemon_group" ] && \
+               [ "$(stat -c '%a' "$rbac_tmp/operators.map")" = 600 ] && \
+               [ "$(stat -c '%a' "$rbac_tmp/htpasswd")" = 640 ] && \
+               grep -qx "alice:viewer:$rbac_digest" "$rbac_tmp/operators.hashes" && \
+               grep -q '\$apr1\$' "$rbac_tmp/htpasswd"; then
+                pass "TestAJS412ProductionRenderer: roles, hashes, map and root:$daemon_group 0640 ownership"
+            else
+                fail "TestAJS412ProductionRenderer: invalid artifacts, modes or ownership (${rbac_hash_stat:-missing} on operators.hashes)"
+            fi
+            rbac_read_rc=0
+            identity_can_read "$rbac_tmp/operators.hashes" "$daemon_user" "$daemon_group" || rbac_read_rc=$?
+            case $rbac_read_rc in
+                0) pass "TestAJS412ProductionRenderer: daemon identity $daemon_user:$daemon_group can read the hash file" ;;
+                2) skip "TestAJS412ProductionRenderer: cannot switch to $daemon_user:$daemon_group on this host, so hash-file readability is unproven" ;;
+                *) fail "TestAJS412ProductionRenderer: daemon identity $daemon_user:$daemon_group cannot read the hash file (${rbac_hash_stat:-missing})" ;;
+            esac
+            if ! grep -q "$rbac_token" "$rbac_tmp/operators.hashes" && \
+               ! grep -q "$rbac_token" "$rbac_tmp/render.log" && \
+               ! grep -q 'alice-runtime-password' "$rbac_tmp/render.log"; then
+                pass "TestAJS412ProductionRenderer: daemon hashes and log contain no plaintext"
+            else
+                fail "TestAJS412ProductionRenderer: plaintext token/password leaked"
+            fi
+            # Two hashes may overlap during rotation, but nginx must have exactly
+            # one current key for the person, not a duplicate-key syntax error.
+            next_token=$(openssl rand -hex 32)
+            printf 'alice:viewer:%s:alice-runtime-password\nalice:viewer:%s:alice-runtime-password\n' "$rbac_token" "$next_token" > "$rbac_tmp/inventory"
+            if AJS_OPERATOR_HASH_FILE="$rbac_tmp/operators.hashes" \
+               AJS_OPERATOR_MAP_FILE="$rbac_tmp/operators.map" \
+               AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
+               AJS_DAEMON_GROUP="$daemon_group" AJS_HTPASSWD_GROUP="$(id -gn)" \
+               sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/rotate.log" 2>&1 && \
+               [ "$(wc -l < "$rbac_tmp/operators.hashes")" -eq 2 ] && \
+               [ "$(wc -l < "$rbac_tmp/operators.map")" -eq 1 ] && \
+               [ "$(wc -l < "$rbac_tmp/htpasswd")" -eq 1 ] && \
+               grep -q "$next_token" "$rbac_tmp/operators.map"; then
+                pass "TestAJS412ProductionRenderer: two-generation rotation has one current nginx token"
+            else
+                fail "TestAJS412ProductionRenderer: two-generation rendering failed"
+            fi
         else
-            fail "TestAJS412ProductionRenderer: two-generation rendering failed"
+            fail "TestAJS412ProductionRenderer: $(tr '\n' ' ' < "$rbac_tmp/render.log" | cut -c1-300)"
         fi
-    else
-        fail "TestAJS412ProductionRenderer: $(tr '\n' ' ' < "$rbac_tmp/render.log" | cut -c1-300)"
+        rm -rf "$rbac_tmp"
+        rbac_tmp=""
     fi
-    rm -rf "$rbac_tmp"
 fi
 
 # ---------------------------------------------------------------------------

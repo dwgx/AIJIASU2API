@@ -79,6 +79,19 @@ jobs:
       - name: Verify lockfile metadata
         run: npm run verify:lockfile
 
+      - name: Negative control (empty lockfile is rejected)
+        # A verifier that passes an empty package map is decoration; prove the
+        # red path here so the guard cannot regress silently.
+        run: |
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/scripts"
+          cp scripts/verify-lockfile.mjs "$tmp/scripts/"
+          printf '{"lockfileVersion":3,"packages":{}}' > "$tmp/package-lock.json"
+          if node "$tmp/scripts/verify-lockfile.mjs"; then
+            echo 'negative control failed: an empty lockfile was accepted'
+            exit 1
+          fi
+
       - name: Test
         run: npm test -- --pool=forks --maxWorkers=1
 
@@ -108,8 +121,37 @@ jobs:
         working-directory: daemon
         run: go build -o ajs-accountd ./cmd/ajs-accountd
 
+      - name: Create the daemon identity for the renderer proof
+        # deploy/production/README.md installs this user in step 1; the
+        # AJS-412 proof reads the hash file as the unit's User=/Group=.
+        run: |
+          sudo groupadd --system ajs
+          sudo useradd --system --gid ajs --no-create-home --shell /usr/sbin/nologin ajs
+
       - name: Run production gate (intentional root for ownership checks)
-        # The AJS-412 renderer proof creates root-owned 0640/0600 artifacts and
-        # proves the nginx worker can read them. Run the whole gate as root so
-        # the CI result is a real production PASS, never a non-root false PASS.
+        # The AJS-412 renderer proof creates root-owned 0640/0600 artifacts,
+        # proves the nginx worker can read them, and proves the daemon identity
+        # (User=/Group= from the unit) can read the hash file. Run the whole
+        # gate as root so the CI result is a real production PASS, never a
+        # non-root false PASS.
         run: sudo -E bash deploy/production/check.sh
+
+      - name: Negative control (broken temp dir cannot yield a PASS)
+        # The systemd unit check must fail closed. With mktemp broken the gate
+        # must print the setup FAIL and exit non-zero, never omit the check and
+        # still print PASS.
+        run: |
+          stub=$(mktemp -d)
+          printf '#!/bin/sh\nexit 1\n' > "$stub/mktemp"
+          chmod 0755 "$stub/mktemp"
+          set +e
+          sudo env PATH="$stub:$PATH" bash deploy/production/check.sh > /tmp/ajs-negative.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/ajs-negative.log
+          test "$rc" -ne 0
+          grep -qF 'FAIL  cannot create a temporary directory for systemd-analyze verify' /tmp/ajs-negative.log
+          if grep -qF 'check: PASS' /tmp/ajs-negative.log; then
+            echo 'negative control failed: the gate printed PASS without a temp dir'
+            exit 1
+          fi

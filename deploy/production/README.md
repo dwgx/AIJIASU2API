@@ -581,11 +581,14 @@ state directory.
 13. the AJS-412 production renderer acceptance: a valid inventory produces
     separate Basic/bearer/hash artifacts with the documented ownership and
     modes (`root:<nginx group>` `0640` htpasswd, `root:root` `0600` bearer
-    map, `root:<daemon group>` `0640` hash file), a two-generation rotation
-    leaves one current nginx token, and no plaintext token or password
-    reaches the daemon hash file or renderer log. The renderer creates
-    root-owned files, so this proof is why production mode must run via
-    `sudo -E`.
+    map, `root:<daemon group>` `0640` hash file), the unit's own daemon
+    identity (`User=`/`Group=`, `ajs:ajs`) is proven to read the hash file
+    rather than only asserted by mode bits, a two-generation rotation leaves
+    one current nginx token, and no plaintext token or password reaches the
+    daemon hash file or renderer log. The renderer creates root-owned files,
+    so this proof is why production mode must run via `sudo -E`. If the
+    daemon group or user does not exist, or this host cannot switch identity
+    to it, the proof is a required `FAIL`, never an omitted check.
 
 In production mode every item above is required: a missing tool is a `FAIL`
 and the summary reports the required-skip count. Production mode also refuses
@@ -630,6 +633,14 @@ requirement.
 - `nft -c` accepted the production firewall through the `unshare -Urn` fallback.
 - The firewall rule is compared textually with
   `deploy/nftables/ajs-panel.nft`; a drift fails the gate.
+
+The root-mode runs above predate the AJS-421 review follow-up, which added
+three assertions: a `systemd-analyze` setup failure is now a `FAIL` instead of
+a silently omitted check, the AJS-412 proof reads the hash file as the unit's
+daemon identity instead of only asserting mode bits, and the renderer proof
+fails closed when its temporary directory cannot be created. Re-run
+`sudo -E bash deploy/production/check.sh` on a Linux host and update this list
+before the next release.
 
 ## Limitations
 
