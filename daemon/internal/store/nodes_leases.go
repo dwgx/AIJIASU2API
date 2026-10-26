@@ -321,7 +321,7 @@ func (s *Store) DemoteNode(id string) (model.ProxyNode, []model.Lease, bool, err
 
 // DrainNode moves a node to DRAINING. In-flight flows are left untouched; this
 // skeleton has no flow scheduler yet.
-func (s *Store) DrainNode(id string) (model.ProxyNode, error) {
+func (s *Store) DrainNode(id string, actor ...string) (model.ProxyNode, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -336,7 +336,7 @@ func (s *Store) DrainNode(id string) (model.ProxyNode, error) {
 	node.State = model.NodeDraining
 	node.LastProbeAt = iso(s.now())
 	s.syncAccountCountsLocked()
-	s.addAuditLocked(model.SeverityWarn, "operator", "node.drain", node.Label,
+	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "node.drain", node.Label,
 		fmt.Sprintf("Drain requested · %d in-flight flows", node.InUse))
 	return *node, nil
 }
@@ -345,7 +345,7 @@ func (s *Store) DrainNode(id string) (model.ProxyNode, error) {
 // READY because no session is known to be alive, and a STALE node does too:
 // startup recovery closed its gate and its lease, so only a login can make it
 // LIVE again. Every other node returns LIVE.
-func (s *Store) UndrainNode(id string) (model.ProxyNode, error) {
+func (s *Store) UndrainNode(id string, actor ...string) (model.ProxyNode, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -361,7 +361,7 @@ func (s *Store) UndrainNode(id string) (model.ProxyNode, error) {
 	}
 	node.LastProbeAt = iso(s.now())
 	s.syncAccountCountsLocked()
-	s.addAuditLocked(model.SeverityInfo, "operator", "node.undrain", node.Label, "Node returned to service")
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "node.undrain", node.Label, "Node returned to service")
 	return *node, nil
 }
 
@@ -388,7 +388,7 @@ func (s *Store) ProbeNode(id string) (model.ProxyNode, error) {
 
 // RotateLease assigns the next egress IP, refreshes the TTL window and mirrors
 // the new address onto the node.
-func (s *Store) RotateLease(id string) (model.Lease, error) {
+func (s *Store) RotateLease(id string, actor ...string) (model.Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -404,7 +404,7 @@ func (s *Store) RotateLease(id string) (model.Lease, error) {
 	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 {
 		s.nodes[nodeIdx].EgressIP = lease.EgressIP
 	}
-	s.addAuditLocked(model.SeverityInfo, "operator", "lease.rotate", lease.UserName,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "lease.rotate", lease.UserName,
 		fmt.Sprintf("synthetic rotation without Resin · %s → %s", oldIP, lease.EgressIP))
 	out := *lease
 	s.normalizeLeaseLocked(&out)

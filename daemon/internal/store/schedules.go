@@ -44,7 +44,7 @@ func (s *Store) Schedule(id string) (model.Schedule, bool) {
 // CreateSchedule inserts a schedule, assigning the id and revision. The caller
 // has already validated the action, trigger and target; the store enforces the
 // structural invariants the snapshot depends on.
-func (s *Store) CreateSchedule(schedule model.Schedule) (model.Schedule, error) {
+func (s *Store) CreateSchedule(schedule model.Schedule, actor ...string) (model.Schedule, error) {
 	name := strings.TrimSpace(schedule.Name)
 	switch {
 	case name == "":
@@ -81,7 +81,7 @@ func (s *Store) CreateSchedule(schedule model.Schedule) (model.Schedule, error) 
 	schedule.UpdatedAt = now
 	schedule.Degraded = schedule.ConsecutiveFailures >= 3
 	s.schedules = append(s.schedules, cloneSchedule(schedule))
-	s.addAuditLocked(model.SeverityInfo, "operator", "schedule.created", schedule.ID,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "schedule.created", schedule.ID,
 		fmt.Sprintf("%s · %s", schedule.Name, schedule.Action), map[string]string{
 			"scheduleId": schedule.ID,
 			"action":     string(schedule.Action),
@@ -96,7 +96,7 @@ func (s *Store) CreateSchedule(schedule model.Schedule) (model.Schedule, error) 
 // UpdateSchedule applies an already-validated replacement and bumps the
 // revision. expectedRevision is the revision the caller read; a mismatch is a
 // conflict. ID, createdAt and revision are server-owned.
-func (s *Store) UpdateSchedule(next model.Schedule, expectedRevision int64) (model.Schedule, error) {
+func (s *Store) UpdateSchedule(next model.Schedule, expectedRevision int64, actor ...string) (model.Schedule, error) {
 	name := strings.TrimSpace(next.Name)
 	if name == "" {
 		return model.Schedule{}, invalidf("name is required")
@@ -130,7 +130,7 @@ func (s *Store) UpdateSchedule(next model.Schedule, expectedRevision int64) (mod
 	}
 	next.Degraded = next.ConsecutiveFailures >= 3
 	s.schedules[idx] = cloneSchedule(next)
-	s.addAuditLocked(model.SeverityInfo, "operator", "schedule.updated", next.ID,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "schedule.updated", next.ID,
 		next.Name, map[string]string{
 			"scheduleId": next.ID,
 			"action":     string(next.Action),
@@ -165,7 +165,7 @@ func (s *Store) MutateSchedule(id string, mutate func(*model.Schedule)) (model.S
 
 // DeleteSchedule removes one schedule and writes schedule.deleted. Runs and
 // fire records stay until retention evicts them, matching the audit contract.
-func (s *Store) DeleteSchedule(id string) error {
+func (s *Store) DeleteSchedule(id string, actor ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := s.scheduleIndexLocked(id)
@@ -174,7 +174,7 @@ func (s *Store) DeleteSchedule(id string) error {
 	}
 	name := s.schedules[idx].Name
 	s.schedules = append(s.schedules[:idx], s.schedules[idx+1:]...)
-	s.addAuditLocked(model.SeverityInfo, "operator", "schedule.deleted", id, name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "schedule.deleted", id, name,
 		map[string]string{"scheduleId": id})
 	return nil
 }

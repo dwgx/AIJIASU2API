@@ -1454,7 +1454,7 @@ func BuildExportCSV(doc AccountExport) ([]byte, error) {
 // applied under one lock. A failure rolls the affected rows back and restores
 // the previous sealed envelopes; accountSeq stays advanced because burned ids
 // are safe.
-func (s *Store) ImportAccounts(plan ImportPlan) (ImportApply, error) {
+func (s *Store) ImportAccounts(plan ImportPlan, actor ...string) (ImportApply, error) {
 	if len(plan.Creates) == 0 && len(plan.Updates) == 0 {
 		return ImportApply{}, nil
 	}
@@ -1650,7 +1650,7 @@ func (s *Store) ImportAccounts(plan ImportPlan) (ImportApply, error) {
 	if len(apply.Created) > 0 || len(apply.Updated) > 0 {
 		if plan.totalRows() <= 20 {
 			for _, account := range apply.Created {
-				s.addAuditLocked(model.SeverityInfo, "operator", "account.create", account.Label,
+				s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.create", account.Label,
 					fmt.Sprintf("source=import platform=%s concurrency=%d", account.Platform, account.Concurrency))
 			}
 			for _, account := range apply.Updated {
@@ -1658,7 +1658,7 @@ func (s *Store) ImportAccounts(plan ImportPlan) (ImportApply, error) {
 				if fields == "" {
 					fields = "none"
 				}
-				s.addAuditLocked(model.SeverityInfo, "operator", "account.update", account.Label,
+				s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.update", account.Label,
 					"source=import fields: "+fields)
 			}
 		}
@@ -1666,7 +1666,7 @@ func (s *Store) ImportAccounts(plan ImportPlan) (ImportApply, error) {
 		if format == "" {
 			format = "unknown"
 		}
-		s.addAuditLocked(model.SeverityInfo, "operator", "account.import", "accounts",
+		s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.import", "accounts",
 			fmt.Sprintf("format=%s mode=%s created=%d updated=%d skipped=%d renamed=%d failed=%d dry_run=false",
 				format, plan.Mode, len(apply.Created), len(apply.Updated), plan.Skipped, plan.Renamed, plan.Failed))
 	}

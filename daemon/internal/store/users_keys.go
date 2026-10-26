@@ -17,15 +17,15 @@ import (
 )
 
 // CreateUser validates and prepends a panel identity.
-func (s *Store) CreateUser(in model.CreateUserInput) (model.PanelUser, error) {
+func (s *Store) CreateUser(in model.CreateUserInput, actor ...string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createUserLocked(in)
+	return s.createUserLocked(in, actor...)
 }
 
 // createUserLocked is CreateUser without the lock. Approval uses it to create
 // and bind the user under the same commit as the tenant activation.
-func (s *Store) createUserLocked(in model.CreateUserInput) (model.PanelUser, error) {
+func (s *Store) createUserLocked(in model.CreateUserInput, actor ...string) (model.PanelUser, error) {
 	name := strings.TrimSpace(in.Name)
 	switch {
 	case name == "":
@@ -78,13 +78,13 @@ func (s *Store) createUserLocked(in model.CreateUserInput) (model.PanelUser, err
 		CreatedAt:       iso(now),
 	}
 	s.users = append([]model.PanelUser{user}, s.users...)
-	s.addAuditLocked(model.SeverityInfo, "operator", "user.create", name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.create", name,
 		fmt.Sprintf("platform %s · sticky ttl %s", platform, stickyTTL))
 	return s.withDerivedUsage(cloneUser(user)), nil
 }
 
 // UpdateUser applies a partial identity update.
-func (s *Store) UpdateUser(id string, patch model.UserPatch) (model.PanelUser, error) {
+func (s *Store) UpdateUser(id string, patch model.UserPatch, actor ...string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -134,13 +134,13 @@ func (s *Store) UpdateUser(id string, patch model.UserPatch) (model.PanelUser, e
 		return s.withDerivedUsage(cloneUser(user)), nil
 	}
 	s.users[idx] = user
-	s.addAuditLocked(model.SeverityInfo, "operator", "user.update", user.Name, "fields: "+strings.Join(changed, ", "))
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.update", user.Name, "fields: "+strings.Join(changed, ", "))
 	return s.withDerivedUsage(cloneUser(user)), nil
 }
 
 // DeleteUser releases the user's leases, revokes their keys and removes the
 // identity. Historical request rows are retained.
-func (s *Store) DeleteUser(id string) error {
+func (s *Store) DeleteUser(id string, actor ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -178,13 +178,13 @@ func (s *Store) DeleteUser(id string) error {
 	}
 	s.users = append(s.users[:idx], s.users[idx+1:]...)
 	s.forgetUserUsageLocked(id)
-	s.addAuditLocked(model.SeverityInfo, "operator", "user.delete", name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.delete", name,
 		fmt.Sprintf("%d leases released · %d keys revoked", leasesRemoved, keysRevoked))
 	return nil
 }
 
 // SetUserEnabled is the kill switch behind suspend and resume.
-func (s *Store) SetUserEnabled(id string, enabled bool) (model.PanelUser, error) {
+func (s *Store) SetUserEnabled(id string, enabled bool, actor ...string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -195,15 +195,15 @@ func (s *Store) SetUserEnabled(id string, enabled bool) (model.PanelUser, error)
 	user := &s.users[idx]
 	user.Enabled = enabled
 	if enabled {
-		s.addAuditLocked(model.SeverityInfo, "operator", "user.resume", user.Name, "Kill switch released")
+		s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.resume", user.Name, "Kill switch released")
 	} else {
-		s.addAuditLocked(model.SeverityWarn, "operator", "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
+		s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
 	}
 	return s.withDerivedUsage(cloneUser(*user)), nil
 }
 
 // SetUserAllowlist replaces the user's destination allowlist.
-func (s *Store) SetUserAllowlist(id string, allowlist []string) (model.PanelUser, error) {
+func (s *Store) SetUserAllowlist(id string, allowlist []string, actor ...string) (model.PanelUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -217,21 +217,21 @@ func (s *Store) SetUserAllowlist(id string, allowlist []string) (model.PanelUser
 	}
 	user := &s.users[idx]
 	user.Allowlist = normalized
-	s.addAuditLocked(model.SeverityInfo, "operator", "user.allowlist", user.Name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.allowlist", user.Name,
 		fmt.Sprintf("%d entries", len(normalized)))
 	return s.withDerivedUsage(cloneUser(*user)), nil
 }
 
 // CreateKey issues a secret, stores only its hash and returns the secret once.
-func (s *Store) CreateKey(userID, label string) (model.APIKey, string, error) {
+func (s *Store) CreateKey(userID, label string, actor ...string) (model.APIKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createKeyLocked(userID, label)
+	return s.createKeyLocked(userID, label, actor...)
 }
 
 // createKeyLocked is CreateKey without the lock, so the portal path can apply
 // its active-key cap and issue the key under one commit.
-func (s *Store) createKeyLocked(userID, label string) (model.APIKey, string, error) {
+func (s *Store) createKeyLocked(userID, label string, actor ...string) (model.APIKey, string, error) {
 	userIdx := s.userIndexLocked(userID)
 	if userIdx < 0 {
 		return model.APIKey{}, "", notFoundf("user %q not found", userID)
@@ -263,12 +263,12 @@ func (s *Store) createKeyLocked(userID, label string) (model.APIKey, string, err
 	}
 	s.keys = append([]model.APIKey{key}, s.keys...)
 	s.keyHashes[key.ID] = hex.EncodeToString(sum[:])
-	s.addAuditLocked(model.SeverityInfo, "operator", "key.create", key.UserName, "Key prefix "+key.Prefix)
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.create", key.UserName, "Key prefix "+key.Prefix)
 	return cloneKey(key), secret, nil
 }
 
 // RevokeKey marks a key revoked. Revoking an already-revoked key is a no-op.
-func (s *Store) RevokeKey(id string) error {
+func (s *Store) RevokeKey(id string, actor ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -281,12 +281,12 @@ func (s *Store) RevokeKey(id string) error {
 		return nil
 	}
 	key.RevokedAt = ptrString(iso(s.now()))
-	s.addAuditLocked(model.SeverityInfo, "operator", "key.revoke", key.UserName, "Key prefix "+key.Prefix+" revoked")
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.revoke", key.UserName, "Key prefix "+key.Prefix+" revoked")
 	return nil
 }
 
 // CreateMutation appends a synthetic request log row for the mutation lab.
-func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, error) {
+func (s *Store) CreateMutation(in model.MutationLabInput, actor ...string) (model.RequestLog, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -335,7 +335,7 @@ func (s *Store) CreateMutation(in model.MutationLabInput) (model.RequestLog, err
 		Source:       model.SourceMutationLab,
 	}
 	s.prependRequestLocked(entry)
-	s.addAuditLocked(model.SeverityInfo, "operator", "request.mutation", node.Label,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "request.mutation", node.Label,
 		fmt.Sprintf("%s %s · %d bytes", method, target, entry.Bytes))
 	return entry, nil
 }
@@ -383,7 +383,7 @@ func (s *Store) prependRequestLocked(entry model.RequestLog) {
 }
 
 // UpdateSettings applies a validated partial settings update.
-func (s *Store) UpdateSettings(patch model.SettingsPatch) (model.PanelSettings, error) {
+func (s *Store) UpdateSettings(patch model.SettingsPatch, actor ...string) (model.PanelSettings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -439,7 +439,7 @@ func (s *Store) UpdateSettings(patch model.SettingsPatch) (model.PanelSettings, 
 		return next, nil
 	}
 	s.settings = next
-	s.addAuditLocked(model.SeverityInfo, "operator", "settings.update", "runtime", "fields: "+strings.Join(changed, ", "))
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "settings.update", "runtime", "fields: "+strings.Join(changed, ", "))
 	return next, nil
 }
 

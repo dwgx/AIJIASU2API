@@ -1662,7 +1662,7 @@ func validateDevicePassphrase(passphrase string) error {
 
 // ExportDevicePool builds the passphrase-encrypted envelope. It never writes
 // raw values anywhere except the ciphertext.
-func (s *Store) ExportDevicePool(opts DeviceExportOptions) (DeviceExportEnvelope, error) {
+func (s *Store) ExportDevicePool(opts DeviceExportOptions, actor ...string) (DeviceExportEnvelope, error) {
 	if s.deviceSealer == nil {
 		return DeviceExportEnvelope{}, devicePoolDisabled()
 	}
@@ -1763,7 +1763,7 @@ func (s *Store) ExportDevicePool(opts DeviceExportOptions) (DeviceExportEnvelope
 	envelope.Ciphertext = base64.StdEncoding.EncodeToString(ciphertext)
 
 	s.mu.Lock()
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.export", "pool",
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.export", "pool",
 		fmt.Sprintf("count=%d scope=%s sha256=%s", len(payload.Devices), scope, envelope.PayloadSHA256[:16]))
 	s.mu.Unlock()
 	return envelope, nil
@@ -1929,7 +1929,7 @@ func decodeStrictDeviceJSON(data []byte, out any) error {
 // commits an envelope. It is idempotent: re-importing the same envelope skips
 // every record. Any decrypt, format or conflict error leaves the pool
 // untouched.
-func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceImportResult, error) {
+func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions, actor ...string) (DeviceImportResult, error) {
 	if s.deviceSealer == nil {
 		return DeviceImportResult{}, devicePoolDisabled()
 	}
@@ -2235,7 +2235,7 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			if key.Index == 1 {
 				s.devices[key.AccountID] = materials[device.DeviceID].Identity
 			}
-			s.deviceAppendEventLocked(rec, "assigned", "operator",
+			s.deviceAppendEventLocked(rec, "assigned", auditActorArg(actor),
 				"source=import slot="+key.String())
 			continue
 		}
@@ -2254,7 +2254,7 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			PresentedAt:     cloneStringPtr(device.PresentedAt),
 			FirstSeenAt:     cloneStringPtr(device.FirstSeenAt), LastSeenAt: cloneStringPtr(device.LastSeenAt),
 			LoginCount: device.LoginCount, CreatedAt: material.CreatedAt, CreatedBy: "import",
-			History: []DeviceEvent{{At: now, Action: "imported", Actor: "operator", Detail: "from envelope"}},
+			History: []DeviceEvent{{At: now, Action: "imported", Actor: auditActorArg(actor), Detail: "from envelope"}},
 		}
 		if rec.State == DeviceRetired {
 			rec.RetiredAt = &now
@@ -2274,14 +2274,14 @@ func (s *Store) ImportDevicePool(data []byte, opts DeviceImportOptions) (DeviceI
 			if key.Index == 1 {
 				s.devices[key.AccountID] = material.Identity
 			}
-			s.deviceAppendEventLocked(&rec, "assigned", "operator",
+			s.deviceAppendEventLocked(&rec, "assigned", auditActorArg(actor),
 				"source=import slot="+key.String())
 		}
 		s.devicePool[rec.ID] = &rec
 		s.deviceMaterial[rec.ID] = cloneDeviceMaterial(material)
 	}
 	result.Bound = len(bindings)
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.import", "pool",
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.import", "pool",
 		fmt.Sprintf("added=%d skipped=%d bound=%d conflicts=%d dryRun=false sha256=%s",
 			result.Added, result.Skipped, result.Bound, result.Conflicts, envelope.PayloadSHA256[:16]))
 	s.mu.Unlock()
@@ -2601,7 +2601,7 @@ func deviceTupleEqual(a, b map[string]string) bool {
 
 // ReleaseDevice unbinds an assigned record. A record that has ever been
 // presented to the vendor is retired, never returned to available.
-func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
+func (s *Store) ReleaseDevice(deviceID string, actor ...string) (DeviceRecord, error) {
 	s.deviceMu.Lock()
 	defer s.deviceMu.Unlock()
 	s.mu.Lock()
@@ -2651,16 +2651,16 @@ func (s *Store) ReleaseDevice(deviceID string) (DeviceRecord, error) {
 		rec.RetiredAt = &now
 		rec.RetiredReason = "released_after_presentation"
 	}
-	s.deviceAppendEventLocked(rec, "released", "operator",
+	s.deviceAppendEventLocked(rec, "released", auditActorArg(actor),
 		"account="+label+" slot="+key.String())
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.release", rec.ID,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.release", rec.ID,
 		fmt.Sprintf("account=%s reused=%t slot=%s", label, reused, key.String()))
 	return cloneDeviceRecord(*rec), nil
 }
 
 // RetireDevice moves an unassigned or logged-out record to retired. It never
 // deletes material: restore inside the retention window still works.
-func (s *Store) RetireDevice(deviceID, reason string) (DeviceRecord, error) {
+func (s *Store) RetireDevice(deviceID, reason string, actor ...string) (DeviceRecord, error) {
 	s.deviceMu.Lock()
 	defer s.deviceMu.Unlock()
 	s.mu.Lock()
@@ -2703,13 +2703,13 @@ func (s *Store) RetireDevice(deviceID, reason string) (DeviceRecord, error) {
 	rec.State = DeviceRetired
 	rec.RetiredAt = &now
 	rec.RetiredReason = reason
-	s.deviceAppendEventLocked(rec, "retired", "operator", "reason="+reason)
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.retire", rec.ID, "reason="+reason)
+	s.deviceAppendEventLocked(rec, "retired", auditActorArg(actor), "reason="+reason)
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.retire", rec.ID, "reason="+reason)
 	return cloneDeviceRecord(*rec), nil
 }
 
 // QuarantineDevice freezes an unassigned record. It has no restore edge.
-func (s *Store) QuarantineDevice(deviceID, reason string) (DeviceRecord, error) {
+func (s *Store) QuarantineDevice(deviceID, reason string, actor ...string) (DeviceRecord, error) {
 	s.deviceMu.Lock()
 	defer s.deviceMu.Unlock()
 	s.mu.Lock()
@@ -2738,14 +2738,14 @@ func (s *Store) QuarantineDevice(deviceID, reason string) (DeviceRecord, error) 
 	rec.AssignedSlotKey = nil
 	rec.RetiredAt = nil
 	rec.RetiredReason = ""
-	s.deviceAppendEventLocked(rec, "quarantined", "operator", "reason="+reason)
-	s.addAuditLocked(model.SeverityWarn, "operator", "device.quarantine", rec.ID, "reason="+reason)
+	s.deviceAppendEventLocked(rec, "quarantined", auditActorArg(actor), "reason="+reason)
+	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "device.quarantine", rec.ID, "reason="+reason)
 	return cloneDeviceRecord(*rec), nil
 }
 
 // PurgeDevice deletes the sealed material and then the record. It is the
 // irreversible right-to-erasure path.
-func (s *Store) PurgeDevice(deviceID string) error {
+func (s *Store) PurgeDevice(deviceID string, actor ...string) error {
 	s.deviceMu.Lock()
 	defer s.deviceMu.Unlock()
 
@@ -2796,7 +2796,7 @@ func (s *Store) PurgeDevice(deviceID string) error {
 			delete(s.deviceBindings, accountID)
 		}
 	}
-	s.addAuditLocked(model.SeverityWarn, "operator", "device.purge", deviceID, "reason=purge")
+	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "device.purge", deviceID, "reason=purge")
 	return nil
 }
 

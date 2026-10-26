@@ -119,7 +119,11 @@ var routeScopes = map[string]model.Scope{
 // the router then skips scope checks.
 type authIdentity struct {
 	admin bool
-	key   model.ScopedKey
+	// operator is the proxy-authenticated admin username from X-AJS-Operator.
+	// It is empty for a bare bearer without the header and always empty for a
+	// scoped key, which has its own principal prefix.
+	operator string
+	key      model.ScopedKey
 }
 
 type authIdentityKey struct{}
@@ -354,7 +358,7 @@ func (s *Server) handleCreateScopedKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	key, secret, err := s.store.CreateScopedKey(input)
+	key, secret, err := s.store.CreateScopedKey(input, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -372,7 +376,7 @@ func (s *Server) handleGetScopedKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteScopedKey(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.RevokeScopedKey(pathParam(r, "id")); err != nil {
+	if err := s.store.RevokeScopedKey(pathParam(r, "id"), s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

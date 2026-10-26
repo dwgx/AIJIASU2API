@@ -44,16 +44,19 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 | `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the site configs |
 | `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
 | `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, portal-only routes |
-| `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, proxy-injected bearer |
+| `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, per-operator Basic auth, proxy-injected bearer |
 | `nginx/snippets/ajs-tls.conf` | shared TLS 1.2+/1.3 policy |
 | `nginx/snippets/ajs-proxy-common.conf` | `X-Forwarded-For` overwrite + trusted-proxy note |
 | `nginx/snippets/ajs-security-headers.conf` | HSTS and the other response headers |
 | `nginx/snippets/ajs-admin-token.conf.template` | template for the root-only bearer snippet |
+| `nginx/snippets/ajs-admin-operator.conf` | forwards `$remote_user` as `X-AJS-Operator` to the daemon |
 | `systemd/ajs-accountd.service` | hardened unit (`ProtectSystem=strict`, empty capability set, syscall filter) |
 | `systemd/ajs-accountd.env.example` | exact daemon environment, placeholders only |
 | `firewall/ajs-production.nft` | standalone nftables table matching the repo-owned LAN block |
 | `build-bundles.sh` | builds the live, same-origin, **token-free** portal and admin bundles from a locked `npm ci` tree and verifies `ajs-build.json` |
 | `render-admin-token.sh` | renders the nginx bearer snippet at mode 0600, never prints it |
+| `render-admin-htpasswd.sh` | renders the nginx operator htpasswd from the root-only inventory at mode 0600 |
+| `admin-operators.example` | template for the root-only `username:password` operator inventory |
 | `inventory.example.yml` | non-secret deployment inputs, validated by `check.sh` |
 | `check.sh` | the release-gate check |
 
@@ -127,12 +130,19 @@ readable by root only (mode 0600–0640, group root).
 
 ### Secrets
 
-Generate both on the host; never commit or paste them into a report:
+Generate the shared secrets on the host; never commit or paste them into a
+report:
 
 ```bash
 openssl rand -hex 32   # AJS_ADMIN_TOKEN  (also the nginx-injected bearer)
 openssl rand -hex 32   # AJS_MASTER_KEY   (AES-256-GCM account-password sealing)
 ```
+
+Operator passwords are separate, per-person secrets. They live only in the
+root-owned `/etc/ajs/admin-operators` inventory (mode 0600); the rendered
+htpasswd stores apr1 hashes. Do not reuse the shared bearer as an operator
+password, and do not share one operator entry between people — the audit trail
+can only name the username it is given.
 
 `AJS_MASTER_KEY` is optional only in the sense that without it account
 passwords are discarded; with it, losing the key makes every sealed value
@@ -224,11 +234,17 @@ sudo cp deploy/production/nginx/snippets/*.conf /etc/nginx/snippets/
 sudo cp deploy/production/nginx/sites-available/ajs-*.conf /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
-# 6. Admin bearer, root-only; never echoed
+# 6. Admin operator accounts: root-only inventory, then render the htpasswd
+sudo install -m 0600 -o root -g root \
+  deploy/production/admin-operators.example /etc/ajs/admin-operators
+sudo -e /etc/ajs/admin-operators          # replace every placeholder password
+sudo sh deploy/production/render-admin-htpasswd.sh
+
+# 7. Admin bearer, root-only; never echoed
 sudo AJS_ADMIN_TOKEN="$(grep '^AJS_ADMIN_TOKEN=' /etc/ajs/accountd.env | cut -d= -f2-)" \
   sh deploy/production/render-admin-token.sh
 
-# 7. Validate and start
+# 8. Validate and start
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -299,22 +315,45 @@ bundle is copied to both roots because the admin route code is lazy-loaded and
 dead on the portal origin; the deployment edge, not a source fork, is what
 makes the customer surface portal-only.
 
-### Admin origin: bearer injected by the proxy
+### Admin origin: per-operator Basic auth + injected bearer
 
-The admin bundle is also built without a token. `nginx/sites-available/ajs-admin.conf`
-includes `snippets/ajs-admin-token.conf` inside every `/v1/` location, which
-sets:
+The admin bundle is built without a token, and the admin vhost authenticates
+every request twice, for two different purposes:
+
+1. **Per-operator HTTP Basic auth at nginx.** `auth_basic` and
+   `auth_basic_user_file /etc/nginx/ajs-admin.htpasswd` are set at server
+   level, so the SPA, `/v1/*` and the SSE stream all require an operator
+   login. The htpasswd file is rendered from a root-only inventory; see
+   [Admin operator accounts](#admin-operator-accounts).
+2. **The shared daemon bearer, injected by nginx.** `snippets/ajs-admin-token.conf`
+   is included inside every `/v1/` location and sets:
 
 ```nginx
 proxy_set_header Authorization "Bearer <AJS_ADMIN_TOKEN>";
 ```
 
-The rendered file is root-owned `0600` and is never served, never bundled and
-never visible to a browser. `render-admin-token.sh` takes the token from the
-environment (or `/etc/ajs/admin.token`), refuses placeholders and anything
-shorter than 32 characters, and prints only the destination path.
+The rendered bearer file is root-owned `0600` and is never served, never
+bundled and never visible to a browser. `render-admin-token.sh` takes the
+token from the environment (or `/etc/ajs/admin.token`), refuses placeholders
+and anything shorter than 32 characters, and prints only the destination path.
+Basic auth does not replace it: a request that somehow reaches the daemon
+without the bearer still gets 401, and the daemon still requires
+`X-AJS-CSRF: 1` plus an exact `AJS_ADMIN_ORIGINS` match on every unsafe call.
 
-Access policy is two independent layers:
+The admin vhost also forwards the authenticated Basic username:
+
+```nginx
+proxy_set_header X-AJS-Operator $remote_user;
+```
+
+The daemon reads that header only after the bearer check succeeds and writes
+it as the audit actor on admin mutations (`user.suspend`, `backup.create`,
+`account.export`, order settlement, and the rest). A request without the
+header keeps the historical `operator` actor. The header is an audit label,
+not an authority grant: it never authenticates a request and a scoped key
+cannot use it to impersonate an operator.
+
+Access policy is three independent layers:
 
 1. **Listen address** — `127.0.0.1:8443` by default. Reach it through an SSH
    tunnel (`ssh -L 8443:127.0.0.1:8443 user@host`) or uncomment the
@@ -322,20 +361,61 @@ Access policy is two independent layers:
 2. **nginx `allow`/`deny`** — loopback plus the VPN client CIDR
    (`10.8.0.0/24` in the template), ending in `deny all;`. Requests from any
    other peer get 403 even if the listener is accidentally exposed.
+3. **Per-operator Basic auth** — every request needs a named operator entry
+   from `/etc/nginx/ajs-admin.htpasswd`. There is no anonymous admin path.
 
-The daemon adds a third layer on every unsafe admin request (`POST`, `PUT`,
-`PATCH`, `DELETE`): it requires the non-simple `X-AJS-CSRF: 1` header and, when
-an `Origin` header is present, an exact match against `AJS_ADMIN_ORIGINS`
-(`https://admin.example.com:8443` in the template). A cross-origin HTML form
-cannot set the header; a cross-origin `fetch` that tries must pass a CORS
-preflight, and the admin origin is not in `AJS_CORS_ORIGINS`. CLI and SDK
-clients omit `Origin` but must send the header. Do not strip `Origin` at the
-proxy; the shipped nginx config passes it through.
+The daemon adds the CSRF/Origin gate on every unsafe admin request (`POST`,
+`PUT`, `PATCH`, `DELETE`): it requires the non-simple `X-AJS-CSRF: 1` header
+and, when an `Origin` header is present, an exact match against
+`AJS_ADMIN_ORIGINS` (`https://admin.example.com:8443` in the template). A
+cross-origin HTML form cannot set the header; a cross-origin `fetch` that
+tries must pass a CORS preflight, and the admin origin is not in
+`AJS_CORS_ORIGINS`. CLI and SDK clients omit `Origin` but must send the
+header. Do not strip `Origin` at the proxy; the shipped nginx config passes it
+through.
 
-There is no admin login page and no per-operator identity in this kit: the
-bearer is one shared secret. Put an authenticating reverse proxy or VPN in
-front if more than one operator needs access, and rotate the token by editing
-`/etc/ajs/accountd.env` and re-running `render-admin-token.sh`.
+This is authenticated operator identity with per-user audit, **not RBAC**.
+Every operator can do everything the admin API allows; the kit has no roles,
+per-route grants or server-side session. Use separate operator usernames so
+the audit trail names a person, and keep the admin origin on loopback/VPN.
+
+#### Admin operator accounts
+
+The operator inventory is a plain-text list of `username:password` pairs,
+root-owned `0600`, never committed:
+
+```bash
+# One line per person. Passwords are plaintext only in this root-only file.
+sudo install -m 0600 -o root -g root \
+  deploy/production/admin-operators.example /etc/ajs/admin-operators
+sudo -e /etc/ajs/admin-operators
+
+# Render the nginx htpasswd (apr1 hashes, mode 0600). Secrets are not printed.
+sudo sh deploy/production/render-admin-htpasswd.sh
+
+# Validate and reload nginx; existing sessions may need to re-authenticate.
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+`render-admin-htpasswd.sh` refuses placeholder or short passwords, duplicate
+usernames and characters outside `A-Z a-z 0-9 . _ - @ +`, writes the htpasswd
+atomically with mode `0600`, and prints only the destination and operator
+count. The rendered file contains hashes, not plaintext.
+
+**Rotation.** Edit `/etc/ajs/admin-operators`, re-run
+`render-admin-htpasswd.sh`, then `nginx -t && systemctl reload nginx`.
+Removing a line revokes that operator on the next reload. Rotating the shared
+bearer is separate: edit `/etc/ajs/accountd.env`, re-run
+`render-admin-token.sh`, reload nginx and restart the daemon. A password change
+does not rotate the shared bearer, and vice versa.
+
+**127.0.0.1:8443 fallback warning.** The documented fallback
+`https://127.0.0.1:8443` still requires the Basic prompt and still goes through
+the same auth/allow/deny checks. The browser will warn about the certificate
+name mismatch because the certificate is issued for `admin.example.com`; that
+warning is expected. Do not disable TLS verification, add an `allow` rule or
+remove `auth_basic` to make the fallback quieter. For routine work, map
+`admin.example.com` to `127.0.0.1` in `/etc/hosts` and use the real name.
 
 ### `X-Forwarded-For` and the trusted-proxy note
 
@@ -397,8 +477,10 @@ curl -fsS https://panel.example.com/readyz   # daemon readiness through the edge
 # admin through an SSH tunnel
 ssh -N -L 8443:127.0.0.1:8443 user@host
 # browse https://admin.example.com:8443 (map admin.example.com to 127.0.0.1
-# in /etc/hosts, or use https://127.0.0.1:8443 and accept the name mismatch)
-# No token prompt should appear: nginx injects the bearer.
+# in /etc/hosts, or use https://127.0.0.1:8443 and accept the certificate-name
+# warning). The browser prompts for the operator username/password from
+# /etc/nginx/ajs-admin.htpasswd; the bearer is injected by nginx and never
+# reaches the browser.
 ```
 
 The daemon's state lives in `/var/lib/ajs`: `state.json` (rewritten every
@@ -432,7 +514,8 @@ state directory.
    assignments, literal `Authorization: Bearer` values, and bare 64-hex
    strings; the admin-token template must contain only `${AJS_ADMIN_TOKEN}`;
 4. a real `nginx -t` on a staged copy of both vhosts with a generated
-   self-signed certificate and a dummy 64-character token. The staged config
+   self-signed certificate, a dummy 64-character token and a throwaway
+   operator htpasswd. The staged config
    rewrites the PID file and every `*_temp_path` into the throwaway tree, so
    the gate passes as an unprivileged user on stock Debian/Ubuntu nginx
    without writing `/run/nginx.pid` or `/var/lib/nginx/*`. Because nginx -t
@@ -506,11 +589,14 @@ parser is always a failure because YAML validation is a gate requirement.
 ## Limitations
 
 - **Single host, no HA.** One nginx, one daemon, one state directory.
-- **One shared admin bearer.** No per-operator identity, roles or revocation;
-  the proxy/VPN is the only user boundary. Rotate by re-rendering the snippet
-  and restarting/reloading nginx.
-- **Admin UI is not a hardened multi-user console.** Anyone who reaches the
-  admin origin can do everything the bearer allows. Keep it loopback/VPN.
+- **Per-operator identity, not RBAC.** Basic auth names the operator and the
+  daemon writes that name into audit rows, but every operator has the full
+  admin API. There are no roles, per-route grants or server-side sessions.
+  Revoke one person by deleting their inventory line and re-rendering the
+  htpasswd; rotate the shared bearer separately. The bearer remains one
+  shared secret, so a leaked bearer is still a full-admin incident.
+- **Admin UI is not a hardened multi-user console.** Anyone with an operator
+  login can do everything the admin API allows. Keep it loopback/VPN.
 - **The portal bundle is the same JS as the admin bundle.** Only the nginx
   route surface differs; do not serve the admin origin's bundle from the
   customer origin without the terminal 404.

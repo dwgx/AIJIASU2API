@@ -451,6 +451,17 @@ func auditActor(actor string) string {
 	return "operator"
 }
 
+// auditActorArg is the optional-actor form used by the store mutations that
+// predate the admin operator identity. Existing internal callers keep the
+// historical "operator" actor; the HTTP layer passes the authenticated
+// operator as the final argument.
+func auditActorArg(actors []string) string {
+	if len(actors) > 0 {
+		return auditActor(actors[0])
+	}
+	return "operator"
+}
+
 func cloneServerStat(stat model.ServerStat) model.ServerStat {
 	if stat.LastLatencyMs != nil {
 		value := *stat.LastLatencyMs

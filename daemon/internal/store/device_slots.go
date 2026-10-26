@@ -914,7 +914,7 @@ func (s *Store) RestoreCandidatesSlot(key model.SlotKey, profileName string) ([]
 
 // RestoreDeviceSlot binds a specific retired record to one exact slot. It is
 // the operator's resolution for an ambiguous automatic match.
-func (s *Store) RestoreDeviceSlot(deviceID string, key model.SlotKey) (DeviceRecord, error) {
+func (s *Store) RestoreDeviceSlot(deviceID string, key model.SlotKey, actor ...string) (DeviceRecord, error) {
 	if !key.Valid() {
 		return DeviceRecord{}, deviceInvalidf(DeviceReasonStateInvalid, "slot key %q is invalid", key.String())
 	}
@@ -975,15 +975,15 @@ func (s *Store) RestoreDeviceSlot(deviceID string, key model.SlotKey) (DeviceRec
 	if key.Index == 1 {
 		s.devices[key.AccountID] = material.Identity
 	}
-	s.deviceAppendEventLocked(rec, "restored", "operator", "source=manual slot="+key.String())
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.restore", rec.ID,
+	s.deviceAppendEventLocked(rec, "restored", auditActorArg(actor), "source=manual slot="+key.String())
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.restore", rec.ID,
 		"account="+s.deviceAccountLabelLocked(key.AccountID)+" candidate=manual slot="+key.String())
 	return cloneDeviceRecord(*rec), nil
 }
 
 // AssignDeviceSlot binds an available record, or a retired record that
 // belongs to the same account key and slot, without marking it presented.
-func (s *Store) AssignDeviceSlot(deviceID string, key model.SlotKey) (DeviceRecord, error) {
+func (s *Store) AssignDeviceSlot(deviceID string, key model.SlotKey, actor ...string) (DeviceRecord, error) {
 	if !key.Valid() {
 		return DeviceRecord{}, deviceInvalidf(DeviceReasonStateInvalid, "slot key %q is invalid", key.String())
 	}
@@ -1068,8 +1068,8 @@ func (s *Store) AssignDeviceSlot(deviceID string, key model.SlotKey) (DeviceReco
 	if key.Index == 1 {
 		s.devices[key.AccountID] = material.Identity
 	}
-	s.deviceAppendEventLocked(rec, "assigned", "operator", "source=manual slot="+key.String())
-	s.addAuditLocked(model.SeverityInfo, "operator", "device.assign", rec.ID,
+	s.deviceAppendEventLocked(rec, "assigned", auditActorArg(actor), "source=manual slot="+key.String())
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.assign", rec.ID,
 		"account="+s.deviceAccountLabelLocked(key.AccountID)+" source=manual slot="+key.String())
 	return cloneDeviceRecord(*rec), nil
 }
@@ -1119,7 +1119,7 @@ func (s *Store) reconcileSlotBindingsLocked() {
 // retireAccountDeviceBindingsLocked retires every assigned record of an
 // account across all slots, preserving each record's slot affinity so a
 // re-added account restores the right slot. The caller holds s.mu.
-func (s *Store) retireAccountDeviceBindingsLocked(accountID, label, reason string) int {
+func (s *Store) retireAccountDeviceBindingsLocked(accountID, label, reason string, actor ...string) int {
 	if reason == "" {
 		reason = "account_deleted"
 	}
@@ -1144,8 +1144,8 @@ func (s *Store) retireAccountDeviceBindingsLocked(accountID, label, reason strin
 		rec.AssignedAt = nil
 		rec.RetiredAt = &now
 		rec.RetiredReason = reason
-		s.deviceAppendEventLocked(rec, "retired", "operator", "account delete slot="+rec.AssignedSlotKey.String())
-		s.addAuditLocked(model.SeverityInfo, "operator", "device.retire", rec.ID,
+		s.deviceAppendEventLocked(rec, "retired", auditActorArg(actor), "account delete slot="+rec.AssignedSlotKey.String())
+		s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "device.retire", rec.ID,
 			"reason="+reason+" account="+label)
 		retired++
 	}
@@ -1195,11 +1195,11 @@ func (s *Store) RestoreCandidates(accountID, profileName string) ([]RestoreCandi
 }
 
 // RestoreDevice is the account-level compatibility shim for slot 1.
-func (s *Store) RestoreDevice(deviceID, accountID string) (DeviceRecord, error) {
-	return s.RestoreDeviceSlot(deviceID, accountSlotKey(accountID))
+func (s *Store) RestoreDevice(deviceID, accountID string, actor ...string) (DeviceRecord, error) {
+	return s.RestoreDeviceSlot(deviceID, accountSlotKey(accountID), actor...)
 }
 
 // AssignDevice is the account-level compatibility shim for slot 1.
-func (s *Store) AssignDevice(deviceID, accountID string) (DeviceRecord, error) {
-	return s.AssignDeviceSlot(deviceID, accountSlotKey(accountID))
+func (s *Store) AssignDevice(deviceID, accountID string, actor ...string) (DeviceRecord, error) {
+	return s.AssignDeviceSlot(deviceID, accountSlotKey(accountID), actor...)
 }

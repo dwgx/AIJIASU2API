@@ -2570,6 +2570,14 @@ the header. The two payment provider callbacks (`/v1/payments/stripe` and
 `/v1/payments/epay/notify`) and the customer portal chain are outside this gate: the providers
 authenticate a signature over the raw body and the portal uses its per-session `X-CSRF-Token`.
 
+Admin audit identity: when the admin bearer is accepted, an optional `X-AJS-Operator` header names
+the operator. The production admin vhost performs per-operator HTTP Basic auth and forwards
+`$remote_user` in that header; the daemon writes it as the actor on admin mutation audit rows and
+as `requestedBy` on async operations. An absent, malformed or over-long value falls back to
+`operator`; a scoped key never takes an operator name from the header. The header is an audit
+label, not an authentication factor: the bearer is still required, so a direct client cannot gain
+authority by setting it.
+
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/healthz` | process status + account-state counts (liveness only) |

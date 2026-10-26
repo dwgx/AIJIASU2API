@@ -1,0 +1,18 @@
+# AJS admin operator inventory — TEMPLATE, never commit real values.
+#
+# Copy this file to /etc/ajs/admin-operators (root-owned, mode 0600), replace
+# every placeholder password, then render the nginx htpasswd file:
+#
+#   sudo sh deploy/production/render-admin-htpasswd.sh
+#
+# Format: one `username:password` pair per line. Blank lines and lines whose
+# first non-space character is `#` are ignored. The username becomes the HTTP
+# Basic username and is forwarded to the daemon as X-AJS-Operator, so it must
+# use only A-Z a-z 0-9 . _ - @ + and be at most 64 characters. Passwords are
+# plaintext only in this root-only inventory; the rendered htpasswd stores an
+# apr1 hash. Rotate one operator by editing this file and re-rendering.
+#
+# Keep one line per person. Do not share a username: the audit trail cannot
+# tell two people apart when they use the same operator name.
+alice:replace-me-with-a-long-unique-password
+bob:replace-me-with-another-long-unique-password

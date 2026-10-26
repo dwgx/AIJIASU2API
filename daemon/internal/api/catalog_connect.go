@@ -110,7 +110,7 @@ func (s *Server) handlePutSelection(w http.ResponseWriter, r *http.Request) {
 		s.writeCatalogError(w, err)
 		return
 	}
-	selection, err := s.store.SetSelection(id, body.ServerID, "operator")
+	selection, err := s.store.SetSelection(id, body.ServerID, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -132,7 +132,7 @@ func (s *Server) handleDeleteSelection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
 		return
 	}
-	if _, err := s.store.ClearSelection(id, "operator"); err != nil {
+	if _, err := s.store.ClearSelection(id, s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

@@ -337,7 +337,7 @@ func (s *Store) Tenant(id string) (model.Tenant, bool) {
 // CreateUserInput; the new user, the link, the status change and the audit row
 // commit under one lock, so a failed bind leaves the tenant pending and creates
 // nothing.
-func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserInput) (model.Tenant, error) {
+func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserInput, actor ...string) (model.Tenant, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	userID = strings.TrimSpace(userID)
 	if (userID == "") == (create == nil) {
@@ -359,7 +359,7 @@ func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserI
 	}
 
 	if create != nil {
-		user, err := s.createUserLocked(*create)
+		user, err := s.createUserLocked(*create, actor...)
 		if err != nil {
 			return model.Tenant{}, err
 		}
@@ -381,7 +381,7 @@ func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserI
 	rec.Status = model.TenantActive
 	rec.ApprovedAt = ptrString(now)
 	rec.SuspendedAt = nil
-	s.addAuditLocked(model.SeverityInfo, "admin", "tenant.approve", rec.Email,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "tenant.approve", rec.Email,
 		"linked user "+userID)
 	return cloneTenant(rec.Tenant), nil
 }
@@ -389,7 +389,7 @@ func (s *Store) ApproveTenant(tenantID, userID string, create *model.CreateUserI
 // SuspendTenant disables the linked user and revokes every session and API key
 // the tenant owns in one commit. Suspending an already suspended tenant is a
 // no-op so an admin retry is safe.
-func (s *Store) SuspendTenant(id string) (model.Tenant, error) {
+func (s *Store) SuspendTenant(id string, actor ...string) (model.Tenant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := s.tenantIndexLocked(strings.TrimSpace(id))
@@ -439,14 +439,14 @@ func (s *Store) SuspendTenant(id string) (model.Tenant, error) {
 	}
 	rec.Status = model.TenantSuspended
 	rec.SuspendedAt = ptrString(now)
-	s.addAuditLocked(model.SeverityWarn, "admin", "tenant.suspend", rec.Email,
+	s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "tenant.suspend", rec.Email,
 		fmt.Sprintf("%d sessions revoked · %d keys revoked", sessionsRevoked, keysRevoked))
 	return cloneTenant(rec.Tenant), nil
 }
 
 // ResumeTenant re-enables the linked user. Keys revoked by the suspension stay
 // revoked; only a new issue restores service credentials.
-func (s *Store) ResumeTenant(id string) (model.Tenant, error) {
+func (s *Store) ResumeTenant(id string, actor ...string) (model.Tenant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := s.tenantIndexLocked(strings.TrimSpace(id))
@@ -471,7 +471,7 @@ func (s *Store) ResumeTenant(id string) (model.Tenant, error) {
 	}
 	rec.Status = model.TenantActive
 	rec.SuspendedAt = nil
-	s.addAuditLocked(model.SeverityInfo, "admin", "tenant.resume", rec.Email, "tenant reactivated")
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "tenant.resume", rec.Email, "tenant reactivated")
 	return cloneTenant(rec.Tenant), nil
 }
 

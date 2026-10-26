@@ -744,7 +744,10 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		token := strings.TrimPrefix(header, prefix)
 		if s.cfg.AdminToken != "" &&
 			subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) == 1 {
-			next.ServeHTTP(w, withAuthIdentity(r, authIdentity{admin: true}))
+			// The production admin proxy authenticates each operator with HTTP
+			// Basic auth and forwards the username here. It is an audit label,
+			// not a second credential: the bearer above is still required.
+			next.ServeHTTP(w, withAuthIdentity(r, authIdentity{admin: true, operator: requestOperator(r)}))
 			return
 		}
 		key, ok := s.store.AuthenticateScopedKey(token)

@@ -15,7 +15,7 @@ import (
 // CreateScopedKey issues a least-privilege secret, stores only its SHA-256 and
 // returns the secret once. The account and region lists restrict reads; an
 // empty list means unrestricted.
-func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest) (model.ScopedKey, string, error) {
+func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string) (model.ScopedKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -79,7 +79,7 @@ func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest) (model.ScopedKe
 	}
 	s.scopedKeys = append([]model.ScopedKey{key}, s.scopedKeys...)
 	s.scopedKeyHashes[key.ID] = hex.EncodeToString(sum[:])
-	s.addAuditLocked(model.SeverityInfo, "operator", "key.create", key.UserName,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.create", key.UserName,
 		"Scoped key prefix "+key.Prefix)
 	return cloneScopedKey(key), secret, nil
 }
@@ -108,7 +108,7 @@ func (s *Store) ScopedKey(id string) (model.ScopedKey, bool) {
 
 // RevokeScopedKey marks a scoped key revoked. Revoking an already-revoked key
 // is a no-op so DELETE stays idempotent.
-func (s *Store) RevokeScopedKey(id string) error {
+func (s *Store) RevokeScopedKey(id string, actor ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -121,7 +121,7 @@ func (s *Store) RevokeScopedKey(id string) error {
 		return nil
 	}
 	key.RevokedAt = ptrString(iso(s.now()))
-	s.addAuditLocked(model.SeverityInfo, "operator", "key.revoke", key.UserName,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "key.revoke", key.UserName,
 		"Scoped key prefix "+key.Prefix+" revoked")
 	return nil
 }

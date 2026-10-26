@@ -38,7 +38,7 @@ func (s *Server) handleApproveTenant(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	tenant, err := s.store.ApproveTenant(pathParam(r, "id"), in.UserID, in.User)
+	tenant, err := s.store.ApproveTenant(pathParam(r, "id"), in.UserID, in.User, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -49,7 +49,7 @@ func (s *Server) handleApproveTenant(w http.ResponseWriter, r *http.Request) {
 // handleSuspendTenant disables the linked user and revokes the tenant's
 // sessions and keys in one commit.
 func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
-	tenant, err := s.store.SuspendTenant(pathParam(r, "id"))
+	tenant, err := s.store.SuspendTenant(pathParam(r, "id"), s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -60,7 +60,7 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 // handleResumeTenant re-enables the linked user. Keys revoked by the
 // suspension stay revoked.
 func (s *Server) handleResumeTenant(w http.ResponseWriter, r *http.Request) {
-	tenant, err := s.store.ResumeTenant(pathParam(r, "id"))
+	tenant, err := s.store.ResumeTenant(pathParam(r, "id"), s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

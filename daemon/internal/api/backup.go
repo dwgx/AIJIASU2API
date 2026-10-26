@@ -193,7 +193,7 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.RecordAudit(model.SeverityInfo, "operator", "backup.create", "backup",
+	s.store.RecordAudit(model.SeverityInfo, s.auditActor(r), "backup.create", "backup",
 		fmt.Sprintf("blobs=%d bytes=%d", len(manifest.Entries), len(envelope)))
 	s.logger.Info("backup_created",
 		"blobs", len(manifest.Entries),
@@ -363,7 +363,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	// shutdown save can write the stale panel back over the restore.
 	s.restore.MarkRestored()
 
-	s.store.RecordAudit(model.SeverityWarn, "operator", "backup.restore", "backup",
+	s.store.RecordAudit(model.SeverityWarn, s.auditActor(r), "backup.restore", "backup",
 		fmt.Sprintf("blobs=%d changed=%d added=%d removed=%d",
 			len(written), view.Diff.Changed, view.Diff.Added, view.Diff.Removed))
 	s.logger.Warn("backup_restored",

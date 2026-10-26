@@ -44,7 +44,9 @@ not a silent reallocation.
 All routes are loopback-only and require `Authorization: Bearer $AJS_ADMIN_TOKEN` (empty token
 disables auth and is refused unless `AJS_ALLOW_INSECURE=1`). Every unsafe admin request must also
 send `X-AJS-CSRF: 1`, and an `Origin` header must exactly match `AJS_ADMIN_ORIGINS`; non-browser
-clients omit `Origin` but still send the header.
+clients omit `Origin` but still send the header. In the production kit nginx adds per-operator HTTP
+Basic auth and forwards the authenticated username as `X-AJS-Operator`; the daemon uses it only as
+the audit actor (falling back to `operator` when absent), never as an authentication factor.
 
 ### Accounts
 

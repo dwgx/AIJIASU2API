@@ -46,7 +46,7 @@ func (s *Store) Plan(id string) (model.Plan, bool) {
 
 // CreatePlan validates and prepends one catalogue entry. Active defaults to
 // true; an explicit false creates a draft that no customer can order.
-func (s *Store) CreatePlan(in model.PlanInput) (model.Plan, error) {
+func (s *Store) CreatePlan(in model.PlanInput, actor ...string) (model.Plan, error) {
 	name, amount, currency, ttl, quota, err := normalizePlanFields(
 		in.Name, in.AmountMinor, in.Currency, in.LeaseTTLSeconds, in.QuotaBytes)
 	if err != nil {
@@ -76,7 +76,7 @@ func (s *Store) CreatePlan(in model.PlanInput) (model.Plan, error) {
 		UpdatedAt:       now,
 	}
 	s.plans = prependCapped(s.plans, plan, MaxPlans)
-	s.addAuditLocked(model.SeverityInfo, "operator", "plan.created", plan.Name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "plan.created", plan.Name,
 		fmt.Sprintf("%s %s · ttl %ds · quota %d bytes · active %t",
 			formatMinor(amount, currency), currency, ttl, quota, active),
 		map[string]string{"planId": plan.ID})
@@ -85,7 +85,7 @@ func (s *Store) CreatePlan(in model.PlanInput) (model.Plan, error) {
 
 // UpdatePlan applies a validated partial update. Existing orders keep their
 // immutable snapshots; only orders created afterwards see the new price.
-func (s *Store) UpdatePlan(id string, patch model.PlanPatch) (model.Plan, error) {
+func (s *Store) UpdatePlan(id string, patch model.PlanPatch, actor ...string) (model.Plan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -131,7 +131,7 @@ func (s *Store) UpdatePlan(id string, patch model.PlanPatch) (model.Plan, error)
 	}
 	plan.UpdatedAt = iso(s.now())
 	s.plans[idx] = plan
-	s.addAuditLocked(model.SeverityInfo, "operator", "plan.updated", plan.Name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "plan.updated", plan.Name,
 		fmt.Sprintf("%s · ttl %ds · quota %d bytes · active %t",
 			formatMinor(plan.AmountMinor, plan.Currency), plan.LeaseTTLSeconds,
 			plan.QuotaBytes, plan.Active),
@@ -142,7 +142,7 @@ func (s *Store) UpdatePlan(id string, patch model.PlanPatch) (model.Plan, error)
 // DeactivatePlan turns a plan off without deleting it. Deactivation affects
 // only new orders: every existing order keeps its snapshot and entitlement.
 // The operation is idempotent so an admin retry is safe.
-func (s *Store) DeactivatePlan(id string) (model.Plan, error) {
+func (s *Store) DeactivatePlan(id string, actor ...string) (model.Plan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -156,7 +156,7 @@ func (s *Store) DeactivatePlan(id string) (model.Plan, error) {
 	}
 	plan.Active = false
 	plan.UpdatedAt = iso(s.now())
-	s.addAuditLocked(model.SeverityInfo, "operator", "plan.deactivated", plan.Name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "plan.deactivated", plan.Name,
 		"new orders refused; existing snapshots unchanged",
 		map[string]string{"planId": plan.ID})
 	return clonePlan(*plan), nil

@@ -27,6 +27,13 @@ admin:
     - 127.0.0.1
     - ::1
     - 10.8.0.0/24
+  # Per-operator HTTP Basic auth inputs. Both paths are host-local and are
+  # never copied into the repository: operators_file is the root-only 0600
+  # username:password inventory (copy admin-operators.example), and
+  # htpasswd_file is the rendered 0600 nginx file. Rotate by editing the
+  # inventory and re-running render-admin-htpasswd.sh.
+  operators_file: /etc/ajs/admin-operators
+  htpasswd_file: /etc/nginx/ajs-admin.htpasswd
 
 tls:
   # Directory layout: /etc/ajs/tls/<domain>/{fullchain.pem,privkey.pem}

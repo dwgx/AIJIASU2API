@@ -91,7 +91,7 @@ func (s *Server) handlePortalReissueOrder(w http.ResponseWriter, r *http.Request
 // administration route, so an operator can restore a paid entitlement after a
 // restart without a customer session.
 func (s *Server) handleReissueOrder(w http.ResponseWriter, r *http.Request) {
-	after, failedLease, err := s.reissueEndedOrderLease(r, pathParam(r, "id"), "operator")
+	after, failedLease, err := s.reissueEndedOrderLease(r, pathParam(r, "id"), s.auditActor(r))
 	if err != nil {
 		s.writeReissueError(w, failedLease, err)
 		return

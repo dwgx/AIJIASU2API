@@ -224,7 +224,7 @@ func (s *Store) SetAccountUseCount(id string, useCount int) (model.Account, erro
 // active lease. Only a LIVE node with a bound gate port is a target: READY is
 // the seeded/demo state and still carries the node's recorded egress and port,
 // but no listener, so leasing it would advertise a dead endpoint.
-func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error) {
+func (s *Store) CreateLease(in model.CreateLeaseInput, actor ...string) (model.Lease, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -333,7 +333,7 @@ func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error
 	}
 	s.leases = append(s.leases, lease)
 	s.nodes[nodeIdx].InUse++
-	s.addAuditLocked(model.SeverityInfo, "operator", "lease.create", user.Name,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "lease.create", user.Name,
 		fmt.Sprintf("%s · %s · node %s · ttl %s", platform, account.Label, node.Label,
 			(time.Duration(ttl)*time.Second).String()),
 		map[string]string{
@@ -350,7 +350,7 @@ func (s *Store) CreateLease(in model.CreateLeaseInput) (model.Lease, bool, error
 // RevokeLease removes a lease and returns its slot to the node. The returned
 // row carries Status=revoked; only active rows are stored, so the row is gone
 // from later reads.
-func (s *Store) RevokeLease(id string) (model.Lease, error) {
+func (s *Store) RevokeLease(id string, actor ...string) (model.Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -366,7 +366,7 @@ func (s *Store) RevokeLease(id string) (model.Lease, error) {
 		s.nodes[nodeIdx].InUse--
 	}
 	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
-	s.addAuditLocked(model.SeverityInfo, "operator", "lease.revoke", lease.UserName,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "lease.revoke", lease.UserName,
 		fmt.Sprintf("Lease on %s revoked", lease.NodeLabel),
 		map[string]string{
 			"leaseId":    lease.ID,

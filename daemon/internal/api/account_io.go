@@ -208,7 +208,7 @@ func (s *Server) handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.store.RecordAudit(model.SeverityInfo, "operator", "account.export", "accounts",
+	s.store.RecordAudit(model.SeverityInfo, s.auditActor(r), "account.export", "accounts",
 		fmt.Sprintf("format=%s accounts=%d passwords=%d devices=%d", format, len(rows), passwords, devices))
 	s.logger.Info("account_export",
 		"format", format,
@@ -344,7 +344,7 @@ func (s *Server) handleImportAccounts(w http.ResponseWriter, r *http.Request) {
 		writeImportResult(w, result)
 		return
 	}
-	applied, err := s.store.ImportAccounts(plan)
+	applied, err := s.store.ImportAccounts(plan, s.auditActor(r))
 	clearImportPlan(&plan)
 	if err != nil {
 		s.logger.Warn("account_import_failed", "reason", "store")
@@ -537,7 +537,7 @@ func (s *Server) handleBulkDeleteAccounts(w http.ResponseWriter, r *http.Request
 			}
 			continue
 		}
-		if err := s.store.DeleteAccount(id); err != nil {
+		if err := s.store.DeleteAccount(id, s.auditActor(r)); err != nil {
 			if release != nil {
 				release()
 			}
@@ -584,7 +584,7 @@ func (s *Server) handleBulkDeleteAccounts(w http.ResponseWriter, r *http.Request
 			}
 			s.persistAccountIO()
 		}
-		s.store.RecordAudit(model.SeverityInfo, "operator", "account.bulk_delete", "accounts",
+		s.store.RecordAudit(model.SeverityInfo, s.auditActor(r), "account.bulk_delete", "accounts",
 			fmt.Sprintf("requested=%d deleted=%d not_found=%d failed=%d skipped=%d",
 				len(ids), result.Counts.Deleted, result.Counts.NotFound, result.Counts.Failed, result.Counts.Skipped))
 		s.logger.Info("account_bulk_delete",

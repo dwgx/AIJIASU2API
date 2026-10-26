@@ -54,7 +54,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	account, err := s.store.CreateAccount(input)
+	account, err := s.store.CreateAccount(input, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -99,7 +99,7 @@ func (s *Server) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 			patch.TrafficBudgetBytes = &budget
 		}
 	}
-	account, err := s.store.UpdateAccount(pathParam(r, "id"), patch)
+	account, err := s.store.UpdateAccount(pathParam(r, "id"), patch, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -129,7 +129,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	if err := s.store.DeleteAccount(id); err != nil {
+	if err := s.store.DeleteAccount(id, s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -177,7 +177,7 @@ func (s *Server) stopAccountForMutation(ctx context.Context, accountID string, h
 func (s *Server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
 	if s.cfg.LoginService == nil {
-		updated, err := s.store.LoginAccount(id)
+		updated, err := s.store.LoginAccount(id, s.auditActor(r))
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -260,7 +260,7 @@ func (s *Server) handleLogoutAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	account, err := s.store.LogoutAccount(id)
+	account, err := s.store.LogoutAccount(id, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

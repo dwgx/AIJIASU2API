@@ -95,7 +95,7 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, node)
 		return
 	}
-	node, err := s.store.DrainNode(id)
+	node, err := s.store.DrainNode(id, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -124,7 +124,7 @@ func (s *Server) handleUndrainNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, node)
 		return
 	}
-	node, err := s.store.UndrainNode(id)
+	node, err := s.store.UndrainNode(id, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -178,7 +178,7 @@ func (s *Server) handleRotateLease(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, lease)
 		return
 	}
-	lease, err := s.store.RotateLease(id)
+	lease, err := s.store.RotateLease(id, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

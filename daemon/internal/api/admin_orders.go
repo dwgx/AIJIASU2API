@@ -33,7 +33,7 @@ func (s *Server) handleCreatePlan(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	plan, err := s.store.CreatePlan(in)
+	plan, err := s.store.CreatePlan(in, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -58,7 +58,7 @@ func (s *Server) handlePatchPlan(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &patch) {
 		return
 	}
-	plan, err := s.store.UpdatePlan(pathParam(r, "id"), patch)
+	plan, err := s.store.UpdatePlan(pathParam(r, "id"), patch, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -69,7 +69,7 @@ func (s *Server) handlePatchPlan(w http.ResponseWriter, r *http.Request) {
 // handleDeletePlan soft-deactivates a plan. It never removes the row: orders
 // snapshot the price, and an admin still needs the catalogue history.
 func (s *Server) handleDeletePlan(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.store.DeactivatePlan(pathParam(r, "id")); err != nil {
+	if _, err := s.store.DeactivatePlan(pathParam(r, "id"), s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -147,7 +147,7 @@ func (s *Server) handleSettleOrder(w http.ResponseWriter, r *http.Request) {
 		s.writePaymentError(w, err)
 		return
 	}
-	after, err := s.store.ApplyPaymentEvent(s.cfg.ManualPayments.Name(), event, "operator")
+	after, err := s.store.ApplyPaymentEvent(s.cfg.ManualPayments.Name(), event, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -169,7 +169,7 @@ func (s *Server) handleRefundOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	after, err := s.store.RecordManualRefund(orderID, in.Reference, in.Reason, "operator")
+	after, err := s.store.RecordManualRefund(orderID, in.Reference, in.Reason, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -191,7 +191,7 @@ func (s *Server) handleChargebackOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	after, err := s.store.RecordManualChargeback(orderID, in.Reference, in.Reason, "operator")
+	after, err := s.store.RecordManualChargeback(orderID, in.Reference, in.Reason, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -208,7 +208,7 @@ func (s *Server) handleAdminCancelOrder(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, CodeNotFound, "order not found")
 		return
 	}
-	after, err := s.store.CancelOrder(orderID, "operator")
+	after, err := s.store.CancelOrder(orderID, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

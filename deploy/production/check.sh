@@ -89,6 +89,8 @@ README.md
 check.sh
 build-bundles.sh
 render-admin-token.sh
+render-admin-htpasswd.sh
+admin-operators.example
 inventory.example.yml
 nginx/nginx.conf
 nginx/ajs-mime.types
@@ -96,6 +98,7 @@ nginx/snippets/ajs-tls.conf
 nginx/snippets/ajs-proxy-common.conf
 nginx/snippets/ajs-security-headers.conf
 nginx/snippets/ajs-admin-token.conf.template
+nginx/snippets/ajs-admin-operator.conf
 nginx/sites-available/ajs-portal.conf
 nginx/sites-available/ajs-admin.conf
 nginx/sites-available/ajs-default.conf
@@ -120,11 +123,13 @@ for rel in check.sh build-bundles.sh; do
         fail "bash -n $rel"
     fi
 done
-if sh -n "$kit/render-admin-token.sh" 2>/dev/null; then
-    pass "sh -n render-admin-token.sh"
-else
-    fail "sh -n render-admin-token.sh"
-fi
+for rel in render-admin-token.sh render-admin-htpasswd.sh; do
+    if sh -n "$kit/$rel" 2>/dev/null; then
+        pass "sh -n $rel"
+    else
+        fail "sh -n $rel"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 section "YAML"
@@ -149,6 +154,10 @@ if not isinstance(data.get("portal"), dict) or not data["portal"].get("origin"):
     raise SystemExit("portal.origin is required")
 if not isinstance(data.get("admin"), dict) or not data["admin"].get("origin"):
     raise SystemExit("admin.origin is required")
+if not data["admin"].get("operators_file"):
+    raise SystemExit("admin.operators_file is required")
+if not data["admin"].get("htpasswd_file"):
+    raise SystemExit("admin.htpasswd_file is required")
 PY
         then
             pass "YAML parses and has the required keys: $(basename "$f")"
@@ -245,7 +254,11 @@ fi
 # ---------------------------------------------------------------------------
 section "nginx configuration (nginx -t)"
 nginx_tmp=""
-cleanup() { [ -n "$nginx_tmp" ] && rm -rf "$nginx_tmp"; }
+auth_tmp=""
+cleanup() {
+    [ -n "$nginx_tmp" ] && rm -rf "$nginx_tmp"
+    [ -n "$auth_tmp" ] && rm -rf "$auth_tmp"
+}
 trap cleanup 0 HUP INT TERM
 
 nginx_bin=${AJS_NGINX_BIN:-}
@@ -287,6 +300,11 @@ if [ -n "$nginx_mode" ]; then
             cp "$kit/nginx/sites-available/ajs-admin.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-default.conf" "$nginx_tmp/sites-enabled/"
 
+            # nginx resolves auth_basic_user_file at config load. Stage a
+            # throwaway htpasswd beside the rewritten /etc/nginx root; the
+            # committed kit never contains a real hash or password.
+            printf 'check-operator:%s\n' "$(openssl passwd -apr1 'check-only-password')" > "$nginx_tmp/ajs-admin.htpasswd"
+            chmod 600 "$nginx_tmp/ajs-admin.htpasswd"
 
             # Throwaway token: 64 'a' characters, never a committed literal.
             dummy_token=$(printf 'a%.0s' {1..64})
@@ -511,6 +529,24 @@ if grep -q 'ajs-admin-token.conf' "$kit/nginx/sites-available/ajs-admin.conf"; t
 else
     fail "admin vhost does not include the rendered bearer snippet"
 fi
+if grep -qE '^[[:space:]]*auth_basic[[:space:]]+"AJS admin";' "$kit/nginx/sites-available/ajs-admin.conf" && \
+   grep -qE '^[[:space:]]*auth_basic_user_file[[:space:]]+/etc/nginx/ajs-admin.htpasswd;' "$kit/nginx/sites-available/ajs-admin.conf"; then
+    pass "admin vhost requires per-operator HTTP Basic auth"
+else
+    fail "admin vhost is missing auth_basic / auth_basic_user_file"
+fi
+if grep -q 'ajs-admin-operator.conf' "$kit/nginx/sites-available/ajs-admin.conf" && \
+   grep -qE 'proxy_set_header[[:space:]]+X-AJS-Operator[[:space:]]+\$remote_user;' "$kit/nginx/snippets/ajs-admin-operator.conf"; then
+    pass "admin vhost forwards X-AJS-Operator from \$remote_user"
+else
+    fail "admin vhost does not forward X-AJS-Operator from \$remote_user"
+fi
+if grep -qE 'install -m 0600|chmod 0600' "$kit/render-admin-htpasswd.sh" && \
+   grep -q 'replace-me' "$kit/render-admin-htpasswd.sh"; then
+    pass "htpasswd renderer writes mode 0600 and refuses placeholders"
+else
+    fail "htpasswd renderer is missing the 0600 or placeholder guard"
+fi
 if grep -qE 'allow[[:space:]]+127\.0\.0\.1;' "$kit/nginx/sites-available/ajs-admin.conf" && \
    grep -qE 'deny[[:space:]]+all;' "$kit/nginx/sites-available/ajs-admin.conf"; then
     pass "admin vhost has a loopback/VPN allow policy ending in deny all"
@@ -564,7 +600,119 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "admin operator auth (runtime)"
+# Prove the admin edge itself enforces per-operator HTTP Basic auth and forwards
+# the authenticated username. The upstream is a tiny Python server; an
+# unauthenticated request must leave its log empty, which is the "never reaches
+# the daemon" assertion.
+if [ -z "$nginx_bin" ] || [ ! -x "$nginx_bin" ]; then
+    skip "admin operator auth runtime test needs host nginx"
+elif ! command -v curl >/dev/null 2>&1; then
+    skip "admin operator auth runtime test needs curl"
+elif ! command -v python3 >/dev/null 2>&1; then
+    skip "admin operator auth runtime test needs python3"
+else
+    auth_tmp=$(mktemp -d) || { fail "cannot create admin auth test directory"; auth_tmp=""; }
+    if [ -n "$auth_tmp" ]; then
+        auth_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+        upstream_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+        cat > "$auth_tmp/upstream.py" <<'PY'
+import http.server
+import sys
+
+log = sys.argv[2]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(self.headers.get("X-AJS-Operator", "") + "\n")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):
+        pass
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PY
+        python3 "$auth_tmp/upstream.py" "$upstream_port" "$auth_tmp/seen" &
+        upstream_pid=$!
+        upstream_ready=0
+        for _ in $(seq 1 50); do
+            if curl -s -o /dev/null "http://127.0.0.1:$upstream_port/"; then
+                upstream_ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        : > "$auth_tmp/seen"
+        printf 'alice:%s\nbob:%s\n' \
+            "$(openssl passwd -apr1 'alice-runtime-password')" \
+            "$(openssl passwd -apr1 'bob-runtime-password')" > "$auth_tmp/htpasswd"
+        chmod 600 "$auth_tmp/htpasswd"
+        cat > "$auth_tmp/nginx.conf" <<EOF
+daemon off;
+pid $auth_tmp/nginx.pid;
+error_log $auth_tmp/error.log;
+events { worker_connections 32; }
+http {
+    access_log off;
+    client_body_temp_path $auth_tmp/client_body;
+    proxy_temp_path $auth_tmp/proxy;
+    fastcgi_temp_path $auth_tmp/fastcgi;
+    uwsgi_temp_path $auth_tmp/uwsgi;
+    scgi_temp_path $auth_tmp/scgi;
+    server {
+        listen 127.0.0.1:$auth_port;
+        auth_basic "AJS admin";
+        auth_basic_user_file $auth_tmp/htpasswd;
+        location / {
+            proxy_pass http://127.0.0.1:$upstream_port;
+            proxy_set_header X-AJS-Operator \$remote_user;
+        }
+    }
+}
+EOF
+        "$nginx_bin" -p "$auth_tmp/" -c "$auth_tmp/nginx.conf" &
+        nginx_pid=$!
+        ready=0
+        for _ in $(seq 1 50); do
+            if curl -s -o /dev/null "http://127.0.0.1:$auth_port/"; then
+                ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        if [ "$upstream_ready" -ne 1 ]; then
+            fail "admin operator auth runtime test: upstream did not start"
+        elif [ "$ready" -ne 1 ]; then
+            fail "admin operator auth runtime test: nginx did not start"
+        else
+            unauth=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$auth_port/")
+            if [ "$unauth" = "401" ] && [ ! -s "$auth_tmp/seen" ]; then
+                pass "unauthenticated admin request is refused before the upstream"
+            else
+                fail "unauthenticated admin request status=$unauth upstream=$(wc -c < "$auth_tmp/seen" 2>/dev/null || echo missing)"
+            fi
+            alice_status=$(curl -s -o /dev/null -w '%{http_code}' -u 'alice:alice-runtime-password' "http://127.0.0.1:$auth_port/")
+            bob_status=$(curl -s -o /dev/null -w '%{http_code}' -u 'bob:bob-runtime-password' "http://127.0.0.1:$auth_port/")
+            if [ "$alice_status" = "200" ] && [ "$bob_status" = "200" ] && \
+               grep -qx 'alice' "$auth_tmp/seen" && grep -qx 'bob' "$auth_tmp/seen"; then
+                pass "two distinct Basic operators reach the upstream as distinct X-AJS-Operator values"
+            else
+                fail "operator forwarding failed (alice=$alice_status bob=$bob_status seen=$(tr '\n' ',' < "$auth_tmp/seen" 2>/dev/null))"
+            fi
+        fi
+        kill "$nginx_pid" "$upstream_pid" 2>/dev/null || true
+        wait "$nginx_pid" "$upstream_pid" 2>/dev/null || true
+        rm -rf "$auth_tmp"
+        auth_tmp=""
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 section "token-free bundle path"
+
 if grep -q 'VITE_USE_MOCK=false' "$kit/build-bundles.sh"; then
     pass "bundle build sets VITE_USE_MOCK=false"
 else
@@ -809,7 +957,7 @@ fi
 
 # ---------------------------------------------------------------------------
 section "README inputs"
-for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_MASTER_KEY DNS TLS; do
+for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd admin-operators DNS TLS; do
     if grep -q "$token" "$kit/README.md"; then
         pass "README documents: $token"
     else

@@ -109,7 +109,7 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 		AccountID:      body.AccountID,
 		TTLSeconds:     body.TTLSeconds,
 		IdempotencyKey: key,
-	})
+	}, s.auditActor(r))
 	if err != nil {
 		s.writeLeaseCreateError(w, err)
 		return
@@ -169,7 +169,7 @@ func (s *Server) handleRevokeLease(w http.ResponseWriter, r *http.Request) {
 		}
 		revoked.Status = model.LeaseRevoked
 	} else {
-		lease, err := s.store.RevokeLease(id)
+		lease, err := s.store.RevokeLease(id, s.auditActor(r))
 		if err != nil {
 			s.writeStoreError(w, err)
 			return

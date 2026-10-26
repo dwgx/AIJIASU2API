@@ -22,7 +22,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.store.CreateUser(input)
+	user, err := s.store.CreateUser(input, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -56,7 +56,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 			patch.QuotaBytesMonth = &quota
 		}
 	}
-	user, err := s.store.UpdateUser(pathParam(r, "id"), patch)
+	user, err := s.store.UpdateUser(pathParam(r, "id"), patch, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -65,7 +65,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteUser(pathParam(r, "id")); err != nil {
+	if err := s.store.DeleteUser(pathParam(r, "id"), s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -73,7 +73,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSuspendUser(w http.ResponseWriter, r *http.Request) {
-	user, err := s.store.SetUserEnabled(pathParam(r, "id"), false)
+	user, err := s.store.SetUserEnabled(pathParam(r, "id"), false, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -82,7 +82,7 @@ func (s *Server) handleSuspendUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResumeUser(w http.ResponseWriter, r *http.Request) {
-	user, err := s.store.SetUserEnabled(pathParam(r, "id"), true)
+	user, err := s.store.SetUserEnabled(pathParam(r, "id"), true, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -101,7 +101,7 @@ func (s *Server) handleAllowlistUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "allowlist is required")
 		return
 	}
-	user, err := s.store.SetUserAllowlist(pathParam(r, "id"), *body.Allowlist)
+	user, err := s.store.SetUserAllowlist(pathParam(r, "id"), *body.Allowlist, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -134,7 +134,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	key, secret, err := s.store.CreateKey(input.UserID, input.Label)
+	key, secret, err := s.store.CreateKey(input.UserID, input.Label, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -143,7 +143,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.RevokeKey(pathParam(r, "id")); err != nil {
+	if err := s.store.RevokeKey(pathParam(r, "id"), s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

@@ -785,10 +785,17 @@ func emptyOperationTarget(target *model.OperationTarget) bool {
 }
 
 // requestPrincipal names the caller on the durable record. It never carries a
-// secret: the admin token is "admin" and a scoped key is its display prefix.
+// secret: a bare admin token is "admin", an operator authenticated by the
+// production proxy is its username, and a scoped key is its display prefix.
 func requestPrincipal(r *http.Request) string {
 	identity, ok := authIdentityFrom(r)
-	if !ok || identity.admin {
+	if !ok {
+		return "admin"
+	}
+	if identity.admin {
+		if identity.operator != "" {
+			return identity.operator
+		}
 		return "admin"
 	}
 	return "key:" + identity.key.Prefix

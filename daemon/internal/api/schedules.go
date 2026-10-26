@@ -124,7 +124,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 			scheduleValue.NextRunAt = next.UTC().Format(time.RFC3339)
 		}
 	}
-	created, err := s.store.CreateSchedule(scheduleValue)
+	created, err := s.store.CreateSchedule(scheduleValue, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -222,7 +222,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	updated, err := s.store.UpdateSchedule(next, expectedRevision)
+	updated, err := s.store.UpdateSchedule(next, expectedRevision, s.auditActor(r))
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeScheduleReason(w, http.StatusPreconditionFailed, "PRECONDITION_FAILED", "stale_revision",
@@ -246,7 +246,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 			"a run is in flight for this schedule", nil)
 		return
 	}
-	if err := s.store.DeleteSchedule(id); err != nil {
+	if err := s.store.DeleteSchedule(id, s.auditActor(r)); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

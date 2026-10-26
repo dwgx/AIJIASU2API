@@ -802,7 +802,7 @@ func (s *Store) Settings() model.PanelSettings {
 // fsync, so holding the store lock across it would block every reader; the
 // reservation keeps concurrent creates and renames conflict-safe. Without a
 // sealer the password is validated and discarded under the lock.
-func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error) {
+func (s *Store) CreateAccount(in model.CreateAccountInput, actor ...string) (model.Account, error) {
 	label := strings.TrimSpace(in.Label)
 	username := strings.TrimSpace(in.Username)
 	switch {
@@ -838,7 +838,7 @@ func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error
 	}
 	if s.sealer == nil {
 		id := s.reserveAccountIDLocked()
-		account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, nil)
+		account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, nil, actor...)
 		s.mu.Unlock()
 		return cloneAccount(account), nil
 	}
@@ -862,7 +862,7 @@ func (s *Store) CreateAccount(in model.CreateAccountInput) (model.Account, error
 		// writer honours pendingLabels.
 		return model.Account{}, conflictf("an account named %q already exists", label)
 	}
-	account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, sealed)
+	account := s.insertAccountLocked(id, label, username, in.Platform, concurrency, regions, sealed, actor...)
 	return cloneAccount(account), nil
 }
 
@@ -876,7 +876,7 @@ func (s *Store) reserveAccountIDLocked() string {
 
 // insertAccountLocked prepends the account, stores its sealed secret and
 // records the audit event. The caller holds the write lock.
-func (s *Store) insertAccountLocked(id, label, username string, platform model.Platform, concurrency int, regions []string, sealed []byte) model.Account {
+func (s *Store) insertAccountLocked(id, label, username string, platform model.Platform, concurrency int, regions []string, sealed []byte, actor ...string) model.Account {
 	now := s.now()
 	account := model.Account{
 		ID:          id,
@@ -897,7 +897,7 @@ func (s *Store) insertAccountLocked(id, label, username string, platform model.P
 	}
 	s.accounts = append([]model.Account{account}, s.accounts...)
 	s.ensureAccountSlotRowLocked(id)
-	s.addAuditLocked(model.SeverityInfo, "operator", "account.create", label,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.create", label,
 		fmt.Sprintf("platform %s · concurrency %d", platform, concurrency))
 	return account
 }
@@ -917,7 +917,7 @@ func (s *Store) accountLabelTakenLocked(label string) bool {
 }
 
 // UpdateAccount applies a partial entitlement update.
-func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Account, error) {
+func (s *Store) UpdateAccount(id string, patch model.AccountPatch, actor ...string) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1027,7 +1027,7 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 			s.leases[i].AccountLabel = next.Label
 		}
 	}
-	s.addAuditLocked(model.SeverityInfo, "operator", "account.update", next.Label, "fields: "+strings.Join(changed, ", "))
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.update", next.Label, "fields: "+strings.Join(changed, ", "))
 	return cloneAccount(next), nil
 }
 
@@ -1040,7 +1040,7 @@ func (s *Store) UpdateAccount(id string, patch model.AccountPatch) (model.Accoun
 // secret untouched so the operator can retry, whereas deleting the account
 // first would drop it while leaking the sealed blob on disk. The in-memory
 // cascade then runs under one write lock.
-func (s *Store) DeleteAccount(id string) error {
+func (s *Store) DeleteAccount(id string, actor ...string) error {
 	// Serialise with the pool binders: retiring a bound record and sealing a
 	// new one must not interleave.
 	s.deviceMu.Lock()
@@ -1097,7 +1097,7 @@ func (s *Store) DeleteAccount(id string) error {
 	// A bound identity is retired, not erased: re-adding the same
 	// (family, username) inside the retention window restores it. Every slot
 	// is retired separately, preserving its slot affinity for the restore.
-	s.retireAccountDeviceBindingsLocked(id, label, "account_deleted")
+	s.retireAccountDeviceBindingsLocked(id, label, "account_deleted", actor...)
 	for key := range s.accountSlots {
 		if key.AccountID == id {
 			delete(s.accountSlots, key)
@@ -1128,13 +1128,13 @@ func (s *Store) DeleteAccount(id string) error {
 		}
 	}
 	s.syncAccountCountsLocked()
-	s.addAuditLocked(model.SeverityInfo, "operator", "account.delete", label,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.delete", label,
 		fmt.Sprintf("%d nodes and %d leases removed", nodesRemoved, leasesRemoved))
 	return nil
 }
 
 // LoginAccount refreshes the session timestamp and clears an auth failure.
-func (s *Store) LoginAccount(id string) (model.Account, error) {
+func (s *Store) LoginAccount(id string, actor ...string) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1147,7 +1147,7 @@ func (s *Store) LoginAccount(id string) (model.Account, error) {
 	if account.State == model.AccountAuthFailed {
 		account.State = model.AccountActive
 	}
-	s.addAuditLocked(model.SeverityInfo, "operator", "account.login", account.Label, "Session refreshed")
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.login", account.Label, "Session refreshed")
 	return cloneAccount(*account), nil
 }
 
@@ -1216,7 +1216,7 @@ func (s *Store) MarkAuthFailed(id, message string) (model.Account, error) {
 // node that belongs to it. The sealed secret is deliberately kept: logout ends
 // a session, and the account client needs the password to sign in again.
 // Only DeleteAccount removes it.
-func (s *Store) LogoutAccount(id string) (model.Account, error) {
+func (s *Store) LogoutAccount(id string, actor ...string) (model.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1237,7 +1237,7 @@ func (s *Store) LogoutAccount(id string) (model.Account, error) {
 		draining++
 	}
 	s.syncAccountCountsLocked()
-	s.addAuditLocked(model.SeverityInfo, "operator", "account.logout", account.Label,
+	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "account.logout", account.Label,
 		fmt.Sprintf("Sessions stopped · %d nodes draining", draining))
 	return cloneAccount(*account), nil
 }

@@ -166,7 +166,7 @@ func (s *Server) handleCreateMutation(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	entry, err := s.store.CreateMutation(input)
+	entry, err := s.store.CreateMutation(input, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -250,7 +250,7 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "invalid settings value: "+err.Error())
 		return
 	}
-	settings, err := s.store.UpdateSettings(patch)
+	settings, err := s.store.UpdateSettings(patch, s.auditActor(r))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

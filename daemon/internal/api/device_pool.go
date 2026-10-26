@@ -287,7 +287,7 @@ func (s *Server) handleGenerateDevices(w http.ResponseWriter, r *http.Request) {
 		Profile:     req.Profile,
 		Algorithm:   req.Algorithm,
 		LabelPrefix: req.LabelPrefix,
-		Actor:       "operator",
+		Actor:       s.auditActor(r),
 	})
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
@@ -330,7 +330,7 @@ func (s *Server) handleAssignDevicePoolRecord(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, "accountId is required")
 		return
 	}
-	rec, err := s.store.AssignDevice(id, req.AccountID)
+	rec, err := s.store.AssignDevice(id, req.AccountID, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
@@ -347,7 +347,7 @@ func (s *Server) handleReleaseDevicePoolRecord(w http.ResponseWriter, r *http.Re
 	if !requireDeviceConfirm(w, req.Confirm, "RELEASE") {
 		return
 	}
-	rec, err := s.store.ReleaseDevice(id)
+	rec, err := s.store.ReleaseDevice(id, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
@@ -367,7 +367,7 @@ func (s *Server) handleRetireDevicePoolRecord(w http.ResponseWriter, r *http.Req
 	// Read the binding before RetireDevice clears it: the event names the
 	// account whose device was retired, and the stored record no longer does.
 	prior, _ := s.store.DeviceRecord(id)
-	rec, err := s.store.RetireDevice(id, req.Reason)
+	rec, err := s.store.RetireDevice(id, req.Reason, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
@@ -392,7 +392,7 @@ func (s *Server) handleQuarantineDevicePoolRecord(w http.ResponseWriter, r *http
 	if !requireDeviceConfirm(w, req.Confirm, "QUARANTINE") {
 		return
 	}
-	rec, err := s.store.QuarantineDevice(id, req.Reason)
+	rec, err := s.store.QuarantineDevice(id, req.Reason, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
@@ -409,7 +409,7 @@ func (s *Server) handlePurgeDevicePoolRecord(w http.ResponseWriter, r *http.Requ
 	if !requireDeviceConfirm(w, req.Confirm, "PURGE") {
 		return
 	}
-	if err := s.store.PurgeDevice(id); err != nil {
+	if err := s.store.PurgeDevice(id, s.auditActor(r)); err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
 	}
@@ -440,7 +440,7 @@ func (s *Server) handleExportDevicePool(w http.ResponseWriter, r *http.Request) 
 	if req.IncludeLabels != nil {
 		opts.ExcludeLabels = !*req.IncludeLabels
 	}
-	envelope, err := s.store.ExportDevicePool(opts)
+	envelope, err := s.store.ExportDevicePool(opts, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
@@ -465,7 +465,7 @@ func (s *Server) handleImportDevicePool(w http.ResponseWriter, r *http.Request) 
 		Passphrase: req.Passphrase,
 		DryRun:     req.DryRun,
 		Bind:       req.Bind,
-	})
+	}, s.auditActor(r))
 	if err != nil {
 		s.writeDeviceStoreError(w, err)
 		return
