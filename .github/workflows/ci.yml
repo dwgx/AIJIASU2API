@@ -2,7 +2,8 @@
 #
 # go  — daemon + emulator: go vet and go test -race in both Go modules.
 # web — dashboard: npm ci, vitest run, live production build.
-# kit — production deploy-kit gate on Ubuntu with real nginx, systemd and nft.
+# kit — production deploy-kit gate on Ubuntu with real nginx, systemd and nft,
+#       run as root via sudo -E for the AJS-412 renderer ownership proof.
 #
 # - daemon/go.mod and emulator/go.mod pin the same toolchain (go 1.26.0),
 #   so one setup-go with go-version-file: daemon/go.mod covers both modules.
@@ -94,5 +95,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends nginx nftables python3-yaml
           sudo systemctl stop nginx || true
 
-      - name: Run production gate
-        run: bash deploy/production/check.sh
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+
+      - name: Build daemon for the /readyz proof
+        working-directory: daemon
+        run: go build -o ajs-accountd ./cmd/ajs-accountd
+
+      - name: Run production gate (intentional root for ownership checks)
+        # The AJS-412 renderer proof creates root-owned 0640/0600 artifacts and
+        # proves the nginx worker can read them. Run the whole gate as root so
+        # the CI result is a real production PASS, never a non-root false PASS.
+        run: sudo -E bash deploy/production/check.sh

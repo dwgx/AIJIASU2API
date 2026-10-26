@@ -10,22 +10,27 @@ Nothing here is a credential. There are no certificates, private keys, tokens
 or filled-in environment files in this tree — only paths, placeholders and the
 template from which the host renders its admin bearer.
 
-Run the gate:
+Run the gate as root:
 
 ```bash
-bash deploy/production/check.sh
-# check: PASS (n checks, 0 skipped)
+sudo -E bash deploy/production/check.sh
+# check: PASS (all checks, 0 skipped)
 ```
 
-The default mode is the production gate. It requires a real host `nginx -t`,
-`openssl`, `systemd-analyze`, `nft`, and a daemon binary for the `/readyz`
-proof (`AJS_ACCOUNTD_BIN`, `ajs-accountd` on `PATH`, `daemon/ajs-accountd`, or
-`go build`); a missing required tool is a `FAIL`, not a `SKIP`. For a
-workstation without those tools use the explicitly non-production mode:
+The default mode is the production gate. It must run as root because the
+AJS-412 renderer proof creates root-owned `0640`/`0600` artifacts, and the
+gate switches to the nginx worker identity to prove that identity can read
+them. A non-root production invocation exits 1 before any checks, prints the
+exact `sudo -E` command, and never prints `check: PASS`. Production also
+requires a real host `nginx -t`, `openssl`, `systemd-analyze`, `nft`, and a
+daemon binary for the `/readyz` proof (`AJS_ACCOUNTD_BIN`, `ajs-accountd` on
+`PATH`, `daemon/ajs-accountd`, or `go build`); a missing required tool is a
+`FAIL`, not a `SKIP`. For a workstation without those tools, or for a non-root
+static run, use the explicitly non-production mode:
 
 ```bash
 bash deploy/production/check.sh --dev
-# check: DEV-PASS (n checks, m skipped; not a production gate)
+# check: DEV-PASS (some checks skipped; not a production gate)
 ```
 
 `check.sh` is read-only. It stages nginx configs in a throwaway directory with
@@ -535,7 +540,7 @@ state directory.
    self-signed certificate, a dummy 64-character token and a throwaway
    operator htpasswd. The staged config
    rewrites the PID file and every `*_temp_path` into the throwaway tree, so
-   the gate passes as an unprivileged user on stock Debian/Ubuntu nginx
+   the nginx stage passes as an unprivileged user on stock Debian/Ubuntu nginx
    without writing `/run/nginx.pid` or `/var/lib/nginx/*`. Because nginx -t
    opens the listening sockets even in test mode, an unprivileged run retries
    in an isolated user+network namespace (`unshare -Urn`) where it can bind
@@ -572,38 +577,47 @@ state directory.
     and `nft -c` (direct, `unshare -Urn`, or `sudo -n` fallback);
 12. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
     `AJS_TRUSTED_PROXIES`, `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, `X-AJS-Operator`,
-    `render-admin-htpasswd`, `admin-operators`, DNS, TLS).
+    `render-admin-htpasswd`, `admin-operators`, DNS, TLS);
+13. the AJS-412 production renderer acceptance: a valid inventory produces
+    separate Basic/bearer/hash artifacts with the documented ownership and
+    modes (`root:<nginx group>` `0640` htpasswd, `root:root` `0600` bearer
+    map, `root:<daemon group>` `0640` hash file), a two-generation rotation
+    leaves one current nginx token, and no plaintext token or password
+    reaches the daemon hash file or renderer log. The renderer creates
+    root-owned files, so this proof is why production mode must run via
+    `sudo -E`.
 
 In production mode every item above is required: a missing tool is a `FAIL`
-and the summary reports the required-skip count. `--dev` reports absent tools
-as `SKIP` and ends with `check: DEV-PASS`, never `check: PASS`. A missing YAML
-parser is always a failure because YAML validation is a gate requirement.
+and the summary reports the required-skip count. Production mode also refuses
+to start as a non-root user instead of deferring the root-only renderer proof
+to a late required-skip failure. `--dev` reports absent tools and the root-only
+ownership proof as `SKIP` and ends with `check: DEV-PASS`, never `check: PASS`.
+A missing YAML parser is always a failure because YAML validation is a gate
+requirement.
 
 ## Recorded verification (2026-10-26)
 
-- **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), non-root uid 1000 with passwordless sudo:**
-  `bash deploy/production/check.sh` → `check: PASS (89 checks, 0 skipped)`.
-  The real `nginx -t` parsed the staged portal/admin/default vhosts; because
-  nginx -t opens the listening sockets even in test mode, the unprivileged run
-  used the `unshare -Urn` fallback (the direct run reached `syntax is ok` and
-  failed only at `bind() :80 permission denied`). The runtime probe then
-  started that staged config and observed unknown HTTP Host closed (444),
-  unknown HTTPS and IP-literal Hosts answered 421, the fixed canonical
-  redirect, and the canonical portal Host still at 200. The worker-read proof
-  rendered a disposable htpasswd with the real renderer and read it as
-  `www-data`; it needs root or passwordless sudo to create `root:www-data`
-  ownership and switch identity. A real daemon binary
-  proved `/readyz` 200 with a writable state directory and 503 `not_ready`
-  (state check) with a 0555 directory, while `/healthz` stayed 200. No
-  required check was skipped.
-- **Same host as root:** `sudo bash deploy/production/check.sh` →
-  `check: PASS (89 checks, 0 skipped)`. The operator auth probe runs nginx
-  with `user www-data;` and the rendered `root:www-data` 0640 htpasswd, so a
-  valid Alice/Bob login proves the production worker identity can read it.
+- **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), production gate via passwordless sudo:**
+  `sudo -E bash deploy/production/check.sh` → `check: PASS` with zero skipped
+  checks. The real `nginx -t` parsed the staged portal/admin/default vhosts;
+  the runtime probe observed unknown HTTP Host closed (444), unknown HTTPS and
+  IP-literal Hosts answered 421, the fixed canonical redirect, and the
+  canonical portal Host still at 200. The worker-read proof rendered a
+  disposable htpasswd with the real renderer and read it as `www-data`. The
+  AJS-412 renderer proof created its root-owned artifacts and verified the
+  two-generation rotation. A real daemon binary proved `/readyz` 200 with a
+  writable state directory and 503 `not_ready` (state check) with a 0555
+  directory, while `/healthz` stayed 200.
+- **Same host as a non-root user:** `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS`; the root-only AJS-412 ownership proof is listed as a dev
+  skip, and the nginx staging still passes unprivileged via `unshare -Urn`.
+  `bash deploy/production/check.sh` without sudo exits 1 before any checks
+  with the exact `sudo -E bash deploy/production/check.sh` instruction and
+  never prints `check: PASS`.
 - **Windows development host without nginx, systemd-analyze or nft:**
   `bash deploy/production/check.sh --dev` reports `DEV-PASS` and lists the
-  unavailable tools as `SKIP`; the default production mode reports `FAIL`
-  with the required-skip count and never prints `PASS`.
+  unavailable tools as `SKIP`; the default production mode refuses the
+  non-root invocation before any checks and never prints `PASS`.
 - A clean `npm ci` from the committed `dashboard/package-lock.json` succeeded
   with an empty npm cache (206 packages installed). `build-bundles.sh` was
   exercised against `dashboard/`; it produced `mode: live`, `mock: false`,

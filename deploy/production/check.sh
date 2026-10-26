@@ -6,20 +6,25 @@
 # throwaway temporary directory.
 #
 # Usage:
-#   bash deploy/production/check.sh                  # production gate (default)
+#   sudo -E bash deploy/production/check.sh          # production gate (default)
 #   bash deploy/production/check.sh --dev            # development-only checks
 #   AJS_CHECK_MODE=dev bash deploy/production/check.sh
 #
 # Exit:
 #   0 = production gate passed with no skipped checks, or dev checks passed
-#   1 = a check failed, or a required production check was skipped
+#   1 = a check failed, a required production check was skipped, or a
+#       non-root production invocation was refused
 #   2 = bad usage
 #
-# Production mode requires a real `nginx -t` from host nginx, openssl for the
-# throwaway certificate, systemd-analyze, and nft syntax verification. A
-# missing required tool is FAIL, never SKIP. Dev mode allows those tools to be
-# absent, but its result is printed as DEV-PASS/DEV-FAIL and can never be
-# mistaken for a production PASS.
+# Production mode requires root: the AJS-412 renderer proof creates root-owned
+# 0640/0600 artifacts and switches to the nginx worker identity to read them.
+# A non-root production run exits 1 before any checks and prints the exact
+# `sudo -E` command; it can never report a production PASS. Production also
+# requires a real `nginx -t` from host nginx, openssl for the throwaway
+# certificate, systemd-analyze, and nft syntax verification. A missing required
+# tool is FAIL, never SKIP. Dev mode allows those tools to be absent and skips
+# the root-only ownership proof with an explicit dev marker, but its result is
+# printed as DEV-PASS/DEV-FAIL and can never be mistaken for a production PASS.
 #
 # Tools:
 #   nginx (or set AJS_NGINX_BIN=/usr/sbin/nginx; Docker with
@@ -43,7 +48,7 @@ while [ $# -gt 0 ]; do
         --production|--prod) mode=production; shift ;;
         --dev|--development) mode=dev; shift ;;
         -h|--help)
-            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -59,6 +64,17 @@ case $mode in
         exit 2
         ;;
 esac
+
+# The AJS-412 renderer proof creates root-owned 0640/0600 artifacts and then
+# switches to the nginx worker identity to prove it can read them. That is a
+# real privilege requirement, not a missing optional tool: refuse a non-root
+# production invocation up front instead of accumulating PASS lines and then
+# ending in a required-skip FAIL. Dev mode remains usable without root.
+if [ "$mode" = production ] && [ "$(id -u)" -ne 0 ]; then
+    printf 'check: FAIL: production mode requires root for the AJS-412 ownership proof\n' >&2
+    printf 'check: run it as: sudo -E bash %s\n' "$0" >&2
+    exit 1
+fi
 
 checks=0
 failures=0
@@ -1126,7 +1142,11 @@ section "AJS-412 production renderer"
 # TestAJS412ProductionRenderer (shell acceptance): valid inventory produces
 # separate Basic/bearer/hash artifacts; no plaintext reaches the daemon file.
 if [ "$(id -u)" -ne 0 ]; then
-    skip "TestAJS412ProductionRenderer needs root for ownership checks"
+    if [ "$mode" = production ]; then
+        fail "TestAJS412ProductionRenderer: root is required for the ownership assertion (run with sudo -E)"
+    else
+        skip "TestAJS412ProductionRenderer: ownership assertion needs root (DEV-ONLY skip; production uses sudo -E)"
+    fi
 elif ! command -v openssl >/dev/null 2>&1 || ! command -v getent >/dev/null 2>&1; then
     skip "TestAJS412ProductionRenderer needs openssl and getent"
 else
