@@ -127,7 +127,7 @@ As of 2026-10-26:
   second order, grant or charge. The operator **Orders** page filters by state
   or review flag, toggles plan activation, attests an offline receipt, records an offline refund
   and cancels — every one of those dialogs says it moves no money and charges no card.
-  500 Vitest tests in 56 files. The UI is bilingual: a `中` / `EN` switch
+  512 Vitest tests in 57 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -264,8 +264,8 @@ As of 2026-10-26:
   persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
   egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
   no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 1393 `func Test`
-  functions — 1347 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
+  accounts once per process, pausing a jittered 60 s after a failed login. 1413 `func Test`
+  functions — 1367 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
   Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
   per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
   covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
@@ -496,8 +496,8 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (500 tests in 56 files), `cd daemon && go test ./...`
-(1347 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
+Tests: `cd dashboard && npm test` (512 tests in 57 files), `cd daemon && go test ./...`
+(1367 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
 [`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and

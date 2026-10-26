@@ -2883,7 +2883,7 @@ Mutations append `audit-0NN` events at the head of the audit list.
 
 ## Tests
 
-The tree holds **1347 `func Test*` functions across 168 `_test.go` files** (one `TestMain`
+The tree holds **1367 `func Test*` functions across 169 `_test.go` files** (one `TestMain`
 included; recounted 2026-10-27); the emulator module adds 46 functions in 14 files. Every suite
 runs offline.
 
