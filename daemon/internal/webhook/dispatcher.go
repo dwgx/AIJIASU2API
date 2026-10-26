@@ -410,6 +410,12 @@ func (d *Dispatcher) Dispatch(event Event) error {
 	// Dispatch from the drop hook cannot observe a key that is in memory but
 	// still missing from the store.
 	if err := d.persistLiveOutbox(record, entry); err != nil {
+		// The entry never became durable. Roll the acceptance back so the
+		// endpoint cannot stay "running" without a worker: otherwise every
+		// later dispatch queues behind a dead handoff and Close blocks on the
+		// unbalanced WaitGroup count. The event is left for a later retry,
+		// which is also why the dedupe seed is removed.
+		d.rollbackDispatch(record, state, start, now)
 		return err
 	}
 	d.reportOutboxDrops(evicted)
@@ -418,6 +424,49 @@ func (d *Dispatcher) Dispatch(event Event) error {
 		go d.runEndpoint(state)
 	}
 	return nil
+}
+
+// rollbackDispatch undoes the bookkeeping Dispatch added before the outbox
+// write failed. The failed event must not stay accepted: the queue entry, the
+// outbox record and the dedupe seed are removed so a later Dispatch can retry
+// the same event id, and the pending counter follows the queue entry exactly
+// (an eviction or a worker may already have taken the job and adjusted it).
+//
+// When this dispatch was the one that started the endpoint, the worker handoff
+// moves to any job another goroutine queued behind it while it looked running;
+// otherwise the WaitGroup count added by Dispatch is returned here, so Close
+// cannot wait forever.
+func (d *Dispatcher) rollbackDispatch(record *outboxRecord, state *endpointState, start bool, seenAt time.Time) {
+	d.mu.Lock()
+	if current, ok := d.outbox[record.entry.Key()]; ok && current == record {
+		delete(d.outbox, record.entry.Key())
+	}
+	if seen, ok := d.dedupe[record.entry.ID]; ok && seen.Equal(seenAt) {
+		delete(d.dedupe, record.entry.ID)
+	}
+	for i := range state.pending {
+		if state.pending[i].record != record {
+			continue
+		}
+		state.pending = append(state.pending[:i], state.pending[i+1:]...)
+		d.pending--
+		break
+	}
+	if !start {
+		d.mu.Unlock()
+		return
+	}
+	if len(state.pending) > 0 && !d.closed {
+		// A concurrent Dispatch queued behind this one while running was
+		// true and therefore did not start a worker itself. Hand the worker
+		// over so that job is not stranded.
+		d.mu.Unlock()
+		go d.runEndpoint(state)
+		return
+	}
+	state.running = false
+	d.mu.Unlock()
+	d.wg.Done()
 }
 
 func (d *Dispatcher) purgeDedupeLocked(now time.Time) {

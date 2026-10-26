@@ -666,3 +666,108 @@ func TestConcurrentDispatch(t *testing.T) {
 		t.Fatalf("pending = %d, want 0", got)
 	}
 }
+
+// errOutboxWrite is the injected store fault. It is a plain error, so the test
+// can tell a persistence failure apart from a validation rejection.
+var errOutboxWrite = errors.New("injected outbox write failure")
+
+// flakyOutbox wraps the in-memory store and fails PutOutbox while fail is set.
+// Healing it lets a test prove the dispatcher is not wedged after a rollback.
+type flakyOutbox struct {
+	*memoryOutbox
+	mu   sync.Mutex
+	fail bool
+}
+
+func (f *flakyOutbox) PutOutbox(entry OutboxEntry) error {
+	f.mu.Lock()
+	fail := f.fail
+	f.mu.Unlock()
+	if fail {
+		return errOutboxWrite
+	}
+	return f.memoryOutbox.PutOutbox(entry)
+}
+
+func (f *flakyOutbox) setFail(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = fail
+}
+
+// TestWebhookPersistFailureDoesNotWedge drives the fail-closed dispatch path:
+// the store rejects the first write, so Dispatch must roll the accepted event
+// back out of the pending count, outbox, dedupe window and endpoint handoff
+// instead of leaving the endpoint "running" with no worker. A retry of the
+// same event id after the store recovers has to be accepted, delivered, and
+// followed by a Close that returns: a leaked WaitGroup count would block
+// Close on wg.Wait forever, which the deadline turns into a test failure.
+func TestWebhookPersistFailureDoesNotWedge(t *testing.T) {
+	var requests atomic.Int64
+	delivered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		delivered <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	store := &flakyOutbox{memoryOutbox: newMemoryOutbox(), fail: true}
+	dispatcher := newTestDispatcher(Config{Outbox: store, MaxAttempts: 3}, newFakeClock())
+	addEndpoint(t, dispatcher, Endpoint{ID: "ep", URL: server.URL, Secret: "s", Enabled: true})
+
+	event := Event{ID: "evt-persist", EndpointID: "ep", Type: EventNodeConnected}
+	if err := dispatcher.Dispatch(event); !errors.Is(err, errOutboxWrite) {
+		t.Fatalf("Dispatch with failing store error = %v, want %v", err, errOutboxWrite)
+	}
+	if got := dispatcher.Pending(); got != 0 {
+		t.Fatalf("pending after failed persist = %d, want 0", got)
+	}
+	if got := dispatcher.OutboxLen(); got != 0 {
+		t.Fatalf("outbox after failed persist = %d, want 0", got)
+	}
+	if got := store.len(); got != 0 {
+		t.Fatalf("outbox store entries after failed persist = %d, want 0", got)
+	}
+	select {
+	case <-delivered:
+		t.Fatal("failed persist started a delivery")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The store recovers; the same event id must be accepted again because the
+	// failed dispatch rolled its dedupe seed back.
+	store.setFail(false)
+	if err := dispatcher.Dispatch(event); err != nil {
+		t.Fatalf("Dispatch after store recovery: %v", err)
+	}
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch after store recovery never reached the receiver")
+	}
+	waitFor(t, "successful delivery record", func() bool {
+		recent := dispatcher.Log().Recent()
+		return len(recent) == 1 && recent[0].Status == StatusSuccess
+	})
+	if got := dispatcher.Pending(); got != 0 {
+		t.Fatalf("pending after delivery = %d, want 0", got)
+	}
+	if got := store.len(); got != 0 {
+		t.Fatalf("outbox store entries after delivery = %d, want 0", got)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- dispatcher.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after a failed persist: WaitGroup count leaked")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("receiver requests = %d, want 1", got)
+	}
+}
