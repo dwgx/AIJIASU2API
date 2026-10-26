@@ -1201,7 +1201,11 @@ else
     if [ -z "$rbac_tmp" ]; then
         fail "cannot create a temporary directory for the AJS-412 renderer proof"
     else
-        chmod 0711 "$rbac_tmp"
+        # The htpasswd renderer refuses a destination directory that no group
+        # can search; production /etc/nginx is group-searchable. Keep the
+        # fixture group-searchable for that step only -- the renderer then owns
+        # the final hash-directory mode, which is asserted below.
+        chmod 0710 "$rbac_tmp"
         rbac_token=$(openssl rand -hex 32)
         rbac_digest=$(printf '%s' "$rbac_token" | openssl dgst -sha256 -r | awk '{print $1}')
         printf 'alice:viewer:%s:alice-runtime-password\n' "$rbac_token" > "$rbac_tmp/inventory"
@@ -1211,10 +1215,18 @@ else
            AJS_HTPASSWD_FILE="$rbac_tmp/htpasswd" \
            AJS_DAEMON_GROUP="$daemon_group" AJS_HTPASSWD_GROUP="$(id -gn)" \
            sh "$kit/render-admin-operators.sh" "$rbac_tmp/inventory" >"$rbac_tmp/render.log" 2>&1; then
-            # Keep the fixture directory traversable by the daemon identity so
-            # this proof isolates the hash file's own group bits from the
-            # parent-directory question.
-            chmod 0711 "$rbac_tmp"
+            # AJS-428 contract: the renderer leaves the hash directory
+            # root:<daemon group> 0750 so the daemon (User=ajs Group=ajs) can
+            # traverse it; a root:root parent denies the open with EACCES even
+            # when the file bits are correct. Assert the mode the renderer
+            # produced instead of repairing it, so a pre-AJS-428 renderer fails
+            # here rather than passing on a world-traversable fixture.
+            rbac_dir_stat=$(stat -c '%U:%G %a' "$rbac_tmp" 2>/dev/null)
+            if [ "$rbac_dir_stat" = "root:$daemon_group 750" ]; then
+                pass "TestAJS412ProductionRenderer: hash directory is root:$daemon_group 0750"
+            else
+                fail "TestAJS412ProductionRenderer: hash directory is ${rbac_dir_stat:-missing}, want root:$daemon_group 0750 (AJS-428 renderer contract)"
+            fi
             rbac_hash_stat=$(stat -c '%U:%G %a' "$rbac_tmp/operators.hashes" 2>/dev/null)
             if [ "$(stat -c '%a' "$rbac_tmp/operators.hashes")" = 640 ] && \
                [ "$(stat -c '%U' "$rbac_tmp/operators.hashes")" = root ] && \
@@ -1234,6 +1246,21 @@ else
                 2) skip "TestAJS412ProductionRenderer: cannot switch to $daemon_user:$daemon_group on this host, so hash-file readability is unproven" ;;
                 *) fail "TestAJS412ProductionRenderer: daemon identity $daemon_user:$daemon_group cannot read the hash file (${rbac_hash_stat:-missing})" ;;
             esac
+            # Negative control: the pre-AJS-428 root:root 0750 parent must fail
+            # the same read. Without it the proof above would also pass for a
+            # directory mode the daemon cannot traverse.
+            if chgrp root "$rbac_tmp" 2>/dev/null && chmod 0750 "$rbac_tmp" 2>/dev/null; then
+                rbac_neg_rc=0
+                identity_can_read "$rbac_tmp/operators.hashes" "$daemon_user" "$daemon_group" || rbac_neg_rc=$?
+                case $rbac_neg_rc in
+                    1) pass "TestAJS412ProductionRenderer: root:root 0750 parent denies the daemon (negative control)" ;;
+                    2) skip "TestAJS412ProductionRenderer: cannot switch to $daemon_user:$daemon_group for the directory negative control" ;;
+                    *) fail "TestAJS412ProductionRenderer: the daemon read the hash file through a root:root 0750 parent" ;;
+                esac
+                chgrp "$daemon_group" "$rbac_tmp" 2>/dev/null && chmod 0750 "$rbac_tmp" 2>/dev/null
+            else
+                fail "TestAJS412ProductionRenderer: cannot stage the root:root 0750 negative control"
+            fi
             if ! grep -q "$rbac_token" "$rbac_tmp/operators.hashes" && \
                ! grep -q "$rbac_token" "$rbac_tmp/render.log" && \
                ! grep -q 'alice-runtime-password' "$rbac_tmp/render.log"; then
