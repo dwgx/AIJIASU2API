@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { api } from '../src/lib/api'
+import { ApiError } from '../src/lib/errors'
 import {
   MOCK_PORTAL_EMAIL,
   MOCK_PORTAL_PASSWORD,
@@ -507,6 +508,103 @@ describe('admin orders', () => {
     expect(await screen.findByText('Epay disabled')).toBeInTheDocument()
   })
 
+  it('refuses an offline refund affordance for epay and keeps it for manual and stripe', async () => {
+    const seed = await api.listOrders()
+    const epay = seed.find((order) => order.id === 'ord-03')!
+    const manual = seed.find((order) => order.id === 'ord-04')!
+    // Stripe keeps the offline path: a verified provider refund is recorded by
+    // the daemon, and the operator may still attest an offline reversal.
+    const stripe: Order = { ...manual, id: 'ord-stripe', provider: 'stripe', providerRef: 'pi_3N' }
+    vi.spyOn(api, 'listOrders').mockResolvedValue([epay, manual, stripe])
+
+    await openAdmin()
+
+    const epayRow = await findRow('ord-03')
+    expect(
+      within(epayRow).queryByRole('button', { name: 'Record offline refund' }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(epayRow).getByText('Epay has no refund API — refund at the provider.'),
+    ).toBeInTheDocument()
+
+    expect(
+      within(await findRow('ord-04')).getByRole('button', { name: 'Record offline refund' }),
+    ).toBeInTheDocument()
+    expect(
+      within(await findRow('ord-stripe')).getByRole('button', { name: 'Record offline refund' }),
+    ).toBeInTheDocument()
+  })
+
+  it('requeues a dead-lettered job and reloads the row', async () => {
+    const { user } = await openAdmin()
+
+    const dead = await findRow('ord-09')
+    expect(within(dead).getByText('Dead letter')).toBeInTheDocument()
+    await user.click(within(dead).getByRole('button', { name: 'Retry fulfilment' }))
+
+    expect(
+      await screen.findByText('Fulfilment retry queued for order ord-09.'),
+    ).toBeInTheDocument()
+    await waitFor(() =>
+      expect(within(rowForSync('ord-09')).getByText('Queued')).toBeInTheDocument(),
+    )
+    expect(
+      within(rowForSync('ord-09')).queryByRole('button', { name: 'Retry fulfilment' }),
+    ).not.toBeInTheDocument()
+    expect(within(rowForSync('ord-09')).queryByText('Dead letter')).not.toBeInTheDocument()
+  })
+
+  it('keeps the dead letter and shows the daemon refusal when a retry is rejected', async () => {
+    vi.spyOn(api, 'retryFulfilment').mockRejectedValue(
+      new ApiError(
+        409,
+        '409 Conflict — order "ord-09" attempt "lease-ord-09" is awaiting external cleanup',
+        'CONFLICT',
+      ),
+    )
+    const { user } = await openAdmin()
+
+    const dead = await findRow('ord-09')
+    await user.click(within(dead).getByRole('button', { name: 'Retry fulfilment' }))
+
+    expect(
+      await screen.findByText(
+        /Retry refused: order "ord-09" attempt "lease-ord-09" is awaiting external cleanup/,
+      ),
+    ).toBeInTheDocument()
+    expect(within(rowForSync('ord-09')).getByText('Dead letter')).toBeInTheDocument()
+  })
+
+  it('offers no retry for queued, publishing or cleanup-pending jobs', async () => {
+    const seed = await api.listOrders()
+    const queued = seed.find((order) => order.id === 'ord-03')!
+    const cleanup = seed.find((order) => order.id === 'ord-10')!
+    const publishing: Order = {
+      ...seed.find((order) => order.id === 'ord-04')!,
+      id: 'ord-publishing',
+      state: 'paid',
+      grant: null,
+      fulfilment: {
+        orderId: 'ord-publishing',
+        mode: 'initial',
+        state: 'publishing',
+        attempts: 1,
+        entitlementExpiresAt: '2026-11-25T00:01:00Z',
+        updatedAt: '2026-10-27T00:00:00Z',
+      },
+    }
+    vi.spyOn(api, 'listOrders').mockResolvedValue([queued, publishing, cleanup])
+
+    await openAdmin()
+
+    for (const id of ['ord-03', 'ord-publishing', 'ord-10']) {
+      const row = await findRow(id)
+      expect(
+        within(row).queryByRole('button', { name: 'Retry fulfilment' }),
+      ).not.toBeInTheDocument()
+    }
+  })
+
   it('requires a receipt reference, then attests, activates and refunds', async () => {
     await signIn()
     const order = await portalApi.createOrder('plan-01', 'admin-flow')
@@ -661,5 +759,61 @@ describe('account capacity', () => {
     expect(within(card).getByText('Simultaneous connections')).toBeInTheDocument()
     expect(within(card).getByText('200')).toBeInTheDocument()
     expect(within(card).getByText('Multi-slot pending')).toBeInTheDocument()
+  })
+})
+
+describe('admin fulfilment retry route', () => {
+  it('posts the retry route with CSRF and surfaces the daemon 409 detail', async () => {
+    const seed = await api.listOrders()
+    const dead = seed.find((order) => order.id === 'ord-09')!
+    const queued: Order = {
+      ...dead,
+      fulfilment: {
+        ...dead.fulfilment!,
+        state: 'queued',
+        attempts: 0,
+        blocked: false,
+        nextAttemptAt: '2026-10-27T00:00:00Z',
+      },
+    }
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(queued, 202))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'CONFLICT',
+              message: 'order "ord-09" attempt "lease-ord-09" is awaiting external cleanup',
+            },
+          },
+          409,
+        ),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    // `lib/api.ts` reads VITE_USE_MOCK at module init; a fresh module graph is
+    // the only way to exercise the live branch from this mock-mode file.
+    vi.resetModules()
+    const live = await import('../src/lib/api')
+
+    const accepted = await live.api.retryFulfilment('ord-09')
+    expect(accepted.fulfilment?.state).toBe('queued')
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/v1/admin/orders/ord-09/actions/retry-fulfilment')
+    expect(init.method).toBe('POST')
+    const headers = new Headers(init.headers)
+    expect(headers.get('X-AJS-CSRF')).toBe('1')
+    expect(headers.get('Authorization')).toBeNull()
+    expect(init.body).toBeUndefined()
+
+    await expect(live.api.retryFulfilment('ord-09')).rejects.toMatchObject({
+      status: 409,
+      code: 'CONFLICT',
+      message: expect.stringContaining('awaiting external cleanup'),
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

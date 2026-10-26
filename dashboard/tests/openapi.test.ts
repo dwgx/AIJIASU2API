@@ -203,8 +203,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(119)
-    expect(entries).toHaveLength(146)
+    expect(Object.keys(doc.paths)).toHaveLength(120)
+    expect(entries).toHaveLength(147)
   })
 
   it('documents the real-time debugger trace and stream', () => {

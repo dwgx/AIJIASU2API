@@ -27,6 +27,7 @@ import {
   TableSkeleton,
 } from '../components/primitives'
 import { api } from '../lib/api'
+import { ApiError } from '../lib/errors'
 import { formatBytes, formatDate } from '../lib/format'
 import { useI18n } from '../lib/i18n'
 import type { Order, OrderState, Plan } from '../lib/types'
@@ -60,6 +61,36 @@ function matchesFulfilment(order: Order, filter: FulfilmentFilter): boolean {
   if (filter === 'all') return true
   if (filter === 'cleanup_pending') return order.fulfilment?.cleanupPending === true
   return order.fulfilment?.state === filter
+}
+
+/**
+ * Only a dead-lettered job can be re-driven: `blocked` marks exactly that job
+ * as needing an operator. A queued or publishing job is already scheduled, and
+ * a job awaiting external cleanup still owns its published identity, so none of
+ * them offers a retry.
+ */
+function canRetryFulfilment(order: Order): boolean {
+  const job = order.fulfilment
+  if (!job || job.cleanupPending) return false
+  if (job.state === 'queued' || job.state === 'publishing') return false
+  return job.state === 'dead_letter' || job.blocked === true
+}
+
+type Translate = (key: string, params?: Record<string, string | number>) => string
+
+/**
+ * The daemon's 409 detail is the actionable half of a refused retry ("only a
+ * dead-lettered job can be retried", "awaiting external cleanup"), and this
+ * route carries no separate machine reason. Show that detail verbatim behind a
+ * localized prefix; a bodyless refusal falls back to the generic sentence.
+ */
+function retryRefusal(cause: unknown, t: Translate): string {
+  if (cause instanceof ApiError && cause.status === 409) {
+    const separator = cause.message.indexOf(' — ')
+    const detail = separator >= 0 ? cause.message.slice(separator + 3).trim() : ''
+    if (detail) return t('orders.retryFulfilmentRefused', { reason: detail })
+  }
+  return t('orders.retryFulfilmentFailed')
 }
 
 interface PlanTarget {
@@ -212,6 +243,24 @@ export default function Orders() {
     }
   }
 
+  /**
+   * Requeue a dead-lettered job. A 202 means the daemon scheduled the same job
+   * again, so the row reloads into `queued`; a 409 keeps the dead letter and
+   * surfaces the blocker instead of pretending anything changed.
+   */
+  const submitRetry = async (order: Order) => {
+    setBusy(`retry:${order.id}`)
+    try {
+      await api.retryFulfilment(order.id)
+      push(t('orders.retryFulfilmentToast', { id: order.id }), 'success')
+      orders.reload()
+    } catch (cause) {
+      push(retryRefusal(cause, t), 'danger')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const submitPlan = async () => {
     if (!planTarget) return
     setBusy('plan')
@@ -341,6 +390,17 @@ export default function Orders() {
       label: '',
       render: (order) => (
         <div className="order-actions">
+          {canRetryFulfilment(order) ? (
+            <Button
+              variant="primary"
+              loading={busy === `retry:${order.id}`}
+              onClick={() => submitRetry(order)}
+            >
+              {busy === `retry:${order.id}`
+                ? t('orders.retryingFulfilment')
+                : t('orders.retryFulfilment')}
+            </Button>
+          ) : null}
           {order.state === 'awaiting_payment' ? (
             <>
               <Button variant="primary" onClick={() => openAttest(order)}>
@@ -351,22 +411,21 @@ export default function Orders() {
               </Button>
             </>
           ) : null}
-          {order.state === 'paid' ? (
-            <>
-              {order.fulfilment ? null : (
-                <Button variant="primary" onClick={() => openAttest(order)}>
-                  {t('orders.retryActivation')}
-                </Button>
-              )}
+          {order.state === 'paid' && !order.fulfilment ? (
+            <Button variant="primary" onClick={() => openAttest(order)}>
+              {t('orders.retryActivation')}
+            </Button>
+          ) : null}
+          {order.state === 'paid' || order.state === 'active' ? (
+            order.provider === 'epay' ? (
+              <span className="order-hint" title={t('orders.refundEpayUnsupportedHint')}>
+                {t('orders.refundEpayUnsupported')}
+              </span>
+            ) : (
               <Button variant="ghost" onClick={() => openRefund(order)}>
                 {t('orders.refund')}
               </Button>
-            </>
-          ) : null}
-          {order.state === 'active' ? (
-            <Button variant="ghost" onClick={() => openRefund(order)}>
-              {t('orders.refund')}
-            </Button>
+            )
           ) : null}
         </div>
       ),

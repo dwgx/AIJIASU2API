@@ -617,10 +617,21 @@ export function mockSettleOrder(id: string, reference: string): Order {
   return clone(order)
 }
 
-/** Record an offline refund the operator already completed; full-only. */
+/**
+ * Record an offline refund the operator already completed; full-only. Epay has
+ * no refund API, so a local reversal would fabricate evidence and is refused
+ * exactly as the daemon refuses it.
+ */
 export function mockRefundOrder(id: string, reference: string): Order {
   const order = findOrder(id)
   if (!reference.trim()) throw new ApiError(400, 'A refund reference is required', 'INVALID_ARGUMENT')
+  if (order.provider === 'epay') {
+    throw new ApiError(
+      409,
+      'epay has no refund API; only a verified provider refund can be recorded',
+      'PROVIDER_REFUND_UNSUPPORTED',
+    )
+  }
   const now = Date.now()
   if (order.state === 'paid' || order.state === 'active') {
     order.state = 'refunded'
@@ -634,6 +645,48 @@ export function mockRefundOrder(id: string, reference: string): Order {
     // Refund evidence without a recorded payment quarantines the order.
     order.reviewRequired = true
   }
+  return clone(order)
+}
+
+/**
+ * POST /v1/admin/orders/{id}/actions/retry-fulfilment — requeue a dead-lettered
+ * job with a fresh attempt budget. Mirrors the daemon's refusals: only a
+ * dead-lettered job without a pending external cleanup qualifies, and a
+ * review-flagged order waits for its review to be resolved.
+ */
+export function mockRetryFulfilment(id: string): Order {
+  const order = findOrder(id)
+  const job = order.fulfilment
+  if (!job) throw new ApiError(409, `Order ${id} has no fulfilment job to retry`, 'CONFLICT')
+  if (job.cleanupPending) {
+    throw new ApiError(
+      409,
+      `Order ${id} attempt is awaiting external cleanup; retrying would publish a second lease`,
+      'CONFLICT',
+    )
+  }
+  if (job.state !== 'dead_letter') {
+    throw new ApiError(
+      409,
+      `Order ${id} fulfilment job is ${job.state}; only a dead-lettered job can be retried`,
+      'CONFLICT',
+    )
+  }
+  if (order.reviewRequired) {
+    throw new ApiError(
+      409,
+      `Order ${id} requires review; fulfilment retry is blocked`,
+      'CONFLICT',
+    )
+  }
+  const now = Date.now()
+  job.state = 'queued'
+  job.attempts = 0
+  job.blocked = false
+  delete job.lastReason
+  delete job.lastError
+  job.nextAttemptAt = iso(now)
+  job.updatedAt = iso(now)
   return clone(order)
 }
 

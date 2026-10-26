@@ -46,6 +46,7 @@ import {
   mockCancelOrder,
   mockEpayEnabled,
   mockRefundOrder,
+  mockRetryFulfilment,
   mockSettleOrder,
   mockSetPlanActive,
   resetOrderMock,
@@ -4434,6 +4435,24 @@ export const api = {
     }
     await wait()
     return mockRefundOrder(id, reference)
+  },
+
+  /**
+   * POST /v1/admin/orders/{id}/actions/retry-fulfilment — requeue a
+   * dead-lettered publication job with a fresh attempt budget. Only the job
+   * changes: the mode, the paid term and the order state are untouched. A job
+   * that is still scheduled, publishing or awaiting external cleanup answers
+   * 409 with the blocker in the message.
+   */
+  async retryFulfilment(id: string): Promise<Order> {
+    if (!USE_MOCK) {
+      return http<Order>(
+        `/v1/admin/orders/${encodeURIComponent(id)}/actions/retry-fulfilment`,
+        { method: 'POST' },
+      )
+    }
+    await wait()
+    return mockRetryFulfilment(id)
   },
 
   /** PATCH /v1/admin/plans/{id} — activate/deactivate; snapshots stay priced. */
