@@ -30,6 +30,7 @@ import (
 	"ajsaccountd/internal/account"
 	"ajsaccountd/internal/api"
 	eventring "ajsaccountd/internal/events"
+	"ajsaccountd/internal/fulfilment"
 	"ajsaccountd/internal/gate"
 	"ajsaccountd/internal/health"
 	"ajsaccountd/internal/lablog"
@@ -636,6 +637,21 @@ func run() error {
 			snapshots.save("account-io")
 		},
 	}, st, logger)
+
+	// Order fulfilment is the only path that publishes a reserved lease and
+	// commits it. The worker publishes through the server's existing Panel and
+	// LeasePublishHook boundary, so it is built after the server and installed
+	// before the listener starts; the settlement callback can then attempt a
+	// paid order immediately while the loop owns the retry schedule.
+	fulfiller := fulfilment.New(fulfilment.Config{
+		Store:     st,
+		Publisher: server,
+		Events:    server,
+		Logger:    logger,
+	})
+	server.SetFulfiller(fulfiller)
+	go fulfiller.Run(ctx)
+	logger.Info("fulfilment_worker_started", "scan_interval", fulfilment.DefaultScanInterval.String())
 
 	// 易支付 reconciliation is a bounded, jittered poller over the persisted
 	// pending orders. It starts only when the adapter is fully configured and

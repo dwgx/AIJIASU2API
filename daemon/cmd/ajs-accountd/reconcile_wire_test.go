@@ -155,6 +155,8 @@ func (p *fakeReconcilePanel) Reconcile(context.Context) (runtime.Topology, error
 
 func (p *fakeReconcilePanel) PublishLease(context.Context, model.Lease) error { return nil }
 
+func (p *fakeReconcilePanel) WithdrawLease(context.Context, string) error { return nil }
+
 func (p *fakeReconcilePanel) RotateLease(context.Context, string) (model.Lease, error) {
 	return model.Lease{}, nil
 }

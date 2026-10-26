@@ -3,18 +3,22 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"ajsaccountd/internal/fulfilment"
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/payment"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 const (
@@ -922,5 +926,476 @@ func TestEpayReconcileSettlesPaidUnfulfilledOrder(t *testing.T) {
 	resp, body = epayNotifyCall(t, ts, valid)
 	if resp.StatusCode != http.StatusOK || string(body) != "success" {
 		t.Fatalf("post-activation notify response = %d %q, want 200 success", resp.StatusCode, body)
+	}
+}
+
+// epayFulfilPublisher is the publication seam for the notify tests: it records
+// every reserved lease and optionally fails the publication.
+type epayFulfilPublisher struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (p *epayFulfilPublisher) PublishReservedLease(context.Context, model.Lease) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return p.err
+}
+
+func (p *epayFulfilPublisher) WithdrawReservedLease(context.Context, model.Lease) error {
+	return nil
+}
+
+func (p *epayFulfilPublisher) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// releasingFulfiller models the blocker clearing between settlement and the
+// callback's immediate attempt. The seeded account holds its only slot while
+// the money is recorded, so the store cannot activate the order; the
+// fulfilment attempt then releases that seeded lease and publishes the
+// reservation through the real service.
+type releasingFulfiller struct {
+	st  *store.Store
+	svc *fulfilment.Service
+}
+
+func (f *releasingFulfiller) FulfilNow(ctx context.Context, orderID string) (model.Order, error) {
+	for _, lease := range f.st.Leases() {
+		if lease.AccountID != "acc-01" {
+			continue
+		}
+		if err := f.st.ReleaseLease(lease.ID); err != nil {
+			return model.Order{}, err
+		}
+	}
+	return f.svc.FulfilNow(ctx, orderID)
+}
+
+// The metrics endpoint asserts this interface on Config.Fulfiller; the test
+// decorator delegates to the real worker so the counters are observable.
+func (f *releasingFulfiller) FulfilmentAttempts() map[string]map[string]int {
+	return f.svc.FulfilmentAttempts()
+}
+
+func (f *releasingFulfiller) FulfilmentDeadLetters() int {
+	return f.svc.FulfilmentDeadLetters()
+}
+
+// newEpayNotifyConfig is the shared configuration of the fulfilment notify
+// tests: a fully configured epay adapter, the tenant portal and one event sink.
+func newEpayNotifyConfig(st *store.Store, sink *recordingSink, fulfiller Fulfiller) Config {
+	return Config{
+		AdminToken:     testToken,
+		TenantPortal:   true,
+		TenantOrigin:   portalTestOrigin,
+		ManualPayments: payment.NewManual(time.Now),
+		Epay: payment.NewEpay(payment.EpayConfig{
+			Gateway:  "https://pay.example.test/",
+			PID:      epayAPITestPID,
+			Key:      epayAPITestKey,
+			SignType: "MD5",
+			Now:      func() time.Time { return time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC) },
+		}),
+		Events:    sink,
+		Fulfiller: fulfiller,
+	}
+}
+
+// newEpayFulfilmentServer wires the real fulfilment service over a fake
+// publisher, so the notify tests exercise the callback, the store gate and the
+// publication seam together.
+func newEpayFulfilmentServer(t *testing.T, publisher *epayFulfilPublisher) (*httptest.Server, *store.Store, *recordingSink, *Server) {
+	t.Helper()
+	st := store.New()
+	sink := &recordingSink{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Mirror main: the server exists first, the worker publishes and emits
+	// through it, and SetFulfiller installs the worker before serving.
+	srv := New(newEpayNotifyConfig(st, sink, nil), st, logger)
+	svc := fulfilment.New(fulfilment.Config{
+		Store: st, Publisher: publisher, Events: srv, Logger: logger,
+	})
+	srv.SetFulfiller(&releasingFulfiller{st: st, svc: svc})
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts, st, sink, srv
+}
+
+// TestEpayNotifyFulfilsImmediatelyAndAcksSuccess proves the callback attempts
+// the queued job and answers success only after the order is actually serving.
+func TestEpayNotifyFulfilsImmediatelyAndAcksSuccess(t *testing.T) {
+	publisher := &epayFulfilPublisher{}
+	ts, st, sink, _ := newEpayFulfilmentServer(t, publisher)
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-immediate@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-immediate")
+	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+	requireStatus(t, resp, http.StatusOK)
+
+	valid := epayNotifyForm(t, epayAPITestKey, order, "trade-immediate", "30.00")
+	resp, body := epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "success" {
+		t.Fatalf("notify response = %d %q, want 200 success", resp.StatusCode, body)
+	}
+	current, ok := st.Order(order.ID)
+	if !ok || current.State != model.OrderActive || current.Grant == nil || current.Fulfilment != nil {
+		t.Fatalf("order after notify = %+v, ok=%t, want active with a grant and no job", current, ok)
+	}
+	if publisher.count() != 1 {
+		t.Fatalf("publications = %d, want exactly one", publisher.count())
+	}
+	lease, ok := st.Lease(current.Grant.LeaseID)
+	if !ok || lease.Status != model.LeaseActive || lease.UserID != current.UserID {
+		t.Fatalf("grant lease = %+v, ok=%t, want the one active reservation", lease, ok)
+	}
+	for _, candidate := range st.Leases() {
+		if candidate.Status == model.LeasePendingPublication {
+			t.Fatalf("committed order left a provisional reservation: %+v", candidate)
+		}
+	}
+	if grants := st.Grants(); len(grants) != 1 || grants[0].OrderID != order.ID {
+		t.Fatalf("grants = %+v, want exactly one for %s", grants, order.ID)
+	}
+	if got := len(st.PaymentEvents()); got != 1 {
+		t.Fatalf("payment events = %d, want one settlement fact", got)
+	}
+	if sink.count(webhook.EventOrderActivated) != 1 || sink.count(webhook.EventLeaseCreated) != 1 {
+		t.Fatalf("events = %v, want one order.activated and one lease.created", sink.types())
+	}
+
+	// A duplicate callback is acknowledged from the serving state and emits no
+	// second activation or lease event.
+	resp, body = epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "success" {
+		t.Fatalf("duplicate notify response = %d %q, want 200 success", resp.StatusCode, body)
+	}
+	if sink.count(webhook.EventOrderActivated) != 1 || sink.count(webhook.EventLeaseCreated) != 1 {
+		t.Fatalf("duplicate notify emitted events: %v", sink.types())
+	}
+}
+
+// TestEpayNotifyFulfilFailureLeavesJobQueued proves a failed immediate attempt
+// keeps the payment, leaves the job queued with a retry, grants nothing and
+// answers the gateway fail.
+func TestEpayNotifyFulfilFailureLeavesJobQueued(t *testing.T) {
+	publisher := &epayFulfilPublisher{err: errors.New("resin unavailable")}
+	ts, st, sink, srv := newEpayFulfilmentServer(t, publisher)
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-immediate-fail@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-immediate-fail")
+	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+	requireStatus(t, resp, http.StatusOK)
+	before := time.Now()
+
+	valid := epayNotifyForm(t, epayAPITestKey, order, "trade-immediate-fail", "30.00")
+	resp, body := epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "fail" {
+		t.Fatalf("notify response = %d %q, want 200 fail", resp.StatusCode, body)
+	}
+	current, ok := st.Order(order.ID)
+	if !ok || current.State != model.OrderPaid || current.Grant != nil {
+		t.Fatalf("order after failed fulfil = %+v, ok=%t, want paid without a grant", current, ok)
+	}
+	job := current.Fulfilment
+	if job == nil || job.State != model.FulfilmentQueued || job.Attempts != 1 ||
+		job.LastReason != model.FulfilmentReasonPublishFailed || job.NextAttemptAt == nil {
+		t.Fatalf("job = %+v, want one queued failed attempt", job)
+	}
+	next, err := time.Parse(time.RFC3339Nano, *job.NextAttemptAt)
+	if err != nil || !next.After(before) {
+		t.Fatalf("nextAttemptAt = %q, want a future retry", *job.NextAttemptAt)
+	}
+	for _, candidate := range st.Leases() {
+		if candidate.Status == model.LeasePendingPublication {
+			t.Fatalf("failed attempt left a provisional reservation: %+v", candidate)
+		}
+	}
+	if grants := st.Grants(); len(grants) != 0 {
+		t.Fatalf("failed attempt granted %+v", grants)
+	}
+	if publisher.count() != 1 {
+		t.Fatalf("publications = %d, want exactly one", publisher.count())
+	}
+	if got := len(st.PaymentEvents()); got != 1 {
+		t.Fatalf("payment events = %d, want one settlement fact", got)
+	}
+	if sink.count(webhook.EventOrderActivated) != 0 || sink.count(webhook.EventLeaseCreated) != 0 {
+		t.Fatalf("failed attempt emitted service events: %v", sink.types())
+	}
+	var metrics strings.Builder
+	srv.writeFulfilmentMetrics(&metrics)
+	for _, want := range []string{
+		`ajs_order_fulfilment_jobs{state="queued",reason="publish_failed"} 1`,
+		`ajs_order_fulfilment_attempts_total{result="publish_failed",reason="publish_failed"} 1`,
+		"ajs_order_fulfilment_dead_letters_total 0",
+		"ajs_order_paid_unfulfilled_seconds ",
+	} {
+		if !strings.Contains(metrics.String(), want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics.String())
+		}
+	}
+}
+
+// recordingFulfiller captures the context the notify path passes and fails
+// immediately, so the timeout wiring is observable without waiting ten seconds.
+type recordingFulfiller struct {
+	mu       sync.Mutex
+	calls    int
+	deadline time.Time
+	alive    bool
+}
+
+func (f *recordingFulfiller) FulfilNow(ctx context.Context, _ string) (model.Order, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.deadline, _ = ctx.Deadline()
+	f.alive = ctx.Err() == nil
+	return model.Order{}, context.DeadlineExceeded
+}
+
+// TestEpayNotifyFulfilTimeoutUsesDetachedDeadline proves the callback attempts
+// the job with its own ~10s deadline, not the request context, and answers fail
+// while the job stays queued.
+func TestEpayNotifyFulfilTimeoutUsesDetachedDeadline(t *testing.T) {
+	st := store.New()
+	sink := &recordingSink{}
+	fulfiller := &recordingFulfiller{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts := httptest.NewServer(New(newEpayNotifyConfig(st, sink, fulfiller), st, logger))
+	t.Cleanup(ts.Close)
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "epay-timeout@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-timeout")
+	resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+	requireStatus(t, resp, http.StatusOK)
+
+	valid := epayNotifyForm(t, epayAPITestKey, order, "trade-timeout", "30.00")
+	resp, body := epayNotifyCall(t, ts, valid)
+	if resp.StatusCode != http.StatusOK || string(body) != "fail" {
+		t.Fatalf("notify response = %d %q, want 200 fail", resp.StatusCode, body)
+	}
+	fulfiller.mu.Lock()
+	calls, deadline, alive := fulfiller.calls, fulfiller.deadline, fulfiller.alive
+	fulfiller.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("fulfilment calls = %d, want 1", calls)
+	}
+	if !alive {
+		t.Fatal("the immediate attempt ran on a cancelled request context")
+	}
+	remaining := time.Until(deadline)
+	if remaining < 8*time.Second || remaining > 11*time.Second {
+		t.Fatalf("attempt deadline = %s away, want the bounded ~10s context", remaining)
+	}
+	current, ok := st.Order(order.ID)
+	if !ok || current.State != model.OrderPaid || current.Grant != nil {
+		t.Fatalf("order after timeout = %+v, ok=%t, want paid without a grant", current, ok)
+	}
+	if job := current.Fulfilment; job == nil || job.State != model.FulfilmentQueued ||
+		job.Attempts != 0 || job.NextAttemptAt == nil {
+		t.Fatalf("job = %+v, want the queued job left for the worker", current.Fulfilment)
+	}
+}
+
+// seedPaidQueuedOrder frees the seeded account slot and creates one paid order
+// for u-01 with a queued initial job. The settlement happens while the user is
+// suspended, so the order is paid without a grant — the state an initial
+// fulfilment job starts from.
+func seedPaidQueuedOrder(t *testing.T, st *store.Store) string {
+	t.Helper()
+	freeFixtureCapacity(t, st)
+	if err := st.SignupTenant(model.TenantSignupInput{
+		Email: "fulfilment-seed@example.com", Password: portalTestPassword, DisplayName: "Fulfilment Seed",
+	}); err != nil {
+		t.Fatalf("SignupTenant: %v", err)
+	}
+	var tenant model.Tenant
+	for _, candidate := range st.Tenants() {
+		if candidate.Email == "fulfilment-seed@example.com" {
+			tenant = candidate
+		}
+	}
+	if tenant.ID == "" {
+		t.Fatal("signup did not store a tenant")
+	}
+	if _, err := st.ApproveTenant(tenant.ID, "u-01", nil); err != nil {
+		t.Fatalf("ApproveTenant: %v", err)
+	}
+	plan, err := st.CreatePlan(model.PlanInput{
+		Name: "Monthly 5 GiB", AmountMinor: 3000, Currency: "CNY",
+		LeaseTTLSeconds: 3600, QuotaBytes: 5 << 30,
+	})
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	order, _, err := st.CreateOrder(tenant.ID, "u-01", plan.ID, "fulfilment-seed", "test")
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if _, err := st.SetUserEnabled("u-01", false); err != nil {
+		t.Fatalf("suspend user: %v", err)
+	}
+	paid, err := st.ApplyPaymentEvent(model.ProviderManual, model.PaymentEvent{
+		Provider: model.ProviderManual, ID: "evt-fulfilment-seed", Kind: model.PaymentSettled,
+		OrderID: order.ID, ProviderRef: "receipt-fulfilment-seed",
+	}, "test")
+	if err != nil {
+		t.Fatalf("ApplyPaymentEvent: %v", err)
+	}
+	if _, err := st.SetUserEnabled("u-01", true); err != nil {
+		t.Fatalf("resume user: %v", err)
+	}
+	if paid.State != model.OrderPaid || paid.Grant != nil {
+		t.Fatalf("settled order = %+v, want paid without a grant", paid)
+	}
+	if _, err := st.EnqueueFulfilment(order.ID, model.FulfilmentInitial); err != nil {
+		t.Fatalf("EnqueueFulfilment: %v", err)
+	}
+	return order.ID
+}
+
+// TestPublishReservedLeaseMatrix pins the idempotent publish-or-inspect
+// contract: a pending reservation is published once, withdrawal reaches both
+// the Panel and the hook, an active row is reported published without another
+// panel or hook call, and a missing row is a conflict.
+func TestPublishReservedLeaseMatrix(t *testing.T) {
+	st := store.New()
+	panel := &leasePanel{}
+	hookCalls := 0
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(Config{
+		Panel: panel,
+		LeasePublishHook: func(context.Context, LeaseAction, model.Lease) error {
+			hookCalls++
+			return nil
+		},
+	}, st, logger)
+
+	orderID := seedPaidQueuedOrder(t, st)
+	attempt, err := st.BeginFulfilment(orderID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if _, err := st.MarkFulfilmentPublished(orderID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished: %v", err)
+	}
+
+	if err := srv.PublishReservedLease(context.Background(), attempt.Lease); err != nil {
+		t.Fatalf("publish pending reservation: %v", err)
+	}
+	if panel.publishes != 1 || hookCalls != 1 {
+		t.Fatalf("pending publish = %d panel, %d hook; want one each", panel.publishes, hookCalls)
+	}
+	// The withdrawal must reach the configured Panel and the hook; the row is
+	// released by the worker's completion, not by this inspection call.
+	if err := srv.WithdrawReservedLease(context.Background(), attempt.Lease); err != nil {
+		t.Fatalf("withdraw pending reservation: %v", err)
+	}
+	if panel.withdrawals != 1 || hookCalls != 2 {
+		t.Fatalf("pending withdrawal = %d panel, %d hook; want one each",
+			panel.withdrawals, hookCalls)
+	}
+	if _, err := st.CommitFulfilment(orderID, attempt.LeaseID); err != nil {
+		t.Fatalf("CommitFulfilment: %v", err)
+	}
+	active, ok := st.Lease(attempt.LeaseID)
+	if !ok || active.Status != model.LeaseActive {
+		t.Fatalf("committed lease = %+v, ok=%t", active, ok)
+	}
+	if err := srv.PublishReservedLease(context.Background(), active); err != nil {
+		t.Fatalf("publish active lease: %v", err)
+	}
+	if panel.publishes != 1 || hookCalls != 2 {
+		t.Fatalf("active row republished: %d panel, %d hook", panel.publishes, hookCalls)
+	}
+	if err := srv.PublishReservedLease(context.Background(), model.Lease{ID: "lease-missing"}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("missing row error = %v, want ErrConflict", err)
+	}
+	if panel.publishes != 1 || hookCalls != 2 {
+		t.Fatalf("missing row reached the publisher: %d panel, %d hook", panel.publishes, hookCalls)
+	}
+	// Withdrawal must never remove a serving lease.
+	if err := srv.WithdrawReservedLease(context.Background(), active); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("withdraw active lease error = %v, want ErrConflict", err)
+	}
+	// A terminal transition can drop the row before the marker; the caller
+	// still holds the attempt lease identity, so the panel must be reached from
+	// the passed account even when no row remains.
+	before := panel.withdrawals
+	if err := srv.WithdrawReservedLease(context.Background(), model.Lease{
+		ID: "lease-orphan", AccountID: "acc-orphan",
+	}); err != nil {
+		t.Fatalf("withdraw orphaned publication: %v", err)
+	}
+	if panel.withdrawals != before+1 {
+		t.Fatalf("orphaned withdrawal panel calls = %d, want %d", panel.withdrawals, before+1)
+	}
+}
+
+// TestFulfilmentDeadLetterWithdrawsThroughPanel proves the production wiring:
+// the worker publishes and withdraws through the same server, and a
+// published-then-dead-lettered job reaches the configured Panel and the hook.
+func TestFulfilmentDeadLetterWithdrawsThroughPanel(t *testing.T) {
+	st := store.New()
+	panel := &leasePanel{}
+	revokes := 0
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(Config{
+		Panel: panel,
+		LeasePublishHook: func(_ context.Context, action LeaseAction, _ model.Lease) error {
+			switch action {
+			case LeaseActionCreated:
+				// Force every commit to lose its race after publication.
+				_, err := st.SetUserEnabled("u-01", false)
+				return err
+			case LeaseActionRevoked:
+				revokes++
+			}
+			return nil
+		},
+	}, st, logger)
+	svc := fulfilment.New(fulfilment.Config{
+		Store: st, Publisher: srv, Events: srv, Logger: logger,
+	})
+	srv.SetFulfiller(svc)
+
+	orderID := seedPaidQueuedOrder(t, st)
+	for i := range store.MaxFulfilmentAttempts {
+		if _, err := svc.FulfilNow(context.Background(), orderID); err == nil {
+			t.Fatalf("attempt %d succeeded, want a commit refusal", i+1)
+		}
+	}
+	order, ok := st.Order(orderID)
+	if !ok || order.Fulfilment == nil || order.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("order after cleanup = %+v, ok=%t, want a dead letter", order, ok)
+	}
+	if panel.publishes != 1 {
+		t.Fatalf("panel publishes = %d, want one (commit retries never republish)", panel.publishes)
+	}
+	if panel.withdrawals != 1 {
+		t.Fatalf("panel withdrawals = %d, want 1", panel.withdrawals)
+	}
+	if revokes != 1 {
+		t.Fatalf("hook revokes = %d, want 1", revokes)
+	}
+	for _, lease := range st.Leases() {
+		if lease.Status == model.LeasePendingPublication {
+			t.Fatalf("cleanup left a reservation: %+v", lease)
+		}
+		if lease.AccountID == "acc-01" {
+			t.Fatalf("cleanup left an acc-01 lease: %+v", lease)
+		}
+	}
+	if grants := st.Grants(); len(grants) != 0 {
+		t.Fatalf("grants = %+v, want none", grants)
+	}
+	if got := svc.FulfilmentDeadLetters(); got != 1 {
+		t.Fatalf("dead-letter counter = %d, want 1", got)
 	}
 }

@@ -21,6 +21,15 @@ type healthResponse struct {
 	Accounts map[string]int `json:"accounts"`
 }
 
+// FulfilmentMetrics is the worker's counter snapshot behind GET /metrics. The
+// API asserts it on Config.Fulfiller, so a deployment without a worker still
+// serves the job gauge and paid-age series from the store and reports zero
+// attempts instead of failing the endpoint.
+type FulfilmentMetrics interface {
+	FulfilmentAttempts() map[string]map[string]int
+	FulfilmentDeadLetters() int
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{
 		string(model.AccountActive):     0,
@@ -152,9 +161,70 @@ func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	s.writeFulfilmentMetrics(&b)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(b.String()))
+}
+
+// writeFulfilmentMetrics appends the order-fulfilment series. The job gauge and
+// paid age are derived from the store, so they are present even when this
+// process has no worker wired; the attempt and dead-letter counters come from
+// the worker's in-process snapshot.
+func (s *Server) writeFulfilmentMetrics(b *strings.Builder) {
+	states := []model.FulfilmentState{
+		model.FulfilmentQueued, model.FulfilmentPublishing, model.FulfilmentDeadLetter,
+	}
+	jobs := make(map[model.FulfilmentState]map[model.FulfilmentReason]int, len(states))
+	for _, state := range states {
+		jobs[state] = make(map[model.FulfilmentReason]int)
+	}
+	oldestPaid := 0.0
+	now := time.Now()
+	for _, order := range s.store.Orders() {
+		if job := order.Fulfilment; job != nil {
+			jobs[job.State][job.LastReason]++
+		}
+		if order.State != model.OrderPaid || order.Grant != nil || order.PaidAt == nil {
+			continue
+		}
+		paidAt, err := time.Parse(time.RFC3339Nano, *order.PaidAt)
+		if err != nil {
+			continue
+		}
+		if age := now.Sub(paidAt).Seconds(); age > oldestPaid {
+			oldestPaid = age
+		}
+	}
+	b.WriteString("# HELP ajs_order_fulfilment_jobs Durable fulfilment jobs by state and last reason.\n")
+	b.WriteString("# TYPE ajs_order_fulfilment_jobs gauge\n")
+	for _, state := range states {
+		if len(jobs[state]) == 0 {
+			fmt.Fprintf(b, "ajs_order_fulfilment_jobs{state=%q,reason=%q} 0\n", state, "")
+			continue
+		}
+		for reason, count := range jobs[state] {
+			fmt.Fprintf(b, "ajs_order_fulfilment_jobs{state=%q,reason=%q} %d\n", state, reason, count)
+		}
+	}
+	b.WriteString("# HELP ajs_order_paid_unfulfilled_seconds Age of the oldest paid order without a grant.\n")
+	b.WriteString("# TYPE ajs_order_paid_unfulfilled_seconds gauge\n")
+	fmt.Fprintf(b, "ajs_order_paid_unfulfilled_seconds %g\n", oldestPaid)
+	deadLetters := 0
+	b.WriteString("# HELP ajs_order_fulfilment_attempts_total Fulfilment attempts by result and reason.\n")
+	b.WriteString("# TYPE ajs_order_fulfilment_attempts_total counter\n")
+	if provider, ok := s.cfg.Fulfiller.(FulfilmentMetrics); ok {
+		for result, reasons := range provider.FulfilmentAttempts() {
+			for reason, count := range reasons {
+				fmt.Fprintf(b, "ajs_order_fulfilment_attempts_total{result=%q,reason=%q} %d\n",
+					result, reason, count)
+			}
+		}
+		deadLetters = provider.FulfilmentDeadLetters()
+	}
+	b.WriteString("# HELP ajs_order_fulfilment_dead_letters_total Fulfilment jobs dead-lettered by this process.\n")
+	b.WriteString("# TYPE ajs_order_fulfilment_dead_letters_total counter\n")
+	fmt.Fprintf(b, "ajs_order_fulfilment_dead_letters_total %d\n", deadLetters)
 }
 
 // defaultRequestsPageSize bounds GET /v1/requests when the caller omits

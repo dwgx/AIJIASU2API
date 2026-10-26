@@ -234,7 +234,22 @@ type FulfilmentJob struct {
 	LastReason           FulfilmentReason `json:"lastReason,omitempty"`
 	LastError            string           `json:"lastError,omitempty"`
 	Blocked              bool             `json:"blocked,omitempty"`
-	UpdatedAt            string           `json:"updatedAt"`
+	// PublishedAt and PublishedLeaseID are the durable proof that the
+	// attempt's provisional lease was accepted by the publisher. Once set,
+	// the job may only commit that exact lease: a retry must never publish a
+	// second identity while the first publication is unaccounted for. The
+	// marker is cleared when the job commits or is dead-lettered, and its
+	// reservation is released at the same time.
+	PublishedAt        *string `json:"publishedAt,omitempty"`
+	PublishedLeaseID   string  `json:"publishedLeaseId,omitempty"`
+	PublishedAccountID string  `json:"publishedAccountId,omitempty"`
+	// CleanupPending marks a published attempt whose external withdrawal
+	// failed. The published identity is retained — never released and never
+	// dead-lettered as if cleanup succeeded — and the worker retries the
+	// withdrawal. The order is flagged for review so no automatic service is
+	// claimed while an externally accepted reservation may still exist.
+	CleanupPending bool   `json:"cleanupPending,omitempty"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 // LeasePendingPublication is a provisional serving lease reserved by one order

@@ -343,8 +343,8 @@ func TestCreateLeasePublishFailureRollsBack(t *testing.T) {
 	requireStatus(t, resp, http.StatusServiceUnavailable)
 	requireErrorCode(t, body, CodeUpstreamUnavailable)
 	requireLeaseReason(t, body, "lease_publish_failed")
-	if !strings.Contains(string(body), "resin is unreachable") {
-		t.Fatalf("error body %s does not carry the cause", body)
+	if strings.Contains(string(body), "resin is unreachable") {
+		t.Fatalf("error body %s leaked the publisher cause", body)
 	}
 
 	if leases := fixture.st.Leases(); len(leases) != 0 {
@@ -392,15 +392,22 @@ func TestCreateLeasePublishFailureRollsBack(t *testing.T) {
 // test.
 type leasePanel struct {
 	runtime.Panel
-	publishes int
-	leaseIDs  []string
-	err       error
+	publishes   int
+	leaseIDs    []string
+	err         error
+	withdrawals int
+	withdrawErr error
 }
 
 func (p *leasePanel) PublishLease(_ context.Context, lease model.Lease) error {
 	p.publishes++
 	p.leaseIDs = append(p.leaseIDs, lease.ID)
 	return p.err
+}
+
+func (p *leasePanel) WithdrawLease(_ context.Context, accountID string) error {
+	p.withdrawals++
+	return p.withdrawErr
 }
 
 // TestCreateLeasePanelPublishFailureRollsBack proves the Resin path uses the

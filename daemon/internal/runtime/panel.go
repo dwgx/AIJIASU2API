@@ -56,6 +56,11 @@ type Panel interface {
 	// API then rolls the lease back instead of serving an endpoint Resin
 	// cannot route to.
 	PublishLease(ctx context.Context, lease model.Lease) error
+	// WithdrawLease deletes the external lease for one account. It is the
+	// symmetric cleanup of PublishLease for a reservation that will never
+	// serve: the API calls it before releasing a published reservation that
+	// cannot commit. A missing external lease is a no-op.
+	WithdrawLease(ctx context.Context, accountID string) error
 	RotateLease(ctx context.Context, leaseID string) (model.Lease, error)
 	ReleaseLease(ctx context.Context, leaseID string) error
 	DrainNode(ctx context.Context, nodeID string) (model.ProxyNode, error)

@@ -447,6 +447,7 @@ func (p *scopedTopologyPanel) Reconcile(context.Context) (runtime.Topology, erro
 	return p.topology, nil
 }
 func (p *scopedTopologyPanel) PublishLease(context.Context, model.Lease) error { return nil }
+func (p *scopedTopologyPanel) WithdrawLease(context.Context, string) error     { return nil }
 func (p *scopedTopologyPanel) RotateLease(context.Context, string) (model.Lease, error) {
 	return model.Lease{}, nil
 }

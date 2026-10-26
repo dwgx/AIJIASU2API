@@ -233,10 +233,107 @@ func (s *Server) publishLease(ctx context.Context, lease model.Lease) error {
 	return nil
 }
 
+// PublishReservedLease publishes one lease an order fulfilment attempt reserved
+// and is the fulfilment twin of publishLease: the same Panel and
+// LeasePublishHook boundary, with the store row as the idempotence check. A
+// retry after an interrupted attempt may present the same reservation again,
+// so an already-active row is inspected and reported published, and a row that
+// is gone (released by recovery or an abort) is refused instead of published
+// for a reservation that no longer exists. Only a pending_publication row is
+// actually published. It satisfies fulfilment.Publisher.
+func (s *Server) PublishReservedLease(ctx context.Context, lease model.Lease) error {
+	current, ok := s.store.Lease(lease.ID)
+	if !ok {
+		return fmt.Errorf("%w: reserved lease %q was released; nothing to publish",
+			store.ErrConflict, lease.ID)
+	}
+	switch current.Status {
+	case model.LeaseActive:
+		// A previous attempt already promoted this exact row. Publishing
+		// again would duplicate external work for a lease that already
+		// serves.
+		return nil
+	case model.LeasePendingPublication:
+		return s.publishLease(ctx, current)
+	default:
+		return fmt.Errorf("%w: reserved lease %q is %s, want %s",
+			store.ErrConflict, lease.ID, current.Status, model.LeasePendingPublication)
+	}
+}
+
+// LeaseCreated publishes the serving lease a committed initial fulfilment
+// created. The worker calls it after the store's commit, never before.
+func (s *Server) LeaseCreated(lease model.Lease) {
+	s.emitLeaseEvent(webhook.EventLeaseCreated, lease)
+}
+
+// LeaseReissued publishes the replacement lease a committed reissue created.
+// previousLeaseID names the ended lease the customer was moved off; the shared
+// lease payload carries ids and expiry, never a key.
+func (s *Server) LeaseReissued(lease model.Lease, _ string) {
+	s.emitLeaseEvent(webhook.EventLeaseReissued, lease)
+}
+
+// WithdrawReservedLease withdraws a published reservation that will never
+// commit. Resin has no per-lease create for a reservation — publication is a
+// reconcile of the node's subscription, and the panel's account lease belongs
+// to serving rows — so the publish hook is the only external object a
+// deployment can hold. It receives the revoke action; the store row itself is
+// released by the worker's dead-letter path. An active row is refused: a
+// fulfilment cleanup must never remove service.
+func (s *Server) WithdrawReservedLease(ctx context.Context, lease model.Lease) error {
+	current, ok := s.store.Lease(lease.ID)
+	if ok {
+		if current.Status != model.LeasePendingPublication {
+			return fmt.Errorf("%w: lease %q is %s; refusing to withdraw a serving row",
+				store.ErrConflict, lease.ID, current.Status)
+		}
+		lease = current
+	} else if strings.TrimSpace(lease.AccountID) == "" {
+		// The row is gone and the caller has no account identity: only the
+		// hook can still withdraw an external object.
+		if s.cfg.LeasePublishHook != nil {
+			if err := s.cfg.LeasePublishHook(ctx, LeaseActionRevoked, lease); err != nil {
+				return fmt.Errorf("withdraw hook: %w", err)
+			}
+		}
+		return nil
+	}
+	// The panel deletes the account's external lease. That deletion is only
+	// identity-safe when no other lease row uses the account: a newer serving
+	// lease must never be removed by a stale reservation's cleanup.
+	if s.cfg.Panel != nil && s.reservationOwnsAccount(lease) {
+		if err := s.cfg.Panel.WithdrawLease(ctx, lease.AccountID); err != nil {
+			return fmt.Errorf("withdraw panel lease: %w", err)
+		}
+	}
+	if s.cfg.LeasePublishHook != nil {
+		if err := s.cfg.LeasePublishHook(ctx, LeaseActionRevoked, lease); err != nil {
+			return fmt.Errorf("withdraw hook: %w", err)
+		}
+	}
+	return nil
+}
+
+// reservationOwnsAccount reports whether the reservation is the only lease row
+// for its account. Account-level external deletion is safe only then; with a
+// concurrent serving lease the panel must not delete the account's lease.
+func (s *Server) reservationOwnsAccount(lease model.Lease) bool {
+	for _, other := range s.store.Leases() {
+		if other.AccountID == lease.AccountID && other.ID != lease.ID {
+			return false
+		}
+	}
+	return true
+}
+
 // rollbackUnpublishedLease is the compensating step of a failed publication:
 // the store row disappears, the node's slot is free, and one error audit row
 // records why. The debug trace carries the same refusal for the live console.
-// No lease.created event is emitted for a lease the caller never received.
+// No lease.created event is emitted for a lease the caller never received. The
+// log line carries only a bounded class: the panel/hook error can embed a URL,
+// token or provider reference, and the sanitized operator detail is the store
+// audit row written by RollbackLease.
 func (s *Server) rollbackUnpublishedLease(lease model.Lease, cause error) {
 	if _, err := s.store.RollbackLease(lease.ID, cause.Error()); err != nil {
 		s.logger.Error("lease_rollback_failed", "lease", lease.ID, "error", err)
@@ -245,7 +342,7 @@ func (s *Server) rollbackUnpublishedLease(lease model.Lease, cause error) {
 		"lease", lease.ID,
 		"account_id", lease.AccountID,
 		"node_id", lease.NodeID,
-		"error", cause)
+		"error", publishFailureClass(cause))
 	s.cfg.Debug.Record(model.DebugTrace{
 		Kind:       model.DebugKindLeaseCreate,
 		AccountID:  lease.AccountID,
@@ -270,9 +367,23 @@ func (s *Server) writeLeasePublishError(w http.ResponseWriter, lease model.Lease
 	}
 	writeJSON(w, status, errorResponse{Error: errorDetail{
 		Code:    code,
-		Message: fmt.Sprintf("lease %s was not created: %v", lease.ID, cause),
+		Message: fmt.Sprintf("lease %s was not created: publication failed", lease.ID),
 		Reason:  leaseReasonPublishFailed,
 	}})
+}
+
+// publishFailureClass reduces an external publication error to a bounded,
+// credential-free label for logs and responses. The sanitized operator detail
+// is the store audit row written by RollbackLease.
+func publishFailureClass(cause error) string {
+	switch {
+	case errors.Is(cause, store.ErrConflict):
+		return "conflict"
+	case errors.Is(cause, store.ErrUpstream):
+		return "upstream"
+	default:
+		return "publish_failed"
+	}
 }
 
 // runLeaseRevokeHook calls the optional hook after a revoke committed. Unlike

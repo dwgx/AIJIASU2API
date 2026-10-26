@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/payment"
@@ -194,6 +196,13 @@ const epayNotifyPath = "/v1/payments/epay/notify"
 // address, matching the Stripe budget.
 const epayNotifyLimitPerMin = 120
 
+// epayNotifyFulfilTimeout bounds the immediate publication attempt a verified
+// callback makes. It is deliberately independent of the request context: the
+// gateway's connection may drop at any moment, and a publication that already
+// reserved capacity must be allowed to finish or abort on its own deadline
+// instead of being cancelled mid-flight.
+const epayNotifyFulfilTimeout = 10 * time.Second
+
 // orderCheckoutRequest is the POST /v1/portal/orders/{id}/checkout body. Type
 // selects the gateway channel; an omitted type defaults to alipay.
 type orderCheckoutRequest struct {
@@ -350,8 +359,10 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 	// Only an order that is actually serving may answer success. A paid order
 	// means the money is durably recorded but the entitlement is not published
 	// yet, so the callback attaches the durable initial job (idempotent per
-	// order) and answers fail: the gateway keeps retrying, and no callback
-	// ever claims service that does not exist.
+	// order) and attempts it immediately. Success is answered only when that
+	// attempt (or a concurrent one) left the order active with a serving
+	// grant; every other outcome answers fail, so the gateway keeps retrying
+	// and no callback ever claims service that does not exist.
 	current, serving := s.store.OrderActiveWithGrant(order.ID)
 	if serving {
 		writeEpayAck(w, http.StatusOK, "success")
@@ -363,6 +374,22 @@ func (s *Server) handleEpayNotify(w http.ResponseWriter, r *http.Request) {
 			// The payment is already durable; a failed enqueue must not turn
 			// the acknowledgement into a payment failure or a success.
 			s.logger.Warn("epay_notify_fulfilment_enqueue_failed", "order_id", current.ID, "error", err)
+		}
+		// The queue alone cannot answer this callback: try the job now, with a
+		// deadline of its own, and let the reloaded order decide the ack. A
+		// failed attempt leaves the job queued for the worker and its backoff.
+		if s.cfg.Fulfiller != nil {
+			fulfilCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()),
+				epayNotifyFulfilTimeout)
+			_, fulfilErr := s.cfg.Fulfiller.FulfilNow(fulfilCtx, current.ID)
+			cancel()
+			if fulfilErr != nil {
+				s.logger.Warn("epay_notify_fulfilment_failed", "order_id", current.ID, "error", fulfilErr)
+			}
+			if _, serving := s.store.OrderActiveWithGrant(current.ID); serving {
+				writeEpayAck(w, http.StatusOK, "success")
+				return
+			}
 		}
 	}
 	writeEpayAck(w, http.StatusOK, "fail")

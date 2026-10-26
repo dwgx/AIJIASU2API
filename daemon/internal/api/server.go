@@ -66,6 +66,17 @@ var DefaultCORSOrigins = []string{
 // mutation methods cannot drift from the implementation.
 type Panel = runtime.Panel
 
+// Fulfiller attempts one order's queued publication job immediately. The
+// settlement callback uses it so a verified payment can serve in the same
+// request; nil keeps the durable queue as the only path and the callback
+// answers fail after attaching the job.
+type Fulfiller interface {
+	// FulfilNow attempts the order's queued job and returns the order's
+	// current state. An error reports a real attempt that failed; the job is
+	// still queued (or dead-lettered) when the store says so.
+	FulfilNow(ctx context.Context, orderID string) (model.Order, error)
+}
+
 // LoginService is the optional vendor login path. When nil the login handler
 // keeps the store-only session refresh, so the daemon never contacts a vendor
 // host unless AJS_ACCOUNT_LOGIN=1 wires an implementation.
@@ -246,6 +257,12 @@ type Config struct {
 	// or an adapter with incomplete configuration, answers 503 on both the
 	// portal checkout route and the notify callback.
 	Epay *payment.Epay
+	// Fulfiller attempts a queued publication job from the settlement
+	// callback. It is wired after New because the worker publishes through
+	// this server's Panel/LeasePublishHook boundary; SetFulfiller installs it
+	// before the listener starts. Nil keeps the callback honest without an
+	// attempt: the job is queued and the gateway is told fail.
+	Fulfiller Fulfiller
 }
 
 // Server wires the store to an http.Handler.
@@ -361,6 +378,23 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 	s.trustedProxies = trusted
 	s.handler = s.buildHandler()
 	return s
+}
+
+// SetFulfiller installs the order fulfilment worker. It exists because the
+// worker publishes through this server's Panel/LeasePublishHook boundary, so
+// the two cannot be built in one pass: main creates the server, builds the
+// worker with the server as its publisher, and calls this before the listener
+// starts. A nil fulfiller restores the queue-only behaviour.
+func (s *Server) SetFulfiller(f Fulfiller) {
+	s.cfg.Fulfiller = f
+}
+
+// OrderActivated publishes the activation a committed fulfilment produced. The
+// worker calls it only after the store's commit won, so a failed or refused
+// attempt never reaches the customer stream. It is the same payload the
+// request path emits.
+func (s *Server) OrderActivated(order model.Order) {
+	s.emitOrderEvent(webhook.EventOrderActivated, order)
 }
 
 // ServeHTTP implements http.Handler.

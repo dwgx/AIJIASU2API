@@ -219,6 +219,7 @@ func (f *fakePanel) Reconcile(context.Context) (runtime.Topology, error) {
 	return runtime.Topology{}, f.topologyErr
 }
 func (f *fakePanel) PublishLease(context.Context, model.Lease) error { return nil }
+func (f *fakePanel) WithdrawLease(context.Context, string) error     { return nil }
 func (f *fakePanel) RotateLease(context.Context, string) (model.Lease, error) {
 	return model.Lease{}, nil
 }

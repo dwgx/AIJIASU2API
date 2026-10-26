@@ -1387,8 +1387,17 @@ func TestFulfilmentBackoffScheduleAndDeadLetter(t *testing.T) {
 		requireNextAttempt(t, job, f.now.Add(delay))
 		*f.now = f.now.Add(delay)
 	}
-	if got := countAudit(f.st, "fulfilment.retry"); got != 7 {
-		t.Fatalf("fulfilment.retry rows = %d, want 7", got)
+	if got := countAudit(f.st, "fulfilment.blocked"); got != 1 {
+		t.Fatalf("fulfilment.blocked rows = %d, want 1 (first failure only)", got)
+	}
+	if got := countAudit(f.st, "fulfilment.retry"); got != 6 {
+		t.Fatalf("fulfilment.retry rows = %d, want 6", got)
+	}
+	blocked := findAudit(t, f.st, "fulfilment.blocked", func(e model.AuditEvent) bool {
+		return e.Meta["orderId"] == paid.ID
+	})
+	if blocked.Severity != model.SeverityCritical || blocked.Meta["reason"] != string(model.FulfilmentReasonCapacity) {
+		t.Fatalf("blocked audit = %+v, want critical capacity row", blocked)
 	}
 
 	// The eighth failure dead-letters instead of scheduling another retry.
@@ -2570,6 +2579,11 @@ func (f *orderFixture) publishingInitial(t *testing.T, key string) (model.Order,
 		attempt.ExpiresAt == "" {
 		t.Fatalf("begin attempt = %+v, want a pending_publication reservation", attempt)
 	}
+	// CommitFulfilment requires the durable publication marker; a real attempt
+	// publishes before it commits.
+	if _, err := f.st.MarkFulfilmentPublished(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished(%s): %v", paid.ID, err)
+	}
 	stored, ok := f.st.Order(paid.ID)
 	if !ok {
 		t.Fatalf("order %q missing", paid.ID)
@@ -2740,6 +2754,31 @@ func TestCommitFulfilmentInitialGrantsOnce(t *testing.T) {
 	}
 }
 
+func TestCommitFulfilmentRequiresPublicationMarker(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "commit-unmarked")
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+
+	// The attempt lease matches, but no publication marker exists, so the
+	// commit has no external fact to promote.
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unmarked commit error = %v, want ErrConflict", err)
+	}
+	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
+
+	// The marker is the gate: once written, the same commit succeeds.
+	if _, err := f.st.MarkFulfilmentPublished(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished: %v", err)
+	}
+	if _, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("marked commit: %v", err)
+	}
+}
+
 func TestCommitFulfilmentRejectsStaleAttemptLease(t *testing.T) {
 	f := newOrderFixture(t)
 	paid := f.paidOrderWithoutGrant(t, "commit-stale")
@@ -2756,6 +2795,9 @@ func TestCommitFulfilmentRejectsStaleAttemptLease(t *testing.T) {
 	attempt, err := f.st.BeginFulfilment(paid.ID)
 	if err != nil {
 		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if _, err := f.st.MarkFulfilmentPublished(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished: %v", err)
 	}
 	for _, stale := range []string{"lease-stale", attempt.LeaseID + "-x"} {
 		if _, err := f.st.CommitFulfilment(paid.ID, stale); !errors.Is(err, ErrConflict) {
@@ -2808,6 +2850,9 @@ func TestBeginFulfilmentWithoutCapacityLeavesPaid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginFulfilment after capacity returned: %v", err)
 	}
+	if _, err := f.st.MarkFulfilmentPublished(paid.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished: %v", err)
+	}
 	committed, err := f.st.CommitFulfilment(paid.ID, attempt.LeaseID)
 	if err != nil {
 		t.Fatalf("CommitFulfilment after capacity returned: %v", err)
@@ -2849,14 +2894,16 @@ func TestCommitFulfilmentMissingReservationLeavesPaid(t *testing.T) {
 		t.Fatalf("reservation loss moved quota: %v, want %v", user.QuotaBytesMonth, quotaBefore)
 	}
 
-	// The caller can still abort the dangling attempt and requeue it.
-	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
-		model.FulfilmentReasonTargetChanged, "reservation lost", true)
+	// A published attempt whose reservation vanished cannot commit. The caller
+	// completes the external cleanup; the job becomes an operator item instead
+	// of being released as if the publication never happened.
+	completed, err := f.st.CompleteFulfilmentCleanup(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonTargetChanged, "reservation lost")
 	if err != nil {
-		t.Fatalf("AbortFulfilment after reservation loss: %v", err)
+		t.Fatalf("CompleteFulfilmentCleanup after reservation loss: %v", err)
 	}
-	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentQueued {
-		t.Fatalf("aborted job = %+v, want queued", aborted.Fulfilment)
+	if completed.Fulfilment == nil || completed.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("cleaned job = %+v, want a dead letter", completed.Fulfilment)
 	}
 }
 
@@ -2870,12 +2917,12 @@ func TestCommitFulfilmentRefusesExpiredPaidTerm(t *testing.T) {
 	}
 	requireUncommittedPaid(t, f.st, f.user.ID, paid.ID, attempt, f.user.QuotaBytesMonth)
 
-	// The caller aborts the expired attempt; the reservation is released and
-	// the job becomes an operator dead letter.
-	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
-		model.FulfilmentReasonEntitlementExpired, "paid term ended", false)
+	// The caller completes the cleanup of the expired published attempt; the
+	// reservation is released and the job becomes an operator dead letter.
+	aborted, err := f.st.CompleteFulfilmentCleanup(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonEntitlementExpired, "paid term ended")
 	if err != nil {
-		t.Fatalf("AbortFulfilment(expired): %v", err)
+		t.Fatalf("CompleteFulfilmentCleanup(expired): %v", err)
 	}
 	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentDeadLetter {
 		t.Fatalf("expired job = %+v, want a dead letter", aborted.Fulfilment)
@@ -2957,6 +3004,9 @@ func TestCommitFulfilmentReissueRepointsGrant(t *testing.T) {
 	reserved, ok := f.st.Lease(attempt.LeaseID)
 	if !ok || reserved.Status != model.LeasePendingPublication {
 		t.Fatalf("reserved replacement = %+v, ok=%t", reserved, ok)
+	}
+	if _, err := f.st.MarkFulfilmentPublished(order.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished(reissue): %v", err)
 	}
 	before, _ := f.st.Order(order.ID)
 	if before.Grant == nil || before.Grant.LeaseID != oldLeaseID {
@@ -3078,9 +3128,16 @@ func pendingReservations(t *testing.T, st *Store) []model.Lease {
 
 func TestCommitFulfilmentAfterAbortIsRefused(t *testing.T) {
 	f := newOrderFixture(t)
-	paid, attempt := f.publishingInitial(t, "commit-after-abort")
+	paid := f.paidOrderWithoutGrant(t, "commit-after-abort")
+	enqueueInitial(t, f.st, paid.ID)
 	quotaBefore := f.user.QuotaBytesMonth
 
+	// Abort applies to an attempt that never published: reserve it, then
+	// release it without a marker.
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
 	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
 		model.FulfilmentReasonPublishFailed, "publication refused", true)
 	if err != nil {
@@ -3187,6 +3244,9 @@ func TestCommitFulfilmentReissueExpiredLeavesOldGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginFulfilment(reissue): %v", err)
 	}
+	if _, err := f.st.MarkFulfilmentPublished(order.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished(reissue): %v", err)
+	}
 
 	// The replacement was reserved while the term was live, but the paid term
 	// ends before the commit arrives.
@@ -3207,11 +3267,12 @@ func TestCommitFulfilmentReissueExpiredLeavesOldGrant(t *testing.T) {
 		t.Fatalf("grants after expired reissue commit = %d, want the original one", len(grants))
 	}
 
-	// Abort releases the expired reservation and dead-letters the job.
-	aborted, err := f.st.AbortFulfilment(order.ID, attempt.LeaseID,
-		model.FulfilmentReasonEntitlementExpired, "paid term ended", false)
+	// Complete the cleanup of the expired reissue reservation; the job becomes
+	// an operator dead letter and the old grant reference is untouched.
+	aborted, err := f.st.CompleteFulfilmentCleanup(order.ID, attempt.LeaseID,
+		model.FulfilmentReasonEntitlementExpired, "paid term ended")
 	if err != nil {
-		t.Fatalf("AbortFulfilment(expired reissue): %v", err)
+		t.Fatalf("CompleteFulfilmentCleanup(expired reissue): %v", err)
 	}
 	if aborted.Fulfilment == nil || aborted.Fulfilment.State != model.FulfilmentDeadLetter {
 		t.Fatalf("expired reissue job = %+v, want a dead letter", aborted.Fulfilment)
@@ -3353,6 +3414,9 @@ func (f *orderFixture) publishingReissue(t *testing.T, key string) (model.Order,
 	if attempt.Mode != model.FulfilmentReissue ||
 		attempt.Lease.Status != model.LeasePendingPublication {
 		t.Fatalf("reissue attempt = %+v, want a pending replacement", attempt)
+	}
+	if _, err := f.st.MarkFulfilmentPublished(order.ID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished(reissue): %v", err)
 	}
 	stored, ok := f.st.Order(order.ID)
 	if !ok {
