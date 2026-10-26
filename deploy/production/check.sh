@@ -98,6 +98,7 @@ nginx/snippets/ajs-security-headers.conf
 nginx/snippets/ajs-admin-token.conf.template
 nginx/sites-available/ajs-portal.conf
 nginx/sites-available/ajs-admin.conf
+nginx/sites-available/ajs-default.conf
 systemd/ajs-accountd.service
 systemd/ajs-accountd.env.example
 firewall/ajs-production.nft
@@ -284,6 +285,8 @@ if [ -n "$nginx_mode" ]; then
             cp "$kit/nginx/snippets/"*.conf "$nginx_tmp/snippets/" 2>/dev/null || true
             cp "$kit/nginx/sites-available/ajs-portal.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-admin.conf" "$nginx_tmp/sites-enabled/"
+            cp "$kit/nginx/sites-available/ajs-default.conf" "$nginx_tmp/sites-enabled/"
+
 
             # Throwaway token: 64 'a' characters, never a committed literal.
             dummy_token=$(printf 'a%.0s' {1..64})
@@ -391,6 +394,101 @@ if [ -n "$nginx_mode" ]; then
             else
                 fail "nginx -t failed: $(printf '%s' "$nginx_output" | tr '\n' ' ' | cut -c1-500)"
             fi
+
+            # Runtime host-boundary probe. nginx -t only parses; it cannot
+            # prove that an unknown Host is refused or that the HTTP redirect
+            # uses the fixed canonical name. Start the staged configuration
+            # and probe it on the real :80/:443 listeners.
+            if [ "$nginx_rc" -eq 0 ] && [ "$nginx_mode" = host ]; then
+                panel_host=$(awk '$1 == "server_name" {gsub(/;/, "", $2); print $2; exit}' "$kit/nginx/sites-available/ajs-portal.conf")
+                [ -n "$panel_host" ] || panel_host=panel.example.com
+                cat > "$nginx_tmp/probe.sh" <<'AJS_NGINX_PROBE'
+#!/bin/sh
+set -u
+root=$1
+config=$2
+nginx_bin=$3
+ip_bin=${4:-}
+panel_host=${5:-panel.example.com}
+if [ -n "$ip_bin" ]; then "$ip_bin" link set lo up 2>/dev/null || true; fi
+"$nginx_bin" -p "$root/" -c "$config" >/dev/null 2>&1 || { echo "nginx_start_failed"; exit 1; }
+cleanup() { "$nginx_bin" -p "$root/" -c "$config" -s stop >/dev/null 2>&1 || true; }
+trap cleanup EXIT HUP INT TERM
+i=0
+while [ "$i" -lt 100 ]; do
+    if curl -s -o /dev/null --max-time 1 -H "Host: $panel_host" http://127.0.0.1/healthz 2>/dev/null; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+http_unknown=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -H 'Host: attacker.invalid' http://127.0.0.1/ 2>/dev/null || true)
+https_unknown=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 --resolve attacker.invalid:443:127.0.0.1 https://attacker.invalid/ 2>/dev/null || true)
+https_ip=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 https://127.0.0.1/ 2>/dev/null || true)
+canonical=$(curl -sS -o /dev/null -D - --max-time 3 -H "Host: $panel_host" http://127.0.0.1/some/path 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{code=$2} /^Location:/{sub(/\r$/,""); loc=$2} END{print code "|" loc}')
+portal_health=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 --resolve "$panel_host:443:127.0.0.1" "https://$panel_host/healthz" 2>/dev/null || true)
+printf 'http_unknown=%s\n' "$http_unknown"
+printf 'https_unknown=%s\n' "$https_unknown"
+printf 'https_ip=%s\n' "$https_ip"
+printf 'canonical=%s\n' "$canonical"
+printf 'portal_health=%s\n' "$portal_health"
+AJS_NGINX_PROBE
+                probe_config="$nginx_tmp/nginx.conf"
+                probe_out=""
+                probe_rc=1
+                probe_ran=0
+                if [ "$(id -u)" -eq 0 ]; then
+                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
+                    probe_rc=$?
+                    probe_ran=1
+                elif command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
+                    # Inside the user+network namespace uid 0 is the only
+                    # mapped id, so nginx must run as root there.
+                    cp "$nginx_tmp/nginx.conf" "$nginx_tmp/nginx.probe.conf"
+                    sed -i.bak -E 's|^[[:space:]]*user[[:space:]]+[^;]+;|user root;|' "$nginx_tmp/nginx.probe.conf"
+                    rm -f "$nginx_tmp/nginx.probe.conf.bak"
+                    probe_config="$nginx_tmp/nginx.probe.conf"
+                    probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" 2>&1)
+                    probe_rc=$?
+                    probe_ran=1
+                else
+                    skip "nginx runtime host-boundary probe needs root or unshare+ip"
+                fi
+                if [ "$probe_ran" -eq 1 ] && [ -n "$probe_out" ]; then
+                    http_unknown=$(printf '%s\n' "$probe_out" | sed -n 's/^http_unknown=//p')
+                    https_unknown=$(printf '%s\n' "$probe_out" | sed -n 's/^https_unknown=//p')
+                    https_ip=$(printf '%s\n' "$probe_out" | sed -n 's/^https_ip=//p')
+                    canonical=$(printf '%s\n' "$probe_out" | sed -n 's/^canonical=//p')
+                    portal_health=$(printf '%s\n' "$probe_out" | sed -n 's/^portal_health=//p')
+                    if [ "$http_unknown" = "444" ] || [ "$http_unknown" = "000" ]; then
+                        pass "unknown Host on :80 is refused (444/connection closed)"
+                    else
+                        fail "unknown Host on :80 was not refused: status=${http_unknown:-<none>}"
+                    fi
+                    if [ "$https_unknown" = "421" ]; then
+                        pass "unknown Host on :443 is refused (421 Misdirected Request)"
+                    else
+                        fail "unknown Host on :443 was not refused: status=${https_unknown:-<none>}"
+                    fi
+                    if [ "$https_ip" = "421" ]; then
+                        pass "IP-literal Host on :443 is refused (421)"
+                    else
+                        fail "IP-literal Host on :443 was not refused: status=${https_ip:-<none>}"
+                    fi
+                    if [ "$canonical" = "301|https://$panel_host/some/path" ]; then
+                        pass "HTTP redirect uses the fixed canonical portal origin"
+                    else
+                        fail "HTTP canonical redirect wrong: ${canonical:-<none>}"
+                    fi
+                    if [ "$portal_health" = "200" ]; then
+                        pass "canonical portal Host still reaches /healthz (200)"
+                    else
+                        fail "canonical portal /healthz status=${portal_health:-<none>}"
+                    fi
+                elif [ "$probe_ran" -eq 1 ] && [ "$probe_rc" -ne 0 ]; then
+                    fail "nginx runtime probe failed: $(printf '%s' "$probe_out" | tr '\n' ' ' | cut -c1-300)"
+                fi
+            fi
             rm -rf "$nginx_tmp"
             nginx_tmp=""
         fi
@@ -418,6 +516,36 @@ if grep -qE 'allow[[:space:]]+127\.0\.0\.1;' "$kit/nginx/sites-available/ajs-adm
     pass "admin vhost has a loopback/VPN allow policy ending in deny all"
 else
     fail "admin vhost is missing the allow/deny policy"
+fi
+if grep -qE 'listen[[:space:]]+80[[:space:]]+default_server;' "$kit/nginx/sites-available/ajs-default.conf" && \
+   grep -q 'return 444;' "$kit/nginx/sites-available/ajs-default.conf"; then
+    pass "default HTTP server refuses unknown Host with 444"
+else
+    fail "default HTTP server is missing (listen 80 default_server + return 444)"
+fi
+if grep -qE 'listen[[:space:]]+443[[:space:]]+ssl[[:space:]]+default_server;' "$kit/nginx/sites-available/ajs-default.conf" && \
+   grep -q 'return 421;' "$kit/nginx/sites-available/ajs-default.conf"; then
+    pass "default HTTPS server refuses unknown Host with 421"
+else
+    fail "default HTTPS server is missing (listen 443 ssl default_server + return 421)"
+fi
+if grep -qE '^[[:space:]]*return[[:space:]]+301[[:space:]]+https://[^$[:space:]]+\$request_uri;' "$kit/nginx/sites-available/ajs-portal.conf" && \
+   ! grep -q 'return 301 https://\$host' "$kit/nginx/sites-available/ajs-portal.conf"; then
+    pass "portal HTTP redirect uses the fixed canonical origin"
+else
+    fail "portal HTTP redirect still reflects \$host or lacks the canonical origin"
+fi
+if grep -qE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/readyz[[:space:]]*\{' "$kit/nginx/sites-available/ajs-portal.conf" && \
+   grep -q 'proxy_pass http://ajs_accountd;' "$kit/nginx/sites-available/ajs-portal.conf"; then
+    pass "portal edge proxies /readyz to the daemon"
+else
+    fail "portal edge does not proxy /readyz"
+fi
+if grep -qE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/healthz[[:space:]]*\{' "$kit/nginx/sites-available/ajs-portal.conf" && \
+   grep -q 'return 200 "ok\\n";' "$kit/nginx/sites-available/ajs-portal.conf"; then
+    pass "portal /healthz remains a static edge liveness response"
+else
+    fail "portal /healthz is no longer a static edge liveness response"
 fi
 if grep -q 'Strict-Transport-Security' "$kit/nginx/snippets/ajs-security-headers.conf"; then
     pass "HSTS header present"
@@ -561,6 +689,122 @@ if command -v nft >/dev/null 2>&1; then
     fi
 else
     skip "nft not installed; production gate requires nft -c"
+fi
+
+# ---------------------------------------------------------------------------
+section "daemon readiness (/readyz)"
+ready_tmp=$(mktemp -d) || ready_tmp=""
+daemon_bin="${AJS_ACCOUNTD_BIN:-}"
+if [ -n "$daemon_bin" ] && [ ! -x "$daemon_bin" ]; then
+    fail "AJS_ACCOUNTD_BIN is not executable: $daemon_bin"
+    daemon_bin=""
+fi
+if [ -z "$daemon_bin" ]; then
+    daemon_bin=$(command -v ajs-accountd 2>/dev/null || true)
+fi
+for candidate in "$repo_root/daemon/ajs-accountd" "$repo_root/daemon/ajs-accountd-linux-amd64" "$kit/dist/ajs-accountd"; do
+    if [ -z "$daemon_bin" ] && [ -x "$candidate" ]; then daemon_bin=$candidate; fi
+done
+if [ -z "$daemon_bin" ] && command -v go >/dev/null 2>&1 && [ -n "$ready_tmp" ]; then
+    if (cd "$repo_root/daemon" && go build -o "$ready_tmp/ajs-accountd" ./cmd/ajs-accountd) >"$ready_tmp/build.log" 2>&1; then
+        daemon_bin="$ready_tmp/ajs-accountd"
+    fi
+fi
+if [ -z "$daemon_bin" ] || [ -z "$ready_tmp" ]; then
+    skip "daemon binary unavailable; set AJS_ACCOUNTD_BIN or install go to prove /readyz"
+    [ -n "$ready_tmp" ] && rm -rf "$ready_tmp"
+else
+    ready_token=$(printf 'b%.0s' {1..64})
+    ready_port=""
+    if command -v python3 >/dev/null 2>&1; then
+        ready_port=$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)
+    fi
+    [ -n "$ready_port" ] || ready_port=$((20000 + ($$ % 20000)))
+    ready_state="$ready_tmp/state"
+    mkdir -p "$ready_state" || fail "cannot create readiness state directory"
+
+    start_ready_daemon() {
+        AJS_LISTEN="127.0.0.1:$ready_port" \
+        AJS_ADMIN_TOKEN="$ready_token" \
+        AJS_STATE_DIR="$ready_state" \
+        AJS_SNAPSHOT_INTERVAL=3600 \
+        AJS_LOG_LEVEL=error \
+        "$daemon_bin" >"$ready_tmp/daemon.log" 2>&1 &
+        ready_pid=$!
+        ready_up=0
+        i=0
+        while [ "$i" -lt 100 ]; do
+            if ! kill -0 "$ready_pid" 2>/dev/null; then break; fi
+            if curl -fsS --max-time 1 "http://127.0.0.1:$ready_port/healthz" >/dev/null 2>&1; then
+                ready_up=1
+                break
+            fi
+            i=$((i + 1))
+            sleep 0.1
+        done
+        if [ "$ready_up" -ne 1 ]; then return 1; fi
+        # A concurrent check.sh may have picked the same ephemeral port. Prove
+        # this listener is our daemon by authenticating with our unique token.
+        auth_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 \
+            -H "Authorization: Bearer $ready_token" \
+            "http://127.0.0.1:$ready_port/v1/accounts" 2>/dev/null || true)
+        [ "$auth_code" = "200" ]
+    }
+
+    stop_ready_daemon() {
+        kill -TERM "$ready_pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$ready_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+            i=$((i + 1))
+            sleep 0.1
+        done
+        kill -KILL "$ready_pid" 2>/dev/null || true
+        wait "$ready_pid" 2>/dev/null || true
+    }
+
+    if start_ready_daemon; then
+        ready_code=$(curl -sS -o "$ready_tmp/ready-ok.json" -w '%{http_code}' --max-time 3 \
+            "http://127.0.0.1:$ready_port/readyz" 2>/dev/null || true)
+        if [ "$ready_code" = "200" ] && grep -q '"status":"ready"' "$ready_tmp/ready-ok.json" 2>/dev/null; then
+            pass "daemon /readyz is 200 ready with a writable state directory"
+        else
+            fail "daemon /readyz with writable state: status=${ready_code:-<none>} body=$(tr '\n' ' ' < "$ready_tmp/ready-ok.json" 2>/dev/null | cut -c1-300)"
+        fi
+        stop_ready_daemon
+
+        chmod 0555 "$ready_state" 2>/dev/null || true
+        if start_ready_daemon; then
+            ready_code=$(curl -sS -o "$ready_tmp/ready-bad.json" -w '%{http_code}' --max-time 3 \
+                "http://127.0.0.1:$ready_port/readyz" 2>/dev/null || true)
+            live_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+                "http://127.0.0.1:$ready_port/healthz" 2>/dev/null || true)
+            if [ "$ready_code" = "503" ] && grep -q '"status":"not_ready"' "$ready_tmp/ready-bad.json" 2>/dev/null && \
+               grep -q '"name":"state"' "$ready_tmp/ready-bad.json" 2>/dev/null; then
+                pass "daemon /readyz is 503 not_ready when the state directory is unwritable"
+            else
+                fail "daemon /readyz with unwritable state: status=${ready_code:-<none>} body=$(tr '\n' ' ' < "$ready_tmp/ready-bad.json" 2>/dev/null | cut -c1-300)"
+            fi
+            if [ "$live_code" = "200" ]; then
+                pass "daemon /healthz stays 200 (liveness) while /readyz is 503"
+            else
+                fail "daemon /healthz with unwritable state: status=${live_code:-<none>}"
+            fi
+            stop_ready_daemon
+        else
+            fail "daemon did not start with an unwritable state directory: $(tail -c 300 "$ready_tmp/daemon.log" 2>/dev/null | tr '\n' ' ')"
+        fi
+        chmod 0755 "$ready_state" 2>/dev/null || true
+    else
+        fail "daemon did not start for /readyz proof: $(tail -c 300 "$ready_tmp/daemon.log" 2>/dev/null | tr '\n' ' ')"
+    fi
+    rm -rf "$ready_tmp"
 fi
 
 # ---------------------------------------------------------------------------

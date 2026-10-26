@@ -199,6 +199,10 @@ type Config struct {
 	// defaults to StateDir/state.json, matching the daemon's own resolution,
 	// so a relocated state file is backed up and restored in place.
 	StatePath string
+	// ReadyChecks are extra named readiness probes for integrations that have
+	// no health surface of their own. /readyz runs each with a short deadline;
+	// a failed Required check answers 503.
+	ReadyChecks []ReadyCheck
 	// AllowBackupRestore lets POST /v1/backup/restore write the panel files
 	// while the daemon runs (AJS_BACKUP_ALLOW_RESTORE=1). The default refusal
 	// is deliberate: the running daemon keeps the replaced panel in memory and
@@ -371,6 +375,7 @@ func (s *Server) buildHandler() http.Handler {
 
 func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodGet, "/healthz", s.handleHealthz)
+	rt.handle(http.MethodGet, "/readyz", s.handleReadyz)
 	rt.handle(http.MethodGet, "/metrics", s.handlePrometheusMetrics)
 	rt.handle(http.MethodGet, "/v1/metrics", s.handleMetrics)
 

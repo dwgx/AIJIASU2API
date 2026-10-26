@@ -196,9 +196,16 @@ AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 go run ./cmd/ajs-accountd
 
 ```bash
 curl -s http://127.0.0.1:2261/healthz
+curl -s http://127.0.0.1:2261/readyz
 curl -s http://127.0.0.1:2261/v1/accounts          # insecure mode: no bearer token
 curl -s -H "Authorization: Bearer $AJS_ADMIN_TOKEN" http://127.0.0.1:2261/v1/accounts
 ```
+
+`/healthz` is process liveness only. `/readyz` is the readiness gate: it probes
+the state directory with the same atomic write `state.json` uses and reports
+configured required integrations, answering `503` with a `reasons` list when a
+required check fails. Point orchestrator readiness probes at `/readyz`; do not
+restart a process for an unwritable state directory.
 
 `AJS_ALLOW_INSECURE=1` disables bearer auth and is refused unless `AJS_LISTEN` is
 loopback, so it is only for throwaway local runs. Without a token or insecure
@@ -2565,7 +2572,8 @@ authenticate a signature over the raw body and the portal uses its per-session `
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/healthz` | process status + account-state counts |
+| GET | `/healthz` | process status + account-state counts (liveness only) |
+| GET | `/readyz` | readiness: state-directory write probe + configured integrations; `200 {"status":"ready"}` or `503 {"status":"not_ready","reasons":[...]}`; unauthenticated like `/healthz` |
 | GET | `/metrics` | Prometheus text format: aggregate account/node/lease/user/key/request counts, build info, uptime; every state including zeros, no ids/labels/IPs/secrets |
 | GET | `/v1/metrics?range=24h\|7d` | account health derived from state + live node count (active+LIVE=100, active without a LIVE node=70, paused=40, auth_failed/expired=0); the traffic series is empty and totals are zero with `telemetryAvailable:false` — the gate meter feeds the request log (`/v1/usage`), not this series |
 | GET | `/v1/openapi.json` | the OpenAPI 3.1 contract, served from the embedded byte-for-byte copy of `docs/openapi.json` with a strong `ETag` (SHA-256) and `If-None-Match` → 304; same bearer auth as the rest of `/v1/*` |

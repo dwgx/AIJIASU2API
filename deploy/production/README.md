@@ -18,9 +18,10 @@ bash deploy/production/check.sh
 ```
 
 The default mode is the production gate. It requires a real host `nginx -t`,
-`openssl`, `systemd-analyze` and `nft`; a missing required tool is a `FAIL`,
-not a `SKIP`. For a workstation without those tools use the explicitly
-non-production mode:
+`openssl`, `systemd-analyze`, `nft`, and a daemon binary for the `/readyz`
+proof (`AJS_ACCOUNTD_BIN`, `ajs-accountd` on `PATH`, `daemon/ajs-accountd`, or
+`go build`); a missing required tool is a `FAIL`, not a `SKIP`. For a
+workstation without those tools use the explicitly non-production mode:
 
 ```bash
 bash deploy/production/check.sh --dev
@@ -30,15 +31,18 @@ bash deploy/production/check.sh --dev
 `check.sh` is read-only. It stages nginx configs in a throwaway directory with
 a generated self-signed certificate and a dummy token, pins the nginx PID and
 all temp paths inside that directory, runs a real `nginx -t` as the invoking
-user, validates the YAML inventory, scans the kit for committed secrets,
-verifies the systemd unit, and compares the production firewall rule with
-`deploy/nftables/ajs-panel.nft`.
+user, starts that staged config to prove unknown Hosts are refused on :80/:443
+and the portal redirect is canonical, validates the YAML inventory, scans the
+kit for committed secrets, starts a daemon binary to prove `/readyz` fails on
+an unwritable state directory, verifies the systemd unit, and compares the
+production firewall rule with `deploy/nftables/ajs-panel.nft`.
 
 ## What the kit contains
 
 | Path | Purpose |
 |---|---|
-| `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the two sites |
+| `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the site configs |
+| `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
 | `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, portal-only routes |
 | `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, proxy-injected bearer |
 | `nginx/snippets/ajs-tls.conf` | shared TLS 1.2+/1.3 policy |
@@ -68,6 +72,7 @@ tree or generated on the host.
 Replace `panel.example.com` and `admin.example.com` in:
 - `nginx/sites-available/ajs-portal.conf` (`server_name`, certificate paths)
 - `nginx/sites-available/ajs-admin.conf` (`server_name`, certificate paths)
+- `nginx/sites-available/ajs-default.conf` (the HTTPS default listener uses the portal certificate)
 - `systemd/ajs-accountd.env.example` (`AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`)
 
 `AJS_TENANT_ORIGIN` must be the exact bare origin (`https://panel.example.com`),
@@ -75,6 +80,18 @@ with no path, query or trailing slash. The daemon refuses a path and uses the
 value for the portal's exact `Origin` check. `AJS_ADMIN_ORIGINS` must be the
 admin SPA's exact bare origin (`https://admin.example.com:8443` in this kit);
 unsafe admin requests from any other `Origin` are refused before the handler.
+
+### Host boundary
+
+`nginx/sites-available/ajs-default.conf` installs the explicit
+`default_server` listeners. Any request whose `Host` is not
+`panel.example.com` (or the admin `server_name` on its private listener) is
+refused before it reaches a virtual host: HTTP closes the connection with
+`444`, HTTPS answers `421 Misdirected Request`. The portal's HTTP-to-HTTPS
+redirect uses the fixed `https://panel.example.com` origin, never `$host`, so
+an attacker-chosen `Host` cannot influence a redirect even if a future config
+change moves the default listener. Keep `ajs-default.conf` installed and
+loaded; without it nginx falls back to the first server block.
 
 ### TLS certificates
 
@@ -371,9 +388,11 @@ sudo nginx -t && sudo systemctl reload nginx
 # restart the daemon after changing /etc/ajs/accountd.env
 sudo systemctl restart ajs-accountd
 
-# health
-curl -fsS http://127.0.0.1:2261/healthz
-curl -fsS https://panel.example.com/healthz
+# health: liveness vs readiness
+curl -fsS http://127.0.0.1:2261/healthz      # daemon process liveness only
+curl -fsS http://127.0.0.1:2261/readyz       # 503 until state-write and required integrations are ready
+curl -fsS https://panel.example.com/healthz  # edge liveness: static nginx "ok"
+curl -fsS https://panel.example.com/readyz   # daemon readiness through the edge
 
 # admin through an SSH tunnel
 ssh -N -L 8443:127.0.0.1:8443 user@host
@@ -387,6 +406,20 @@ The daemon's state lives in `/var/lib/ajs`: `state.json` (rewritten every
 `device-secrets.json` when `AJS_MASTER_KEY` is set. Back up the directory
 while the service is stopped, together with the master key; without the key
 the sealed envelopes cannot be opened.
+
+`/healthz` is liveness only: it reports that the process can answer and is
+deliberately unaffected by a broken state directory. `/readyz` is the
+readiness contract used by monitoring and load balancers. It checks that the
+state directory accepts the atomic snapshot write and that every configured
+required integration is usable (a configured Resin panel must have completed
+its first reconcile; a partially configured epay adapter must be enabled; a
+tenant portal must have its origin). It answers `200` with
+`{"status":"ready","checks":[...]}` or `503` with
+`{"status":"not_ready","reasons":[...]}`. It never performs a vendor network
+call: the Resin row reads the in-memory topology of the last successful
+reconcile, and custom `ReadyChecks` are bounded by a 750 ms deadline. Do not
+point a liveness probe at `/readyz`: a restart will not fix an unwritable
+state directory.
 
 ## Verification
 
@@ -407,16 +440,32 @@ the sealed envelopes cannot be opened.
    in an isolated user+network namespace (`unshare -Urn`) where it can bind
    :80/:443. Production mode requires host nginx; Docker
    `nginx:1.29-alpine` staging is dev-only (`AJS_CHECK_NGINX_DOCKER=1`);
-5. static nginx assertions: portal terminal 404, no generic `/v1/` proxy on
-   the portal origin, admin token include, allow/deny, HSTS, rate-limit zones,
+5. a runtime nginx probe on the staged `:80`/`:443` listeners: an unknown
+   HTTP `Host` must be closed (`444`), an unknown HTTPS `Host` and an
+   IP-literal `Host` must answer `421`, the portal HTTP redirect must use the
+   fixed `https://panel.example.com` origin, and the canonical portal `Host`
+   must still reach `/healthz` with `200`;
+6. a runtime per-operator auth probe: an unauthenticated request to a Basic
+   vhost answers `401` and leaves the upstream log empty; two different
+   operator credentials reach the upstream with distinct `X-AJS-Operator`
+   values;
+7. a real daemon `/readyz` proof: start the packaged binary
+   (`AJS_ACCOUNTD_BIN`, `PATH`, `daemon/ajs-accountd`, or a `go build`) with a
+   writable state directory and require `200` `ready`; then repeat with a
+   `0555` state directory and require `503` `not_ready` naming the `state`
+   check while `/healthz` stays `200`;
+8. static nginx assertions: portal terminal 404, no generic `/v1/` proxy on
+   the portal origin, admin token include, allow/deny, default-deny `444`/`421`,
+   canonical redirect, `/readyz` proxy, HSTS, rate-limit zones,
    `X-Forwarded-For $remote_addr`;
-6. token-free bundle assertions on `build-bundles.sh`, the committed
+9. token-free bundle assertions on `build-bundles.sh`, the committed
    `dashboard/package-lock.json`, and the `ajs-build.json` live/mock manifest;
-7. `systemd-analyze verify` plus the hardening directives;
-8. the production firewall rule exactly matching `deploy/nftables/ajs-panel.nft`
-   and `nft -c` (direct, `unshare -Urn`, or `sudo -n` fallback);
-9. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
-   `AJS_TRUSTED_PROXIES`, `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, DNS, TLS).
+10. `systemd-analyze verify` plus the hardening directives;
+11. the production firewall rule exactly matching `deploy/nftables/ajs-panel.nft`
+    and `nft -c` (direct, `unshare -Urn`, or `sudo -n` fallback);
+12. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
+    `AJS_TRUSTED_PROXIES`, `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, `X-AJS-Operator`,
+    `render-admin-htpasswd`, `admin-operators`, DNS, TLS).
 
 In production mode every item above is required: a missing tool is a `FAIL`
 and the summary reports the required-skip count. `--dev` reports absent tools
@@ -426,16 +475,21 @@ parser is always a failure because YAML validation is a gate requirement.
 ## Recorded verification (2026-10-26)
 
 - **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), non-root uid 1000:**
-  `bash deploy/production/check.sh` → `check: PASS (58 checks, 0 skipped)`.
-  The real `nginx -t` parsed the staged portal/admin vhosts; because nginx -t
-  opens the listening sockets even in test mode, the unprivileged run used the
-  `unshare -Urn` fallback (the direct run reached `syntax is ok` and failed only
-  at `bind() :80 permission denied`). No required check was skipped.
+  `bash deploy/production/check.sh` → `check: PASS (84 checks, 0 skipped)`.
+  The real `nginx -t` parsed the staged portal/admin/default vhosts; because
+  nginx -t opens the listening sockets even in test mode, the unprivileged run
+  used the `unshare -Urn` fallback (the direct run reached `syntax is ok` and
+  failed only at `bind() :80 permission denied`). The runtime probe then
+  started that staged config and observed unknown HTTP Host closed (444),
+  unknown HTTPS and IP-literal Hosts answered 421, the fixed canonical
+  redirect, and the canonical portal Host still at 200. A real daemon binary
+  proved `/readyz` 200 with a writable state directory and 503 `not_ready`
+  (state check) with a 0555 directory, while `/healthz` stayed 200. No
+  required check was skipped.
 - **Windows development host without nginx, systemd-analyze or nft:**
-  `bash deploy/production/check.sh --dev` → `check: DEV-PASS (55 checks,
-  3 skipped; not a production gate)`. The same host in the default production
-  mode → `check: FAIL (3 failed, 3 required skips, 58 checks)` — no `PASS` with
-  skips.
+  `bash deploy/production/check.sh --dev` reports `DEV-PASS` and lists the
+  unavailable tools as `SKIP`; the default production mode reports `FAIL`
+  with the required-skip count and never prints `PASS`.
 - A clean `npm ci` from the committed `dashboard/package-lock.json` succeeded
   with an empty npm cache (206 packages installed). `build-bundles.sh` was
   exercised against `dashboard/`; it produced `mode: live`, `mock: false`,

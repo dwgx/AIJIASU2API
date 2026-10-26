@@ -82,7 +82,8 @@ clients omit `Origin` but still send the header.
 
 | Method | Path | Effect |
 |---|---|---|
-| GET | `/healthz` | process, DB, Resin reachability, per-account summary |
+| GET | `/healthz` | process liveness + account-state counts only |
+| GET | `/readyz` | readiness: state-directory write probe + configured integrations; `200 ready` or `503 not_ready` with a reason list |
 | GET | `/metrics` | Prometheus text |
 | GET | `/v1/topology` | rendered subscription, node→Resin hash map, platform list |
 | POST | `/v1/reconcile` | force re-render + PATCH + refresh |

@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(112)
-    expect(entries).toHaveLength(138)
+    expect(Object.keys(doc.paths)).toHaveLength(113)
+    expect(entries).toHaveLength(139)
   })
 
   it('documents the real-time debugger trace and stream', () => {
@@ -315,6 +315,7 @@ describe('docs/openapi.json', () => {
     const health = doc.paths['/healthz']?.get
     expect(health).toBeDefined()
     expect(health?.security).toEqual([])
+    expect(doc.paths['/readyz']?.get.security).toEqual([])
     // The portal is its own authentication chain: it authenticates the opaque
     // cookie, never the admin bearer, and overrides the global requirement.
     const portalPaths: Record<string, true> = {
@@ -338,7 +339,7 @@ describe('docs/openapi.json', () => {
       '/v1/payments/epay/notify': true,
     }
     for (const { method, path, operation } of entries) {
-      if (path === '/healthz' || portalPaths[path]) continue
+      if (path === '/healthz' || path === '/readyz' || portalPaths[path]) continue
       expect(operation.security, `${method} ${path}`).toBeUndefined()
     }
   })

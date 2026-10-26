@@ -156,6 +156,39 @@
         "security": []
       }
     },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness: state-directory write probe and configured integrations.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready; see the reasons list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/metrics": {
       "get": {
         "operationId": "getPrometheusMetrics",
@@ -7069,7 +7102,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback. Every unsafe admin request also requires X-AJS-CSRF: 1, and an Origin header must exactly match AJS_ADMIN_ORIGINS."
+        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz and /readyz are unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback. Every unsafe admin request also requires X-AJS-CSRF: 1, and an Origin header must exactly match AJS_ADMIN_ORIGINS."
       },
       "portalCookie": {
         "type": "apiKey",
@@ -8715,6 +8748,66 @@
           "version",
           "time",
           "accounts"
+        ]
+      },
+      "ReadinessResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ready", "not_ready"]
+          },
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessCheck"
+            }
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "version",
+          "time",
+          "checks"
+        ]
+      },
+      "ReadinessCheck": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "ok",
+          "required"
         ]
       },
       "UpdateInfo": {
