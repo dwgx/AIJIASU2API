@@ -1998,7 +1998,9 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   active plan, and accepts an optional `Idempotency-Key`. Orders are unique on
   `(tenantId, keyHash)`: a replay with the same plan returns the original (200), a different plan
   answers 409. One awaiting/paid/unexpired-active order per user is allowed; expiry permits a
-  renewal. A foreign order id answers 404 exactly like an unknown one.
+  renewal. When the user's active order for the requested plan has an ended grant lease, the create
+  call re-issues that order instead (200 with the existing order and a replacement lease) rather
+  than creating a second charge. A foreign order id answers 404 exactly like an unknown one.
 - **Manual settlement.** `POST /v1/admin/orders/{id}/settle` requires a nonempty receipt
   `reference` and `offlineFundsReceived:true`. The provider never sees the order: the store stamps
   the snapshot amount, records one `PaymentEvent`, audits `payment.settled`, then activates.
@@ -2010,6 +2012,13 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   no TTL extension. Activation needs an active tenant and an enabled linked user; while blocked the
   order stays `paid`, `payment.activation_retry` is audited, and the same settlement retry grants
   once after resume.
+- **Lease re-issue.** A daemon restart ends a lease explicitly (`lease.revoke` with reason
+  `daemon_restart`). An active order whose `grant.leaseId` no longer names a live lease is not an
+  active entitlement: it no longer blocks a renewal with the old "already holds an unexpired
+  entitlement" conflict. `POST /v1/portal/orders/{id}/reissue` (own order) or
+  `POST /v1/admin/orders/{id}/reissue` creates exactly one replacement lease for the same grant,
+  keeps the original paid expiry, records a `lease.reissued` audit row and event, and never creates
+  a second grant or payment event. A retry while the replacement lease is live answers 409.
 - **Refunds and chargebacks.** `POST …/refund` records an already completed full offline refund and
   never transfers money; `POST …/chargeback` records external evidence and always flags review.
   Both revoke the grant's lease and restore its previous quota without re-enabling a suspended user
@@ -2043,11 +2052,12 @@ commands: neither an order-create response nor a checkout redirect is evidence o
   plus their sequence counters. An order row stores only SHA-256 idempotency/request hashes, never
   the raw key. A malformed restored row is failed closed into `cancelled` + `reviewRequired` with
   no grant. Audited actions: `order.created`, `order.checkout`, `order.cancelled`,
-  `payment.settled`, `payment.activation_retry`, `entitlement.granted`, `refund.completed`,
-  `refund.review`, `chargeback.recorded`, `entitlement.revoked`, `webhook.rejected`,
-  `epay.reconcile`, `plan.created`, `plan.updated`, `plan.deactivated`; details carry a reference
-  fingerprint, never the reference, payload or signature. Customer events:
-  `order.created|cancelled|paid|activated|refunded|charged_back`.
+  `payment.settled`, `payment.activation_retry`, `entitlement.granted`, `lease.reissued`,
+  `refund.completed`, `refund.review`, `chargeback.recorded`, `entitlement.revoked`,
+  `webhook.rejected`, `epay.reconcile`, `plan.created`, `plan.updated`, `plan.deactivated`; details
+  carry a reference fingerprint, never the reference, payload or signature. Customer events:
+  `order.created|cancelled|paid|activated|refunded|charged_back`; lease events include
+  `lease.created|reissued|revoked|expired`.
 
 Operations: creating an order is not a payment and an epay checkout is only provider intent.
 Reconcile offline receipts before attesting manual settlement; `refund` records money already
@@ -2620,6 +2630,7 @@ objects.
 | GET | `/v1/portal/orders/{id}` | one own order; a foreign or unknown id → 404 |
 | POST | `/v1/portal/orders/{id}/checkout` | `{type:"alipay" / "wxpay"}` + `X-CSRF-Token` → 200 `{payUrl}`; signed 易支付 redirect for one own `awaiting_payment` order. A checkout is intent, never payment; disabled epay → 503, foreign id → 404, non-awaiting → 409 |
 | POST | `/v1/portal/orders/{id}/cancel` | requires `X-CSRF-Token`; only `awaiting_payment` → `cancelled` (terminal); a repeat cancel is 200 unchanged, any other state 409 |
+| POST | `/v1/portal/orders/{id}/reissue` | requires `X-CSRF-Token`; an own `active` order whose grant lease has ended → 200 `Order` with one replacement lease for the same grant, original expiry, `lease.reissued` audit/event; a live lease or expired term → 409; never a new order, grant or payment |
 | GET | `/v1/admin/plans?limit=&offset=` | the full catalogue, including inactive rows (admin token or scoped `admin` only) |
 | POST | `/v1/admin/plans` | `{name,amountMinor,currency,leaseTtlSeconds,quotaBytes,active?}` → 201 `Plan`; invalid price/currency/TTL/quota → 400 |
 | GET | `/v1/admin/plans/{id}` | one plan |
@@ -2631,6 +2642,7 @@ objects.
 | POST | `/v1/admin/orders/{id}/refund` | `{reference,reason?}` → 200 `Order`; records an already completed full offline refund, revokes the grant once; a partial or unsupported case is flagged for review without mutation |
 | POST | `/v1/admin/orders/{id}/chargeback` | `{reference,reason?}` → 200 `Order`; records external dispute evidence, revokes the grant and flags review |
 | POST | `/v1/admin/orders/{id}/cancel` | cancels `awaiting_payment` → 200; a repeat is 200 unchanged, any other state 409 |
+| POST | `/v1/admin/orders/{id}/reissue` | admin counterpart of the portal re-issue: 200 `Order` with one replacement lease for the same grant; a live lease or expired term → 409; never a second grant or charge |
 | POST | `/v1/payments/stripe` | no bearer: verifies `Stripe-Signature` over the raw body (HMAC-SHA256, five-minute tolerance), maps checkout-completion/refund/dispute events and acknowledges duplicates. A bad signature/stale timestamp → 400, an unknown type → 200 `ignored`, no secret configured → 503 |
 | GET, POST | `/v1/payments/epay/notify` | no bearer: 易支付 callback via GET query parameters or form-encoded POST body. Verifies MD5 sign, `pid`, `trade_status=TRADE_SUCCESS` and `money` against the order snapshot, then settles idempotently by `trade_no`. Answers `success` only for accepted/duplicate, otherwise `fail`; disabled epay → 503 `fail` |
 | POST | `/v1/backup` | `{passphrase}` → the `.ajsb` envelope as a download (admin-only); `no-store`, `X-AJS-Backup-Blobs`; 409 `CONFLICT` when `state.json` is missing, 409 `BACKUP_BUSY` while another backup/restore runs |

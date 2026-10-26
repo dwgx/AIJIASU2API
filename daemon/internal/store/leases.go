@@ -87,6 +87,18 @@ func (s *Store) deliverLeaseRevocations(leases []model.Lease) {
 	s.flushLeaseRevocations()
 }
 
+// leaseEndReasonLocked returns the durable reason a lease left the active
+// collection, or "lease_ended" when it was removed by a path that does not
+// write a LeaseEnd row (an operator revoke or an ordinary expiry sweep).
+func (s *Store) leaseEndReasonLocked(leaseID string) string {
+	for _, end := range s.leaseEnds {
+		if end.Lease.ID == leaseID {
+			return end.Reason
+		}
+	}
+	return "lease_ended"
+}
+
 // recordLeaseEndLocked appends one lease to the durable outcome log and queues
 // its revoke event. The caller holds s.mu; the event is delivered only after
 // the caller releases the lock (DemoteNode calls flushLeaseRevocations, and

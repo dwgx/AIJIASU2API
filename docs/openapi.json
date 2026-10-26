@@ -12659,6 +12659,7 @@
           "account.expired",
           "account.renewal_due",
           "lease.created",
+          "lease.reissued",
           "lease.revoked",
           "lease.expired",
           "node.connected",

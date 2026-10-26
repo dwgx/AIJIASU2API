@@ -698,3 +698,195 @@ func TestRestoreQuarantinesMalformedOrder(t *testing.T) {
 		t.Fatalf("restored leases = %d, want 0", len(restored.Leases()))
 	}
 }
+
+// reviveOrderNode puts a node demoted by a simulated daemon restart back into
+// service with the lease-visible endpoint it had before. The re-issue path
+// targets a live node; the restart itself leaves every node STALE until the
+// runtime reconnects it.
+func reviveOrderNode(t *testing.T, st *Store, lease model.Lease) {
+	t.Helper()
+	node, ok := st.Node(lease.NodeID)
+	if !ok {
+		t.Fatalf("node %q missing", lease.NodeID)
+	}
+	node.State = model.NodeLive
+	node.GatePort = lease.GatePort
+	node.EgressIP = lease.EgressIP
+	node.Protocol = lease.Protocol
+	node.Region = lease.Region
+	node.Label = lease.NodeLabel
+	if _, err := st.PutNode(node); err != nil {
+		t.Fatalf("revive node %q: %v", lease.NodeID, err)
+	}
+}
+
+// TestReissueOrderLeaseAfterDaemonRestart is the AJS-395 acceptance test: a
+// restart ends the grant's lease with reason daemon_restart, but the paid order
+// must be able to obtain a replacement lease without a second grant or charge.
+func TestReissueOrderLeaseAfterDaemonRestart(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue", "receipt-reissue"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v, want an active grant", active)
+	}
+	oldLeaseID := active.Grant.LeaseID
+	oldExpiry := active.Grant.ExpiresAt
+	oldLease, ok := f.st.Lease(oldLeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", oldLeaseID)
+	}
+	paymentsBefore := len(f.st.PaymentEvents())
+	grantsBefore := len(f.st.Grants())
+
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	ends := f.st.LeaseEnds()
+	if len(ends) != 1 || ends[0].Lease.ID != oldLeaseID || ends[0].Reason != "daemon_restart" {
+		t.Fatalf("lease ends = %+v, want one daemon_restart row for %s", ends, oldLeaseID)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+
+	after, lease, err := f.st.ReissueOrderLease(order.ID, "operator")
+	if err != nil {
+		t.Fatalf("ReissueOrderLease: %v", err)
+	}
+	if after.State != model.OrderActive || after.Grant == nil {
+		t.Fatalf("reissued order = %+v, want active with a grant", after)
+	}
+	if lease.ID == oldLeaseID || after.Grant.LeaseID != lease.ID {
+		t.Fatalf("grant lease = %s, new lease = %s, old = %s", after.Grant.LeaseID, lease.ID, oldLeaseID)
+	}
+	if after.Grant.ExpiresAt != oldExpiry || lease.ExpiresAt != oldExpiry {
+		t.Fatalf("reissue extended the paid term: grant %s, lease %s, want %s",
+			after.Grant.ExpiresAt, lease.ExpiresAt, oldExpiry)
+	}
+	if after.Grant.RevokedAt != nil {
+		t.Fatalf("reissued grant is revoked: %+v", after.Grant)
+	}
+	if len(f.st.Leases()) != 1 {
+		t.Fatalf("active leases = %d, want exactly one replacement", len(f.st.Leases()))
+	}
+	if len(f.st.Grants()) != grantsBefore {
+		t.Fatalf("grants = %d, want the original %d (no second grant)", len(f.st.Grants()), grantsBefore)
+	}
+	if len(f.st.PaymentEvents()) != paymentsBefore {
+		t.Fatalf("payment events = %d, want the original %d (no second charge)",
+			len(f.st.PaymentEvents()), paymentsBefore)
+	}
+	audit := findAudit(t, f.st, "lease.reissued", func(event model.AuditEvent) bool {
+		return event.Meta["orderId"] == order.ID
+	})
+	if audit.Meta["previousLeaseId"] != oldLeaseID || audit.Meta["leaseId"] != lease.ID ||
+		audit.Meta["reason"] != "daemon_restart" {
+		t.Fatalf("lease.reissued meta = %v", audit.Meta)
+	}
+
+	// A retry while the replacement is live is refused, not allocated twice.
+	if _, _, err := f.st.ReissueOrderLease(order.ID, "operator"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second reissue error = %v, want ErrConflict", err)
+	}
+	if len(f.st.Leases()) != 1 || countAudit(f.st, "lease.reissued") != 1 {
+		t.Fatalf("second reissue changed state: leases=%d audit=%d",
+			len(f.st.Leases()), countAudit(f.st, "lease.reissued"))
+	}
+
+	// The replacement grant survives a save/load cycle.
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	stored, ok := restored.Order(order.ID)
+	if !ok || stored.Grant == nil || stored.Grant.LeaseID != lease.ID {
+		t.Fatalf("restored order grant = %+v, want lease %s", stored.Grant, lease.ID)
+	}
+	if len(restored.Leases()) != 1 || restored.Leases()[0].ID != lease.ID {
+		t.Fatalf("restored leases = %+v, want %s", restored.Leases(), lease.ID)
+	}
+}
+
+// TestEndedLeaseDoesNotBlockNewOrder is the AJS-395(c) falsifier: before the
+// fix an active order whose grant lease had ended still returned the 409
+// "already holds an unexpired entitlement" on a new order.
+func TestEndedLeaseDoesNotBlockNewOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "ended-lease")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-ended", "receipt-ended"))
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant")
+	}
+	lease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease missing")
+	}
+	if _, _, _, err := f.st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	renewal, replayed, err := f.st.CreateOrder(f.tenant.ID, f.user.ID, f.plan.ID, "after-restart", "tenant")
+	if err != nil {
+		t.Fatalf("CreateOrder after an ended lease: %v", err)
+	}
+	if replayed || renewal.State != model.OrderAwaitingPayment {
+		t.Fatalf("renewal = %+v, replayed=%t", renewal, replayed)
+	}
+}
+
+// TestReissueOrderLeaseRefusesExpiredGrant proves the re-issue path cannot
+// extend service beyond the paid term.
+func TestReissueOrderLeaseRefusesExpiredGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-expired")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-expired", "receipt-reissue-expired"))
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant")
+	}
+	*f.now = f.now.Add(time.Duration(f.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	if _, _, err := f.st.ReissueOrderLease(order.ID, "operator"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue expired grant error = %v, want ErrConflict", err)
+	}
+	if len(f.st.Leases()) != 0 {
+		t.Fatalf("expired reissue created %d leases", len(f.st.Leases()))
+	}
+}
+
+// TestActivationRetryDoesNotTreatEndedGrantLeaseAsActive proves a paid order
+// whose grant points at an ended lease stays paid on a settlement retry; it
+// must not be flipped back to active without a serving lease.
+func TestActivationRetryDoesNotTreatEndedGrantLeaseAsActive(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "retry-ended")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-retry-ended", "receipt-retry-ended"))
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant")
+	}
+	lease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease missing")
+	}
+	if _, _, _, err := f.st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+
+	// White-box: model the retry state a restored or interrupted activation
+	// can leave behind, where the order is paid but still carries its grant.
+	f.st.mu.Lock()
+	idx := f.st.orderIndexLocked(order.ID)
+	f.st.orders[idx].Order.State = model.OrderPaid
+	f.st.mu.Unlock()
+
+	after := f.apply(t, f.settleEvent(order.ID, "evt-retry-ended", "receipt-retry-ended"))
+	if after.State != model.OrderPaid {
+		t.Fatalf("retry state = %s, want paid with the ended lease", after.State)
+	}
+	if !containsAction(auditActions(f.st), "payment.activation_retry") {
+		t.Fatal("no payment.activation_retry audit row")
+	}
+	if len(f.st.Leases()) != 0 {
+		t.Fatalf("retry created %d leases without a live grant", len(f.st.Leases()))
+	}
+}

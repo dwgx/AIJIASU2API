@@ -1,7 +1,7 @@
 package webhook
 
-// LeaseEventData returns the payload shared by lease.created, lease.revoked
-// and lease.expired. It carries the lease identity, the user and account it
+// LeaseEventData returns the payload shared by lease.created, lease.reissued,
+// lease.revoked and lease.expired. It carries the lease identity, the user and account it
 // was allocated from, the platform and the expiry instant — and nothing else:
 // a lease event never includes a key, token, password, signing secret or node
 // credential. Callers pass the committed store row, so the same shape reaches

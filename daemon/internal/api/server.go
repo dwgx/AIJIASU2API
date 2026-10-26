@@ -513,6 +513,7 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/refund", s.handleRefundOrder)
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/chargeback", s.handleChargebackOrder)
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/cancel", s.handleAdminCancelOrder)
+	s.registerOrderReissueRoutes(rt)
 
 	// Customer portal chains (DESIGN-TENANT). Both are opt-in: without
 	// AJS_TENANT_PORTAL=1 the routes are not registered and answer 404, and

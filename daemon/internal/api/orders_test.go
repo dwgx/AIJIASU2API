@@ -17,6 +17,7 @@ import (
 	"ajsaccountd/internal/model"
 	"ajsaccountd/internal/payment"
 	"ajsaccountd/internal/store"
+	"ajsaccountd/internal/webhook"
 )
 
 const orderTestStripeSecret = "whsec_order_test"
@@ -675,4 +676,168 @@ func mustUser(t *testing.T, st *store.Store, id string) model.PanelUser {
 		t.Fatalf("user %q not found", id)
 	}
 	return user
+}
+
+// reviveOrderAPILease puts a node demoted by a simulated daemon restart back
+// into service with the endpoint the lease advertised before.
+func reviveOrderAPILease(t *testing.T, st *store.Store, lease model.Lease) {
+	t.Helper()
+	node, ok := st.Node(lease.NodeID)
+	if !ok {
+		t.Fatalf("node %q missing", lease.NodeID)
+	}
+	node.State = model.NodeLive
+	node.GatePort = lease.GatePort
+	node.EgressIP = lease.EgressIP
+	node.Protocol = lease.Protocol
+	node.Region = lease.Region
+	node.Label = lease.NodeLabel
+	if _, err := st.PutNode(node); err != nil {
+		t.Fatalf("revive node %q: %v", lease.NodeID, err)
+	}
+}
+
+// TestPortalOrderReissueAfterDaemonRestart is the customer-facing AJS-395
+// path: after a restart ends the lease, the paid customer re-issues the same
+// order and receives a replacement lease with one lease.reissued event and no
+// new order, grant or payment.
+func TestPortalOrderReissueAfterDaemonRestart(t *testing.T) {
+	ts, st, sink := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-reissue@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "reissue-order")
+
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-reissue", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v", active)
+	}
+	oldLease, ok := st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderAPILease(t, st, oldLease)
+	leasesBefore := len(st.Leases())
+	paymentsBefore := len(st.PaymentEvents())
+	grantsBefore := len(st.Grants())
+
+	resp, body = portalOrderCall(t, ts, http.MethodPost,
+		"/v1/portal/orders/"+order.ID+"/reissue", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	after := decodeBody[model.Order](t, body)
+	if after.Grant == nil || after.Grant.LeaseID == oldLease.ID || after.Grant.LeaseID == "" {
+		t.Fatalf("reissued grant = %+v, old lease %s", after.Grant, oldLease.ID)
+	}
+	if after.Grant.ExpiresAt != active.Grant.ExpiresAt {
+		t.Fatalf("reissue changed the paid expiry: %s -> %s", active.Grant.ExpiresAt, after.Grant.ExpiresAt)
+	}
+	if got := len(st.Leases()); got != leasesBefore+1 {
+		t.Fatalf("leases = %d, want %d", got, leasesBefore+1)
+	}
+	if got := len(st.Grants()); got != grantsBefore {
+		t.Fatalf("grants = %d, want the original %d", got, grantsBefore)
+	}
+	if got := len(st.PaymentEvents()); got != paymentsBefore {
+		t.Fatalf("payment events = %d, want the original %d", got, paymentsBefore)
+	}
+	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
+		t.Fatalf("lease.reissued events = %d, want 1", got)
+	}
+
+	// The retry is refused and emits nothing further.
+	resp, body = portalOrderCall(t, ts, http.MethodPost,
+		"/v1/portal/orders/"+order.ID+"/reissue", nil, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusConflict)
+	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
+		t.Fatalf("retry emitted another lease.reissued: %d", got)
+	}
+	if got := len(st.Leases()); got != leasesBefore+1 {
+		t.Fatalf("retry changed leases: %d", got)
+	}
+}
+
+// TestAdminOrderReissueAfterDaemonRestart proves the admin path exists even
+// without a portal session and uses the same single-grant operation.
+func TestAdminOrderReissueAfterDaemonRestart(t *testing.T) {
+	ts, st, sink := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-admin-reissue@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "admin-reissue-order")
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-admin-reissue", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	oldLease, ok := st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease missing")
+	}
+	if _, _, _, err := st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderAPILease(t, st, oldLease)
+
+	resp, body = apiCall(t, ts, http.MethodPost, "/v1/admin/orders/"+order.ID+"/reissue", nil)
+	requireStatus(t, resp, http.StatusOK)
+	after := decodeBody[model.Order](t, body)
+	if after.Grant == nil || after.Grant.LeaseID == oldLease.ID {
+		t.Fatalf("admin reissue grant = %+v", after.Grant)
+	}
+	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
+		t.Fatalf("lease.reissued events = %d, want 1", got)
+	}
+}
+
+// TestPortalCreateOrderAfterEndedLeaseDoesNot409 is the AJS-395(c) API
+// falsifier: the old check saw only grant.ExpiresAt and returned the 409
+// "already holds an unexpired entitlement" even though the lease was ended.
+// The same plan now takes the re-issue path and returns the existing order
+// with a replacement lease, so the customer is not charged again.
+func TestPortalCreateOrderAfterEndedLeaseDoesNot409(t *testing.T) {
+	ts, st, sink := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "orders-ended@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "ended-order")
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-ended", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	lease, ok := st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease missing")
+	}
+	if _, _, _, err := st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderAPILease(t, st, lease)
+	ordersBefore := len(st.Orders())
+	paymentsBefore := len(st.PaymentEvents())
+	leasesBefore := len(st.Leases())
+
+	resp, body = portalOrderCall(t, ts, http.MethodPost, "/v1/portal/orders",
+		model.OrderCreateRequest{PlanID: plan.ID}, cookie, csrf, nil)
+	requireStatus(t, resp, http.StatusOK)
+	reissued := decodeBody[model.Order](t, body)
+	if reissued.ID != order.ID || reissued.State != model.OrderActive || reissued.Grant == nil {
+		t.Fatalf("reissued order = %+v, want the original active order", reissued)
+	}
+	if reissued.Grant.LeaseID == lease.ID {
+		t.Fatalf("order still points at the ended lease %s", lease.ID)
+	}
+	if got := len(st.Orders()); got != ordersBefore {
+		t.Fatalf("orders = %d, want the original %d (no second order)", got, ordersBefore)
+	}
+	if got := len(st.PaymentEvents()); got != paymentsBefore {
+		t.Fatalf("payment events = %d, want the original %d (no second charge)", got, paymentsBefore)
+	}
+	if got := len(st.Leases()); got != leasesBefore+1 {
+		t.Fatalf("leases = %d, want %d", got, leasesBefore+1)
+	}
+	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
+		t.Fatalf("lease.reissued events = %d, want 1", got)
+	}
 }

@@ -224,16 +224,73 @@ func (s *Store) checkOpenOrderLocked(userID string, now time.Time) error {
 		case model.OrderAwaitingPayment, model.OrderPaid:
 			return conflictf("user %q already has an order awaiting activation", userID)
 		case model.OrderActive:
-			if order.Grant == nil || order.Grant.RevokedAt != nil {
+			if !s.grantLeaseActiveLocked(&order.Order, now) {
 				continue
 			}
-			expires, ok := leaseExpiry(order.Grant.ExpiresAt)
-			if !ok || expires.After(now) {
-				return conflictf("user %q already holds an unexpired entitlement", userID)
-			}
+			return conflictf("user %q already holds an unexpired entitlement", userID)
 		}
 	}
 	return nil
+}
+
+// grantLeaseActiveLocked reports whether an order's grant is backed by a live
+// serving lease right now. The grant's ExpiresAt alone is not enough: a daemon
+// restart, a node revocation or an operator revoke ends the lease before the
+// paid term expires, and an order whose referenced lease is gone must not
+// block a renewal or be reported as serving. A revoked grant is never active.
+func (s *Store) grantLeaseActiveLocked(order *model.Order, now time.Time) bool {
+	if order == nil || order.Grant == nil || order.Grant.RevokedAt != nil {
+		return false
+	}
+	expires, ok := leaseExpiry(order.Grant.ExpiresAt)
+	if !ok || !expires.After(now) {
+		return false
+	}
+	for i := range s.leases {
+		lease := &s.leases[i]
+		if lease.ID == order.Grant.LeaseID && lease.UserID == order.UserID &&
+			lease.ExpiresAt == order.Grant.ExpiresAt {
+			return true
+		}
+	}
+	return false
+}
+
+// ReissueCandidate returns the newest active order for tenantID, userID and
+// planID whose grant lease has ended but whose paid term is unexpired. It is
+// the portal create path's signal that the customer already owns service and
+// should be re-issued instead of being charged for a new order.
+func (s *Store) ReissueCandidate(tenantID, userID, planID string) (model.Order, bool) {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	planID = strings.TrimSpace(planID)
+	if tenantID == "" || userID == "" {
+		return model.Order{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := s.now()
+	for i := range s.orders {
+		order := &s.orders[i].Order
+		if order.TenantID != tenantID || order.UserID != userID || order.State != model.OrderActive {
+			continue
+		}
+		if planID != "" && order.PlanID != planID {
+			continue
+		}
+		if order.Grant == nil || order.Grant.RevokedAt != nil {
+			continue
+		}
+		expires, ok := leaseExpiry(order.Grant.ExpiresAt)
+		if !ok || !expires.After(now) {
+			continue
+		}
+		if s.grantLeaseActiveLocked(order, now) {
+			continue
+		}
+		return cloneOrder(*order), true
+	}
+	return model.Order{}, false
 }
 
 // Orders returns every order, newest first. It is the admin view.
@@ -740,11 +797,20 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 	s.sweepExpiredLocked(now)
 	if order.Grant != nil {
 		if order.Grant.RevokedAt == nil {
-			order.State = model.OrderActive
-			if order.ActivatedAt == nil {
-				order.ActivatedAt = ptrString(iso(now))
+			if s.grantLeaseActiveLocked(order, now) {
+				order.State = model.OrderActive
+				if order.ActivatedAt == nil {
+					order.ActivatedAt = ptrString(iso(now))
+				}
+				return true
 			}
-			return true
+			// The grant is still owned by the order but its lease ended (for
+			// example a daemon restart). Reactivating must not pretend the
+			// ended lease is still serving; the explicit re-issue path creates
+			// the replacement lease without creating a second grant.
+			s.retryBlockedLocked(order, actor, "grant_lease_ended",
+				"entitlement lease has ended; reissue required")
+			return false
 		}
 		s.retryBlockedLocked(order, actor, "grant_revoked", "entitlement was already revoked")
 		return false
@@ -855,6 +921,160 @@ func (s *Store) activateOrderLocked(idx int, actor string) bool {
 			"state":    string(model.OrderActive),
 		})
 	return true
+}
+
+// ReissueOrderLease creates a replacement serving lease for an existing paid
+// order whose grant no longer has an active lease. A daemon restart ends the
+// lease with reason daemon_restart; a node revocation or an operator revoke has
+// the same effect on the grant. The operation never creates a second
+// entitlement or records a second payment: the same grant is re-pointed at one
+// new lease with the grant's original expiry, so a re-issue can restore
+// service but cannot extend the paid term.
+//
+// While the grant still has an active lease the call is refused, so concurrent
+// or repeated re-issues cannot allocate a second lease. A grant whose term has
+// expired is refused as well: restoring an expired order would be service
+// without a valid entitlement.
+func (s *Store) ReissueOrderLease(orderID, actor string) (model.Order, model.Lease, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return model.Order{}, model.Lease{}, invalidf("orderId is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return model.Order{}, model.Lease{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if order.State != model.OrderActive {
+		return model.Order{}, model.Lease{}, conflictf(
+			"order %q is %s; only active orders can reissue an ended lease", order.ID, order.State)
+	}
+	if order.Grant == nil {
+		return model.Order{}, model.Lease{}, conflictf("order %q has no entitlement grant", order.ID)
+	}
+	if order.Grant.RevokedAt != nil {
+		return model.Order{}, model.Lease{}, conflictf("order %q entitlement was revoked", order.ID)
+	}
+	now := s.now()
+	s.sweepExpiredLocked(now)
+	expires, ok := leaseExpiry(order.Grant.ExpiresAt)
+	if !ok || !expires.After(now) {
+		return model.Order{}, model.Lease{}, conflictf(
+			"order %q entitlement expired at %s", order.ID, order.Grant.ExpiresAt)
+	}
+	if s.leaseIndexLocked(order.Grant.LeaseID) >= 0 {
+		return model.Order{}, model.Lease{}, conflictf(
+			"order %q entitlement lease %s is still active", order.ID, order.Grant.LeaseID)
+	}
+
+	tenantIdx := s.tenantIndexLocked(order.TenantID)
+	if tenantIdx < 0 {
+		return model.Order{}, model.Lease{}, conflictf("tenant %q not found", order.TenantID)
+	}
+	tenant := s.tenants[tenantIdx]
+	if tenant.Status != model.TenantActive {
+		return model.Order{}, model.Lease{}, conflictf("tenant %q is not active", tenant.ID)
+	}
+	if tenant.UserID == nil || *tenant.UserID != order.UserID {
+		return model.Order{}, model.Lease{}, conflictf("tenant is not linked to this user")
+	}
+	userIdx := s.userIndexLocked(order.UserID)
+	if userIdx < 0 {
+		return model.Order{}, model.Lease{}, conflictf("user %q not found", order.UserID)
+	}
+	user := &s.users[userIdx]
+	if !user.Enabled {
+		return model.Order{}, model.Lease{}, conflictf("user %q is suspended", user.Name)
+	}
+
+	accountIdx, nodeIdx, platform, err := s.pickOrderLeaseTargetLocked(*user, now)
+	if err != nil {
+		return model.Order{}, model.Lease{}, err
+	}
+	account := s.accounts[accountIdx]
+	node := s.nodes[nodeIdx]
+
+	remaining := int(expires.Sub(now) / time.Second)
+	if remaining < 1 {
+		remaining = 1
+	}
+	oldLeaseID := order.Grant.LeaseID
+	lease := model.Lease{
+		ID:           s.nextOrderLeaseIDLocked(order.ID),
+		UserID:       user.ID,
+		UserName:     user.Name,
+		AccountID:    account.ID,
+		AccountLabel: account.Label,
+		Platform:     platform,
+		NodeID:       node.ID,
+		NodeLabel:    node.Label,
+		Region:       node.Region,
+		EgressIP:     node.EgressIP,
+		Protocol:     node.Protocol,
+		GatePort:     node.GatePort,
+		TTLSeconds:   remaining,
+		ExpiresAt:    order.Grant.ExpiresAt,
+		Sticky:       true,
+		Status:       model.LeaseActive,
+		CreatedAt:    iso(now),
+		Slot:         node.Slot,
+		Generation:   s.slotGenerationLocked(node),
+	}
+	s.leases = append(s.leases, lease)
+	s.nodes[nodeIdx].InUse++
+	order.Grant.LeaseID = lease.ID
+	// order.Grant.ExpiresAt intentionally stays the original paid-term
+	// expiry; the replacement lease must not outlive what the customer paid.
+
+	s.addAuditLocked(model.SeverityInfo, actor, "lease.reissued", user.Name,
+		fmt.Sprintf("%s · %s · node %s · order %s · %s → %s", platform, account.Label,
+			node.Label, order.ID, oldLeaseID, lease.ID),
+		map[string]string{
+			"leaseId":         lease.ID,
+			"previousLeaseId": oldLeaseID,
+			"orderId":         order.ID,
+			"tenantId":        order.TenantID,
+			"userId":          order.UserID,
+			"accountId":       account.ID,
+			"nodeId":          node.ID,
+			"slot":            fmt.Sprintf("%d", node.Slot),
+			"generation":      fmt.Sprintf("%d", lease.Generation),
+			"expiresAt":       lease.ExpiresAt,
+			"reason":          s.leaseEndReasonLocked(oldLeaseID),
+		})
+	return cloneOrder(*order), lease, nil
+}
+
+// nextOrderLeaseIDLocked returns an id for a replacement lease that cannot
+// collide with the original order lease or any ended row. The original
+// activation uses "lease-<orderID>"; later re-issues append -rN.
+func (s *Store) nextOrderLeaseIDLocked(orderID string) string {
+	base := "lease-" + orderID
+	used := func(id string) bool {
+		for _, lease := range s.leases {
+			if lease.ID == id {
+				return true
+			}
+		}
+		for _, end := range s.leaseEnds {
+			if end.Lease.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !used(base) {
+		return base
+	}
+	for n := 1; ; n++ {
+		candidate := fmt.Sprintf("%s-r%d", base, n)
+		if !used(candidate) {
+			return candidate
+		}
+	}
 }
 
 // retryBlockedLocked records why activation could not proceed. The order stays

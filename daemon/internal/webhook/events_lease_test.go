@@ -14,6 +14,7 @@ func TestLeaseEventTypesAreInTheCatalogue(t *testing.T) {
 		want  string
 	}{
 		{EventLeaseCreated, "lease.created"},
+		{EventLeaseReissued, "lease.reissued"},
 		{EventLeaseRevoked, "lease.revoked"},
 		{EventLeaseExpired, "lease.expired"},
 	}
@@ -29,13 +30,13 @@ func TestLeaseEventTypesAreInTheCatalogue(t *testing.T) {
 		t.Error("an undefined lease event was accepted")
 	}
 
-	// A receiver may subscribe to the three lease events; validation would
+	// A receiver may subscribe to the lease events; validation would
 	// reject an unknown type before the endpoint could ever deliver.
 	endpoint := Endpoint{
 		ID:     "ep",
 		URL:    "https://93.184.216.34/hook",
 		Secret: "s",
-		Events: []EventType{EventLeaseCreated, EventLeaseRevoked, EventLeaseExpired},
+		Events: []EventType{EventLeaseCreated, EventLeaseReissued, EventLeaseRevoked, EventLeaseExpired},
 	}
 	if err := validateEndpoint(endpoint, false, false); err != nil {
 		t.Fatalf("endpoint with lease subscriptions rejected: %v", err)

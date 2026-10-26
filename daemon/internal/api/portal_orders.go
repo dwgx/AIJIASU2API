@@ -63,6 +63,12 @@ func (s *Server) handlePortalListOrders(w http.ResponseWriter, r *http.Request) 
 // plan. Creating an order never claims payment: the response state is the
 // truthful server state. An Idempotency-Key replay answers 200 with the
 // original order; a new order answers 201.
+//
+// Before creating anything, an active order for the same plan whose grant
+// lease has ended is re-issued instead. That is the customer path back to
+// service after a daemon restart: it returns the existing order with a
+// replacement lease, so the customer is not charged a second time for an
+// entitlement they already own. A different plan still creates a new order.
 func (s *Server) handlePortalCreateOrder(w http.ResponseWriter, r *http.Request) {
 	principal, ok := portalPrincipalFrom(r)
 	if !ok {
@@ -77,12 +83,22 @@ func (s *Server) handlePortalCreateOrder(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	actor := "tenant:" + principal.Tenant.ID
+	if candidate, ok := s.store.ReissueCandidate(principal.Tenant.ID, principal.User.ID, in.PlanID); ok {
+		after, err := s.reissueEndedOrderLease(candidate.ID, actor)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, after)
+		return
+	}
 	order, replayed, err := s.store.CreateOrder(
 		principal.Tenant.ID,
 		principal.User.ID,
 		in.PlanID,
 		r.Header.Get("Idempotency-Key"),
-		"tenant:"+principal.Tenant.ID,
+		actor,
 	)
 	if err != nil {
 		s.writeStoreError(w, err)
