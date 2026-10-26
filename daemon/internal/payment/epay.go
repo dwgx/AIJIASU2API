@@ -37,6 +37,31 @@ const (
 	EpayTypeWxpay  = "wxpay"
 )
 
+// epayNotifyKeys is the field vocabulary 易支付 documents for a payment
+// notify (pay_notify.html): the required fields plus the optional api_trade_no,
+// addtime, endtime, buyer and timestamp. VerifyNotify rejects every other key:
+// a signature only proves that the merchant key signed *some* field set, and
+// checkout signs overlapping fields with the same key, so a key outside this
+// vocabulary (notify_url, return_url) can only come from a different signed
+// context replayed against the callback route.
+var epayNotifyKeys = map[string]struct{}{
+	"pid":          {},
+	"trade_no":     {},
+	"out_trade_no": {},
+	"api_trade_no": {},
+	"type":         {},
+	"trade_status": {},
+	"addtime":      {},
+	"endtime":      {},
+	"name":         {},
+	"money":        {},
+	"param":        {},
+	"buyer":        {},
+	"timestamp":    {},
+	"sign":         {},
+	"sign_type":    {},
+}
+
 // EpayConfig configures the 易支付 adapter. Gateway, PID and Key are the
 // all-or-nothing core: if any one is missing the adapter stays disabled and
 // every route answers 503. SignType defaults to MD5. NotifyURL and ReturnURL
@@ -148,9 +173,17 @@ func NewEpay(cfg EpayConfig) *Epay {
 		p.problem = "AJS_EPAY_NOTIFY_URL must be an absolute http(s) URL without query separators"
 		return p
 	}
-	if p.returnURL != "" && (!validHTTPURL(p.returnURL) || strings.ContainsAny(p.returnURL, "&\r\n\t")) {
-		p.problem = "AJS_EPAY_RETURN_URL must be an absolute http(s) URL without query separators"
-		return p
+	if p.returnURL != "" {
+		// Checkout strips the query and fragment from every return URL before
+		// signing, so a configured value with a stale tracking query is
+		// normalized here instead of disabling the whole adapter at startup.
+		// Only a value that is not an absolute http(s) URL stays fatal.
+		clean, ok := cleanEpayReturnURL(p.returnURL)
+		if !ok {
+			p.problem = "AJS_EPAY_RETURN_URL must be an absolute http(s) URL"
+			return p
+		}
+		p.returnURL = clean
 	}
 	p.gateway = parsed
 	return p
@@ -278,11 +311,23 @@ func (p *Epay) Checkout(order model.Order, kind, notifyURL, returnURL string) (s
 	// Both callback URLs are optional. An empty value means "no public
 	// callback": the parameter is left out of the signed query and the
 	// reconciler settles the order from the gateway's order-query API.
-	// A supplied value must still be a clean absolute http(s) URL.
-	for _, raw := range []string{notify, back} {
-		if raw != "" && (!validHTTPURL(raw) || strings.ContainsAny(raw, "&\r\n\t")) {
+	// notify_url is server-derived and must be a clean absolute http(s) URL.
+	if notify != "" && (!validHTTPURL(notify) || strings.ContainsAny(notify, "&\r\n\t")) {
+		return "", ErrInvalidEvent
+	}
+	// return_url is echoed to the buyer's browser, but it also travels inside
+	// the signed canonical string, which is bare key=value pairs with no
+	// escaping. A query there ("?trade_status=TRADE_SUCCESS") is client
+	// controlled text that would be signed as part of the callback vocabulary,
+	// so a replayed checkout query could pose as a success notify. Keep only
+	// the clean path: the gateway never reads the query, and the buyer's own
+	// parameters are not worth an ambiguous signature.
+	if back != "" {
+		clean, ok := cleanEpayReturnURL(back)
+		if !ok {
 			return "", ErrInvalidEvent
 		}
+		back = clean
 	}
 
 	values := url.Values{}
@@ -341,6 +386,17 @@ func (p *Epay) VerifyNotify(ctx context.Context, form url.Values, order model.Or
 	expected := SignMD5(form, p.key)
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
 		return model.PaymentEvent{}, ErrInvalidSignature
+	}
+	// The signature proves the merchant key signed this field set; it does not
+	// prove the set is a notify. Checkout signs overlapping fields with the
+	// same key, so reject anything outside the genuine notify vocabulary
+	// before a single value is trusted. This is what stops a signed checkout
+	// query (whose return_url can carry a client-supplied pair) from being
+	// replayed as a success callback.
+	for key := range form {
+		if _, ok := epayNotifyKeys[key]; !ok {
+			return model.PaymentEvent{}, ErrInvalidEvent
+		}
 	}
 	if subtle.ConstantTimeCompare(
 		[]byte(strings.TrimSpace(form.Get("pid"))), []byte(p.pid)) != 1 {
@@ -461,6 +517,33 @@ func ParseMoneyMinor(raw string) (int64, error) {
 		return 0, ErrInvalidEvent
 	}
 	return amount, nil
+}
+
+// cleanEpayReturnURL validates a browser return URL and drops its query and
+// fragment. Checkout signs the URL as a bare key=value pair, so anything after
+// "?" or "#" would join the canonical string as if it were another parameter;
+// stripping both keeps the signed field set unambiguous while preserving the
+// path the buyer returns to. The boolean is false for anything that is not an
+// absolute http(s) URL or that still carries a separator or control character.
+func cleanEpayReturnURL(raw string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	parsed.Scheme = scheme
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	clean := parsed.String()
+	if strings.ContainsAny(clean, "&\r\n\t") {
+		return "", false
+	}
+	return clean, true
 }
 
 func validHTTPURL(raw string) bool {

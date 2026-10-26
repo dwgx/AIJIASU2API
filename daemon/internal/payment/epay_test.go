@@ -40,6 +40,16 @@ func testEpayOrder() model.Order {
 	}
 }
 
+// cloneEpayForm copies a form so a table case can mutate it without touching
+// the shared fixture.
+func cloneEpayForm(form url.Values) url.Values {
+	cloned := url.Values{}
+	for key, list := range form {
+		cloned[key] = append([]string(nil), list...)
+	}
+	return cloned
+}
+
 func signedEpayNotify(t *testing.T, key string, order model.Order, tradeNo, money string) url.Values {
 	t.Helper()
 	form := url.Values{
@@ -236,6 +246,97 @@ func TestEpayCheckoutOptionalCallbackURLs(t *testing.T) {
 	}
 }
 
+// TestEpayCheckoutStripsReturnURLQuery pins AJS-424 at the source: return_url
+// travels inside the same unescaped canonical string a notify uses, so a
+// client-supplied query would be signed as if it were callback vocabulary.
+func TestEpayCheckoutStripsReturnURLQuery(t *testing.T) {
+	provider := newTestEpay()
+	order := testEpayOrder()
+	const dirty = "https://panel.example.com/portal?trade_status=TRADE_SUCCESS&x=1"
+	payURL, err := provider.Checkout(order, "alipay",
+		"https://panel.example.com/v1/payments/epay/notify", dirty)
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	parsed, err := url.Parse(payURL)
+	if err != nil {
+		t.Fatalf("parse pay URL: %v", err)
+	}
+	query := parsed.Query()
+	clean := query.Get("return_url")
+	if clean != "https://panel.example.com/portal" {
+		t.Fatalf("return_url = %q, want the queryless path", clean)
+	}
+	if strings.ContainsAny(clean, "?#&") || strings.Contains(clean, "trade_status") {
+		t.Fatalf("return_url kept client parameters: %q", clean)
+	}
+	if strings.Contains(payURL, "trade_status") {
+		t.Fatalf("pay URL carries the smuggled pair: %s", payURL)
+	}
+	if got := SignMD5(query, epayTestKey); got != query.Get("sign") {
+		t.Fatalf("signature does not verify over the cleaned query")
+	}
+
+	// The signed checkout query is not a notify: return_url and notify_url are
+	// outside the callback vocabulary, so replaying it settles nothing.
+	if _, err := provider.VerifyNotify(context.Background(), query, order); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("checkout replay error = %v, want ErrInvalidEvent", err)
+	}
+
+	// A fragment is stripped the same way and the path survives.
+	payURL, err = provider.Checkout(order, "alipay", "", "https://panel.example.com/portal#frag")
+	if err != nil {
+		t.Fatalf("fragment Checkout: %v", err)
+	}
+	parsed, _ = url.Parse(payURL)
+	if got := parsed.Query().Get("return_url"); got != "https://panel.example.com/portal" {
+		t.Fatalf("fragment return_url = %q", got)
+	}
+
+	// A configured return URL goes through the same clean-up, and a stale
+	// query must not disable the adapter at startup.
+	configured := NewEpay(EpayConfig{
+		Gateway: "https://pay.example.test/", PID: "1001", Key: epayTestKey,
+		ReturnURL: dirty,
+	})
+	if !configured.Enabled() {
+		t.Fatalf("dirty configured return URL disabled epay: %s", configured.DisabledReason())
+	}
+	if got := configured.ReturnURL(); got != "https://panel.example.com/portal" {
+		t.Fatalf("normalized ReturnURL() = %q", got)
+	}
+	payURL, err = configured.Checkout(order, "alipay", "", "")
+	if err != nil {
+		t.Fatalf("configured Checkout: %v", err)
+	}
+	parsed, _ = url.Parse(payURL)
+	if got := parsed.Query().Get("return_url"); got != "https://panel.example.com/portal" {
+		t.Fatalf("configured return_url = %q", got)
+	}
+	if got := SignMD5(parsed.Query(), epayTestKey); got != parsed.Query().Get("sign") {
+		t.Fatalf("configured query signature does not verify")
+	}
+	// A configured value that is not an absolute http(s) URL still disables
+	// the adapter instead of shipping a broken callback.
+	if bad := NewEpay(EpayConfig{
+		Gateway: "https://pay.example.test/", PID: "1001", Key: epayTestKey,
+		ReturnURL: "not-a-url",
+	}); bad.Enabled() || !strings.Contains(bad.DisabledReason(), "AJS_EPAY_RETURN_URL") {
+		t.Fatalf("bad configured return URL enabled=%t reason=%q", bad.Enabled(), bad.DisabledReason())
+	}
+
+	// notify_url is server-derived and is not rewritten, but it keeps its
+	// existing separator rejection.
+	if _, err := provider.Checkout(order, "alipay",
+		"https://panel.example.com/v1/payments/epay/notify?a=1&b=2", ""); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("notify_url with a separator error = %v, want ErrInvalidEvent", err)
+	}
+	// A return URL that is not an absolute http(s) URL is still refused.
+	if _, err := provider.Checkout(order, "alipay", "", "javascript:alert(1)"); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("javascript return_url error = %v, want ErrInvalidEvent", err)
+	}
+}
+
 func TestEpayCheckoutRejectsNonCNY(t *testing.T) {
 	order := testEpayOrder()
 	order.Plan.Currency = "USD"
@@ -394,6 +495,174 @@ func TestEpayNotifyVerificationMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := provider.VerifyNotify(context.Background(), tc.form, order); !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestEpayNotifyRejectsFieldsOutsideProtocol closes the AJS-424 replay: a valid
+// signature only proves the merchant key signed some field set, so a callback
+// may only carry the fields 易支付 actually sends.
+func TestEpayNotifyRejectsFieldsOutsideProtocol(t *testing.T) {
+	provider := newTestEpay()
+	order := testEpayOrder()
+	canonical := signedEpayNotify(t, epayTestKey, order, "trade-canonical", "30.00")
+	clone := func() url.Values { return cloneEpayForm(canonical) }
+
+	// The canonical notify still settles.
+	event, err := provider.VerifyNotify(context.Background(), clone(), order)
+	if err != nil {
+		t.Fatalf("canonical notify rejected: %v", err)
+	}
+	if event.ID != "trade-canonical" || event.Kind != model.PaymentSettled {
+		t.Fatalf("canonical event = %+v", event)
+	}
+
+	// The documented optional fields are accepted: a real gateway payload
+	// carries api_trade_no, addtime, endtime, buyer and timestamp, and the
+	// protocol requires verification to tolerate them.
+	optional := map[string]string{
+		"api_trade_no": "40001249985198893",
+		"addtime":      "2024-07-01 16:47:32",
+		"endtime":      "2024-07-01 16:49:24",
+		"buyer":        "openid-42",
+		"timestamp":    "1721206072",
+		"param":        "tenant-42",
+	}
+	documented := clone()
+	for key, value := range optional {
+		documented.Set(key, value)
+	}
+	documented.Set("sign", SignMD5(documented, epayTestKey))
+	if _, err := provider.VerifyNotify(context.Background(), documented, order); err != nil {
+		t.Fatalf("documented optional fields rejected: %v", err)
+	}
+	// Each optional field is also accepted on its own.
+	for key, value := range optional {
+		t.Run("optional_"+key, func(t *testing.T) {
+			form := clone()
+			form.Set(key, value)
+			form.Set("sign", SignMD5(form, epayTestKey))
+			if _, err := provider.VerifyNotify(context.Background(), form, order); err != nil {
+				t.Fatalf("optional field %q rejected: %v", key, err)
+			}
+		})
+	}
+
+	// Any field outside the notify vocabulary is refused even when the caller
+	// re-signs, which is the only way a promoted checkout query could carry a
+	// success status. notify_url and return_url exist only in the checkout
+	// query, so they are exactly the replay signature.
+	for _, key := range []string{"return_url", "notify_url", "trade_status_extra", "x"} {
+		t.Run(key, func(t *testing.T) {
+			form := clone()
+			form.Set(key, "TRADE_SUCCESS")
+			form.Set("sign", SignMD5(form, epayTestKey))
+			if _, err := provider.VerifyNotify(context.Background(), form, order); !errors.Is(err, ErrInvalidEvent) {
+				t.Fatalf("unknown key %q error = %v, want ErrInvalidEvent", key, err)
+			}
+		})
+	}
+
+	// The allowlist runs after the signature check: an unsigned extra key is a
+	// signature failure, not an event-shape failure.
+	stale := clone()
+	stale.Set("x", "1")
+	if _, err := provider.VerifyNotify(context.Background(), stale, order); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("unsigned extra key error = %v, want ErrInvalidSignature", err)
+	}
+}
+
+// TestEpayReturnURLAndNotifyKeyEdges pins the adversarial boundaries of the
+// AJS-424 cleaner and the case-sensitive notify vocabulary: only bytes that
+// cannot become a canonical separator survive cleaning, and no case variant of
+// a non-protocol key can slip through the allowlist.
+func TestEpayReturnURLAndNotifyKeyEdges(t *testing.T) {
+	provider := NewEpay(EpayConfig{
+		Gateway: "https://pay.example.test/", PID: "1001", Key: epayTestKey,
+	})
+	order := testEpayOrder()
+
+	cleanReturnURL := func(t *testing.T, raw string) (string, bool) {
+		t.Helper()
+		payURL, err := provider.Checkout(order, "alipay", "", raw)
+		if errors.Is(err, ErrInvalidEvent) {
+			return "", false
+		}
+		if err != nil {
+			t.Fatalf("Checkout(%q): %v", raw, err)
+		}
+		parsed, err := url.Parse(payURL)
+		if err != nil {
+			t.Fatalf("parse pay URL for %q: %v", raw, err)
+		}
+		query := parsed.Query()
+		if got := SignMD5(query, epayTestKey); got != query.Get("sign") {
+			t.Fatalf("Checkout(%q) signature does not verify", raw)
+		}
+		return query.Get("return_url"), true
+	}
+
+	accepted := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"query", "https://panel.example.com/portal?trade_status=TRADE_SUCCESS&x=1", "https://panel.example.com/portal"},
+		{"fragment", "https://panel.example.com/portal#frag", "https://panel.example.com/portal"},
+		// Encoded separators are path bytes, not canonical separators: they
+		// survive verbatim and cannot introduce a parameter.
+		{"encoded amp", "https://panel.example.com/portal%26trade_status=TRADE_SUCCESS", "https://panel.example.com/portal%26trade_status=TRADE_SUCCESS"},
+		{"double encoded amp", "https://panel.example.com/portal%2526trade_status=TRADE_SUCCESS", "https://panel.example.com/portal%2526trade_status=TRADE_SUCCESS"},
+		{"encoded question", "https://panel.example.com/portal%3Fx=1", "https://panel.example.com/portal%3Fx=1"},
+		// Empty after cleaning is the origin or root, never an empty value.
+		{"bare question", "https://panel.example.com?", "https://panel.example.com"},
+		{"bare fragment", "https://panel.example.com/#", "https://panel.example.com/"},
+	}
+	for _, tc := range accepted {
+		t.Run("accept_"+tc.name, func(t *testing.T) {
+			got, ok := cleanReturnURL(t, tc.raw)
+			if !ok {
+				t.Fatalf("Checkout(%q) rejected an acceptable return URL", tc.raw)
+			}
+			if got != tc.want {
+				t.Fatalf("cleaned return_url = %q, want %q", got, tc.want)
+			}
+			if strings.ContainsAny(got, "?#") || strings.Contains(got, "&") {
+				t.Fatalf("cleaned return_url carries a canonical separator: %q", got)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name string
+		raw  string
+	}{
+		{"literal amp", "https://panel.example.com/a&b"},
+		{"userinfo", "https://user:pass@panel.example.com/portal"},
+		{"crlf", "https://panel.example.com/portal\r\nX: y"},
+		{"javascript scheme", "javascript:alert(1)"},
+		{"ftp scheme", "ftp://panel.example.com/portal"},
+		{"relative path", "/portal"},
+	}
+	for _, tc := range rejected {
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			if _, ok := cleanReturnURL(t, tc.raw); ok {
+				t.Fatalf("Checkout(%q) accepted a return URL it must refuse", tc.raw)
+			}
+		})
+	}
+
+	// The allowlist is case sensitive: a case variant is an unknown key even
+	// though its value is harmless, and it is rejected after a valid signature.
+	canonical := signedEpayNotify(t, epayTestKey, order, "trade-edge", "30.00")
+	for _, key := range []string{"Return_URL", "Notify_URL", "PARAM", "SIGN_TYPE", "Trade_Status"} {
+		t.Run("case_"+key, func(t *testing.T) {
+			form := cloneEpayForm(canonical)
+			form.Set(key, "TRADE_SUCCESS")
+			form.Set("sign", SignMD5(form, epayTestKey))
+			if _, err := provider.VerifyNotify(context.Background(), form, order); !errors.Is(err, ErrInvalidEvent) {
+				t.Fatalf("case variant %q error = %v, want ErrInvalidEvent", key, err)
 			}
 		})
 	}
