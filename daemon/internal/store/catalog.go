@@ -442,6 +442,7 @@ func (s *Store) DeleteNodeQuiet(id string) error {
 	kept := s.leases[:0]
 	for _, lease := range s.leases {
 		if lease.NodeID == id {
+			s.revokeLeaseCredentialsLocked(lease.ID)
 			continue
 		}
 		kept = append(kept, lease)

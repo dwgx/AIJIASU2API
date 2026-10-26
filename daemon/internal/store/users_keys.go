@@ -164,6 +164,7 @@ func (s *Store) DeleteUser(id string, actor ...string) error {
 	for _, lease := range s.leases {
 		if lease.UserID == id {
 			leasesRemoved++
+			s.revokeLeaseCredentialsLocked(lease.ID)
 			if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
 				s.nodes[nodeIdx].InUse--
 			}
@@ -210,7 +211,12 @@ func (s *Store) SetUserEnabled(id string, enabled bool, actor ...string) (model.
 	if enabled {
 		s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "user.resume", user.Name, "Kill switch released")
 	} else {
-		s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "user.suspend", user.Name, "Kill switch engaged · requests fail closed")
+		revoked := s.revokeUserCredentialsLocked(user.ID)
+		detail := "Kill switch engaged · requests fail closed"
+		if revoked > 0 {
+			detail += fmt.Sprintf(" · %d lease credentials revoked", revoked)
+		}
+		s.addAuditLocked(model.SeverityWarn, auditActorArg(actor), "user.suspend", user.Name, detail)
 	}
 	if err := s.commitLocked(); err != nil {
 		return model.PanelUser{}, err

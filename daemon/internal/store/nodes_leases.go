@@ -154,6 +154,7 @@ func (s *Store) DeleteNode(id string) error {
 	for _, lease := range s.leases {
 		if lease.NodeID == id {
 			s.normalizeLeaseLocked(&lease)
+			s.revokeLeaseCredentialsLocked(lease.ID)
 			s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
 				fmt.Sprintf("Lease on %s revoked · node_deleted", lease.NodeLabel),
 				leaseAuditMeta(lease, "node_deleted"))
@@ -303,6 +304,7 @@ func (s *Store) DemoteNode(id string) (model.ProxyNode, []model.Lease, bool, err
 		if lease.NodeID == id {
 			ended := s.recordLeaseEndLocked(lease, "daemon_restart")
 			revoked = append(revoked, ended)
+			s.revokeLeaseCredentialsLocked(lease.ID)
 			s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
 				fmt.Sprintf("Lease on %s revoked · daemon_restart", lease.NodeLabel),
 				leaseAuditMeta(lease, "daemon_restart"))

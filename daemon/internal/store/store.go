@@ -34,6 +34,14 @@ var (
 	// PROVIDER_REFUND_UNSUPPORTED. A refusal must not mutate the order, its
 	// fulfilment job, the entitlement lease or the user quota.
 	ErrProviderRefundUnsupported = errors.New("provider refund unsupported")
+	// ErrIngressDisabled reports that remote ingress is not configured in this
+	// process: no credential pepper was installed at startup. Issue and
+	// Authenticate fail closed instead of storing an unkeyed verifier.
+	ErrIngressDisabled = errors.New("remote ingress disabled")
+	// ErrUnauthenticated is the single generic refusal of Authenticate. An
+	// unknown lease, a revoked credential, a wrong secret, an expired lease, a
+	// disabled user and a stale route are deliberately indistinguishable.
+	ErrUnauthenticated = errors.New("lease credential authentication failed")
 )
 
 // Error carries a client-safe message while keeping a matchable kind.
@@ -64,6 +72,17 @@ func upstreamf(format string, args ...any) error {
 
 func providerRefundUnsupportedf(format string, args ...any) error {
 	return &Error{Kind: ErrProviderRefundUnsupported, Message: fmt.Sprintf(format, args...)}
+}
+
+func ingressDisabledf(format string, args ...any) error {
+	return &Error{Kind: ErrIngressDisabled, Message: fmt.Sprintf(format, args...)}
+}
+
+// unauthenticatedf is the only failure Authenticate returns, whatever the
+// internal reason. It carries no detail so a caller cannot tell an unknown
+// lease from a wrong secret.
+func unauthenticatedf() error {
+	return &Error{Kind: ErrUnauthenticated, Message: "lease credential authentication failed"}
 }
 
 // Sealer encrypts account credentials at rest and removes them when an account
@@ -190,6 +209,19 @@ type Store struct {
 	// keyHashes maps key id to the SHA-256 of the secret. Plaintext secrets
 	// exist only in the CreateKey return value.
 	keyHashes map[string]string
+
+	// leaseCredentials is the ingress credential metadata (RI-1). Only the
+	// HMAC-SHA256 verifier of a secret is stored; the plaintext exists only in
+	// the Issue/Rotate return value. ingressPepper and ingressPreviousPepper
+	// are process-only keys: never persisted, logged or returned.
+	leaseCredentials      []model.LeaseCredential
+	credentialSeq         int
+	ingressPepper         []byte
+	ingressPreviousPepper []byte
+	// leaseCredentialHook is notified after a live credential stops admitting
+	// sessions. Delivery is queued under s.mu and runs after it is released,
+	// so the router may close flows without deadlocking.
+	leaseCredentialHook func(model.LeaseCredential)
 
 	// monthlyUsage and accountUsage are the durable gate-metered byte totals
 	// for usageMonth, keyed by panel user id and account id. They are persisted
@@ -386,6 +418,7 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		users:              []model.PanelUser{},
 		keys:               []model.APIKey{},
 		scopedKeys:         []model.ScopedKey{},
+		leaseCredentials:   []model.LeaseCredential{},
 		requests:           []model.RequestLog{},
 		audit:              []model.AuditEvent{},
 		settings:           defaultSettings(),
@@ -1361,6 +1394,7 @@ func (s *Store) DeleteAccount(id string, actor ...string) error {
 	for _, lease := range s.leases {
 		if lease.AccountID == id {
 			leasesRemoved++
+			s.revokeLeaseCredentialsLocked(lease.ID)
 			continue
 		}
 		keptLeases = append(keptLeases, lease)
@@ -1627,10 +1661,12 @@ func (s *Store) addAuditLocked(severity model.Severity, actor, action, target, d
 // function is captured with the event so the flush never reads a Store field
 // without the lock.
 type pendingHook struct {
-	audit    func(model.AuditEvent)
-	event    model.AuditEvent
-	lease    func(model.Lease)
-	leaseRow model.Lease
+	audit         func(model.AuditEvent)
+	event         model.AuditEvent
+	lease         func(model.Lease)
+	leaseRow      model.Lease
+	credential    func(model.LeaseCredential)
+	credentialRow model.LeaseCredential
 }
 
 // queueAuditHookLocked captures one critical audit delivery. The caller holds
@@ -1657,6 +1693,22 @@ func (s *Store) queueLeaseExpiryHookLocked(lease model.Lease) {
 	s.hookMu.Unlock()
 }
 
+// queueLeaseCredentialHookLocked captures one credential-revocation delivery.
+// The caller holds s.mu for writing; the event is delivered by the unlock
+// flush, so the router can close flows without holding the store lock.
+func (s *Store) queueLeaseCredentialHookLocked(credential model.LeaseCredential) {
+	hook := s.leaseCredentialHook
+	if hook == nil {
+		return
+	}
+	s.hookMu.Lock()
+	s.pendingHooks = append(s.pendingHooks, pendingHook{
+		credential:    hook,
+		credentialRow: redactLeaseCredential(credential),
+	})
+	s.hookMu.Unlock()
+}
+
 // flushPendingHooks delivers the events queued by the mutation that just
 // released the write lock. It runs without s.mu, so a sink may call back into
 // the Store (the webhook outbox write does) without deadlocking.
@@ -1671,6 +1723,9 @@ func (s *Store) flushPendingHooks() {
 		}
 		if item.lease != nil {
 			item.lease(item.leaseRow)
+		}
+		if item.credential != nil {
+			item.credential(item.credentialRow)
 		}
 	}
 }
