@@ -10,7 +10,9 @@
 # Basic username and is forwarded to the daemon as X-AJS-Operator, so it must
 # use only A-Z a-z 0-9 . _ - @ + and be at most 64 characters. Passwords are
 # plaintext only in this root-only inventory; the rendered htpasswd stores an
-# apr1 hash. Rotate one operator by editing this file and re-rendering.
+# apr1 hash as root:<nginx worker group> mode 0640 (the nginx worker must be
+# able to read it; never make it world-readable). Rotate one operator by
+# editing this file and re-rendering.
 #
 # Keep one line per person. Do not share a username: the audit trail cannot
 # tell two people apart when they use the same operator name.

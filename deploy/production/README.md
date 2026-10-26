@@ -55,7 +55,7 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 | `firewall/ajs-production.nft` | standalone nftables table matching the repo-owned LAN block |
 | `build-bundles.sh` | builds the live, same-origin, **token-free** portal and admin bundles from a locked `npm ci` tree and verifies `ajs-build.json` |
 | `render-admin-token.sh` | renders the nginx bearer snippet at mode 0600, never prints it |
-| `render-admin-htpasswd.sh` | renders the nginx operator htpasswd from the root-only inventory at mode 0600 |
+| `render-admin-htpasswd.sh` | renders the nginx operator htpasswd from the root-only inventory as `root:<nginx worker group>` mode 0640 |
 | `admin-operators.example` | template for the root-only `username:password` operator inventory |
 | `inventory.example.yml` | non-secret deployment inputs, validated by `check.sh` |
 | `check.sh` | the release-gate check |
@@ -140,7 +140,12 @@ openssl rand -hex 32   # AJS_MASTER_KEY   (AES-256-GCM account-password sealing)
 
 Operator passwords are separate, per-person secrets. They live only in the
 root-owned `/etc/ajs/admin-operators` inventory (mode 0600); the rendered
-htpasswd stores apr1 hashes. Do not reuse the shared bearer as an operator
+htpasswd stores apr1 hashes. The htpasswd itself is owned by root and its
+group is the nginx worker group, mode 0640: nginx opens
+`auth_basic_user_file` in its worker process, so a root:root 0600 file makes
+every correct operator login fail with HTTP 500 and EACCES
+(`open() ... failed (13: Permission denied)`) in the worker log. Never make
+the htpasswd world-readable. Do not reuse the shared bearer as an operator
 password, and do not share one operator entry between people — the audit trail
 can only name the username it is given.
 
@@ -239,6 +244,8 @@ sudo install -m 0600 -o root -g root \
   deploy/production/admin-operators.example /etc/ajs/admin-operators
 sudo -e /etc/ajs/admin-operators          # replace every placeholder password
 sudo sh deploy/production/render-admin-htpasswd.sh
+# The renderer detects the nginx worker group from /etc/nginx/nginx.conf and
+# writes root:<group> mode 0640; override with AJS_HTPASSWD_GROUP if needed.
 
 # 7. Admin bearer, root-only; never echoed
 sudo AJS_ADMIN_TOKEN="$(grep '^AJS_ADMIN_TOKEN=' /etc/ajs/accountd.env | cut -d= -f2-)" \
@@ -390,7 +397,8 @@ sudo install -m 0600 -o root -g root \
   deploy/production/admin-operators.example /etc/ajs/admin-operators
 sudo -e /etc/ajs/admin-operators
 
-# Render the nginx htpasswd (apr1 hashes, mode 0600). Secrets are not printed.
+# Render the nginx htpasswd (apr1 hashes, root:<nginx worker group> 0640).
+# Secrets are not printed.
 sudo sh deploy/production/render-admin-htpasswd.sh
 
 # Validate and reload nginx; existing sessions may need to re-authenticate.
@@ -399,8 +407,35 @@ sudo nginx -t && sudo systemctl reload nginx
 
 `render-admin-htpasswd.sh` refuses placeholder or short passwords, duplicate
 usernames and characters outside `A-Z a-z 0-9 . _ - @ +`, writes the htpasswd
-atomically with mode `0600`, and prints only the destination and operator
-count. The rendered file contains hashes, not plaintext.
+atomically with mode `0640` and ownership `root:<nginx worker group>`, and
+prints only the destination and operator count. The rendered file contains
+hashes, not plaintext. It refuses to leave the file world-readable.
+
+**Why group-readable, not root-only 0600.** `auth_basic_user_file` is opened
+by the nginx **worker** process on the first authenticated request, not by the
+root master at startup. The stock kit sets `user www-data;`; a root:root 0600
+htpasswd is therefore unreadable by the worker. `nginx -t` still passes, the
+browser still gets a Basic prompt, but every valid username/password returns
+HTTP 500 and the worker log records:
+
+```text
+open() "/etc/nginx/ajs-admin.htpasswd" failed (13: Permission denied)
+```
+
+The renderer fixes this by writing `root:www-data` mode `0640` (or the group
+from the active `user` directive: `user nginx nginx;` on RHEL, a two-field
+`user www-data ops;`, etc.). Detection reads `AJS_NGINX_CONF` when set, then
+`/etc/nginx/nginx.conf`, then `nginx -V`; if the worker group is not resolvable
+or the destination path is not traversable by that group, it fails instead of
+writing a file the worker cannot read. Override the detected group explicitly
+when the nginx config is not on the host yet:
+
+```bash
+sudo AJS_HTPASSWD_GROUP=www-data sh deploy/production/render-admin-htpasswd.sh
+```
+
+Do not “fix” a 500 by chmod 0644 or 0666: that exposes the apr1 hashes to
+every local user. Group-read with the worker group is the intended boundary.
 
 **Rotation.** Edit `/etc/ajs/admin-operators`, re-run
 `render-admin-htpasswd.sh`, then `nginx -t && systemctl reload nginx`.
@@ -527,11 +562,17 @@ state directory.
    HTTP `Host` must be closed (`444`), an unknown HTTPS `Host` and an
    IP-literal `Host` must answer `421`, the portal HTTP redirect must use the
    fixed `https://panel.example.com` origin, and the canonical portal `Host`
-   must still reach `/healthz` with `200`;
+   must still reach `/healthz` with `200`. The probe prefers an isolated
+   network namespace (`unshare -n` as root, `unshare -Urn` otherwise) so a
+   running host nginx does not conflict with the staged listeners;
 6. a runtime per-operator auth probe: an unauthenticated request to a Basic
    vhost answers `401` and leaves the upstream log empty; two different
    operator credentials reach the upstream with distinct `X-AJS-Operator`
-   values;
+   values. A separate runtime proof renders a disposable htpasswd through the
+   real `render-admin-htpasswd.sh`, verifies `root:<nginx worker group>` mode
+   `0640`, and reads at least one byte as the actual nginx worker identity
+   from `nginx.conf`; a root-only `0600` file fails that proof, which is the
+   AJS-408 condition-1 regression;
 7. a real daemon `/readyz` proof: start the packaged binary
    (`AJS_ACCOUNTD_BIN`, `PATH`, `daemon/ajs-accountd`, or a `go build`) with a
    writable state directory and require `200` `ready`; then repeat with a
@@ -557,18 +598,25 @@ parser is always a failure because YAML validation is a gate requirement.
 
 ## Recorded verification (2026-10-26)
 
-- **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), non-root uid 1000:**
-  `bash deploy/production/check.sh` → `check: PASS (84 checks, 0 skipped)`.
+- **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), non-root uid 1000 with passwordless sudo:**
+  `bash deploy/production/check.sh` → `check: PASS (89 checks, 0 skipped)`.
   The real `nginx -t` parsed the staged portal/admin/default vhosts; because
   nginx -t opens the listening sockets even in test mode, the unprivileged run
   used the `unshare -Urn` fallback (the direct run reached `syntax is ok` and
   failed only at `bind() :80 permission denied`). The runtime probe then
   started that staged config and observed unknown HTTP Host closed (444),
   unknown HTTPS and IP-literal Hosts answered 421, the fixed canonical
-  redirect, and the canonical portal Host still at 200. A real daemon binary
+  redirect, and the canonical portal Host still at 200. The worker-read proof
+  rendered a disposable htpasswd with the real renderer and read it as
+  `www-data`; it needs root or passwordless sudo to create `root:www-data`
+  ownership and switch identity. A real daemon binary
   proved `/readyz` 200 with a writable state directory and 503 `not_ready`
   (state check) with a 0555 directory, while `/healthz` stayed 200. No
   required check was skipped.
+- **Same host as root:** `sudo bash deploy/production/check.sh` →
+  `check: PASS (89 checks, 0 skipped)`. The operator auth probe runs nginx
+  with `user www-data;` and the rendered `root:www-data` 0640 htpasswd, so a
+  valid Alice/Bob login proves the production worker identity can read it.
 - **Windows development host without nginx, systemd-analyze or nft:**
   `bash deploy/production/check.sh --dev` reports `DEV-PASS` and lists the
   unavailable tools as `SKIP`; the default production mode reports `FAIL`

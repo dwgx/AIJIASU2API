@@ -255,9 +255,11 @@ fi
 section "nginx configuration (nginx -t)"
 nginx_tmp=""
 auth_tmp=""
+htpasswd_tmp=""
 cleanup() {
     [ -n "$nginx_tmp" ] && rm -rf "$nginx_tmp"
     [ -n "$auth_tmp" ] && rm -rf "$auth_tmp"
+    [ -n "$htpasswd_tmp" ] && rm -rf "$htpasswd_tmp"
 }
 trap cleanup 0 HUP INT TERM
 
@@ -270,6 +272,32 @@ if [ -z "$nginx_bin" ]; then
         if [ -x "$candidate" ]; then nginx_bin=$candidate; break; fi
     done
 fi
+
+# nginx worker identity: auth_basic_user_file is opened by the worker, not the
+# root master. Use the host's installed config when present, otherwise the kit
+# copy that nginx -t stages. Both the htpasswd runtime proof and the operator
+# auth probe use this identity.
+if [ -n "${AJS_NGINX_CONF:-}" ]; then
+    worker_conf=$AJS_NGINX_CONF
+elif [ -r /etc/nginx/nginx.conf ]; then
+    worker_conf=/etc/nginx/nginx.conf
+else
+    worker_conf=$kit/nginx/nginx.conf
+fi
+worker_user_line=$(sed -n 's/^[[:space:]]*user[[:space:]][[:space:]]*\([^;]*\);.*$/\1/p' "$worker_conf" 2>/dev/null | sed -n '1p')
+worker_user=$(printf '%s\n' "$worker_user_line" | awk '{print $1}')
+worker_group=$(printf '%s\n' "$worker_user_line" | awk '{print $2}')
+[ -n "$worker_user" ] || worker_user=www-data
+if [ -z "$worker_group" ] && command -v getent >/dev/null 2>&1; then
+    worker_gid=$(getent passwd "$worker_user" 2>/dev/null | cut -d: -f4)
+    if [ -n "$worker_gid" ]; then
+        worker_group=$(getent group "$worker_gid" 2>/dev/null | cut -d: -f1)
+    fi
+fi
+if [ -z "$worker_group" ] && command -v id >/dev/null 2>&1; then
+    worker_group=$(id -gn "$worker_user" 2>/dev/null || true)
+fi
+
 nginx_mode=""
 if [ -n "$nginx_bin" ] && [ -x "$nginx_bin" ]; then
     nginx_mode=host
@@ -455,10 +483,20 @@ AJS_NGINX_PROBE
                 probe_out=""
                 probe_rc=1
                 probe_ran=0
-                if [ "$(id -u)" -eq 0 ]; then
-                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
+                if [ "$(id -u)" -eq 0 ] && command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
+                    # A network namespace keeps the probe off the host's real
+                    # :80/:443 listeners, which may already belong to a running
+                    # nginx. As real root, nginx can still setuid to the
+                    # configured worker user, so keep the config unchanged.
+                    probe_out=$(unshare -n sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip)" "$panel_host" 2>&1)
                     probe_rc=$?
                     probe_ran=1
+                    if [ "$probe_rc" -ne 0 ]; then
+                        # Namespace unavailable/blocked: fall back to the real
+                        # listeners, which is valid only when they are free.
+                        probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
+                        probe_rc=$?
+                    fi
                 elif command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
                     # Inside the user+network namespace uid 0 is the only
                     # mapped id, so nginx must run as root there.
@@ -467,6 +505,10 @@ AJS_NGINX_PROBE
                     rm -f "$nginx_tmp/nginx.probe.conf.bak"
                     probe_config="$nginx_tmp/nginx.probe.conf"
                     probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" 2>&1)
+                    probe_rc=$?
+                    probe_ran=1
+                elif [ "$(id -u)" -eq 0 ]; then
+                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                 else
@@ -541,11 +583,18 @@ if grep -q 'ajs-admin-operator.conf' "$kit/nginx/sites-available/ajs-admin.conf"
 else
     fail "admin vhost does not forward X-AJS-Operator from \$remote_user"
 fi
-if grep -qE 'install -m 0600|chmod 0600' "$kit/render-admin-htpasswd.sh" && \
-   grep -q 'replace-me' "$kit/render-admin-htpasswd.sh"; then
-    pass "htpasswd renderer writes mode 0600 and refuses placeholders"
+if grep -q '0640' "$kit/render-admin-htpasswd.sh" && \
+   grep -qE 'chown[[:space:]]+root:' "$kit/render-admin-htpasswd.sh" && \
+   grep -q 'AJS_HTPASSWD_GROUP' "$kit/render-admin-htpasswd.sh"; then
+    pass "htpasswd renderer targets root:<nginx-group> mode 0640 with a group override"
 else
-    fail "htpasswd renderer is missing the 0600 or placeholder guard"
+    fail "htpasswd renderer is missing the root:<nginx-group> 0640 or group override"
+fi
+if grep -qE 'world-readable|world readable|0007' "$kit/render-admin-htpasswd.sh" && \
+   grep -q 'replace-me' "$kit/render-admin-htpasswd.sh"; then
+    pass "htpasswd renderer refuses world-readable output and placeholders"
+else
+    fail "htpasswd renderer is missing the world-readable or placeholder guard"
 fi
 if grep -qE 'allow[[:space:]]+127\.0\.0\.1;' "$kit/nginx/sites-available/ajs-admin.conf" && \
    grep -qE 'deny[[:space:]]+all;' "$kit/nginx/sites-available/ajs-admin.conf"; then
@@ -649,9 +698,21 @@ PY
         printf 'alice:%s\nbob:%s\n' \
             "$(openssl passwd -apr1 'alice-runtime-password')" \
             "$(openssl passwd -apr1 'bob-runtime-password')" > "$auth_tmp/htpasswd"
-        chmod 600 "$auth_tmp/htpasswd"
+        auth_user_directive=""
+        if [ "$(id -u)" -eq 0 ]; then
+            # Run the probe with the real production worker identity. The
+            # htpasswd must be root:<worker-group> 0640 or the worker gets
+            # EACCES and every valid login returns 500 (AJS-408 condition 1).
+            chown root:"${worker_group:-$(id -gn)}" "$auth_tmp/htpasswd"
+            chmod 0640 "$auth_tmp/htpasswd"
+            chmod 0711 "$auth_tmp"
+            auth_user_directive="user $worker_user;"
+        else
+            chmod 0600 "$auth_tmp/htpasswd"
+        fi
         cat > "$auth_tmp/nginx.conf" <<EOF
 daemon off;
+$auth_user_directive
 pid $auth_tmp/nginx.pid;
 error_log $auth_tmp/error.log;
 events { worker_connections 32; }
@@ -707,6 +768,103 @@ EOF
         wait "$nginx_pid" "$upstream_pid" 2>/dev/null || true
         rm -rf "$auth_tmp"
         auth_tmp=""
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+section "htpasswd worker readability (runtime)"
+# nginx opens auth_basic_user_file in its worker process, not in the root
+# master. A root:root 0600 file therefore produces HTTP 500 with
+# "open() ... failed (13: Permission denied)" after a correct password even
+# though nginx -t passes. Render a disposable htpasswd through the real
+# renderer and prove the actual worker identity from nginx.conf can read it.
+htpasswd_tmp=""
+if [ -z "$nginx_bin" ] || [ ! -x "$nginx_bin" ]; then
+    skip "htpasswd worker-read test needs host nginx"
+else
+    if ! id -u "$worker_user" >/dev/null 2>&1; then
+        skip "htpasswd worker-read test: nginx worker user '$worker_user' does not exist"
+    elif [ -z "$worker_group" ]; then
+        skip "htpasswd worker-read test: cannot resolve the group for nginx worker '$worker_user'"
+    elif [ "$(id -u)" -ne 0 ] && ! (command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null); then
+        skip "htpasswd worker-read test needs root or passwordless sudo"
+    else
+        htpasswd_tmp=$(mktemp -d) || { fail "cannot create htpasswd worker-read directory"; htpasswd_tmp=""; }
+        if [ -n "$htpasswd_tmp" ]; then
+            chmod 0711 "$htpasswd_tmp"
+            printf 'worker-check:%s\n' 'worker-check-password-409' > "$htpasswd_tmp/inventory"
+            chmod 0600 "$htpasswd_tmp/inventory"
+
+            render_rc=1
+            if [ "$(id -u)" -eq 0 ]; then
+                AJS_NGINX_CONF="$worker_conf" sh "$kit/render-admin-htpasswd.sh" \
+                    "$htpasswd_tmp/inventory" "$htpasswd_tmp/htpasswd" \
+                    >"$htpasswd_tmp/render.out" 2>&1
+                render_rc=$?
+            elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                sudo -n env AJS_NGINX_CONF="$worker_conf" sh "$kit/render-admin-htpasswd.sh" \
+                    "$htpasswd_tmp/inventory" "$htpasswd_tmp/htpasswd" \
+                    >"$htpasswd_tmp/render.out" 2>&1
+                render_rc=$?
+            fi
+
+            if [ "$render_rc" -ne 0 ]; then
+                fail "htpasswd worker-read test: renderer failed (root or passwordless sudo is required): $(tr '\n' ' ' < "$htpasswd_tmp/render.out" 2>/dev/null | cut -c1-300)"
+            else
+                ht_mode=$(stat -c '%a' "$htpasswd_tmp/htpasswd" 2>/dev/null || stat -f '%Lp' "$htpasswd_tmp/htpasswd" 2>/dev/null)
+                ht_owner=$(stat -c '%U' "$htpasswd_tmp/htpasswd" 2>/dev/null || stat -f '%Su' "$htpasswd_tmp/htpasswd" 2>/dev/null)
+                ht_group=$(stat -c '%G' "$htpasswd_tmp/htpasswd" 2>/dev/null || stat -f '%Sg' "$htpasswd_tmp/htpasswd" 2>/dev/null)
+                if [ "$ht_mode" = "640" ] && [ "$ht_owner" = "root" ] && [ "$ht_group" = "$worker_group" ]; then
+                    pass "render-admin-htpasswd.sh produced root:$worker_group mode 0640 for the nginx worker"
+                else
+                    fail "rendered htpasswd is $ht_owner:$ht_group mode $ht_mode (expected root:$worker_group mode 640)"
+                fi
+                if [ -n "$ht_mode" ] && [ $((0$ht_mode & 0007)) -eq 0 ]; then
+                    pass "rendered htpasswd is not world-readable (mode $ht_mode)"
+                else
+                    fail "rendered htpasswd is missing or world-readable (mode ${ht_mode:-<none>})"
+                fi
+                if grep -Fq '$apr1$' "$htpasswd_tmp/render.out"; then
+                    fail "render-admin-htpasswd.sh printed an apr1 hash"
+                else
+                    pass "render-admin-htpasswd.sh printed no password or hash"
+                fi
+
+                read_rc=1
+                read_via=""
+                if [ "$(id -u)" -eq 0 ]; then
+                    worker_uid=$(id -u "$worker_user")
+                    worker_gid=$(getent group "$worker_group" 2>/dev/null | cut -d: -f3)
+                    [ -n "$worker_gid" ] || worker_gid=$(id -g "$worker_user")
+                    if command -v setpriv >/dev/null 2>&1; then
+                        setpriv --reuid="$worker_uid" --regid="$worker_gid" --clear-groups -- \
+                            sh -c 'test -r "$1" && head -c 1 "$1" >/dev/null' sh "$htpasswd_tmp/htpasswd" 2>/dev/null
+                        read_rc=$?
+                        read_via="setpriv"
+                    elif command -v runuser >/dev/null 2>&1; then
+                        runuser -u "$worker_user" -- sh -c 'test -r "$1" && head -c 1 "$1" >/dev/null' sh "$htpasswd_tmp/htpasswd" 2>/dev/null
+                        read_rc=$?
+                        read_via="runuser"
+                    elif command -v su >/dev/null 2>&1; then
+                        su -s /bin/sh -c "test -r '$htpasswd_tmp/htpasswd' && head -c 1 '$htpasswd_tmp/htpasswd' >/dev/null" "$worker_user" 2>/dev/null
+                        read_rc=$?
+                        read_via="su"
+                    fi
+                elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                    sudo -n -u "$worker_user" -g "$worker_group" -- \
+                        sh -c 'test -r "$1" && head -c 1 "$1" >/dev/null' sh "$htpasswd_tmp/htpasswd" 2>/dev/null
+                    read_rc=$?
+                    read_via="sudo -u $worker_user"
+                fi
+                if [ "$read_rc" -eq 0 ]; then
+                    pass "nginx worker '$worker_user' can read the rendered htpasswd ($read_via)"
+                else
+                    fail "nginx worker '$worker_user' cannot read the rendered htpasswd ($ht_owner:$ht_group mode $ht_mode)"
+                fi
+            fi
+            rm -rf "$htpasswd_tmp"
+            htpasswd_tmp=""
+        fi
     fi
 fi
 
