@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the interfaces added after P0. The daemon binds 127.0.0.1 by default; a token-authenticated deployment may widen AJS_LISTEN, and the production kit publishes only the customer portal through nginx TLS while keeping the admin vhost private. The gate data plane stays loopback-only, so a remote tenant needs an operator-provided tunnel or ingress. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz, GET /readyz, the signed payment callbacks and the portal entry points; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 marks the interfaces added after P0; they are registered in this build (the scheduler itself stays off unless AJS_SCHEDULES=1). See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the interfaces added after P0. The daemon binds 127.0.0.1 by default; a token-authenticated deployment may widen AJS_LISTEN, and the production kit publishes only the customer portal through nginx TLS while keeping the admin vhost private. The gate data plane stays loopback-only, so a remote tenant needs an operator-provided tunnel or ingress. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz, GET /readyz, the signed payment callbacks and the portal entry points; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 marks the interfaces added after P0; they are registered in this build (the scheduler itself stays off unless AJS_SCHEDULES=1). See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too. Scoped-key requests are rate limited per key: every response except 401 carries X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset, and an exhausted bucket answers 429 RATE_LIMITED with Retry-After. An operation reachable by a scoped key declares the exact grant in x-required-scope; a key lacking it answers 403 FORBIDDEN with error.reason=scope_required, and a key whose accountIds/regions exclude the target answers the same status with error.reason=scoped_key_restricted. An operation without x-required-scope is admin-only: only the admin token or a key carrying the admin scope may call it.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -197,6 +197,7 @@
         ],
         "summary": "Prometheus text exposition of aggregate counts.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "metrics:read",
         "responses": {
           "200": {
             "description": "Prometheus text exposition format 0.0.4.",
@@ -206,6 +207,17 @@
                   "type": "string"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
@@ -213,6 +225,9 @@
           },
           "403": {
             "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           }
         }
       }
@@ -225,6 +240,7 @@
         ],
         "summary": "Dashboard metrics for one window.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "metrics:read",
         "responses": {
           "200": {
             "description": "Metrics for the requested range.",
@@ -234,6 +250,17 @@
                   "$ref": "#/components/schemas/Metrics"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -241,6 +268,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -266,6 +299,7 @@
         ],
         "summary": "List accounts, secrets never returned.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:read",
         "responses": {
           "200": {
             "description": "One page of accounts.",
@@ -278,6 +312,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -286,8 +331,11 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -316,6 +364,7 @@
         ],
         "summary": "Create an account and start its first login.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:write",
         "responses": {
           "201": {
             "description": "Account created.",
@@ -325,6 +374,17 @@
                   "$ref": "#/components/schemas/Account"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -333,11 +393,14 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -368,6 +431,7 @@
         ],
         "summary": "Limits and gates for import/export dialogs.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "accounts:read",
         "responses": {
           "200": {
             "description": "Account IO capabilities.",
@@ -377,10 +441,27 @@
                   "$ref": "#/components/schemas/AccountIOCapabilities"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -584,6 +665,7 @@
         ],
         "summary": "Read one account.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:read",
         "responses": {
           "200": {
             "description": "Account.",
@@ -593,13 +675,30 @@
                   "$ref": "#/components/schemas/Account"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -618,6 +717,7 @@
         ],
         "summary": "Update entitlement fields of one account.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:write",
         "responses": {
           "200": {
             "description": "Updated account.",
@@ -627,6 +727,17 @@
                   "$ref": "#/components/schemas/Account"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -635,11 +746,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -671,18 +788,36 @@
         ],
         "summary": "Drain the account, delete its record and keep the audit.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:write",
         "responses": {
           "204": {
-            "description": "Account deleted."
+            "description": "Account deleted.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -706,6 +841,7 @@
         ],
         "summary": "Force a login (vendor login when AJS_ACCOUNT_LOGIN=1).",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:write",
         "responses": {
           "200": {
             "description": "Account after login.",
@@ -715,16 +851,33 @@
                   "$ref": "#/components/schemas/Account"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -751,6 +904,7 @@
         ],
         "summary": "Stop sessions, drain nodes and pause the account.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:write",
         "responses": {
           "200": {
             "description": "Account after logout.",
@@ -760,13 +914,30 @@
                   "$ref": "#/components/schemas/Account"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -790,6 +961,7 @@
         ],
         "summary": "One page of the retained vendor server catalog.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "Filtered, sorted and paged catalog.",
@@ -799,6 +971,17 @@
                   "$ref": "#/components/schemas/ServersView"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -807,8 +990,14 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -892,6 +1081,7 @@
         ],
         "summary": "Hashed device identity and non-fingerprint claims.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "accounts:read",
         "responses": {
           "200": {
             "description": "Device view.",
@@ -901,13 +1091,30 @@
                   "$ref": "#/components/schemas/DeviceView"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1534,6 +1741,7 @@
         ],
         "summary": "Read the persisted operator target.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "Persisted target.",
@@ -1543,13 +1751,30 @@
                   "$ref": "#/components/schemas/CatalogSelection"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1568,6 +1793,7 @@
         ],
         "summary": "Persist the target for the next login sync; starts no session.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Persisted target.",
@@ -1577,6 +1803,17 @@
                   "$ref": "#/components/schemas/CatalogSelection"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -1585,11 +1822,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1621,15 +1864,33 @@
         ],
         "summary": "Clear the target; idempotent and never disconnects.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "responses": {
           "204": {
-            "description": "Target cleared."
+            "description": "Target cleared.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1653,6 +1914,7 @@
         ],
         "summary": "Guarded switch to a vendor server (single session per account).",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Switch result; alreadyConnected marks a no-op.",
@@ -1662,6 +1924,17 @@
                   "$ref": "#/components/schemas/ConnectResult"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -1670,6 +1943,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1677,7 +1953,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1715,6 +1991,7 @@
         ],
         "summary": "Select the account's live node asynchronously (declarative, idempotent).",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
@@ -1742,6 +2019,17 @@
                   "$ref": "#/components/schemas/SelectNodeResult"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "202": {
@@ -1758,6 +2046,15 @@
                 "schema": {
                   "type": "integer"
                 }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             },
             "content": {
@@ -1775,7 +2072,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1784,7 +2081,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1813,6 +2110,7 @@
         ],
         "summary": "Drain and close every gate of the account; keeps the target.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Disconnect result.",
@@ -1822,6 +2120,17 @@
                   "$ref": "#/components/schemas/DisconnectResult"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -1830,11 +2139,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1871,6 +2186,7 @@
         ],
         "summary": "Reopen the current server or the persisted target.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Switch result.",
@@ -1880,6 +2196,17 @@
                   "$ref": "#/components/schemas/ConnectResult"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -1888,6 +2215,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1895,7 +2225,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2372,6 +2702,7 @@
         ],
         "summary": "List proxy nodes with optional filters.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "One page of nodes.",
@@ -2384,6 +2715,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2391,6 +2733,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2431,6 +2779,7 @@
         ],
         "summary": "Stop admitting new flows and unpublish the node.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Node after drain.",
@@ -2440,6 +2789,17 @@
                   "$ref": "#/components/schemas/ProxyNode"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2448,11 +2808,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2479,6 +2845,7 @@
         ],
         "summary": "Return a draining node to service if its session is alive.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Node after undrain.",
@@ -2488,6 +2855,17 @@
                   "$ref": "#/components/schemas/ProxyNode"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2496,11 +2874,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2527,6 +2911,7 @@
         ],
         "summary": "Run a bookkeeping canary probe and return the node.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:write",
         "responses": {
           "200": {
             "description": "Node after probe.",
@@ -2536,6 +2921,17 @@
                   "$ref": "#/components/schemas/ProxyNode"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2544,8 +2940,14 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2570,6 +2972,7 @@
         "summary": "List leases. A non-admin scoped key sees only its own user's leases.",
         "description": "A non-admin scoped key is bound to its own userId: the list is filtered by lease.userId == key.userId before the account grant, and a user_id/userId naming another user answers 403 with error.reason=scoped_key_restricted without revealing whether that user holds a lease. Admin tokens and admin-scope keys keep the unfiltered list and the optional user filter.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "leases:read",
         "responses": {
           "200": {
             "description": "One page of leases.",
@@ -2582,6 +2985,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2591,7 +3005,10 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2616,6 +3033,7 @@
         ],
         "summary": "Create an idempotent lease on a free node.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "leases:write",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2643,6 +3061,17 @@
                   "$ref": "#/components/schemas/CreateLeaseResult"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -2652,7 +3081,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2661,7 +3090,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2681,6 +3110,7 @@
         "summary": "Rotate a lease to a new egress IP and restart its TTL.",
         "description": "A non-admin scoped key may only rotate a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted. Rotation requires a configured Resin panel: without one the route answers 503 UPSTREAM_UNAVAILABLE and mutates nothing.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "leases:write",
         "responses": {
           "200": {
             "description": "Rotated lease.",
@@ -2689,6 +3119,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/Lease"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -2699,13 +3140,16 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2733,6 +3177,7 @@
         "summary": "Read one lease and the loopback gate it currently points at.",
         "description": "Requires leases:read for a scoped key. Ownership follows the same subject rule as a mutation: a non-admin scoped key reads only a lease whose userId is its own subject, an unknown id and another user's lease answer the same 404 NOT_FOUND, and a lease on an account outside the key's grant answers 403 with error.reason=scoped_key_restricted. The connection block names the loopback gate the lease currently points at and the credential shape; a switch that rebinds the lease also moves the port. The scoped-key secret is never returned.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "leases:read",
         "responses": {
           "200": {
             "description": "The lease and the endpoint a client dials for it.",
@@ -2741,6 +3186,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/LeaseDetail"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -2752,6 +3208,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2771,6 +3230,7 @@
         "summary": "Revoke a lease and free its node.",
         "description": "A non-admin scoped key may only revoke a lease owned by its own userId on an account its grant names: a missing id and another user's lease answer the same 404 before any panel or store side effect, and a lease on an account outside the grant answers 403 with error.reason=scoped_key_restricted.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "leases:write",
         "requestBody": {
           "required": true,
           "content": {
@@ -2790,6 +3250,15 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -2800,10 +3269,13 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3262,6 +3734,7 @@
         "summary": "List recorded requests, newest first.",
         "description": "Requires requests:read for a scoped key. A non-admin scoped key is served its own subject only: rows are filtered by the exact RequestLog.UserID before pagination, and a user_id/userId naming another user answers 403 FORBIDDEN with error.reason=scoped_key_restricted without revealing whether that user has rows. An operator caller keeps the global log and ignores the user filter.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "requests:read",
         "responses": {
           "200": {
             "description": "One page of request rows.",
@@ -3274,6 +3747,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3284,6 +3768,9 @@
           },
           "403": {
             "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3371,6 +3858,7 @@
         ],
         "summary": "Newest audit events, capped at 500.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "audit:read",
         "responses": {
           "200": {
             "description": "Audit rows.",
@@ -3383,6 +3871,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3393,6 +3892,9 @@
           },
           "403": {
             "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3421,6 +3923,7 @@
         "summary": "Stream the retained audit history as CSV.",
         "description": "Columns are ts,severity,actor,action,target,detail,meta. Bounds are RFC 3339 and inclusive; the default window is the last seven days and the maximum is 366 days. At most 50000 rows are returned; when older matches are dropped the response carries X-Truncated: true. Audit rows are sanitized before they are stored, and credential-looking assignments are scrubbed again before export.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "audit:read",
         "parameters": [
           {
             "name": "from",
@@ -3473,6 +3976,15 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             },
             "content": {
@@ -3492,6 +4004,9 @@
           "403": {
             "$ref": "#/components/responses/ScopedKeyForbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -3506,6 +4021,7 @@
         ],
         "summary": "Read panel settings.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Current settings.",
@@ -3515,10 +4031,27 @@
                   "$ref": "#/components/schemas/PanelSettings"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3532,6 +4065,7 @@
         ],
         "summary": "Update one or more settings fields.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "settings:write",
         "responses": {
           "200": {
             "description": "Updated settings.",
@@ -3541,6 +4075,17 @@
                   "$ref": "#/components/schemas/PanelSettings"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3548,6 +4093,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3578,6 +4129,7 @@
         ],
         "summary": "Rendered subscription, node-to-hash map and platform list.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "Topology view.",
@@ -3587,10 +4139,27 @@
                   "$ref": "#/components/schemas/Topology"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3722,6 +4291,7 @@
         ],
         "summary": "List async operations newest first.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:read",
         "parameters": [
           {
             "name": "account",
@@ -3782,6 +4352,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3791,7 +4372,10 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           }
         }
       }
@@ -3804,6 +4388,7 @@
         ],
         "summary": "One operation with steps, result and error.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:read",
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
@@ -3818,16 +4403,30 @@
                   "$ref": "#/components/schemas/Operation"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           }
         }
       },
@@ -3838,6 +4437,7 @@
         ],
         "summary": "Cancel a queued operation before dispatch.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "catalog:write",
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
@@ -3855,19 +4455,33 @@
                   "$ref": "#/components/schemas/Operation"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           }
         }
       }
@@ -3880,6 +4494,7 @@
         ],
         "summary": "List scheduled operations.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Schedule rows.",
@@ -3892,6 +4507,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3899,6 +4525,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3934,6 +4566,7 @@
         ],
         "summary": "Create a scheduled operation.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:write",
         "responses": {
           "201": {
             "description": "Schedule created.",
@@ -3943,6 +4576,17 @@
                   "$ref": "#/components/schemas/Schedule"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -3951,8 +4595,14 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -3983,6 +4633,7 @@
         ],
         "summary": "Read one schedule.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Schedule.",
@@ -3992,13 +4643,30 @@
                   "$ref": "#/components/schemas/Schedule"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4017,6 +4685,7 @@
         ],
         "summary": "Update a schedule; bumped revision rejects stale writes.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:write",
         "responses": {
           "200": {
             "description": "Updated schedule.",
@@ -4026,6 +4695,17 @@
                   "$ref": "#/components/schemas/Schedule"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -4034,11 +4714,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4070,18 +4756,36 @@
         ],
         "summary": "Delete a schedule and stop future runs.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:write",
         "responses": {
           "204": {
-            "description": "Schedule deleted."
+            "description": "Schedule deleted.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4105,6 +4809,7 @@
         ],
         "summary": "Compute upcoming run instants from query parameters without persisting a job.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Computed preview.",
@@ -4114,6 +4819,17 @@
                   "$ref": "#/components/schemas/SchedulePreview"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -4121,6 +4837,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4221,6 +4943,7 @@
         ],
         "summary": "Compute upcoming run instants without persisting a job.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Computed preview.",
@@ -4230,6 +4953,17 @@
                   "$ref": "#/components/schemas/SchedulePreview"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -4237,6 +4971,12 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4267,6 +5007,7 @@
         ],
         "summary": "Run a schedule now; destructive actions require confirm.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:write",
         "responses": {
           "202": {
             "description": "Run accepted.",
@@ -4276,6 +5017,17 @@
                   "$ref": "#/components/schemas/ScheduleRunAccepted"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -4284,6 +5036,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -4291,7 +5046,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "429": {
-            "$ref": "#/components/responses/RateLimited"
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4326,6 +5081,7 @@
         ],
         "summary": "Run history for one schedule.",
         "x-implementation-phase": "P1",
+        "x-required-scope": "settings:read",
         "responses": {
           "200": {
             "description": "Run rows.",
@@ -4338,6 +5094,17 @@
                   }
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "400": {
@@ -4346,8 +5113,14 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4545,6 +5318,7 @@
         "summary": "Read the public plan catalogue with its provenance.",
         "description": "Requires renewal:read for a scoped key; the catalogue is anonymous vendor data and carries no account id.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "renewal:read",
         "responses": {
           "200": {
             "description": "Plan catalogue; a failed refresh is soft and reports source/stale.",
@@ -4554,13 +5328,27 @@
                   "$ref": "#/components/schemas/RenewalPlansView"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4580,6 +5368,7 @@
         "summary": "Read one account's expiry state and the official renewal URL.",
         "description": "Requires renewal:read for a scoped key. A key restricted by accountIds/regions answers 403 FORBIDDEN for another account and 404 for an unknown id.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "renewal:read",
         "responses": {
           "200": {
             "description": "Expiry state; the URL carries no account id or credential.",
@@ -4588,6 +5377,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/RenewalAccountView"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -4598,10 +5398,13 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4626,6 +5429,7 @@
         "summary": "Aggregate the request log over an inclusive UTC window.",
         "description": "Requires usage:read for a scoped key. A non-admin scoped key is served its own subject only: rows are filtered by the exact RequestLog.UserID before aggregation, and a userId/user_id naming another user answers 403 FORBIDDEN with error.reason=scoped_key_restricted without revealing whether that user has usage. The request log stores a recyclable account label rather than a stable account id, so a scoped account= filter answers 400 INVALID_ARGUMENT. Admin tokens, admin-scoped keys and unrestricted callers get the global summary.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "usage:read",
         "responses": {
           "200": {
             "description": "Usage summary; the window defaults to the trailing 30 days.",
@@ -4634,6 +5438,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/UsageSummary"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -4645,6 +5460,9 @@
           },
           "403": {
             "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4698,6 +5516,7 @@
         "summary": "Read loopback gate health for every watched node.",
         "description": "Requires health:read for a scoped key. A key restricted by accountIds/regions only sees nodes of its own accounts; enabled=false carries the daemon's reason when probing is off. Each row may carry an egress block measured through the node's own gate; egress.enabled=false names the switch that turned egress sampling off.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "health:read",
         "responses": {
           "200": {
             "description": "Watched nodes; enabled=false carries the daemon's reason.",
@@ -4707,13 +5526,27 @@
                   "$ref": "#/components/schemas/HealthView"
                 }
               }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4947,6 +5780,7 @@
         "summary": "Replay the retained event ring from a cursor.",
         "description": "Returns up to limit retained events published after since, oldest first. An empty since starts at the oldest retained event. When the cursor is current and wait is set, the request is held until the next event arrives or the wait budget expires, then answers a page (possibly empty) whose nextCursor is the resume point. A malformed cursor is 400 INVALID_ARGUMENT; a cursor whose event was evicted is 410 CURSOR_EXPIRED and details.oldestCursor names the restart point. A scoped key restricted by accountIds/regions is refused 403 because the ring is global.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "events:read",
         "responses": {
           "200": {
             "description": "One page of retained events and the cursor to pass next.",
@@ -4955,6 +5789,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/EventsPage"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -4965,10 +5810,13 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "410": {
             "$ref": "#/components/responses/CursorExpired"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4999,6 +5847,7 @@
         "summary": "Stream retained and live events as server-sent events.",
         "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every event is one id:/event:/data: frame whose data is the Event JSON object. Retained events after the cursor are replayed first, then live events follow; a duplicate that appears in both windows is sent once. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. A malformed cursor is 400 INVALID_ARGUMENT; an evicted one is 410 CURSOR_EXPIRED with details.oldestCursor, both as JSON before the stream starts. The stream closes when the client disconnects or the daemon shuts down.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "events:read",
         "responses": {
           "200": {
             "description": "SSE frames; the response never ends on its own while the daemon runs.",
@@ -5007,6 +5856,17 @@
                 "schema": {
                   "type": "string"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -5017,10 +5877,13 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
           },
           "410": {
             "$ref": "#/components/responses/CursorExpired"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -5045,6 +5908,7 @@
         "summary": "Read the bounded, redacted runtime trace ring.",
         "description": "Returns up to limit retained trace entries, oldest first, optionally filtered by account. The ring is in-memory and capped at 500 entries: it survives no restart, and a restarted daemon starts at sequence 1 with an empty window. Each entry carries a monotonic sequence, account/node/server attribution, the slot and generation, and the timing of one runtime boundary (switch steps, gate open/close, session open/lose, lease create/revoke, slot state). Secrets are redacted before storage; there is no field for a SID, cookie, token or device identity. A scoped key needs catalog:read; a key restricted by accountIds/regions sees only its accounts and an ?account= outside the grant is 403.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "One bounded window of redacted trace entries and the cursor to resume from.",
@@ -5053,6 +5917,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/DebugTracePage"
                 }
+              }
+            },
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             }
           },
@@ -5063,7 +5938,10 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -5088,6 +5966,7 @@
         "summary": "Stream retained and live trace entries as server-sent events.",
         "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every frame is one id:/event:/data: frame whose id is the sequence and whose data is the DebugTrace JSON object. Retained entries after the cursor are replayed first, then live entries follow; a duplicate that appears in both windows is sent once. A stale cursor (evicted, or from a previous process) restarts from the oldest retained entry and sets X-Debug-Restarted: true instead of failing. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. The stream closes when the client disconnects or the daemon shuts down.",
         "x-implementation-phase": "P0",
+        "x-required-scope": "catalog:read",
         "responses": {
           "200": {
             "description": "SSE frames; the response never ends on its own while the daemon runs.",
@@ -5097,6 +5976,15 @@
                   "type": "string"
                 },
                 "description": "true when the requested cursor was stale and the stream restarted from the oldest retained entry."
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
               }
             },
             "content": {
@@ -5114,7 +6002,10 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/ScopedKeyForbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -7650,7 +8541,7 @@
         }
       },
       "ScopedKeyForbidden": {
-        "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. These are the only two values these routes emit.",
+        "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason.",
         "content": {
           "application/json": {
             "schema": {
@@ -7663,6 +8554,17 @@
                 "reason": "scoped_key_restricted"
               }
             }
+          }
+        },
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          },
+          "X-RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimitReset"
           }
         }
       },
@@ -7738,6 +8640,30 @@
       },
       "CursorExpired": {
         "description": "CURSOR_EXPIRED: the cursor names an event that is no longer retained. details.oldestCursor is the oldest retained id, the point to restart from.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ScopedKeyRateLimited": {
+        "description": "RATE_LIMITED: the scoped key's per-minute bucket is exhausted, a guarded switch is cooling down, or a waited operation asks for a retry. Retry-After is set when the daemon knows the interval. QUOTA_EXCEEDED uses the same status for an exhausted user quota or account slot budget and does not promise Retry-After.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          },
+          "X-RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimitReset"
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -15010,6 +15936,36 @@
           "strictRbac",
           "kind"
         ]
+      }
+    },
+    "headers": {
+      "RateLimitLimit": {
+        "description": "The presented scoped key's per-minute budget (0 = unlimited). Set on every response to a request authenticated with a scoped key, except 401; absent for admin tokens and operator tokens.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "Tokens left in the key's current bucket after this request. Present whenever X-RateLimit-Limit is.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "RateLimitReset": {
+        "description": "Unix epoch seconds when the bucket is full again; 0 when the key is unlimited. Present whenever X-RateLimit-Limit is.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying. Set on a 429 that names an interval (scoped-key bucket, guarded-switch cooldown, waited operation) and on the 202 that starts an async operation.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     }
   }

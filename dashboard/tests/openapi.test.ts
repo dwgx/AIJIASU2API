@@ -204,7 +204,7 @@ describe('docs/openapi.json', () => {
 
   it('keeps the expected path and operation counts', () => {
     expect(Object.keys(doc.paths)).toHaveLength(120)
-    expect(entries).toHaveLength(147)
+    expect(entries).toHaveLength(148)
   })
 
   it('documents the real-time debugger trace and stream', () => {
@@ -263,7 +263,7 @@ describe('docs/openapi.json', () => {
       $ref: '#/components/schemas/CreateLeaseResult',
     })
     expect(create.responses['409']).toEqual({ $ref: '#/components/responses/Conflict' })
-    expect(create.responses['429']).toEqual({ $ref: '#/components/responses/RateLimited' })
+    expect(create.responses['429']).toEqual({ $ref: '#/components/responses/ScopedKeyRateLimited' })
 
     const input = schema('CreateLeaseInput')
     expect(input.required).toEqual(expect.arrayContaining(['userId', 'platform']))
