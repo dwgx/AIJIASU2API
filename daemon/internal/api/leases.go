@@ -87,6 +87,12 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	// A restricted key must name an account it may use: an empty accountId
+	// would let the store allocate on any free account, which the key's
+	// accountIds/regions cannot cover.
+	if s.denyScopedKeyAccountTarget(w, r, body.AccountID) {
+		return
+	}
 	headerKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	bodyKey := strings.TrimSpace(body.IdempotencyKey)
 	if headerKey != "" && bodyKey != "" && headerKey != bodyKey {
@@ -113,6 +119,16 @@ func (s *Server) handleCreateLease(w http.ResponseWriter, r *http.Request) {
 	}, s.auditActor(r))
 	if err != nil {
 		s.writeLeaseCreateError(w, err)
+		return
+	}
+	// The store answers an idempotent replay before it looks at the requested
+	// accountId, so the lease that actually came back is checked again: a
+	// restricted key must neither see nor republish a lease on an account it
+	// may not use. A fresh create is already pinned to the checked account, so
+	// this can only fire on a replay, where nothing was mutated.
+	if replayed && !s.scopedKeyAllowsAccount(r, lease.AccountID) {
+		writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
+			"scoped key is restricted to named accounts; the replayed lease belongs to another account", nil)
 		return
 	}
 

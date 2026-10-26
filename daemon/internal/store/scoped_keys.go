@@ -14,9 +14,12 @@ import (
 
 // CreateScopedKey issues a least-privilege secret, stores only its SHA-256 and
 // returns the secret once. The scopes decide which routes the key may call;
-// the account and region lists narrow that grant to the named accounts, with
-// global unattributed surfaces refused rather than guessed. An empty list on
-// both dimensions means unrestricted, not none.
+// the account and region lists narrow that grant to the named accounts on
+// every account-scoped route, read and write alike, with global unattributed
+// surfaces refused rather than guessed. An empty list on both dimensions means
+// unrestricted, not none. Combining a write scope with a non-empty list is
+// allowed because the API enforces the list on writes too; it is not a
+// read-only narrowing that a write scope silently escapes.
 func (s *Store) CreateScopedKey(in model.ScopedKeyCreateRequest, actor ...string) (model.ScopedKey, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

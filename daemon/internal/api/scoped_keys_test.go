@@ -737,3 +737,300 @@ func TestScopedKeyAdminExportUnknownIDKeepsNotFound(t *testing.T) {
 	requireStatus(t, resp, http.StatusNotFound)
 	requireErrorCode(t, body, CodeNotFound)
 }
+
+// restrictedWriteKey issues a key that may read and write the account surface
+// but only for the accounts or regions it names.
+func restrictedWriteKey(t *testing.T, ts *httptest.Server, accountIDs, regions []string) model.ScopedKeyCreated {
+	t.Helper()
+	body := map[string]any{
+		"userId": "u-01",
+		"label":  "restricted writer",
+		"scopes": []string{
+			"accounts:read", "accounts:write", "catalog:read", "catalog:write",
+			"leases:read", "leases:write",
+		},
+	}
+	if accountIDs != nil {
+		body["accountIds"] = accountIDs
+	}
+	if regions != nil {
+		body["regions"] = regions
+	}
+	created, _ := mustCreateScopedKey(t, ts, body)
+	return created
+}
+
+// TestScopedKeyRestrictedWritesAreAccountScoped pins AJS-447 (SEC-1): the
+// accountIds/regions restriction covers writes, not just reads. Every mutation
+// that targets another tenant's account, lease, node or operation answers 403
+// scoped_key_restricted and leaves the target untouched, while the key's own
+// account keeps working.
+func TestScopedKeyRestrictedWritesAreAccountScoped(t *testing.T) {
+	ts, st := newTestServer(t)
+	key := restrictedWriteKey(t, ts, []string{"acc-01"}, nil)
+
+	// A queued switch on acc-02 gives the cancel route a foreign target.
+	queued, busy, err := st.BeginOperation(model.Operation{
+		Type: model.OperationTypeSwitch, AccountID: "acc-02",
+		Target: model.OperationTarget{ServerID: "srv-b"}, RequestedBy: "admin",
+	})
+	if err != nil || busy != nil {
+		t.Fatalf("BeginOperation: busy=%+v err=%v", busy, err)
+	}
+
+	denied := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPatch, "/v1/accounts/acc-02", map[string]any{"label": "hijacked"}},
+		{http.MethodDelete, "/v1/accounts/acc-02", nil},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/login", nil},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/logout", nil},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/connect", map[string]any{"serverId": "srv-b", "confirm": true}},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/disconnect", map[string]any{"confirm": true}},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/reconnect", map[string]any{"confirm": true}},
+		{http.MethodPost, "/v1/accounts/acc-02/actions/select-node", map[string]any{"target": map[string]any{"serverId": "srv-b"}}},
+		{http.MethodPut, "/v1/accounts/acc-02/selection", map[string]any{"serverId": "srv-b"}},
+		{http.MethodDelete, "/v1/accounts/acc-02/selection", nil},
+		{http.MethodPost, "/v1/leases", map[string]any{"userId": "u-01", "platform": "ios", "accountId": "acc-02"}},
+		{http.MethodPost, "/v1/leases", map[string]any{"userId": "u-01", "platform": "ios"}},
+		{http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true}},
+		{http.MethodPost, "/v1/leases/lease-03/actions/rotate", nil},
+		{http.MethodPost, "/v1/nodes/node-04/actions/drain", nil},
+		{http.MethodPost, "/v1/nodes/node-04/actions/undrain", nil},
+		{http.MethodPost, "/v1/nodes/node-04/actions/probe", nil},
+		{http.MethodDelete, "/v1/operations/" + queued.ID, nil},
+	}
+	for _, tc := range denied {
+		resp, body := scopedCall(t, ts, key.Secret, tc.method, tc.path, tc.body)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonScopedKeyRestricted)
+		if bytes.Contains(body, []byte("acc-02")) || bytes.Contains(body, []byte("Field Lab")) {
+			t.Fatalf("%s %s refusal leaked the foreign tenant: %s", tc.method, tc.path, body)
+		}
+	}
+
+	// Nothing was mutated by a refused write.
+	if account, ok := st.Account("acc-02"); !ok || account.Label != "Field Lab" {
+		t.Fatalf("acc-02 changed under a refused write: %+v (exists=%v)", account, ok)
+	}
+	if lease, ok := st.Lease("lease-03"); !ok || lease.AccountID != "acc-02" || lease.Status == model.LeaseRevoked {
+		t.Fatalf("lease-03 changed under a refused write: %+v (exists=%v)", lease, ok)
+	}
+	if node, ok := st.Node("node-04"); !ok || node.State != model.NodeLive {
+		t.Fatalf("node-04 changed under a refused write: %+v (exists=%v)", node, ok)
+	}
+	if operation, ok := st.Operation(queued.ID); !ok || operation.State != model.OperationQueued {
+		t.Fatalf("operation changed under a refused cancel: %+v (exists=%v)", operation, ok)
+	}
+	for _, lease := range st.Leases() {
+		if lease.UserID == "u-01" && lease.AccountID == "acc-02" {
+			t.Fatalf("a refused lease create allocated %+v", lease)
+		}
+	}
+
+	// The same key still acts on its own account.
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-01",
+		map[string]any{"label": "Northwind Ops (restricted write)"})
+	requireStatus(t, resp, http.StatusOK)
+	if updated := decodeBody[model.Account](t, body); updated.Label != "Northwind Ops (restricted write)" {
+		t.Fatalf("own-account patch = %+v", updated)
+	}
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/accounts/acc-01/actions/login", nil)
+	requireStatus(t, resp, http.StatusOK)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/accounts/acc-01/actions/connect",
+		map[string]any{"serverId": "srv-a", "confirm": true})
+	requireStatus(t, resp, http.StatusConflict)
+	requireErrorReason(t, body, runtime.ReasonLoginDisabled)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/accounts/acc-01/actions/select-node",
+		map[string]any{"target": map[string]any{"serverId": "srv-a"}})
+	requireStatus(t, resp, http.StatusConflict)
+	requireErrorReason(t, body, runtime.ReasonLoginDisabled)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-01/actions/drain", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if drained := decodeBody[model.ProxyNode](t, body); drained.State != model.NodeDraining {
+		t.Fatalf("own-account drain = %+v", drained)
+	}
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-01/actions/undrain", nil)
+	requireStatus(t, resp, http.StatusOK)
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-01", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	if _, ok := st.Lease("lease-01"); ok {
+		t.Fatal("lease-01 survived its own key's revoke")
+	}
+	// The account has one serving slot in the seed and both are taken; free
+	// the second lease so the same key can allocate on its own account.
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-06", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/leases", map[string]any{
+		"userId": "u-02", "platform": "android", "accountId": "acc-01",
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	if created := decodeBody[leaseCreateResult](t, body); created.Lease.AccountID != "acc-01" {
+		t.Fatalf("own-account lease = %+v", created.Lease)
+	}
+}
+
+// TestScopedKeyRegionRestrictedWrites pins the region dimension on writes: a
+// key restricted to de-fra may mutate acc-04 and nothing else.
+func TestScopedKeyRegionRestrictedWrites(t *testing.T) {
+	ts, st := newTestServer(t)
+	key := restrictedWriteKey(t, ts, nil, []string{"de-fra"})
+
+	resp, body := scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-02", map[string]any{"label": "hijacked"})
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-04/actions/drain", nil)
+	requireStatus(t, resp, http.StatusForbidden)
+	if _, ok := st.Lease("lease-03"); !ok {
+		t.Fatal("a region-refused revoke removed lease-03")
+	}
+
+	// acc-04 is in de-fra, so the same verbs succeed there.
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPatch, "/v1/accounts/acc-04",
+		map[string]any{"label": "Partner EU (regional write)"})
+	requireStatus(t, resp, http.StatusOK)
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/nodes/node-09/actions/drain", nil)
+	requireStatus(t, resp, http.StatusOK)
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodDelete, "/v1/leases/lease-07", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+}
+
+// TestScopedKeyRestrictedWriteUnknownTargetIsIndistinguishable pins the probe
+// rule on writes: an id that does not exist and an id owned by another tenant
+// answer the same 403 byte for byte, so a mutation cannot be used to learn
+// whether a lease, node or account exists. An admin token keeps its 404.
+func TestScopedKeyRestrictedWriteUnknownTargetIsIndistinguishable(t *testing.T) {
+	ts, st := newTestServer(t)
+	key := restrictedWriteKey(t, ts, []string{"acc-01"}, nil)
+	queued, busy, err := st.BeginOperation(model.Operation{
+		Type: model.OperationTypeSwitch, AccountID: "acc-02",
+		Target: model.OperationTarget{ServerID: "srv-b"}, RequestedBy: "admin",
+	})
+	if err != nil || busy != nil {
+		t.Fatalf("BeginOperation: busy=%+v err=%v", busy, err)
+	}
+
+	cases := []struct{ method, unknown, foreign string }{
+		{http.MethodDelete, "/v1/leases/lease-99", "/v1/leases/lease-03"},
+		{http.MethodPost, "/v1/leases/lease-99/actions/rotate", "/v1/leases/lease-03/actions/rotate"},
+		{http.MethodPost, "/v1/nodes/node-99/actions/drain", "/v1/nodes/node-04/actions/drain"},
+		{http.MethodPost, "/v1/nodes/node-99/actions/probe", "/v1/nodes/node-04/actions/probe"},
+		{http.MethodDelete, "/v1/accounts/acc-99", "/v1/accounts/acc-02"},
+		{http.MethodPatch, "/v1/accounts/acc-99", "/v1/accounts/acc-02"},
+		{http.MethodDelete, "/v1/operations/op-9999", "/v1/operations/" + queued.ID},
+	}
+	for _, tc := range cases {
+		var body any
+		if tc.method == http.MethodDelete && strings.HasPrefix(tc.foreign, "/v1/leases/") {
+			body = map[string]any{"confirm": true}
+		}
+		if tc.method == http.MethodPatch {
+			body = map[string]any{"label": "hijacked"}
+		}
+		respUnknown, unknownBody := scopedCall(t, ts, key.Secret, tc.method, tc.unknown, body)
+		requireStatus(t, respUnknown, http.StatusForbidden)
+		requireErrorReason(t, unknownBody, ReasonScopedKeyRestricted)
+		respForeign, foreignBody := scopedCall(t, ts, key.Secret, tc.method, tc.foreign, body)
+		requireStatus(t, respForeign, http.StatusForbidden)
+		requireErrorReason(t, foreignBody, ReasonScopedKeyRestricted)
+		if !bytes.Equal(unknownBody, foreignBody) {
+			t.Fatalf("%s %s and %s answer differently: %s vs %s",
+				tc.method, tc.unknown, tc.foreign, unknownBody, foreignBody)
+		}
+	}
+	if operation, ok := st.Operation(queued.ID); !ok || operation.State != model.OperationQueued {
+		t.Fatalf("a refused cancel changed the operation: %+v (exists=%v)", operation, ok)
+	}
+
+	// An admin token sees the plain 404 contract for the same unknown ids.
+	for _, path := range []string{"/v1/leases/lease-99", "/v1/accounts/acc-99", "/v1/operations/op-9999"} {
+		var body any
+		if strings.HasPrefix(path, "/v1/leases/") {
+			body = map[string]any{"confirm": true}
+		}
+		resp, payload := apiCall(t, ts, http.MethodDelete, path, body)
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, payload, CodeNotFound)
+	}
+	resp, payload := apiCall(t, ts, http.MethodPost, "/v1/nodes/node-99/actions/drain", nil)
+	requireStatus(t, resp, http.StatusNotFound)
+	requireErrorCode(t, payload, CodeNotFound)
+}
+
+// TestScopedKeyRestrictedLeaseReplayIsRefused pins the replay guard: the store
+// answers an idempotent replay before it reads the requested accountId, so the
+// lease that comes back is checked again. A key restricted to acc-01 must not
+// receive the acc-02 lease an admin created under the same idempotency key.
+func TestScopedKeyRestrictedLeaseReplayIsRefused(t *testing.T) {
+	ts, st := newTestServer(t)
+	// acc-02 is at its one-slot capacity in the seed; free both rows so the
+	// admin create below can allocate.
+	for _, id := range []string{"lease-03", "lease-04"} {
+		if _, err := st.RevokeLease(id); err != nil {
+			t.Fatalf("RevokeLease(%s): %v", id, err)
+		}
+	}
+	req := newRequest(t, http.MethodPost, ts.URL+"/v1/leases", map[string]any{
+		"userId": "u-01", "platform": "ios", "accountId": "acc-02", "idempotencyKey": "tenant-b-only",
+	})
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
+	resp, body := doRequest(t, ts, req)
+	requireStatus(t, resp, http.StatusCreated)
+	created := decodeBody[leaseCreateResult](t, body)
+	if created.Lease.AccountID != "acc-02" {
+		t.Fatalf("admin lease = %+v, want acc-02", created.Lease)
+	}
+
+	key := restrictedWriteKey(t, ts, []string{"acc-01"}, nil)
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodPost, "/v1/leases", map[string]any{
+		"userId": "u-01", "platform": "ios", "accountId": "acc-01", "idempotencyKey": "tenant-b-only",
+	})
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	if bytes.Contains(body, []byte(created.Lease.ID)) || bytes.Contains(body, []byte("acc-02")) {
+		t.Fatalf("refused replay leaked the foreign lease: %s", body)
+	}
+	if lease, ok := st.Lease(created.Lease.ID); !ok || lease.AccountID != "acc-02" {
+		t.Fatalf("refused replay changed the lease: %+v (exists=%v)", lease, ok)
+	}
+}
+
+// TestScopedKeyUnrestrictedAndAdminWritesStillWork pins the compatibility side
+// of AJS-447: admin tokens, admin-scoped keys (even when they carry a list) and
+// unrestricted scoped keys keep writing across every account.
+func TestScopedKeyUnrestrictedAndAdminWritesStillWork(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp, _ := apiCall(t, ts, http.MethodDelete, "/v1/leases/lease-03", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+
+	open := restrictedWriteKey(t, ts, nil, nil)
+	resp, _ = scopedCall(t, ts, open.Secret, http.MethodPatch, "/v1/accounts/acc-02",
+		map[string]any{"label": "Field Lab (unrestricted)"})
+	requireStatus(t, resp, http.StatusOK)
+	resp, _ = scopedCall(t, ts, open.Secret, http.MethodDelete, "/v1/leases/lease-04", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	resp, body := scopedCall(t, ts, open.Secret, http.MethodPost, "/v1/leases", map[string]any{
+		"userId": "u-02", "platform": "ios", "accountId": "acc-02",
+	})
+	requireStatus(t, resp, http.StatusCreated)
+	if created := decodeBody[leaseCreateResult](t, body); created.Lease.AccountID != "acc-02" {
+		t.Fatalf("unrestricted lease = %+v", created.Lease)
+	}
+	// Draining removes a serving slot, so it runs after the create.
+	resp, _ = scopedCall(t, ts, open.Secret, http.MethodPost, "/v1/nodes/node-05/actions/drain", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, []string{"acc-01"}, nil)
+	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodDelete, "/v1/leases/lease-05", map[string]any{"confirm": true})
+	requireStatus(t, resp, http.StatusNoContent)
+	resp, _ = scopedCall(t, ts, adminKey.Secret, http.MethodPost, "/v1/nodes/node-06/actions/drain", nil)
+	requireStatus(t, resp, http.StatusOK)
+}

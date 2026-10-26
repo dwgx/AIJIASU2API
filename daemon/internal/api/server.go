@@ -830,14 +830,14 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			return
 		}
 		// The limit is charged before the account restriction check so a
-		// refused read still carries the X-RateLimit headers and a key cannot
-		// probe account ids for free.
+		// refused request still carries the X-RateLimit headers and a key
+		// cannot probe account ids for free.
 		if !s.allowScopedKeyRequest(w, key) {
 			return
 		}
 		if s.scopedKeyDeniesRequest(key, r) {
 			writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonScopedKeyRestricted,
-				"scoped key is not allowed to read this account", nil)
+				"scoped key is not allowed to use this account", nil)
 			return
 		}
 		if err := s.store.MarkScopedKeyUsed(key.ID); err != nil {

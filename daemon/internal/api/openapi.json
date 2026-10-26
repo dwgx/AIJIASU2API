@@ -7551,7 +7551,7 @@
         }
       },
       "ScopedKeyForbidden": {
-        "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude this global read. The message stays human-readable and is not part of the contract; clients branch on reason. These are the only two values these routes emit.",
+        "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. These are the only two values these routes emit.",
         "content": {
           "application/json": {
             "schema": {
@@ -12626,7 +12626,7 @@
       },
       "Scope": {
         "type": "string",
-        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, events:read reaches GET /v1/events and GET /v1/events/stream, and accountIds/regions still narrow every account-scoped read. A key restricted by accountIds/regions is refused the global event stream. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
+        "description": "Permission carried by a scoped API key. Reads are least-privilege: usage:read reaches GET /v1/usage, renewal:read reaches GET /v1/renewal/plans and GET /v1/renewal/accounts/{id}, health:read reaches GET /v1/health/nodes, events:read reaches GET /v1/events and GET /v1/events/stream, and accountIds/regions still narrow every account-scoped route, read or write. A write restricted to another account answers 403 with error.reason=scoped_key_restricted and mutates nothing. A key restricted by accountIds/regions is refused the global event stream. Webhook and backup routes stay admin-only; settings and schedule writes keep their own write scopes.",
         "enum": [
           "accounts:read",
           "accounts:write",
@@ -12676,14 +12676,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Empty means every account."
+            "description": "Empty means every account. A non-empty list narrows both reads and writes to these accounts; a mutation of any other account is refused with 403 and error.reason=scoped_key_restricted."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Empty means every region."
+            "description": "Empty means every region. A non-empty list narrows both reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",
@@ -12746,6 +12746,7 @@
       },
       "ScopedKeyCreateRequest": {
         "type": "object",
+        "description": "accountIds and regions narrow the key to the named accounts on every account-scoped route, reads and writes alike: the same list that filters GET /v1/accounts also refuses PATCH/DELETE /v1/accounts/{id}, the login/logout/connect/disconnect/reconnect/select-node actions, lease create/rotate/revoke, node drain/undrain/probe and operation cancel on any account outside it, with 403 and error.reason=scoped_key_restricted. POST /v1/leases must name an allowed accountId; a restricted key that omits it is refused because the store would otherwise pick any free account. A key carrying the admin scope ignores both lists.",
         "properties": {
           "userId": {
             "type": "string"
@@ -12763,13 +12764,15 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Empty means every account. A non-empty list narrows reads and writes."
           },
           "regions": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Empty means every region. A non-empty list narrows reads and writes to accounts with an overlapping region."
           },
           "rateLimitPerMin": {
             "type": "integer",

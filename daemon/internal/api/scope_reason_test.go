@@ -56,7 +56,7 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 	requireStatus(t, resp, http.StatusForbidden)
 	requireErrorCode(t, body, CodeForbidden)
 	requireErrorReason(t, body, ReasonScopedKeyRestricted)
-	if !strings.Contains(string(body), "scoped key is not allowed to read this account") {
+	if !strings.Contains(string(body), "scoped key is not allowed to use this account") {
 		t.Fatalf("account-filter message changed: %s", body)
 	}
 

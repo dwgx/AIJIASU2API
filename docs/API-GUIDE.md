@@ -99,22 +99,31 @@ customer key has no business enumerating the daemon's outbound receivers or seal
 
 ## Narrowing with `accountIds` / `regions`
 
-Both lists are optional and only affect **reads**:
+Both lists are optional and narrow **reads and writes**:
 
 - Empty `accountIds` and empty `regions` = unrestricted.
 - An account matches when the id list is empty or contains its id, **and** the region list is
   empty or overlaps the account's `regions`.
 - The filter covers the account path, the renewal account path and the `account_id`/`accountId`
-  query on nodes, leases and operations, so a restricted key cannot read one account through a
+  query on nodes, leases and operations, so a restricted key cannot reach one account through a
   different account-scoped route.
-- A GET for an outside account answers `403 FORBIDDEN` with `reason: "scoped_key_restricted"`.
-  `POST .../select-node` answers `404 NOT_FOUND` instead, so a key cannot probe whether an account
-  exists.
+- A request for an outside account answers `403 FORBIDDEN` with `reason: "scoped_key_restricted"`.
+- **Writes are narrowed too.** A key with `accounts:write`, `catalog:write` or `leases:write`
+  restricted to `acc-A` is refused on every mutation of another account: `PATCH`/`DELETE
+  /v1/accounts/{id}`, the login/logout/connect/disconnect/reconnect/select-node actions, the
+  selection routes, `POST /v1/leases`, lease rotate and revoke, node drain/undrain/probe and
+  operation cancel. `POST /v1/leases` must name an allowed `accountId`; a restricted key that
+  omits it is refused, because the store would otherwise pick any free account.
+- A write that names an id the store cannot resolve answers the same `403` as a foreign account,
+  so a mutation cannot be used to probe whether an account, lease, node or operation exists. Reads
+  keep `404` for an unknown id and `403` for a known account outside the key.
 - Global, unattributed surfaces are refused to a restricted key rather than guessed:
   `GET /v1/requests`, `GET /v1/usage`, `GET /v1/audit`, `GET /metrics` and the event stream.
   `/v1/topology` is projected to the key's visible nodes, and `/v1/health/nodes` is filtered.
-- **Writes are governed by scopes, not by these lists.** A key with `catalog:write` or
-  `leases:write` can act on every account. Issue write scopes deliberately.
+- Admin tokens and keys carrying the `admin` scope ignore both lists: the grant already covers
+  every account.
+- `POST /v1/accounts` (create) is not narrowed by the lists: the new id cannot be in the key's
+  `accountIds`, so a restricted key cannot act on the account it just created.
 
 ## Quickstart calls
 

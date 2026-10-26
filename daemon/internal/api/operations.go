@@ -87,14 +87,9 @@ func (s *Server) handleSelectNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
 		return
 	}
-	// A scoped key restricted to other accounts must not learn whether this
-	// account exists, so the answer is the same 404 the read paths use.
-	if visible, restricted := s.visibleAccountIDs(r); restricted {
-		if _, allowed := visible[accountID]; !allowed {
-			writeError(w, http.StatusNotFound, CodeNotFound, "account not found")
-			return
-		}
-	}
+	// A scoped key restricted to other accounts never reaches this handler:
+	// scopedKeyDeniesRequest refuses the account path in the auth middleware
+	// with 403 scoped_key_restricted, before any operation is queued.
 	if s.cfg.Catalog == nil {
 		writeErrorReason(w, http.StatusConflict, CodeConflict, runtime.ReasonLoginDisabled,
 			"account login is disabled (AJS_ACCOUNT_LOGIN=0)", nil)
@@ -428,14 +423,12 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 // handleCancelOperation serves DELETE /v1/operations/{id}. A queued operation
 // is canceled before dispatch; a running one answers 409 because the guarded
 // switch is one executor step that may already hold an open vendor session.
+// The account restriction is enforced in the auth middleware, which resolves
+// the operation's account before this handler runs.
 func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 	id := pathParam(r, "id")
 	operation, ok := s.store.Operation(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, CodeNotFound, "operation not found")
-		return
-	}
-	if !s.operationVisible(r, operation) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "operation not found")
 		return
 	}
