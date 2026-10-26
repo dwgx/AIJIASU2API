@@ -4,6 +4,10 @@
 # GHCR images and the update path, and attaches no assets of its own so these
 # six files (and their SHA256SUMS) stay the complete, consistent set.
 #
+# Nothing is built until the `verify` job passes: it calls the reusable
+# verify.yml (Go, dashboard and SDK suites) and the `package` job needs it, so
+# a red suite cannot produce or attach release assets.
+#
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # The same set is uploaded as a workflow artifact on every run, including
@@ -29,8 +33,15 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify suites
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify.yml
+
   package:
     name: Package artifacts
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

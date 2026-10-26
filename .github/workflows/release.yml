@@ -12,6 +12,10 @@
 # Platform binaries and the dashboard bundle are built and attached by
 # package.yml on the same tag. This workflow attaches no release assets, so
 # that workflow's SHA256SUMS always describes the complete asset set.
+#
+# The `release` job needs the `verify` job (the reusable verify.yml: Go,
+# dashboard and SDK suites), so a red suite cannot push a tag image or move
+# :latest.
 
 name: release
 
@@ -30,7 +34,14 @@ env:
   GHCR_OWNER: ${{ github.repository_owner }}
 
 jobs:
+  verify:
+    name: Verify suites
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify.yml
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -1,0 +1,118 @@
+# Reusable verification workflow: the Go, dashboard and SDK suites that must
+# pass before any release asset or container image is produced.
+#
+# package.yml and release.yml call this as their `verify` job and gate the
+# packaging / publish job on it with `needs: verify`. Keeping the commands in
+# one place means a tag run executes the same suites as a pull request, and a
+# suite cannot be dropped by editing only one of the two release workflows.
+#
+# ci.yml keeps its own go/web/sdk jobs because it also runs the root
+# production gate on every push; its go, web and sdk commands are the same as
+# the ones here.
+#
+# setup-go caching stays off: daemon/go.sum exists but the emulator and
+# sdk/go modules have no dependency file, and the action's default cache
+# fails hard when that file is missing. The suites resolve in seconds.
+
+name: verify
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go tests (daemon + emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+
+      - name: Vet daemon
+        working-directory: daemon
+        run: go vet ./...
+
+      - name: Test daemon
+        working-directory: daemon
+        run: go test -race -count=1 ./...
+
+      - name: Vet emulator
+        working-directory: emulator
+        run: go vet ./...
+
+      - name: Test emulator
+        working-directory: emulator
+        run: go test -race -count=1 ./...
+
+  web:
+    name: Web tests (dashboard)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The serial flags are load-bearing: without them findBy* assertions
+      # time out on a loaded host (7 of 500 fail on a 24-core machine).
+      - name: Test (serial, as CI)
+        run: npm test -- --pool=forks --maxWorkers=1
+
+  sdk:
+    name: SDK tests (Go + TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/go/go.mod
+          cache: false
+
+      - name: Vet Go SDK
+        working-directory: sdk/go
+        run: go vet ./...
+
+      - name: Test Go SDK
+        working-directory: sdk/go
+        run: go test -race -count=1 ./...
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+
+      - name: Install TypeScript SDK dependencies
+        working-directory: sdk/ts
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck TypeScript SDK
+        working-directory: sdk/ts
+        run: npm run typecheck
+
+      - name: Test TypeScript SDK
+        working-directory: sdk/ts
+        run: npm test

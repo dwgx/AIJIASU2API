@@ -46,6 +46,13 @@ version control; the binaries, `dashboard-dist.tar.gz`, `deploy-kit.tar.gz`, `MA
 
 - Go 1.26 or newer in `PATH` (`daemon/go.mod` requires `go 1.26.0`). The script sets
   `GOTOOLCHAIN=local`, so it never downloads a toolchain.
+- A warm Go module cache, or network access once: `daemon/go.sum` is committed and pins
+  `golang.org/x/crypto` (plus `golang.org/x/sys` indirect), and every build runs with
+  `-mod=readonly`, which overrides Go's automatic `-mod=vendor`. On a cold cache run
+  `go mod download` in `daemon/` once with `GOMODCACHE` writable and `GOPROXY` reachable; an
+  air-gapped host needs a warm `GOMODCACHE` (a `vendor/` directory alone is not enough), because
+  `GOPROXY=off` fails with `module lookup disabled by GOPROXY=off`. `emulator/` and `sdk/go/`
+  have no external dependencies and need neither.
 - Node 24 / npm 11 only when building the dashboard (`--build-dashboard`, or a missing
   `dashboard/dist` with `dashboard/node_modules` present). Run `npm ci` in `dashboard/`
   once from the committed `package-lock.json`; the script never installs dependencies. The
@@ -53,7 +60,8 @@ version control; the binaries, `dashboard-dist.tar.gz`, `deploy-kit.tar.gz`, `MA
 - `tar`, and either `sha256sum` (Linux, Git for Windows) or `shasum` (macOS).
 - Git is optional; without it the version falls back to `0.0.0-dev` and the manifest records
   `commit: unknown`.
-- No Docker, no vendor account, no vendor host, no network.
+- No Docker, no vendor account, no vendor host. Network access is limited to the one-time Go
+  module download above and the `npm ci` in `dashboard/` that installs the build toolchain.
 
 The daemon module replaces `ajsproxy` with `../emulator`, so package from a complete checkout
 where `daemon/` and `emulator/` are siblings.
@@ -302,6 +310,10 @@ cd dashboard
 python3 -m http.server 18081 --bind 127.0.0.1
 ```
 
+`18081` is the static bundle's origin only. The API stays on `AJS_LISTEN`
+(`127.0.0.1:2261` by default): point API clients and SDK examples at `2261`, and keep the bundle
+origin in `AJS_CORS_ORIGINS`.
+
 `python3 -m http.server` has no SPA fallback, so a hard refresh on a client-side route returns
 404. For nginx, keep the same fallback the image uses:
 
@@ -329,15 +341,35 @@ must contain the exact browser origin serving the bundle.
 ## Tag workflow
 
 [`../.github/workflows/package.yml`](../.github/workflows/package.yml) runs on a `v*` tag (and
-manually via `workflow_dispatch`). It installs Go 1.26 and Node 24, runs `npm ci`, builds the
+manually via `workflow_dispatch`). Its `verify` job calls the reusable
+[`verify.yml`](../.github/workflows/verify.yml) — the Go (daemon + emulator), dashboard and SDK
+suites — and the `package` job has `needs: verify`, so no artifact is built, uploaded or attached
+unless every suite passes. After that it installs Go 1.26 and Node 24, runs `npm ci`, builds the
 dashboard with the single live recipe, runs this script, uploads the six release files as a
 workflow artifact, and attaches them to the GitHub Release for the tag. `deploy-kit.tar.gz` is
 produced alongside them for local operator use but is not part of that six-file release set. It
 does not build or push container images; that is
-[`release.yml`](../.github/workflows/release.yml)'s job, and `release.yml` attaches no release
-assets, so `SHA256SUMS` always describes the complete asset set. The workflow has not run in this
-repository yet because the tree has no remote and no tags; the script is exercised locally as
-recorded below.
+[`release.yml`](../.github/workflows/release.yml)'s job, which calls the same `verify` job before
+it logs in to GHCR, so a red suite cannot push a tag image or move `:latest`. `release.yml`
+attaches no release assets, so `SHA256SUMS` always describes the complete asset set.
+
+Run the same suites locally before tagging:
+
+```bash
+(cd daemon    && go vet ./... && go test -race -count=1 ./...)
+(cd emulator  && go vet ./... && go test -race -count=1 ./...)
+(cd sdk/go    && go vet ./... && go test -race -count=1 ./...)
+(cd dashboard && npm ci && npm test -- --pool=forks --maxWorkers=1)
+(cd sdk/ts    && npm ci && npm run typecheck && npm test)
+```
+
+The dashboard flags are load-bearing: `npm test` alone is red on a loaded host (7 failed /
+493 passed on a 24-core machine) because `findBy*` waits default to 1 s; with
+`--pool=forks --maxWorkers=1` the same suite passes 500/500 in about 160 s. `go test -race` needs
+cgo and a C compiler (`gcc`); a Go-only host can still run `go test ./...` without `-race`.
+
+No workflow has run in this repository yet: the tree has no remote, and the only tag
+(`v0.1.0-archive`) is local. The script is exercised locally as recorded below.
 
 ## Local verification
 
