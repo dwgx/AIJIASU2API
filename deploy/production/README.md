@@ -14,14 +14,25 @@ Run the gate:
 
 ```bash
 bash deploy/production/check.sh
-# check: PASS (n checks)
+# check: PASS (n checks, 0 skipped)
+```
+
+The default mode is the production gate. It requires a real host `nginx -t`,
+`openssl`, `systemd-analyze` and `nft`; a missing required tool is a `FAIL`,
+not a `SKIP`. For a workstation without those tools use the explicitly
+non-production mode:
+
+```bash
+bash deploy/production/check.sh --dev
+# check: DEV-PASS (n checks, m skipped; not a production gate)
 ```
 
 `check.sh` is read-only. It stages nginx configs in a throwaway directory with
-a generated self-signed certificate and a dummy token, runs `nginx -t` when
-nginx is available, validates the YAML inventory, scans the kit for committed
-secrets, verifies the systemd unit, and compares the production firewall rule
-with `deploy/nftables/ajs-panel.nft`.
+a generated self-signed certificate and a dummy token, pins the nginx PID and
+all temp paths inside that directory, runs a real `nginx -t` as the invoking
+user, validates the YAML inventory, scans the kit for committed secrets,
+verifies the systemd unit, and compares the production firewall rule with
+`deploy/nftables/ajs-panel.nft`.
 
 ## What the kit contains
 
@@ -375,38 +386,56 @@ the sealed envelopes cannot be opened.
 3. a secret scan over every kit file: PEM private keys/certificates, token
    assignments, literal `Authorization: Bearer` values, and bare 64-hex
    strings; the admin-token template must contain only `${AJS_ADMIN_TOKEN}`;
-4. `nginx -t` on a staged copy of both vhosts with a generated self-signed
-   certificate and a dummy 64-character token (host nginx, or Docker
-   `nginx:1.29-alpine` with `AJS_CHECK_NGINX_DOCKER=1`);
+4. a real `nginx -t` on a staged copy of both vhosts with a generated
+   self-signed certificate and a dummy 64-character token. The staged config
+   rewrites the PID file and every `*_temp_path` into the throwaway tree, so
+   the gate passes as an unprivileged user on stock Debian/Ubuntu nginx
+   without writing `/run/nginx.pid` or `/var/lib/nginx/*`. Because nginx -t
+   opens the listening sockets even in test mode, an unprivileged run retries
+   in an isolated user+network namespace (`unshare -Urn`) where it can bind
+   :80/:443. Production mode requires host nginx; Docker
+   `nginx:1.29-alpine` staging is dev-only (`AJS_CHECK_NGINX_DOCKER=1`);
 5. static nginx assertions: portal terminal 404, no generic `/v1/` proxy on
    the portal origin, admin token include, allow/deny, HSTS, rate-limit zones,
    `X-Forwarded-For $remote_addr`;
-6. token-free bundle assertions on `build-bundles.sh`;
-7. `systemd-analyze verify` when available, plus the hardening directives;
+6. token-free bundle assertions on `build-bundles.sh`, the committed
+   `dashboard/package-lock.json`, and the `ajs-build.json` live/mock manifest;
+7. `systemd-analyze verify` plus the hardening directives;
 8. the production firewall rule exactly matching `deploy/nftables/ajs-panel.nft`
-   and `nft -c` when available;
-9. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`,
+   and `nft -c` (direct, `unshare -Urn`, or `sudo -n` fallback);
+9. README input coverage (`AJS_TENANT_PORTAL`, `AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`,
    `AJS_TRUSTED_PROXIES`, `AJS_ADMIN_TOKEN`, `AJS_MASTER_KEY`, DNS, TLS).
 
-Absent optional tools are reported as `SKIP`, not failures; a missing YAML
-parser is a failure because YAML validation is a gate requirement.
+In production mode every item above is required: a missing tool is a `FAIL`
+and the summary reports the required-skip count. `--dev` reports absent tools
+as `SKIP` and ends with `check: DEV-PASS`, never `check: PASS`. A missing YAML
+parser is always a failure because YAML validation is a gate requirement.
 
 ## Recorded verification (2026-10-26)
 
-- `bash deploy/production/check.sh` → `check: PASS (48 checks)` on the
-  development host (nginx not installed there, so the `nginx -t` check was
-  reported as `SKIP`).
-- The same staged nginx tree was additionally tested with `nginx -t` from
-  nginx 1.29.0: `syntax is ok` / `test is successful`. The only warnings were
-  the expected `listen ... http2` deprecation notice and `ssl_stapling`
-  warnings from the throwaway self-signed test certificate.
-- `build-bundles.sh` was exercised against `dashboard/` with
-  `VITE_USE_MOCK=false` and no `VITE_PANEL_TOKEN`; the produced bundle
-  contains no admin token value. The portal/admin copies are byte-identical
-  by design; the nginx vhost is what restricts the customer surface.
+- **Ubuntu 24.04.5, nginx 1.24.0 (Ubuntu), non-root uid 1000:**
+  `bash deploy/production/check.sh` → `check: PASS (58 checks, 0 skipped)`.
+  The real `nginx -t` parsed the staged portal/admin vhosts; because nginx -t
+  opens the listening sockets even in test mode, the unprivileged run used the
+  `unshare -Urn` fallback (the direct run reached `syntax is ok` and failed only
+  at `bind() :80 permission denied`). No required check was skipped.
+- **Windows development host without nginx, systemd-analyze or nft:**
+  `bash deploy/production/check.sh --dev` → `check: DEV-PASS (55 checks,
+  3 skipped; not a production gate)`. The same host in the default production
+  mode → `check: FAIL (3 failed, 3 required skips, 58 checks)` — no `PASS` with
+  skips.
+- A clean `npm ci` from the committed `dashboard/package-lock.json` succeeded
+  with an empty npm cache (206 packages installed). `build-bundles.sh` was
+  exercised against `dashboard/`; it produced `mode: live`, `mock: false`,
+  `panelToken: false`, `apiBase: ""` and the portal/admin copies are
+  byte-identical by design. A plain `npm run build` produced `mode: mock`;
+  `deploy/package.sh` refused it.
+- `deploy/package.sh --build-dashboard` packaged a live bundle and all six
+  release files; `MANIFEST.txt` records `dashboard_mode: live` and the
+  `ajs-build.json` digest. All five SHA-256 entries verified.
+- `nft -c` accepted the production firewall through the `unshare -Urn` fallback.
 - The firewall rule is compared textually with
-  `deploy/nftables/ajs-panel.nft` by `check.sh`; `nft -c` is opt-in
-  (`AJS_CHECK_NFT=1`) because it needs root and an nftables-capable host.
+  `deploy/nftables/ajs-panel.nft`; a drift fails the gate.
 
 ## Limitations
 

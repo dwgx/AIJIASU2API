@@ -5,16 +5,29 @@
 # starts the daemon. Everything that needs a live daemon/cert is staged in a
 # throwaway temporary directory.
 #
-# Usage: bash deploy/production/check.sh
-# Exit:  0 = all checks pass (or an optional tool is absent and was skipped)
-#        1 = at least one check failed
+# Usage:
+#   bash deploy/production/check.sh                  # production gate (default)
+#   bash deploy/production/check.sh --dev            # development-only checks
+#   AJS_CHECK_MODE=dev bash deploy/production/check.sh
 #
-# Optional tools:
-#   nginx (or Docker with nginx:1.29-alpine + AJS_CHECK_NGINX_DOCKER=1)
+# Exit:
+#   0 = production gate passed with no skipped checks, or dev checks passed
+#   1 = a check failed, or a required production check was skipped
+#   2 = bad usage
+#
+# Production mode requires a real `nginx -t` from host nginx, openssl for the
+# throwaway certificate, systemd-analyze, and nft syntax verification. A
+# missing required tool is FAIL, never SKIP. Dev mode allows those tools to be
+# absent, but its result is printed as DEV-PASS/DEV-FAIL and can never be
+# mistaken for a production PASS.
+#
+# Tools:
+#   nginx (or set AJS_NGINX_BIN=/usr/sbin/nginx; Docker with
+#   nginx:1.29-alpine + AJS_CHECK_NGINX_DOCKER=1, dev mode)
 #   python3 + PyYAML (or ruby, or yq) for YAML validation
 #   openssl for the throwaway nginx test certificate
 #   systemd-analyze for unit verification
-#   nft for firewall syntax verification
+#   nft for firewall syntax verification (unshare -Urn or sudo -n fallback)
 set -u
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || {
@@ -24,13 +37,50 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || {
 kit=$script_dir
 repo_root=$(CDPATH= cd -- "$kit/../.." && pwd) || repo_root=.
 
+mode=${AJS_CHECK_MODE:-production}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --production|--prod) mode=production; shift ;;
+        --dev|--development) mode=dev; shift ;;
+        -h|--help)
+            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            printf 'check: unknown argument: %s (use --production, --dev or --help)\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+done
+case $mode in
+    production|dev) ;;
+    *)
+        printf 'check: AJS_CHECK_MODE must be production or dev, got: %s\n' "$mode" >&2
+        exit 2
+        ;;
+esac
+
 checks=0
 failures=0
+skips=0
+required_skips=0
 
 pass() { checks=$((checks + 1)); printf 'PASS  %s\n' "$*"; }
 fail() { checks=$((checks + 1)); failures=$((failures + 1)); printf 'FAIL  %s\n' "$*"; }
-skip() { printf 'SKIP  %s\n' "$*"; }
+skip() {
+    skips=$((skips + 1))
+    if [ "$mode" = production ]; then
+        checks=$((checks + 1))
+        failures=$((failures + 1))
+        required_skips=$((required_skips + 1))
+        printf 'FAIL  %s (required in production mode)\n' "$*"
+    else
+        printf 'SKIP  %s (dev mode)\n' "$*"
+    fi
+}
 section() { printf '\n== %s ==\n' "$*"; }
+
+printf 'check: mode=%s\n' "$mode"
 
 # ---------------------------------------------------------------------------
 section "required files"
@@ -197,28 +247,38 @@ nginx_tmp=""
 cleanup() { [ -n "$nginx_tmp" ] && rm -rf "$nginx_tmp"; }
 trap cleanup 0 HUP INT TERM
 
-nginx_bin=$(command -v nginx 2>/dev/null || true)
+nginx_bin=${AJS_NGINX_BIN:-}
+if [ -z "$nginx_bin" ]; then
+    nginx_bin=$(command -v nginx 2>/dev/null || true)
+fi
+if [ -z "$nginx_bin" ]; then
+    for candidate in /usr/sbin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx; do
+        if [ -x "$candidate" ]; then nginx_bin=$candidate; break; fi
+    done
+fi
 nginx_mode=""
-if [ -n "$nginx_bin" ]; then
+if [ -n "$nginx_bin" ] && [ -x "$nginx_bin" ]; then
     nginx_mode=host
 elif [ "${AJS_CHECK_NGINX_DOCKER:-0}" = "1" ] && command -v docker >/dev/null 2>&1; then
-    nginx_mode=docker
+    if [ "$mode" = production ]; then
+        fail "production gate requires host nginx; Docker nginx staging is development-only"
+    else
+        nginx_mode=docker
+    fi
 else
-    skip "nginx not installed; install nginx or set AJS_CHECK_NGINX_DOCKER=1 (uses nginx:1.29-alpine)"
+    skip "nginx not installed; production gate requires a real nginx -t (install nginx or set AJS_NGINX_BIN)"
 fi
 
 if [ -n "$nginx_mode" ]; then
     if ! command -v openssl >/dev/null 2>&1; then
-        skip "openssl not found; cannot generate the throwaway test certificate"
+        skip "openssl not found; cannot generate the throwaway nginx test certificate"
     else
         nginx_tmp=$(mktemp -d) || { fail "cannot create temporary nginx directory"; nginx_tmp=""; }
         if [ -n "$nginx_tmp" ]; then
             mkdir -p "$nginx_tmp/sites-enabled" "$nginx_tmp/snippets" "$nginx_tmp/logs" \
                 "$nginx_tmp/certs/panel.example.com" "$nginx_tmp/certs/admin.example.com" \
-                "$nginx_tmp/temp/client_body_temp" "$nginx_tmp/temp/proxy_temp" \
-                "$nginx_tmp/temp/fastcgi_temp" "$nginx_tmp/temp/uwsgi_temp" "$nginx_tmp/temp/scgi_temp" \
-                "$nginx_tmp/client_body_temp" "$nginx_tmp/proxy_temp" \
-                "$nginx_tmp/fastcgi_temp" "$nginx_tmp/uwsgi_temp" "$nginx_tmp/scgi_temp"
+                "$nginx_tmp/temp/client_body" "$nginx_tmp/temp/proxy" \
+                "$nginx_tmp/temp/fastcgi" "$nginx_tmp/temp/uwsgi" "$nginx_tmp/temp/scgi"
             cp "$kit/nginx/nginx.conf" "$nginx_tmp/nginx.conf"
             cp "$kit/nginx/ajs-mime.types" "$nginx_tmp/ajs-mime.types"
             cp "$kit/nginx/snippets/"*.conf "$nginx_tmp/snippets/" 2>/dev/null || true
@@ -239,26 +299,95 @@ if [ -n "$nginx_mode" ]; then
                 -keyout "$nginx_tmp/certs/admin.example.com/privkey.pem" \
                 -out "$nginx_tmp/certs/admin.example.com/fullchain.pem" >/dev/null 2>&1
 
+            # Config-visible root differs in Docker mode because the staged
+            # tree is bind-mounted at /work.
+            if [ "$nginx_mode" = docker ]; then nginx_root=/work; else nginx_root=$nginx_tmp; fi
+
             # Rewrite the host paths to the throwaway tree.
             for f in "$nginx_tmp/nginx.conf" "$nginx_tmp/sites-enabled/"*.conf; do
-                sed -i "s|/etc/nginx|$nginx_tmp|g; s|/etc/ajs/tls|$nginx_tmp/certs|g; s|/var/log/nginx|$nginx_tmp/logs|g" "$f"
+                sed -i.bak "s|/etc/nginx|$nginx_root|g; s|/etc/ajs/tls|$nginx_root/certs|g; s|/var/log/nginx|$nginx_root/logs|g" "$f"
+                rm -f "$f.bak"
             done
             if [ "$nginx_mode" = docker ]; then
-                sed -i 's/^user .*/user nginx;/' "$nginx_tmp/nginx.conf"
+                sed -i.bak 's/^user .*/user nginx;/' "$nginx_tmp/nginx.conf"
+                rm -f "$nginx_tmp/nginx.conf.bak"
+            elif [ "$(id -u)" -ne 0 ]; then
+                # The stock config names www-data, which may not exist off
+                # Debian/Ubuntu. Run the staged test as the invoking user so
+                # nginx can chown its temp directories in both a direct run
+                # and the unshare fallback.
+                sed -i.bak -E "s|^[[:space:]]*user[[:space:]]+[^;]+;|user $(id -un);|" "$nginx_tmp/nginx.conf"
+                rm -f "$nginx_tmp/nginx.conf.bak"
             fi
+
+            # nginx -t still opens the pid file and every compiled-in temp
+            # path. On a stock Debian/Ubuntu nginx those are /run/nginx.pid
+            # and /var/lib/nginx/*, which a non-root gate cannot create. Pin
+            # the pid and all temp paths inside the throwaway tree: this is
+            # the staging fix, not a relaxation of nginx -t.
+            sed -i.bak -E "s|^[[:space:]]*pid[[:space:]]+[^;]+;|pid $nginx_root/nginx.pid;|" "$nginx_tmp/nginx.conf"
+            rm -f "$nginx_tmp/nginx.conf.bak"
+            awk -v root="$nginx_root" '
+                /^[[:space:]]*http[[:space:]]*\{/ {
+                    print
+                    print "    client_body_temp_path " root "/temp/client_body;"
+                    print "    proxy_temp_path " root "/temp/proxy;"
+                    print "    fastcgi_temp_path " root "/temp/fastcgi;"
+                    print "    uwsgi_temp_path " root "/temp/uwsgi;"
+                    print "    scgi_temp_path " root "/temp/scgi;"
+                    next
+                }
+                { print }
+            ' "$nginx_tmp/nginx.conf" > "$nginx_tmp/nginx.conf.new" \
+                && mv "$nginx_tmp/nginx.conf.new" "$nginx_tmp/nginx.conf"
 
             nginx_output=""
             nginx_rc=1
+            nginx_via="host nginx"
             if [ "$nginx_mode" = host ]; then
                 nginx_output=$("$nginx_bin" -t -p "$nginx_tmp/" -c "$nginx_tmp/nginx.conf" 2>&1)
                 nginx_rc=$?
+                # nginx -t opens the listening sockets even in test mode. A
+                # non-root user cannot bind :80/:443 on a normal host, so retry
+                # in an isolated user+network namespace where the test process
+                # is root with CAP_NET_BIND_SERVICE. This is still the real
+                # nginx binary parsing the same staged configuration.
+                if [ "$nginx_rc" -ne 0 ] && [ "$(id -u)" -ne 0 ] \
+                    && command -v unshare >/dev/null 2>&1; then
+                    # Inside `unshare -Ur` only uid 0 is mapped, so the test
+                    # config must run as root there; the direct attempt above
+                    # still uses the invoking user.
+                    cp "$nginx_tmp/nginx.conf" "$nginx_tmp/nginx.unshare.conf"
+                    sed -i.bak -E 's|^[[:space:]]*user[[:space:]]+[^;]+;|user root;|' "$nginx_tmp/nginx.unshare.conf"
+                    rm -f "$nginx_tmp/nginx.unshare.conf.bak"
+                    if command -v ip >/dev/null 2>&1; then
+                        nginx_output=$(unshare -Urn sh -c \
+                            "ip link set lo up 2>/dev/null || true; '$nginx_bin' -t -p '$nginx_tmp/' -c '$nginx_tmp/nginx.unshare.conf'" 2>&1)
+                    else
+                        nginx_output=$(unshare -Urn "$nginx_bin" -t -p "$nginx_tmp/" -c "$nginx_tmp/nginx.unshare.conf" 2>&1)
+                    fi
+                    nginx_rc=$?
+                    if [ "$nginx_rc" -eq 0 ]; then nginx_via="unshare -Urn nginx"; fi
+                fi
+                if [ "$nginx_rc" -ne 0 ] && [ "$(id -u)" -ne 0 ] \
+                    && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                    nginx_output=$(sudo -n "$nginx_bin" -t -p "$nginx_tmp/" -c "$nginx_tmp/nginx.conf" 2>&1)
+                    nginx_rc=$?
+                    if [ "$nginx_rc" -eq 0 ]; then nginx_via="sudo nginx"; fi
+                fi
             else
                 nginx_output=$(docker run --rm -v "$nginx_tmp:/work" -w /work nginx:1.29-alpine \
                     nginx -t -p /work/ -c /work/nginx.conf 2>&1)
                 nginx_rc=$?
+                nginx_via="docker nginx:1.29-alpine"
             fi
             if [ "$nginx_rc" -eq 0 ]; then
-                pass "nginx -t: portal and admin vhosts"
+                if [ "$nginx_mode" = host ]; then
+                    nginx_label=$("$nginx_bin" -v 2>&1 | head -1)
+                else
+                    nginx_label="nginx:1.29-alpine"
+                fi
+                pass "nginx -t: portal and admin vhosts ($nginx_label; $nginx_via)"
             else
                 fail "nginx -t failed: $(printf '%s' "$nginx_output" | tr '\n' ' ' | cut -c1-500)"
             fi
@@ -323,6 +452,47 @@ if grep -q 'VITE_API_BASE=' "$kit/build-bundles.sh"; then
 else
     fail "bundle build does not set VITE_API_BASE"
 fi
+if grep -q 'ajs-build.json' "$kit/build-bundles.sh"; then
+    pass "bundle build verifies the live/mock build manifest"
+else
+    fail "bundle build does not verify ajs-build.json"
+fi
+if [ -f "$repo_root/dashboard/package.json" ]; then
+    if [ -f "$repo_root/dashboard/package-lock.json" ]; then
+        pass "dashboard has a committed package-lock.json"
+    else
+        fail "dashboard/package-lock.json is missing; npm ci cannot run on a fresh checkout"
+    fi
+    if grep -q 'npm ci' "$kit/build-bundles.sh"; then
+        pass "bundle build documents the npm ci install path"
+    else
+        fail "bundle build does not document npm ci"
+    fi
+fi
+if [ -f "$repo_root/dashboard/Dockerfile" ]; then
+    if grep -q '^ARG VITE_USE_MOCK=false' "$repo_root/dashboard/Dockerfile"; then
+        pass "dashboard Dockerfile defaults to a live build"
+    else
+        fail "dashboard Dockerfile does not default VITE_USE_MOCK=false"
+    fi
+    if grep -q '^ARG VITE_PANEL_TOKEN' "$repo_root/dashboard/Dockerfile"; then
+        fail "dashboard Dockerfile accepts a VITE_PANEL_TOKEN build argument"
+    else
+        pass "dashboard Dockerfile has no VITE_PANEL_TOKEN build argument"
+    fi
+    if grep -q 'npm ci' "$repo_root/dashboard/Dockerfile"; then
+        pass "dashboard Dockerfile installs from the lockfile with npm ci"
+    else
+        fail "dashboard Dockerfile does not use npm ci"
+    fi
+fi
+if [ -d "$repo_root/.github/workflows" ]; then
+    if grep -rqE 'npm install([[:space:]]|$)' "$repo_root/.github/workflows"; then
+        fail "a workflow still runs npm install instead of npm ci"
+    else
+        pass "workflows use npm ci, not npm install"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 section "systemd unit"
@@ -371,19 +541,31 @@ if grep -q 'table inet ajs_production' "$kit/firewall/ajs-production.nft"; then
 else
     fail "firewall table declaration missing"
 fi
-if [ "${AJS_CHECK_NFT:-0}" = "1" ] && command -v nft >/dev/null 2>&1; then
-    if nft -c -f "$kit/firewall/ajs-production.nft" >/dev/null 2>&1; then
-        pass "nft -c accepts the production firewall"
+if command -v nft >/dev/null 2>&1; then
+    nft_out=""
+    nft_rc=1
+    nft_via=""
+    if nft_out=$(nft -c -f "$kit/firewall/ajs-production.nft" 2>&1); then
+        nft_rc=0; nft_via="nft"
+    elif [ "$(id -u)" -ne 0 ] && command -v unshare >/dev/null 2>&1 \
+        && nft_out=$(unshare -Urn nft -c -f "$kit/firewall/ajs-production.nft" 2>&1); then
+        nft_rc=0; nft_via="unshare -Urn nft"
+    elif [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 \
+        && nft_out=$(sudo -n nft -c -f "$kit/firewall/ajs-production.nft" 2>&1); then
+        nft_rc=0; nft_via="sudo -n nft"
+    fi
+    if [ "$nft_rc" -eq 0 ]; then
+        pass "nft -c accepts the production firewall ($nft_via)"
     else
-        fail "nft -c rejects the production firewall"
+        fail "nft -c rejects the production firewall: $(printf '%s' "$nft_out" | tr '\n' ' ' | cut -c1-500)"
     fi
 else
-    skip "nft syntax check disabled (set AJS_CHECK_NFT=1 on a host with nft and root)"
+    skip "nft not installed; production gate requires nft -c"
 fi
 
 # ---------------------------------------------------------------------------
 section "README inputs"
-for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_MASTER_KEY DNS TLS; do
+for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_MASTER_KEY DNS TLS; do
     if grep -q "$token" "$kit/README.md"; then
         pass "README documents: $token"
     else
@@ -393,9 +575,19 @@ done
 
 # ---------------------------------------------------------------------------
 printf '\n== summary ==\n'
+if [ "$mode" = production ]; then
+    if [ "$failures" -eq 0 ] && [ "$skips" -eq 0 ]; then
+        printf 'check: PASS (%s checks, 0 skipped)\n' "$checks"
+        exit 0
+    fi
+    printf 'check: FAIL (%s failed, %s required skips, %s checks)\n' \
+        "$failures" "$required_skips" "$checks"
+    exit 1
+fi
+
 if [ "$failures" -eq 0 ]; then
-    printf 'check: PASS (%s checks)\n' "$checks"
+    printf 'check: DEV-PASS (%s checks, %s skipped; not a production gate)\n' "$checks" "$skips"
     exit 0
 fi
-printf 'check: FAIL (%s failed of %s checks)\n' "$failures" "$checks"
+printf 'check: DEV-FAIL (%s failed, %s skipped, %s checks)\n' "$failures" "$skips" "$checks"
 exit 1
