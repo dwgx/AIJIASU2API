@@ -377,6 +377,195 @@ func TestPartialRefundReviewAndFullRefundRevocation(t *testing.T) {
 	}
 }
 
+// TestRecordManualRefundRefusesEpayOrder proves the provider-blind admin
+// refund path now refuses an epay order. Epay has no refund API in this build,
+// so recording a "manual" refund would fabricate evidence of money that was
+// never returned. Every case snapshots the whole store and requires the bytes
+// to be identical after the refusal: order, fulfilment job, leases, quota,
+// payment events and audit rows all stay untouched.
+func TestRecordManualRefundRefusesEpayOrder(t *testing.T) {
+	epaySettlement := func(f *orderFixture, orderID, tradeNo string) model.PaymentEvent {
+		return model.PaymentEvent{
+			Provider:    model.ProviderEpay,
+			ID:          tradeNo,
+			Kind:        model.PaymentSettled,
+			OrderID:     orderID,
+			ProviderRef: tradeNo,
+			AmountMinor: f.plan.AmountMinor,
+			Currency:    f.plan.Currency,
+			OccurredAt:  iso(*f.now),
+		}
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, f *orderFixture) model.Order
+	}{
+		{
+			name: "awaiting checkout",
+			setup: func(t *testing.T, f *orderFixture) model.Order {
+				order := f.createOrder(t, "epay-refund-awaiting")
+				if _, err := f.st.MarkOrderCheckout(f.tenant.ID, order.ID, model.ProviderEpay); err != nil {
+					t.Fatalf("MarkOrderCheckout: %v", err)
+				}
+				return order
+			},
+		},
+		{
+			name: "paid with queued job",
+			setup: func(t *testing.T, f *orderFixture) model.Order {
+				order := f.createOrder(t, "epay-refund-job")
+				if _, err := f.st.MarkOrderCheckout(f.tenant.ID, order.ID, model.ProviderEpay); err != nil {
+					t.Fatalf("MarkOrderCheckout: %v", err)
+				}
+				if _, err := f.st.SetUserEnabled(f.user.ID, false); err != nil {
+					t.Fatalf("suspend user: %v", err)
+				}
+				paid := f.apply(t, epaySettlement(f, order.ID, "trade-refund-job"))
+				if paid.State != model.OrderPaid || paid.Grant != nil || paid.Fulfilment != nil {
+					t.Fatalf("settled at capacity = %+v, want paid without grant or job", paid)
+				}
+				if _, err := f.st.SetUserEnabled(f.user.ID, true); err != nil {
+					t.Fatalf("resume user: %v", err)
+				}
+				return enqueueInitial(t, f.st, order.ID)
+			},
+		},
+		{
+			name: "active with grant",
+			setup: func(t *testing.T, f *orderFixture) model.Order {
+				order := f.createOrder(t, "epay-refund-active")
+				if _, err := f.st.MarkOrderCheckout(f.tenant.ID, order.ID, model.ProviderEpay); err != nil {
+					t.Fatalf("MarkOrderCheckout: %v", err)
+				}
+				active := f.apply(t, epaySettlement(f, order.ID, "trade-refund-active"))
+				if active.State != model.OrderActive || active.Grant == nil || len(f.st.Leases()) != 1 {
+					t.Fatalf("active epay order = %+v, leases=%d", active, len(f.st.Leases()))
+				}
+				return active
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrderFixture(t)
+			order := tc.setup(t, f)
+			quota := func() int64 {
+				user, _ := f.st.User(f.user.ID)
+				if user.QuotaBytesMonth == nil {
+					return -1
+				}
+				return *user.QuotaBytesMonth
+			}
+			before, err := f.st.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot(before): %v", err)
+			}
+			eventsBefore := len(f.st.PaymentEvents())
+			auditBefore := len(f.st.Audit(200))
+			quotaBefore := quota()
+
+			if _, err := f.st.RecordManualRefund(order.ID, "offline-refund-epay",
+				"customer request", "operator"); !errors.Is(err, ErrProviderRefundUnsupported) {
+				t.Fatalf("RecordManualRefund error = %v, want ErrProviderRefundUnsupported", err)
+			}
+
+			after, err := f.st.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot(after): %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("refused epay refund changed the store\nbefore: %s\nafter:  %s", before, after)
+			}
+			if got := len(f.st.PaymentEvents()); got != eventsBefore {
+				t.Fatalf("payment events = %d, want %d", got, eventsBefore)
+			}
+			for _, event := range f.st.PaymentEvents() {
+				if event.Provider == model.ProviderManual {
+					t.Fatalf("refused epay refund recorded a manual event: %+v", event)
+				}
+			}
+			if got := len(f.st.Audit(200)); got != auditBefore {
+				t.Fatalf("audit rows = %d, want %d", got, auditBefore)
+			}
+			current, ok := f.st.Order(order.ID)
+			if !ok || current.State != order.State || current.ReviewRequired {
+				t.Fatalf("order after refusal = %+v, ok=%t, want unchanged %s", current, ok, order.State)
+			}
+			if got := quota(); got != quotaBefore {
+				t.Fatalf("quota = %d, want %d", got, quotaBefore)
+			}
+		})
+	}
+}
+
+// TestManualFullRefundRevokesAndRestoresQuota pins the manual-order half of the
+// refund contract: an externally completed full offline refund still becomes
+// refunded, revokes the grant, releases the lease and restores the quota.
+func TestManualFullRefundRevokesAndRestoresQuota(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "manual-full-refund")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-manual-full-settle", "receipt-manual-full"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v", active)
+	}
+	refunded, err := f.st.RecordManualRefund(order.ID, "manual-full-refund-receipt", "customer request", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualRefund: %v", err)
+	}
+	if refunded.State != model.OrderRefunded || refunded.ReviewRequired || refunded.RefundedAt == nil {
+		t.Fatalf("manual refund = %+v, want refunded", refunded)
+	}
+	if refunded.Grant == nil || refunded.Grant.RevokedAt == nil {
+		t.Fatalf("manual refund grant = %+v, want revoked", refunded.Grant)
+	}
+	if len(f.st.Leases()) != 0 {
+		t.Fatalf("manual refund left %d leases", len(f.st.Leases()))
+	}
+	user, _ := f.st.User(f.user.ID)
+	if user.QuotaBytesMonth == nil || *user.QuotaBytesMonth != 1000 {
+		t.Fatalf("manual refund quota = %v, want restored 1000", user.QuotaBytesMonth)
+	}
+	events := f.st.PaymentEvents()
+	if len(events) != 2 || events[0].Provider != model.ProviderManual ||
+		events[0].Kind != model.PaymentRefunded || events[0].Result != model.PaymentApplied {
+		t.Fatalf("manual refund events = %+v", events)
+	}
+	if !containsAction(auditActions(f.st), "refund.completed") {
+		t.Fatalf("missing refund.completed audit: %v", auditActions(f.st))
+	}
+}
+
+// TestManualPartialRefundIsReviewOnly keeps the partial-refund rule for manual
+// evidence: a partial amount never revokes service and never marks the order
+// refunded; it only records review state.
+func TestManualPartialRefundIsReviewOnly(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "manual-partial-refund")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-manual-partial-settle", "receipt-manual-partial"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v", active)
+	}
+	partial := model.PaymentEvent{
+		Provider: model.ProviderManual, ID: "evt-manual-partial", Kind: model.PaymentRefunded,
+		OrderID: order.ID, ProviderRef: "partial-ref", AmountMinor: f.plan.AmountMinor - 500,
+		Currency: f.plan.Currency, OccurredAt: iso(*f.now),
+	}
+	reviewed := f.apply(t, partial)
+	if reviewed.State != model.OrderActive || !reviewed.ReviewRequired {
+		t.Fatalf("manual partial refund = %+v, want active with review", reviewed)
+	}
+	if reviewed.Grant == nil || reviewed.Grant.RevokedAt != nil || len(f.st.Leases()) != 1 {
+		t.Fatalf("manual partial refund revoked the grant")
+	}
+	events := f.st.PaymentEvents()
+	if len(events) != 2 || events[0].Result != model.PaymentReviewOnly {
+		t.Fatalf("manual partial refund events = %+v", events)
+	}
+	if !containsAction(auditActions(f.st), "refund.review") {
+		t.Fatalf("missing refund.review audit: %v", auditActions(f.st))
+	}
+}
+
 func TestRefundPolicyHookCanDeny(t *testing.T) {
 	f := newOrderFixture(t)
 	order := f.createOrder(t, "policy")

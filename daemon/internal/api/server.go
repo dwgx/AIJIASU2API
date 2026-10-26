@@ -45,6 +45,10 @@ const (
 	CodeInviteRedeemed      = "INVITE_REDEEMED"
 	CodeMethodNotAllowed    = "METHOD_NOT_ALLOWED"
 	CodeInternal            = "INTERNAL"
+	// CodeProviderRefundUnsupported is the 409 refusal of a refund for an
+	// order paid through a provider with no refund API (epay). Nothing is
+	// recorded: the order, its fulfilment job, lease and quota stay unchanged.
+	CodeProviderRefundUnsupported = "PROVIDER_REFUND_UNSUPPORTED"
 )
 
 const defaultMaxBodyBytes int64 = 1 << 20 // 1 MiB
@@ -1034,6 +1038,8 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, CodeInviteRedeemed, "invitation already redeemed")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+	case errors.Is(err, store.ErrProviderRefundUnsupported):
+		writeError(w, http.StatusConflict, CodeProviderRefundUnsupported, err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, CodeConflict, err.Error())
 	case errors.Is(err, store.ErrQuota):

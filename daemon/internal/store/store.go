@@ -29,6 +29,11 @@ var (
 	// turns false, later commits are refused and main terminates without a
 	// shutdown save instead of serving state that is not on disk.
 	ErrDurability = errors.New("state durability failed")
+	// ErrProviderRefundUnsupported reports that the order was paid through a
+	// provider that has no refund API in this build. The API maps it to 409
+	// PROVIDER_REFUND_UNSUPPORTED. A refusal must not mutate the order, its
+	// fulfilment job, the entitlement lease or the user quota.
+	ErrProviderRefundUnsupported = errors.New("provider refund unsupported")
 )
 
 // Error carries a client-safe message while keeping a matchable kind.
@@ -55,6 +60,10 @@ func conflictf(format string, args ...any) error {
 
 func upstreamf(format string, args ...any) error {
 	return &Error{Kind: ErrUpstream, Message: fmt.Sprintf(format, args...)}
+}
+
+func providerRefundUnsupportedf(format string, args ...any) error {
+	return &Error{Kind: ErrProviderRefundUnsupported, Message: fmt.Sprintf(format, args...)}
 }
 
 // Sealer encrypts account credentials at rest and removes them when an account

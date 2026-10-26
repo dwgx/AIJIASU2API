@@ -620,6 +620,144 @@ func TestPartialRefundThroughWebhookStaysActive(t *testing.T) {
 	}
 }
 
+// TestEpayRefundRefusedThroughAPIWithoutMutation pins the epay half of the
+// refund contract: epay has no refund API, so the admin route answers 409
+// PROVIDER_REFUND_UNSUPPORTED and records nothing. The whole-store snapshot
+// comparison covers order state, the fulfilment job, leases, the grant, quota,
+// payment events and audit rows.
+func TestEpayRefundRefusedThroughAPIWithoutMutation(t *testing.T) {
+	t.Run("paid with queued job", func(t *testing.T) {
+		ts, st, _ := newEpayAPITestServer(t, Config{})
+		plan := createOrderPlan(t, ts, true, 3000)
+		tenant, cookie, csrf := activePortalTenant(t, ts, st, "epay-refund-job@example.com", "u-01")
+		order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-refund-job")
+		resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+		requireStatus(t, resp, http.StatusOK)
+
+		// The fixture holds the account's only slot, so the callback records
+		// the money and leaves a queued job instead of granting service.
+		resp, body := epayNotifyCall(t, ts, epayNotifyForm(t, epayAPITestKey, order, "trade-refund-job", "30.00"))
+		if resp.StatusCode != http.StatusOK || string(body) != "fail" {
+			t.Fatalf("epay notify = %d %q, want 200 fail", resp.StatusCode, body)
+		}
+		paid, _ := st.Order(order.ID)
+		if paid.State != model.OrderPaid || paid.Fulfilment == nil || paid.Grant != nil {
+			t.Fatalf("settled order = %+v, want paid with a queued job and no grant", paid)
+		}
+		assertEpayRefundRefused(t, ts, st, tenant.ID, paid)
+	})
+
+	t.Run("active with grant", func(t *testing.T) {
+		ts, st, _ := newEpayAPITestServer(t, Config{})
+		plan := createOrderPlan(t, ts, true, 3000)
+		tenant, cookie, csrf := activePortalTenant(t, ts, st, "epay-refund-active@example.com", "u-01")
+		freeFixtureCapacity(t, st)
+		order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "epay-refund-active")
+		resp, _ := epayCheckout(t, ts, order.ID, cookie, csrf, "alipay")
+		requireStatus(t, resp, http.StatusOK)
+		resp, body := epayNotifyCall(t, ts, epayNotifyForm(t, epayAPITestKey, order, "trade-refund-active", "30.00"))
+		if resp.StatusCode != http.StatusOK || string(body) != "success" {
+			t.Fatalf("epay notify = %d %q, want 200 success", resp.StatusCode, body)
+		}
+		active, _ := st.Order(order.ID)
+		if active.State != model.OrderActive || active.Grant == nil || active.Fulfilment != nil {
+			t.Fatalf("settled order = %+v, want active with a grant", active)
+		}
+		assertEpayRefundRefused(t, ts, st, tenant.ID, active)
+	})
+}
+
+func assertEpayRefundRefused(t *testing.T, ts *httptest.Server, st *store.Store, tenantID string, beforeOrder model.Order) {
+	t.Helper()
+	quotaBefore := portalUserQuota(t, st, tenantID)
+	leasesBefore := len(st.Leases())
+	eventsBefore := len(st.PaymentEvents())
+	snapshotBefore, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(before): %v", err)
+	}
+
+	resp, body := refundOrderAPI(t, ts, beforeOrder.ID, "epay-offline-refund")
+	requireStatus(t, resp, http.StatusConflict)
+	requireErrorCode(t, body, CodeProviderRefundUnsupported)
+
+	snapshotAfter, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(after): %v", err)
+	}
+	if !bytes.Equal(snapshotBefore, snapshotAfter) {
+		t.Fatalf("refused epay refund changed the store\nbefore: %s\nafter:  %s", snapshotBefore, snapshotAfter)
+	}
+	current, _ := st.Order(beforeOrder.ID)
+	if current.State != beforeOrder.State || current.ReviewRequired || current.Provider != model.ProviderEpay {
+		t.Fatalf("order after refusal = %+v, want unchanged %+v", current, beforeOrder)
+	}
+	if (current.Fulfilment == nil) != (beforeOrder.Fulfilment == nil) {
+		t.Fatalf("fulfilment after refusal = %+v, want unchanged", current.Fulfilment)
+	}
+	if want := beforeOrder.Fulfilment; want != nil {
+		job := current.Fulfilment
+		if job.State != want.State || job.Attempts != want.Attempts || job.UpdatedAt != want.UpdatedAt ||
+			job.LastReason != want.LastReason || job.Blocked != want.Blocked {
+			t.Fatalf("fulfilment after refusal = %+v, want unchanged %+v", job, want)
+		}
+	}
+	if len(st.Leases()) != leasesBefore {
+		t.Fatalf("leases = %d, want %d", len(st.Leases()), leasesBefore)
+	}
+	requirePortalQuota(t, st, tenantID, quotaBefore)
+	events := st.PaymentEvents()
+	if len(events) != eventsBefore {
+		t.Fatalf("payment events = %d, want %d", len(events), eventsBefore)
+	}
+	for _, event := range events {
+		if event.Provider == model.ProviderManual {
+			t.Fatalf("refused epay refund recorded a manual event: %+v", event)
+		}
+	}
+}
+
+// TestStripeFullRefundWebhookRevokesThroughAPI keeps the verified provider
+// path intact: a full stripe refund still refunds, revokes the grant, releases
+// the lease and restores the quota.
+func TestStripeFullRefundWebhookRevokesThroughAPI(t *testing.T) {
+	ts, st, _ := newOrderTestServer(t, Config{
+		StripeWebhooks: payment.NewStripeCompatible(payment.StripeConfig{Secret: orderTestStripeSecret}),
+	})
+	plan := createOrderPlan(t, ts, true, 3000)
+	tenant, cookie, csrf := activePortalTenant(t, ts, st, "orders-stripe-full-refund@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "")
+	quotaBefore := portalUserQuota(t, st, tenant.ID)
+
+	resp, _ := stripeWebhookCall(t, ts, stripeCheckoutPayload("evt_stripe_full_settle", order.ID, 3000),
+		time.Now().Unix(), orderTestStripeSecret)
+	requireStatus(t, resp, http.StatusOK)
+	active, _ := st.Order(order.ID)
+	if active.State != model.OrderActive || active.Grant == nil || active.Grant.RevokedAt != nil {
+		t.Fatalf("settled order = %+v, want active with a live grant", active)
+	}
+	leasesBefore := len(st.Leases())
+
+	resp, _ = stripeWebhookCall(t, ts, stripeRefundPayload("evt_stripe_full_refund", order.ID, 3000),
+		time.Now().Unix(), orderTestStripeSecret)
+	requireStatus(t, resp, http.StatusOK)
+	refunded, _ := st.Order(order.ID)
+	if refunded.State != model.OrderRefunded || refunded.RefundedAt == nil {
+		t.Fatalf("full refund = %+v, want refunded", refunded)
+	}
+	if refunded.Grant == nil || refunded.Grant.RevokedAt == nil {
+		t.Fatalf("full refund grant = %+v, want revoked", refunded.Grant)
+	}
+	if len(st.Leases()) != leasesBefore-1 {
+		t.Fatalf("leases = %d, want %d", len(st.Leases()), leasesBefore-1)
+	}
+	requirePortalQuota(t, st, tenant.ID, quotaBefore)
+	if _, ok := findAuditAction(st.Audit(50), "refund.completed"); !ok {
+		t.Fatalf("missing refund.completed audit: %+v", st.Audit(50))
+	}
+}
+
 func TestAdminPlansCRUDAndDeactivationScope(t *testing.T) {
 	ts, st, _ := newOrderTestServer(t, Config{})
 	plan := createOrderPlan(t, ts, true, 3000)

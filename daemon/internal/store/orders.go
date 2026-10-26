@@ -531,7 +531,10 @@ func (s *Store) cancelOrderLocked(idx int, actor string) (model.Order, error) {
 
 // RecordManualRefund records an already completed full offline refund. The
 // amount comes from the immutable snapshot, never from the caller, and the
-// reference is required so the reversal has evidence behind it.
+// reference is required so the reversal has evidence behind it. Epay has no
+// refund API in this build, so an epay order is refused outright: recording a
+// "manual" refund for it would fabricate local evidence of money that was
+// never returned.
 func (s *Store) RecordManualRefund(orderID, reference, reason, actor string) (model.Order, error) {
 	ref, err := normalizeOrderReference(reference)
 	if err != nil {
@@ -548,6 +551,10 @@ func (s *Store) RecordManualRefund(orderID, reference, reason, actor string) (mo
 		return model.Order{}, notFoundf("order %q not found", orderID)
 	}
 	order := &s.orders[idx].Order
+	if order.Provider == model.ProviderEpay {
+		return model.Order{}, providerRefundUnsupportedf(
+			"order %q is an epay order, which has no refund API; no refund was recorded", order.ID)
+	}
 	event := model.PaymentEvent{
 		Provider:    model.ProviderManual,
 		ID:          manualEventID("refund", order.ID, ref),

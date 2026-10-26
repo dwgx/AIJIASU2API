@@ -157,7 +157,9 @@ func (s *Server) handleSettleOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRefundOrder records an already completed full offline refund. It never
-// transfers money and never creates a new payment.
+// transfers money and never creates a new payment. An epay order is refused
+// with 409 PROVIDER_REFUND_UNSUPPORTED: epay has no refund API, so recording a
+// local reversal would fabricate evidence.
 func (s *Server) handleRefundOrder(w http.ResponseWriter, r *http.Request) {
 	var in model.OrderRefundRequest
 	if !decodeJSON(w, r, &in) {
