@@ -18,12 +18,23 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, whoamiResponse{Name: adminOperatorFallback, Kind: "legacy", StrictRBAC: s.cfg.StrictRBAC})
 		return
 	}
-	if identity.operator != "" {
+	if identity.rbac && identity.operator != "" {
 		writeJSON(w, http.StatusOK, whoamiResponse{Name: identity.operator, Role: string(identity.role), Kind: "operator", StrictRBAC: s.cfg.StrictRBAC})
 		return
 	}
 	if identity.key.ID != "" {
 		writeJSON(w, http.StatusOK, whoamiResponse{Name: "key:" + identity.key.UserName, Kind: "scoped-key", StrictRBAC: s.cfg.StrictRBAC})
+		return
+	}
+	if identity.admin {
+		// The compatibility shared bearer has full admin authority but no
+		// operator entry, so its role is reported explicitly as admin while
+		// the kind stays legacy. An optional audit label remains the name.
+		name := identity.operator
+		if name == "" {
+			name = adminOperatorFallback
+		}
+		writeJSON(w, http.StatusOK, whoamiResponse{Name: name, Role: string(RoleAdmin), Kind: "legacy", StrictRBAC: s.cfg.StrictRBAC})
 		return
 	}
 	writeJSON(w, http.StatusOK, whoamiResponse{Name: adminOperatorFallback, Kind: "legacy", StrictRBAC: s.cfg.StrictRBAC})
