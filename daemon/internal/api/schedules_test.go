@@ -180,6 +180,7 @@ func TestScheduleAPIListCreatePatchDelete(t *testing.T) {
 
 	req := newRequest(t, http.MethodPatch, ts.URL+"/v1/schedules/"+created.ID, map[string]any{"enabled": true})
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
 	req.Header.Set("If-Match", etag)
 	resp, body = doRequest(t, ts, req)
 	requireStatus(t, resp, http.StatusOK)
@@ -193,6 +194,7 @@ func TestScheduleAPIListCreatePatchDelete(t *testing.T) {
 
 	req = newRequest(t, http.MethodPatch, ts.URL+"/v1/schedules/"+created.ID, map[string]any{"name": "stale"})
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
 	req.Header.Set("If-Match", etag)
 	resp, body = doRequest(t, ts, req)
 	requireStatus(t, resp, http.StatusPreconditionFailed)
@@ -325,6 +327,7 @@ func TestScheduleAPIArmConfirmation(t *testing.T) {
 	req := newRequest(t, http.MethodPatch, ts.URL+"/v1/schedules/"+created.ID,
 		map[string]any{"guard": map[string]any{"dryRun": false}})
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
 	req.Header.Set("If-Match", etag)
 	resp, body = doRequest(t, ts, req)
 	requireStatus(t, resp, http.StatusConflict)
@@ -333,6 +336,7 @@ func TestScheduleAPIArmConfirmation(t *testing.T) {
 	req = newRequest(t, http.MethodPatch, ts.URL+"/v1/schedules/"+created.ID,
 		map[string]any{"guard": map[string]any{"dryRun": false}, "confirm": "ARM"})
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
 	req.Header.Set("If-Match", etag)
 	resp, body = doRequest(t, ts, req)
 	requireStatus(t, resp, http.StatusOK)

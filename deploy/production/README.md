@@ -68,11 +68,13 @@ tree or generated on the host.
 Replace `panel.example.com` and `admin.example.com` in:
 - `nginx/sites-available/ajs-portal.conf` (`server_name`, certificate paths)
 - `nginx/sites-available/ajs-admin.conf` (`server_name`, certificate paths)
-- `systemd/ajs-accountd.env.example` (`AJS_TENANT_ORIGIN`)
+- `systemd/ajs-accountd.env.example` (`AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`)
 
 `AJS_TENANT_ORIGIN` must be the exact bare origin (`https://panel.example.com`),
 with no path, query or trailing slash. The daemon refuses a path and uses the
-value for the portal's exact `Origin` check.
+value for the portal's exact `Origin` check. `AJS_ADMIN_ORIGINS` must be the
+admin SPA's exact bare origin (`https://admin.example.com:8443` in this kit);
+unsafe admin requests from any other `Origin` are refused before the handler.
 
 ### TLS certificates
 
@@ -134,6 +136,7 @@ root-owned `0600`. systemd reads it as root before dropping to `User=ajs`.
 | `AJS_TENANT_ORIGIN` | yes | `https://panel.example.com` | exact browser origin allowed on portal signup/login and every unsafe portal request |
 | `AJS_TRUSTED_PROXIES` | yes | `127.0.0.1,::1` | only nginx's loopback peers may supply `X-Forwarded-For`; never a public CIDR or `0.0.0.0/0` |
 | `AJS_CORS_ORIGINS` | optional | empty | both bundles are same-origin through nginx; set only for a separate browser client |
+| `AJS_ADMIN_ORIGINS` | yes | `https://admin.example.com:8443` | exact browser origin allowed on every unsafe admin request; the admin SPA is served from this origin and nginx injects the bearer. Requests without `Origin` (CLI/SDK) must send `X-AJS-CSRF: 1` |
 | `AJS_LOG_LEVEL` | optional | `info` | `debug` only while diagnosing |
 | `AJS_ACCOUNT_LOGIN` | optional | `0` | keep off until an account exists; `1` contacts the vendor login path |
 | `AJS_CONTROL_CERT_SHA256` | with login | vendor leaf fingerprint | the control hosts use a self-signed `CN=localhost` cert; pin it when `AJS_ACCOUNT_LOGIN=1` |
@@ -302,6 +305,15 @@ Access policy is two independent layers:
 2. **nginx `allow`/`deny`** — loopback plus the VPN client CIDR
    (`10.8.0.0/24` in the template), ending in `deny all;`. Requests from any
    other peer get 403 even if the listener is accidentally exposed.
+
+The daemon adds a third layer on every unsafe admin request (`POST`, `PUT`,
+`PATCH`, `DELETE`): it requires the non-simple `X-AJS-CSRF: 1` header and, when
+an `Origin` header is present, an exact match against `AJS_ADMIN_ORIGINS`
+(`https://admin.example.com:8443` in the template). A cross-origin HTML form
+cannot set the header; a cross-origin `fetch` that tries must pass a CORS
+preflight, and the admin origin is not in `AJS_CORS_ORIGINS`. CLI and SDK
+clients omit `Origin` but must send the header. Do not strip `Origin` at the
+proxy; the shipped nginx config passes it through.
 
 There is no admin login page and no per-operator identity in this kit: the
 bearer is one shared secret. Put an authenticating reverse proxy or VPN in

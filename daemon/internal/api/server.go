@@ -79,8 +79,13 @@ type Config struct {
 	AdminToken    string
 	AllowInsecure bool
 	CORSOrigins   []string
-	MaxBodyBytes  int64
-	Version       string
+	// AdminOrigins is the exact browser-origin allowlist for unsafe admin
+	// requests (AJS_ADMIN_ORIGINS). Empty falls back to CORSOrigins; an Origin
+	// header that is present but not allowlisted is refused. Requests without
+	// an Origin header are non-browser clients and must still send X-AJS-CSRF.
+	AdminOrigins []string
+	MaxBodyBytes int64
+	Version      string
 	// Panel is set when AJS_RESIN_ADMIN_TOKEN is configured; it makes
 	// /v1/topology report the live Resin view and enables /v1/reconcile.
 	// Account delete/logout also reconcile it after the store mutation.
@@ -234,12 +239,13 @@ type Config struct {
 
 // Server wires the store to an http.Handler.
 type Server struct {
-	cfg     Config
-	store   *store.Store
-	logger  *slog.Logger
-	origins map[string]struct{}
-	started time.Time // set in New; backs ajs_uptime_seconds
-	handler http.Handler
+	cfg          Config
+	store        *store.Store
+	logger       *slog.Logger
+	origins      map[string]struct{}
+	adminOrigins map[string]struct{}
+	started      time.Time // set in New; backs ajs_uptime_seconds
+	handler      http.Handler
 
 	// accountIOMu serializes export, import and bulk delete. TryLock turns a
 	// concurrent bulk operation into 409 instead of queueing memory- and
@@ -301,7 +307,28 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) *Server {
 			origins[origin] = struct{}{}
 		}
 	}
-	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, started: time.Now(), restore: cfg.Restore}
+	// An unset admin allowlist follows the CORS list so the loopback dashboard
+	// keeps working in development. A deployment with a same-origin admin SPA
+	// sets AJS_ADMIN_ORIGINS explicitly; a browser Origin that is not in this
+	// map is refused even when CORS would allow it.
+	adminOriginValues := cfg.AdminOrigins
+	if len(adminOriginValues) == 0 {
+		adminOriginValues = cfg.CORSOrigins
+	}
+	adminOrigins := make(map[string]struct{}, len(adminOriginValues))
+	for _, raw := range adminOriginValues {
+		origin, err := normalizeOrigin(raw)
+		if err != nil {
+			// New cannot return an error; main validates the env before calling
+			// it. Fail closed here: an invalid entry is never allowed.
+			logger.Error("admin_origin_invalid", "origin", raw, "error", err)
+			continue
+		}
+		if origin != "" {
+			adminOrigins[origin] = struct{}{}
+		}
+	}
+	s := &Server{cfg: cfg, store: st, logger: logger, origins: origins, adminOrigins: adminOrigins, started: time.Now(), restore: cfg.Restore}
 	if cfg.WebhookSecrets == nil {
 		s.webhookSecrets = make(map[string]string)
 	}
@@ -334,6 +361,7 @@ func (s *Server) buildHandler() http.Handler {
 	rt := &router{}
 	s.routes(rt)
 	var h http.Handler = rt
+	h = s.adminCSRF(h)
 	h = s.auth(h)
 	h = s.bodyLimit(h)
 	h = s.cors(h)
@@ -620,7 +648,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, If-Match, Idempotency-Key")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, If-Match, Idempotency-Key, X-AJS-CSRF")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
 			w.WriteHeader(http.StatusNoContent)

@@ -65,6 +65,10 @@ Then edit `.env`:
 - `AJS_CORS_ORIGINS` — browser origin allowed to call the API. The default is the dashboard
   published on `18081`; add `http://127.0.0.1:18082` if you also run the standalone `vite preview`
   live build.
+- `AJS_ADMIN_ORIGINS` — exact browser origins allowed on every unsafe admin request
+  (`POST`/`PUT`/`PATCH`/`DELETE`). Defaults to `AJS_CORS_ORIGINS`; set it explicitly when the
+  admin UI is served from a different origin. Requests without `Origin` (CLI/SDK) must still
+  send `X-AJS-CSRF: 1`.
 - `AJS_TLS_CERT` / `AJS_TLS_KEY` / `AJS_TLS_LISTEN` — optional HTTPS admin listener. Leave them
   empty to keep the plaintext loopback listener only; see
   [TLS for the admin API](#tls-for-the-admin-api-optional-ajs-276).

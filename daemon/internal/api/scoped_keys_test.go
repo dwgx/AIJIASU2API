@@ -22,6 +22,9 @@ func scopedCall(t *testing.T, ts *httptest.Server, secret, method, path string, 
 	t.Helper()
 	req := newRequest(t, method, ts.URL+path, body)
 	req.Header.Set("Authorization", "Bearer "+secret)
+	if isUnsafeMethod(method) {
+		req.Header.Set(adminCSRFHeader, adminCSRFValue)
+	}
 	return doRequest(t, ts, req)
 }
 

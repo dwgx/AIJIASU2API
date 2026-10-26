@@ -59,8 +59,10 @@ closes the stream. Abort it with `streamEvents({ signal })`. `selectNode` has th
 | Events | `ListEvents`, `StreamEvents`, `FollowEvents` | `listEvents`, `streamEvents` | `GET /v1/events`, `GET /v1/events/stream` |
 
 Every client method sends `Authorization: Bearer <token>` and `Accept: application/json` (the SSE
-stream sends `text/event-stream`). Resource ids are path-escaped; query parameters are omitted
-when empty.
+stream sends `text/event-stream`). Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) also sends
+`X-AJS-CSRF: 1`, the daemon's non-simple admin-mutation header; clients do not send `Origin`, which
+the daemon treats as the explicit non-browser path. Resource ids are path-escaped; query parameters
+are omitted when empty.
 
 ## Errors
 

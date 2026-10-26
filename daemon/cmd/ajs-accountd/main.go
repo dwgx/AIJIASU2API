@@ -60,6 +60,7 @@ func run() error {
 	token := flag.String("token", os.Getenv("AJS_ADMIN_TOKEN"), "admin bearer token (env AJS_ADMIN_TOKEN)")
 	insecure := flag.Bool("insecure", os.Getenv("AJS_ALLOW_INSECURE") == "1", "disable bearer auth (env AJS_ALLOW_INSECURE=1)")
 	corsOrigins := flag.String("cors-origins", envOr("AJS_CORS_ORIGINS", strings.Join(api.DefaultCORSOrigins, ",")), "comma-separated allowed CORS origins")
+	adminOrigins := flag.String("admin-origins", os.Getenv("AJS_ADMIN_ORIGINS"), "comma-separated exact browser origins allowed on unsafe admin requests (env AJS_ADMIN_ORIGINS; default AJS_CORS_ORIGINS)")
 	logLevel := flag.String("log-level", envOr("AJS_LOG_LEVEL", "info"), "debug, info, warn or error")
 	resinURL := flag.String("resin-url", envOr(resin.EnvBaseURL, resin.DefaultBaseURL), "Resin admin API base URL (env AJS_RESIN_URL)")
 	resinToken := flag.String("resin-token", os.Getenv(resin.EnvAdminToken), "Resin admin bearer token (env AJS_RESIN_ADMIN_TOKEN); empty disables the integration")
@@ -110,6 +111,18 @@ func run() error {
 	// partial configuration aborts before the listener starts. A configured
 	// origin without the flag is ignored with a warning (see below).
 	tenantOriginValue, trustedProxyValues, err := tenantPortalConfig(*tenantPortal, *tenantOrigin, *trustedProxies)
+	if err != nil {
+		return err
+	}
+	// AJS_ADMIN_ORIGINS is the exact browser-origin allowlist for unsafe admin
+	// requests. Unset follows AJS_CORS_ORIGINS so the loopback dev dashboard
+	// keeps working; a malformed entry aborts startup instead of silently
+	// leaving the browser path unchecked.
+	adminOriginRaw := strings.TrimSpace(*adminOrigins)
+	if adminOriginRaw == "" {
+		adminOriginRaw = *corsOrigins
+	}
+	adminOriginValues, err := api.NormalizeAdminOrigins(splitList(adminOriginRaw))
 	if err != nil {
 		return err
 	}
@@ -553,6 +566,7 @@ func run() error {
 		AdminToken:           *token,
 		AllowInsecure:        *insecure,
 		CORSOrigins:          splitList(*corsOrigins),
+		AdminOrigins:         adminOriginValues,
 		Version:              api.DefaultVersion,
 		StateDir:             envOr("AJS_STATE_DIR", "./data"),
 		StatePath:            statePath,

@@ -190,6 +190,9 @@ func apiDo(ts *httptest.Server, method, path string) apiHTTPResult {
 		return apiHTTPResult{err: err}
 	}
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		req.Header.Set("X-AJS-CSRF", "1")
+	}
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		return apiHTTPResult{err: err}

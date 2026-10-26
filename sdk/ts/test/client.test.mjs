@@ -76,6 +76,7 @@ test("listAccounts sends auth, query and decodes", async () => {
   assert.equal(url.searchParams.get("limit"), "5");
   assert.equal(url.searchParams.get("offset"), "10");
   assert.equal(calls[0].init.headers.Authorization, `Bearer ${token}`);
+  assert.equal(calls[0].init.headers["X-AJS-CSRF"], undefined);
   assert.equal(String(client).includes(token), false);
   assert.match(calls[0].init.headers["User-Agent"], /^ajs-sdk-ts\//);
 });
@@ -166,6 +167,7 @@ test("createLease generates a matching key and retries safely", async () => {
   const { client, calls } = stubClient((call, n) => {
     if (n === 1) return json({ error: { code: "INTERNAL", message: "boom" } }, 500);
     assert.equal(call.init.headers["Idempotency-Key"], call.body.idempotencyKey);
+    assert.equal(call.init.headers["X-AJS-CSRF"], "1");
     assert.match(call.body.idempotencyKey, /^sdk-/);
     return json(
       {

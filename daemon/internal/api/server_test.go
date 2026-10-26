@@ -71,6 +71,11 @@ func apiCall(t *testing.T, ts *httptest.Server, method, path string, body any) (
 	t.Helper()
 	req := newRequest(t, method, ts.URL+path, body)
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	if isUnsafeMethod(method) {
+		// The daemon requires a non-simple header on every admin mutation.
+		// Tests using apiCall act as a non-browser client: no Origin header.
+		req.Header.Set(adminCSRFHeader, adminCSRFValue)
+	}
 	return doRequest(t, ts, req)
 }
 
@@ -1421,7 +1426,7 @@ func TestCORSPreflight(t *testing.T) {
 	req := newRequest(t, http.MethodOptions, ts.URL+"/v1/accounts", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:18081")
 	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type")
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type, x-ajs-csrf")
 	resp, body := doRequest(t, ts, req)
 	requireStatus(t, resp, http.StatusNoContent)
 	if len(body) != 0 {
@@ -1433,7 +1438,7 @@ func TestCORSPreflight(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "DELETE") || !strings.Contains(got, "PATCH") {
 		t.Fatalf("allow methods = %q", got)
 	}
-	if got := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers")); !strings.Contains(got, "authorization") {
+	if got := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers")); !strings.Contains(got, "authorization") || !strings.Contains(got, "x-ajs-csrf") {
 		t.Fatalf("allow headers = %q", got)
 	}
 

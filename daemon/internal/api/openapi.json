@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the proposed next-phase interfaces. All routes are loopback-only. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 operations are the proposed next-phase contract (account IO, catalog selection/connect, schedules) and may not be registered in a given build. See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -316,7 +316,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/accounts/io/capabilities": {
@@ -426,7 +431,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/accounts/import": {
@@ -473,7 +483,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/accounts/bulk-delete": {
@@ -517,7 +532,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/accounts/{id}": {
@@ -592,6 +612,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -632,6 +655,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -674,6 +700,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -710,6 +739,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -985,7 +1017,12 @@
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/device-pool/{id}": {
@@ -1067,6 +1104,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1119,6 +1159,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1171,6 +1214,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1223,6 +1269,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1275,6 +1324,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1320,6 +1372,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1368,7 +1423,12 @@
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/device-pool/import": {
@@ -1422,7 +1482,12 @@
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/accounts/{id}/selection": {
@@ -1497,6 +1562,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -1534,6 +1602,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -1582,6 +1653,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -1608,6 +1682,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -1733,6 +1810,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -1791,6 +1871,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -2070,7 +2153,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/lab/profiles": {
@@ -2300,6 +2388,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2345,6 +2436,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2384,6 +2478,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2442,6 +2539,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -2533,6 +2633,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2586,6 +2689,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2671,7 +2777,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/users/{id}": {
@@ -2712,6 +2823,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -2752,6 +2866,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2788,6 +2905,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2824,6 +2944,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -2863,6 +2986,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -2961,7 +3087,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/apikeys/{id}": {
@@ -2989,6 +3120,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -3083,7 +3217,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/audit": {
@@ -3279,7 +3418,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/topology": {
@@ -3418,7 +3562,12 @@
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/operations": {
@@ -3548,6 +3697,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "responses": {
@@ -3671,7 +3823,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/schedules/{id}": {
@@ -3746,6 +3903,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -3786,6 +3946,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -3944,7 +4107,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/schedules/{id}/actions/run": {
@@ -3989,6 +4157,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -4141,7 +4312,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/scoped-keys/{id}": {
@@ -4209,6 +4385,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -4468,7 +4647,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/webhooks/{id}": {
@@ -4512,6 +4696,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -4552,6 +4739,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -4866,7 +5056,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/backup/inspect": {
@@ -4914,7 +5109,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/backup/restore": {
@@ -4968,7 +5168,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/portal/signup": {
@@ -5553,6 +5758,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -5605,6 +5813,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -5647,6 +5858,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ]
       }
@@ -6075,7 +6289,12 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ]
       }
     },
     "/v1/admin/plans/{id}": {
@@ -6158,6 +6377,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -6182,6 +6404,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "responses": {
@@ -6322,6 +6547,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -6384,6 +6612,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -6443,6 +6674,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "requestBody": {
@@ -6502,6 +6736,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
           }
         ],
         "responses": {
@@ -6832,7 +7069,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback."
+        "description": "AJS_ADMIN_TOKEN as an Authorization: Bearer token, or an ajs_sk_ scoped key issued by POST /v1/scoped-keys. Only /healthz is unauthenticated. AJS_ALLOW_INSECURE=1 disables the check on loopback. Every unsafe admin request also requires X-AJS-CSRF: 1, and an Origin header must exactly match AJS_ADMIN_ORIGINS."
       },
       "portalCookie": {
         "type": "apiKey",
@@ -6863,7 +7100,7 @@
         }
       },
       "Forbidden": {
-        "description": "FORBIDDEN: the scoped key lacks the route scope, the account is outside its accountIds/regions, or a portal request failed its origin, CSRF or tenant-status check.",
+        "description": "FORBIDDEN: the scoped key lacks the route scope, the account is outside its accountIds/regions, a portal request failed its origin, CSRF or tenant-status check, or an admin request failed the X-AJS-CSRF header or exact Origin allowlist check.",
         "content": {
           "application/json": {
             "schema": {
@@ -7113,6 +7350,18 @@
           "maxLength": 128
         },
         "description": "Retry-safe order-create key. The same key and plan replays the original order (200); the same key with a different plan answers 409."
+      },
+      "AdminCSRF": {
+        "name": "X-AJS-CSRF",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "description": "Non-simple CSRF header required on every unsafe admin request. A cross-origin HTML form cannot set it; a cross-origin fetch must pass a CORS preflight that only an allowlisted admin origin receives. Requests without an Origin header (CLI/SDK clients) must also send it."
       }
     },
     "schemas": {

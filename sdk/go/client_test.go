@@ -46,6 +46,9 @@ func TestListAccountsSendsAuthAndQuery(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {
 			t.Errorf("Authorization = %q", got)
 		}
+		if got := r.Header.Get("X-AJS-CSRF"); got != "" {
+			t.Errorf("GET sent X-AJS-CSRF = %q, want none", got)
+		}
 		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "ajs-sdk-go/") {
 			t.Errorf("User-Agent = %q", got)
 		}
@@ -179,6 +182,9 @@ func TestCreateLeaseGeneratesMatchingIdempotencyKey(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/leases" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-AJS-CSRF"); got != "1" {
+			t.Errorf("X-AJS-CSRF = %q, want 1", got)
 		}
 		headerKey = r.Header.Get("Idempotency-Key")
 		var body map[string]any

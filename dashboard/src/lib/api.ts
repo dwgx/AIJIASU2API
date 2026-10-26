@@ -383,6 +383,13 @@ async function request(
   const headers = new Headers(init.headers)
   if (!headers.has('Accept')) headers.set('Accept', 'application/json')
   if (init.body) headers.set('Content-Type', 'application/json')
+  const method = (init.method ?? 'GET').toUpperCase()
+  // Admin mutations require a non-simple header. A cross-origin form cannot
+  // set it, and a cross-origin fetch must pass a CORS preflight that only an
+  // allowlisted admin origin receives. It is a constant, not a secret.
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    headers.set('X-AJS-CSRF', '1')
+  }
   if (panelToken) headers.set('Authorization', `Bearer ${panelToken}`)
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!response.ok) {

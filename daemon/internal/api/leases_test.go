@@ -87,6 +87,7 @@ func createLeaseCall(t *testing.T, ts *httptest.Server, body map[string]any, hea
 	t.Helper()
 	req := newRequest(t, http.MethodPost, ts.URL+"/v1/leases", body)
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set(adminCSRFHeader, adminCSRFValue)
 	if headerKey != "" {
 		req.Header.Set("Idempotency-Key", headerKey)
 	}

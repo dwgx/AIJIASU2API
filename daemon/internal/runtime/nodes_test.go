@@ -723,6 +723,7 @@ func TestNodeDrainHTTPHookDrivesGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new %s request: %v", action, err)
 		}
+		req.Header.Set("X-AJS-CSRF", "1")
 		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", action, err)
@@ -1048,6 +1049,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	req.Header.Set("X-AJS-CSRF", "1")
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("DELETE: %v", err)
@@ -1090,6 +1092,7 @@ func TestAccountDeleteStopsGatesBeforeStoreCascade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	req.Header.Set("X-AJS-CSRF", "1")
 	resp, err = ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("second DELETE: %v", err)
@@ -1158,6 +1161,7 @@ func TestAccountLogoutStopsGatesBeforeStoreDrain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
+		req.Header.Set("X-AJS-CSRF", "1")
 		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatalf("logout: %v", err)

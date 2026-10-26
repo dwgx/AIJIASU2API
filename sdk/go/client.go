@@ -278,6 +278,14 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// The daemon requires a non-simple header on every admin mutation. A
+	// cross-origin form cannot set it; a browser fetch must pass a CORS
+	// preflight that only an allowlisted admin origin receives.
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		req.Header.Set("X-AJS-CSRF", "1")
+	}
 	for name, values := range headers {
 		req.Header.Del(name)
 		for _, value := range values {

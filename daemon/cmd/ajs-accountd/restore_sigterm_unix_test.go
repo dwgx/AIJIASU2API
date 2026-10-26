@@ -144,6 +144,7 @@ func TestGracefulSIGTERMKeepsRestoredState(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-AJS-CSRF", "1")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("apply restore: %v\nlogs:\n%s", err, logs.String())

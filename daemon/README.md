@@ -1495,7 +1495,8 @@ test binary as the child.
 | `AJS_EPAY_RETURN_URL` | `-epay-return-url` | derived or omitted | optional public browser return URL after checkout. Empty derives `AJS_TENANT_ORIGIN + /portal` when a tenant origin is set; otherwise checkout omits it (poll-only) |
 | `AJS_ALLOW_PLAINTEXT` | — | `0` | `1` allows a non-`https` entry in `AJS_API_HOSTS` (local lab mock only) |
 | `AJS_ALLOW_PLAINTEXT_EXPORT` | — | `0` | `1` allows JSON and CSV account export; the request must also send `confirmPlaintext:"EXPORT"`. Encrypted `.ajsx` export is always available. Off by default because the file is plaintext credentials |
-| `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins |
+| `AJS_CORS_ORIGINS` | `-cors-origins` | `http://127.0.0.1:18081,http://127.0.0.1:5173` | comma-separated exact origins allowed to read CORS responses. This is a browser read allowlist, not the admin mutation origin check |
+| `AJS_ADMIN_ORIGINS` | `-admin-origins` | `AJS_CORS_ORIGINS` | comma-separated exact browser origins allowed on every unsafe admin request. An `Origin` header that is present must match one entry exactly; a request without `Origin` is treated as a non-browser client and must still send `X-AJS-CSRF: 1`. Set it to the admin SPA's exact origin (for example `https://admin.example.com:8443`) in a same-origin production deployment. A malformed entry fails startup |
 | `AJS_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `AJS_ACCOUNT_LOGIN` | — | `0` | `1` enables the vendor login path and the node controller (login → `loginSync` → one loopback gate per usable server); anything else logs `account_login_disabled` and keeps the store-only refresh |
 | `AJS_ACCOUNT_SLOTS` | — | `1` | per-account display capacity cap, 1–2000. Effective slots = `min(vendor UseCount, this value, 8)`; `UseCount` is parsed from the login response (default 1, clamped 1–2000) and persisted. Lease admission counts verified serving slots (see “Multi-slot containment”), so a value above 1 raises capacity only as far as live, listener-bound slots exist; lease creates on a display capacity above 1 also carry `warning: multi_session_unimplemented` for API compatibility. An invalid value falls back to `1` |
@@ -1974,7 +1975,7 @@ AJS_TENANT_PORTAL=1 AJS_TENANT_ORIGIN=https://panel.example.com \
 # signup -> 202 {"status":"pending"}; admin lists and approves:
 curl -H "Authorization: Bearer $AJS_ADMIN_TOKEN" \
   "https://panel.example.com/v1/admin/tenants?status=pending"
-curl -X POST -H "Authorization: Bearer $AJS_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+curl -X POST -H "Authorization: Bearer $AJS_ADMIN_TOKEN" -H 'Content-Type: application/json' -H 'X-AJS-CSRF: 1' \
   -d '{"userId":"u-01"}' \
   "https://panel.example.com/v1/admin/tenants/t-01/approve"
 ```
@@ -2539,6 +2540,13 @@ All `/v1/*` routes — including the Lab `/v1/lab/*` set below — and `GET /met
 the route's scope (see [Scoped API keys](#scoped-api-keys)). `/healthz` is unauthenticated. List
 endpoints return bare JSON arrays, matching `api.ts` (`Account[]`, `ProxyNode[]`, …), not wrapper
 objects.
+
+Every unsafe admin request (`POST`, `PUT`, `PATCH`, `DELETE`) must also send `X-AJS-CSRF: 1`.
+When the request carries an `Origin` header it must exactly match one entry in
+`AJS_ADMIN_ORIGINS`; a request without `Origin` is a non-browser client and is allowed only with
+the header. The two payment provider callbacks (`/v1/payments/stripe` and
+`/v1/payments/epay/notify`) and the customer portal chain are outside this gate: the providers
+authenticate a signature over the raw body and the portal uses its per-session `X-CSRF-Token`.
 
 | Method | Path | Behavior |
 |---|---|---|

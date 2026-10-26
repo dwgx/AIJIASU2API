@@ -878,6 +878,9 @@ func apiCall(t *testing.T, ts *httptest.Server, method, path string, payload ...
 	if reader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		req.Header.Set("X-AJS-CSRF", "1")
+	}
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)

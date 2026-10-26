@@ -204,6 +204,9 @@ export class Client {
         Accept: "application/json",
         "User-Agent": this.userAgent,
         ...(payload !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(method !== "GET" && method !== "HEAD" && method !== "OPTIONS"
+          ? { "X-AJS-CSRF": "1" }
+          : {}),
         ...options.headers,
       };
 

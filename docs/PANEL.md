@@ -42,7 +42,9 @@ not a silent reallocation.
 ## 3. `ajs-accountd` HTTP API
 
 All routes are loopback-only and require `Authorization: Bearer $AJS_ADMIN_TOKEN` (empty token
-disables auth and is refused unless `AJS_ALLOW_INSECURE=1`).
+disables auth and is refused unless `AJS_ALLOW_INSECURE=1`). Every unsafe admin request must also
+send `X-AJS-CSRF: 1`, and an `Origin` header must exactly match `AJS_ADMIN_ORIGINS`; non-browser
+clients omit `Origin` but still send the header.
 
 ### Accounts
 

@@ -192,7 +192,10 @@ As of 2026-10-25:
   `X-Forwarded-For` is believed): signup stores a pending tenant only, login issues a
   `__Host-ajs_portal` cookie (Secure, HttpOnly, SameSite=Strict, 8 h absolute/30 min idle) plus a
   CSRF token that every unsafe method must replay, approval binds exactly one panel user, and the
-  portal reads only the linked user's leases, usage and keys. It also adds a through-gate egress
+  portal reads only the linked user's leases, usage and keys. Every unsafe admin request also
+  requires the non-simple `X-AJS-CSRF: 1` header and, when `Origin` is present, an exact match
+  against `AJS_ADMIN_ORIGINS`; CLI and SDK clients omit `Origin` but must send the header.
+  It also adds a through-gate egress
   probe (`AJS_EGRESS_PROBE=1`, `AJS_EGRESS_INTERVAL` ≥ 10 s, `AJS_EGRESS_TARGET`) that folds a
   real sample into each `/v1/health/nodes` row, `lease.created`/`lease.revoked`/`lease.expired`
   webhook events, and durable monthly usage counters (`usageMonth`/`monthlyUsage`/`accountUsage`)

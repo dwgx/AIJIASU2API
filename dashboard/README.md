@@ -1366,6 +1366,10 @@ bearer to every browser. The runtime token gate keeps a token in `sessionStorage
 instead, and production should still terminate auth in a BFF or reverse proxy. The default build
 remains mock-only and embeds no token.
 
+Every unsafe live request also sends `X-AJS-CSRF: 1`. The daemon requires that non-simple header
+on admin mutations and, when the browser supplies `Origin`, validates it exactly against
+`AJS_ADMIN_ORIGINS`.
+
 Live paths implemented by the client (`[SPEC]` = in `docs/PANEL.md`, `[PROPOSED]` = dashboard
 contract only):
 
