@@ -25,7 +25,7 @@ feature only when strict mode is off.
 | Customer users, proxy keys, scoped keys and webhook administration | no | no | yes |
 | Read scoped-key inventory or webhook receivers/deliveries | no | no | yes |
 | Account device read, plans/orders/tenant reads | no | no | yes |
-| Plans, tenant approval, settlement/refund/chargeback/cancel/reissue | no | no | yes |
+| Plans, tenant approval, settlement/refund/chargeback/cancel/reissue, and retry-fulfilment (resets a dead-lettered fulfilment job for an immediate retry) | no | no | yes |
 | Settings, backup/inspect/restore | no | no | yes |
 
 GET defaults to `viewer`, except explicitly sensitive reads. Unsafe methods
