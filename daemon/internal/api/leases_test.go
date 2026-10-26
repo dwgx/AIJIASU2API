@@ -684,7 +684,7 @@ func TestGetLeaseConnection(t *testing.T) {
 	}
 	want := model.LeaseConnection{
 		Host: "127.0.0.1", Port: 13000, Protocol: model.ProtocolSOCKS5,
-		Username: "u-01", CredentialKind: model.LeaseCredentialKindScopedKey,
+		Username: "u-01", CredentialKind: model.CredentialKindScopedKey,
 	}
 	if detail.Connection != want {
 		t.Fatalf("connection = %+v, want %+v", detail.Connection, want)

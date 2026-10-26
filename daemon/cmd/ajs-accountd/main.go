@@ -1874,25 +1874,6 @@ func stopSnapshotWriter(saver *stateSaver, stop chan struct{}, done <-chan struc
 // orphan. AJS_DEVICE_POOL=0 is the test-only kill switch. The key itself is
 // never logged.
 func openStore(logger *slog.Logger) (*store.Store, *secret.Store, *secret.Store, error) {
-	// Remote ingress is opt-in: with AJS_REMOTE_INGRESS unset the pepper is nil
-	// and nothing below changes. With it enabled a missing or invalid
-	// AJS_INGRESS_PEPPER_FILE fails startup instead of serving a public ingress
-	// whose credential verifiers have no key.
-	pepper, err := store.IngressPepperFromEnv()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	installPepper := func(st *store.Store, secrets, deviceSecrets *secret.Store) (*store.Store, *secret.Store, *secret.Store, error) {
-		if pepper == nil {
-			return st, secrets, deviceSecrets, nil
-		}
-		if err := st.SetIngressPepper(pepper); err != nil {
-			return nil, nil, nil, fmt.Errorf("%s: %w", store.IngressPepperEnv, err)
-		}
-		logger.Info("remote_ingress_enabled")
-		return st, secrets, deviceSecrets, nil
-	}
-
 	raw := strings.TrimSpace(os.Getenv("AJS_MASTER_KEY"))
 	poolOn, err := devicePoolEnabled(raw != "")
 	if err != nil {
@@ -1900,7 +1881,7 @@ func openStore(logger *slog.Logger) (*store.Store, *secret.Store, *secret.Store,
 	}
 	if raw == "" {
 		logger.Info("secrets_disabled", "reason", "AJS_MASTER_KEY is not set")
-		return installPepper(store.NewEmpty(), nil, nil)
+		return store.NewEmpty(), nil, nil, nil
 	}
 	key, err := parseMasterKey(raw)
 	if err != nil {
@@ -1918,7 +1899,7 @@ func openStore(logger *slog.Logger) (*store.Store, *secret.Store, *secret.Store,
 	logger.Info("secrets_enabled", "path", path)
 	if !poolOn {
 		logger.Info("device_pool_disabled", "reason", "AJS_DEVICE_POOL=0")
-		return installPepper(store.NewEmptyWithSealer(secrets), secrets, nil)
+		return store.NewEmptyWithSealer(secrets), secrets, nil, nil
 	}
 	deviceKey, err := deviceSealerKey(key)
 	if err != nil {
@@ -1932,7 +1913,7 @@ func openStore(logger *slog.Logger) (*store.Store, *secret.Store, *secret.Store,
 		return nil, nil, nil, fmt.Errorf("device secret store: %w", err)
 	}
 	logger.Info("device_pool_enabled", "path", devicePath)
-	return installPepper(store.NewEmptyWithSealers(secrets, deviceSecrets), secrets, deviceSecrets)
+	return store.NewEmptyWithSealers(secrets, deviceSecrets), secrets, deviceSecrets, nil
 }
 
 // devicePoolEnabled resolves AJS_DEVICE_POOL. DESIGN-DEVICE-POOL §7.6 makes the

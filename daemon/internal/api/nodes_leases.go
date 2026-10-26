@@ -207,7 +207,7 @@ func (s *Server) handleGetLease(w http.ResponseWriter, r *http.Request) {
 			Port:           lease.GatePort,
 			Protocol:       lease.Protocol,
 			Username:       lease.UserID,
-			CredentialKind: model.LeaseCredentialKindScopedKey,
+			CredentialKind: model.CredentialKindScopedKey,
 		},
 	})
 }

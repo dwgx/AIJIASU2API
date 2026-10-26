@@ -2,8 +2,6 @@ package store
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,19 +42,13 @@ type Snapshot struct {
 	// snapshot loads with an empty log, and an older build ignores it. Each
 	// row carries the full revoked lease plus the reason and the end instant,
 	// so the customer-visible explanation survives the audit retention ring.
-	LeaseEnds []LeaseEnd `json:"leaseEnds,omitempty"`
-	// LeaseCredentials is the ingress credential metadata (RI-1). It is
-	// additive and omitempty: a document from before remote ingress loads with
-	// no credentials, and an older build ignores the field. Each row carries
-	// only the HMAC-SHA256 verifier of its secret; the plaintext secret is
-	// never written here.
-	LeaseCredentials []model.LeaseCredential `json:"leaseCredentials,omitempty"`
-	Users            []model.PanelUser       `json:"users"`
-	Keys             []model.APIKey          `json:"keys"`
-	ScopedKeys       []model.ScopedKey       `json:"scopedKeys,omitempty"`
-	Requests         []model.RequestLog      `json:"requests"`
-	Audit            []model.AuditEvent      `json:"audit"`
-	Settings         model.PanelSettings     `json:"settings"`
+	LeaseEnds  []LeaseEnd          `json:"leaseEnds,omitempty"`
+	Users      []model.PanelUser   `json:"users"`
+	Keys       []model.APIKey      `json:"keys"`
+	ScopedKeys []model.ScopedKey   `json:"scopedKeys,omitempty"`
+	Requests   []model.RequestLog  `json:"requests"`
+	Audit      []model.AuditEvent  `json:"audit"`
+	Settings   model.PanelSettings `json:"settings"`
 
 	// UsageMonth, MonthlyUsage and AccountUsage are the durable gate-metered
 	// monthly totals (user id and account id keyed). They are quota state, not
@@ -174,13 +166,12 @@ type Snapshot struct {
 	// event per row after the store is installed. It never enters the file.
 	revokedLeases []model.Lease
 
-	AccountSeq    int `json:"accountSeq"`
-	UserSeq       int `json:"userSeq"`
-	KeySeq        int `json:"keySeq"`
-	ScopedKeySeq  int `json:"scopedKeySeq,omitempty"`
-	CredentialSeq int `json:"credentialSeq,omitempty"`
-	MutationSeq   int `json:"mutationSeq"`
-	AuditSeq      int `json:"auditSeq"`
+	AccountSeq   int `json:"accountSeq"`
+	UserSeq      int `json:"userSeq"`
+	KeySeq       int `json:"keySeq"`
+	ScopedKeySeq int `json:"scopedKeySeq,omitempty"`
+	MutationSeq  int `json:"mutationSeq"`
+	AuditSeq     int `json:"auditSeq"`
 }
 
 // Snapshot serializes every collection, counter, device identity and sealed
@@ -208,7 +199,6 @@ func (s *Store) snapshotLocked() Snapshot {
 	snap.Nodes = append([]model.ProxyNode(nil), s.nodes...)
 	snap.Leases = append([]model.Lease(nil), s.leases...)
 	snap.LeaseEnds = append([]LeaseEnd(nil), s.leaseEnds...)
-	snap.LeaseCredentials = cloneLeaseCredentials(s.leaseCredentials)
 	snap.Users = make([]model.PanelUser, len(s.users))
 	for i, user := range s.users {
 		snap.Users[i] = cloneUser(user)
@@ -345,7 +335,6 @@ func (s *Store) snapshotLocked() Snapshot {
 	snap.UserSeq = s.userSeq
 	snap.KeySeq = s.keySeq
 	snap.ScopedKeySeq = s.scopedKeySeq
-	snap.CredentialSeq = s.credentialSeq
 	snap.MutationSeq = s.mutationSeq
 	snap.AuditSeq = s.auditSeq
 	return snap
@@ -412,12 +401,6 @@ func (s *Store) Restore(data []byte) error {
 	if repaired := snap.reconcileSlotClaims(s.now()); repaired > 0 {
 		slog.Warn("slot_claims_reconciled", "count", repaired)
 	}
-	// A credential whose lease did not survive reconciliation can never be
-	// admitted. Drop its verifier with the lease instead of retaining key
-	// material for an entitlement the store no longer serves.
-	if dropped := snap.dropOrphanCredentials(); dropped > 0 {
-		slog.Warn("lease_credentials_dropped", "count", dropped, "reason", "lease_not_active")
-	}
 	snap.normalize()
 	// A queued/running row cannot be resumed after a restart: the vendor call
 	// may or may not have happened. Fail it with OPERATION_UNKNOWN before the
@@ -430,7 +413,6 @@ func (s *Store) Restore(data []byte) error {
 	s.nodes = snap.Nodes
 	s.leases = snap.Leases
 	s.leaseEnds = snap.LeaseEnds
-	s.leaseCredentials = cloneLeaseCredentials(snap.LeaseCredentials)
 	s.users = snap.Users
 	s.keys = snap.Keys
 	s.scopedKeys = snap.ScopedKeys
@@ -512,7 +494,6 @@ func (s *Store) Restore(data []byte) error {
 	s.userSeq = snap.UserSeq
 	s.keySeq = snap.KeySeq
 	s.scopedKeySeq = snap.ScopedKeySeq
-	s.credentialSeq = snap.CredentialSeq
 	s.mutationSeq = snap.MutationSeq
 	s.auditSeq = snap.AuditSeq
 	// Operations are installed after the audit sequence so the interrupted
@@ -905,114 +886,7 @@ func (snap *Snapshot) validate() error {
 	if err := snap.validateWebhookDeliveries(); err != nil {
 		return err
 	}
-	if err := snap.validateLeaseCredentials(leases); err != nil {
-		return err
-	}
 	return snap.validateWebhookOutbox()
-}
-
-// validateLeaseCredentials rejects credential metadata that cannot be served.
-// A row must belong to an existing lease and user, carry a well-formed HMAC
-// verifier, a bounded source policy and a route the router could dial. A lease
-// may hold at most one live credential; revoked rows are retained history.
-func (snap *Snapshot) validateLeaseCredentials(leases map[string]model.Lease) error {
-	ids := make(map[string]struct{}, len(snap.LeaseCredentials))
-	live := make(map[string]struct{}, len(snap.LeaseCredentials))
-	for _, credential := range snap.LeaseCredentials {
-		if credential.ID == "" {
-			return errors.New("state snapshot has a lease credential without an id")
-		}
-		if _, ok := ids[credential.ID]; ok {
-			return fmt.Errorf("state snapshot has duplicate lease credential %q", credential.ID)
-		}
-		ids[credential.ID] = struct{}{}
-		if credential.LeaseID == "" {
-			return fmt.Errorf("state snapshot lease credential %q has no lease id", credential.ID)
-		}
-		lease, ok := leases[credential.LeaseID]
-		if !ok {
-			return fmt.Errorf("state snapshot lease credential %q names missing lease %q",
-				credential.ID, credential.LeaseID)
-		}
-		if credential.UserID != lease.UserID {
-			return fmt.Errorf("state snapshot lease credential %q belongs to user %q, lease user is %q",
-				credential.ID, credential.UserID, lease.UserID)
-		}
-		if hash, err := hex.DecodeString(credential.SecretHash); err != nil || len(hash) != sha256.Size {
-			return fmt.Errorf("state snapshot lease credential %q has an invalid secret hash", credential.ID)
-		}
-		if credential.Prefix == "" || credential.CreatedAt == "" {
-			return fmt.Errorf("state snapshot lease credential %q is missing its prefix or creation time", credential.ID)
-		}
-		if credential.MaxConns < 1 || credential.MaxConns > MaxCredentialMaxConns {
-			return fmt.Errorf("state snapshot lease credential %q has maxConns %d outside 1..%d",
-				credential.ID, credential.MaxConns, MaxCredentialMaxConns)
-		}
-		if _, err := normalizeSourceCIDRs(credential.SourceCIDRs); err != nil {
-			return fmt.Errorf("state snapshot lease credential %q: %w", credential.ID, err)
-		}
-		route := credential.Route
-		if route.NodeID == "" || route.AccountID == "" || route.GatePort <= 0 {
-			return fmt.Errorf("state snapshot lease credential %q has no serving route", credential.ID)
-		}
-		if route.Slot != lease.Slot {
-			return fmt.Errorf("state snapshot lease credential %q has slot %d, lease %q has slot %d",
-				credential.ID, route.Slot, credential.LeaseID, lease.Slot)
-		}
-		if credential.RevokedAt == nil {
-			if _, ok := live[credential.LeaseID]; ok {
-				return fmt.Errorf("state snapshot lease %q has more than one live credential", credential.LeaseID)
-			}
-			live[credential.LeaseID] = struct{}{}
-		}
-	}
-	return nil
-}
-
-// dropOrphanCredentials removes credentials whose lease did not survive restore
-// reconciliation and credentials whose immutable route no longer matches the
-// lease the store would serve. A credential is only meaningful while its lease
-// is active on the exact node, account, gate port, slot and generation it was
-// issued for; retaining any other verifier would keep key material for an
-// admission the store must refuse.
-func (snap *Snapshot) dropOrphanCredentials() int {
-	if len(snap.LeaseCredentials) == 0 {
-		return 0
-	}
-	leases := make(map[string]model.Lease, len(snap.Leases))
-	for _, lease := range snap.Leases {
-		leases[lease.ID] = lease
-	}
-	nodes := make(map[string]model.ProxyNode, len(snap.Nodes))
-	for _, node := range snap.Nodes {
-		nodes[node.ID] = node
-	}
-	kept := snap.LeaseCredentials[:0]
-	for _, credential := range snap.LeaseCredentials {
-		lease, ok := leases[credential.LeaseID]
-		if !ok {
-			continue
-		}
-		node, ok := nodes[lease.NodeID]
-		if !ok || node.State != model.NodeLive || node.GatePort <= 0 ||
-			node.AccountID != lease.AccountID || node.GatePort != lease.GatePort {
-			continue
-		}
-		route := model.LeaseRoute{
-			NodeID:     node.ID,
-			AccountID:  node.AccountID,
-			GatePort:   node.GatePort,
-			Slot:       lease.Slot,
-			Generation: lease.Generation,
-		}
-		if credential.Route != route {
-			continue
-		}
-		kept = append(kept, credential)
-	}
-	dropped := len(snap.LeaseCredentials) - len(kept)
-	snap.LeaseCredentials = kept
-	return dropped
 }
 
 // validateWebhooks rejects a document whose receiver rows cannot be loaded.
@@ -1842,12 +1716,6 @@ func (snap *Snapshot) normalizeAccountSlots() {
 // identifier already present. A snapshot written by an older build, or one
 // whose counters were lost, therefore cannot hand out a colliding id.
 func (snap *Snapshot) normalize() {
-	if snap.LeaseCredentials == nil {
-		snap.LeaseCredentials = []model.LeaseCredential{}
-	}
-	for _, credential := range snap.LeaseCredentials {
-		snap.CredentialSeq = max(snap.CredentialSeq, sequenceOf(credential.ID, credentialIDPrefix))
-	}
 	if snap.KeyHashes == nil {
 		snap.KeyHashes = make(map[string]string)
 	}

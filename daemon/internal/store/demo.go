@@ -107,7 +107,6 @@ func (s *Store) purgeDemoLocked() (PurgeResult, map[string]struct{}, Sealer, err
 	keptLeases := s.leases[:0]
 	for _, lease := range s.leases {
 		if _, seed := seedLeaseIDs[lease.ID]; seed {
-			s.revokeLeaseCredentialsLocked(lease.ID)
 			result.Leases++
 			continue
 		}

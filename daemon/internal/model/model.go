@@ -199,10 +199,10 @@ type Lease struct {
 	Generation uint64 `json:"generation,omitempty"`
 }
 
-// LeaseCredentialKindScopedKey is the credentialKind of a lease connection
-// whose RFC 1929 password is an ajs_sk_ scoped key carrying proxy:connect. It
-// names the credential shape only; the secret is never part of a lease read.
-const LeaseCredentialKindScopedKey = "ajs_sk"
+// CredentialKindScopedKey is the credentialKind of a lease connection whose
+// RFC 1929 password is an ajs_sk_ scoped key carrying proxy:connect. It names
+// the credential shape only; the secret is never part of a lease read.
+const CredentialKindScopedKey = "ajs_sk"
 
 // LeaseConnection is the loopback data-plane endpoint of one lease. Host is
 // always 127.0.0.1: gates never bind a public address. Username is the panel

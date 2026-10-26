@@ -382,7 +382,6 @@ func (s *Store) RevokeLease(id string, actor ...string) (revoked model.Lease, er
 		s.nodes[nodeIdx].InUse--
 	}
 	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
-	s.revokeLeaseCredentialsLocked(lease.ID)
 	s.addAuditLocked(model.SeverityInfo, auditActorArg(actor), "lease.revoke", lease.UserName,
 		fmt.Sprintf("Lease on %s revoked", lease.NodeLabel),
 		map[string]string{
@@ -424,7 +423,6 @@ func (s *Store) RollbackLease(id, reason string) (model.Lease, error) {
 	}
 	lease := s.leases[idx]
 	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
-	s.revokeLeaseCredentialsLocked(lease.ID)
 	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
 		s.nodes[nodeIdx].InUse--
 	}
@@ -504,7 +502,6 @@ func (s *Store) InvalidateNodeLeases(nodeID, reason string) ([]model.Lease, erro
 		lease.Status = model.LeaseRevoked
 		s.normalizeLeaseLocked(&lease)
 		revoked = append(revoked, lease)
-		s.revokeLeaseCredentialsLocked(lease.ID)
 		s.addAuditLocked(model.SeverityWarn, "system", "lease.revoke", lease.UserName,
 			fmt.Sprintf("Lease on %s revoked · %s", lease.NodeLabel, detail),
 			leaseAuditMeta(lease, detail))
@@ -560,7 +557,6 @@ func (s *Store) releaseProvisionalLeaseLocked(leaseID, userID, reason string) bo
 		return false
 	}
 	s.leases = append(s.leases[:idx], s.leases[idx+1:]...)
-	s.revokeLeaseCredentialsLocked(lease.ID)
 	if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
 		s.nodes[nodeIdx].InUse--
 	}
@@ -843,7 +839,6 @@ func (s *Store) sweepExpiredLocked(now time.Time) int {
 		if nodeIdx := s.nodeIndexLocked(lease.NodeID); nodeIdx >= 0 && s.nodes[nodeIdx].InUse > 0 {
 			s.nodes[nodeIdx].InUse--
 		}
-		s.revokeLeaseCredentialsLocked(lease.ID)
 		closed++
 		s.addAuditLocked(model.SeverityInfo, "system", "lease.expired", lease.UserName,
 			fmt.Sprintf("Lease on %s expired", lease.NodeLabel),
