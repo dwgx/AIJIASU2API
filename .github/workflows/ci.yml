@@ -76,6 +76,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Verify lockfile metadata
+        run: npm run verify:lockfile
+
       - name: Test
         run: npm test -- --pool=forks --maxWorkers=1
 
