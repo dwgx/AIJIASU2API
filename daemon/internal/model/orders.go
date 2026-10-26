@@ -102,6 +102,11 @@ type Order struct {
 	CancelledAt    *string           `json:"cancelledAt"`
 	RefundedAt     *string           `json:"refundedAt"`
 	Grant          *EntitlementGrant `json:"grant"`
+	// Fulfilment is the durable publication work for this order. Nil means
+	// nothing is pending: either no payment is settled yet, the job already
+	// committed, or the order is terminal. Exactly one job may exist per
+	// order.
+	Fulfilment *FulfilmentJob `json:"fulfilment,omitempty"`
 }
 
 // EntitlementGrant is the single entitlement one order may own. OrderID is
@@ -121,6 +126,115 @@ type EntitlementGrant struct {
 	// are never written back to the order or persisted in a snapshot.
 	LeaseEndedReason string `json:"leaseEndedReason,omitempty"`
 	LeaseEndedAt     string `json:"leaseEndedAt,omitempty"`
+}
+
+// FulfilmentMode is the closed vocabulary of publication work. An initial job
+// publishes the first serving lease of a paid order; a reissue job replaces an
+// ended lease on an active order without creating a second entitlement.
+type FulfilmentMode string
+
+const (
+	FulfilmentInitial FulfilmentMode = "initial"
+	FulfilmentReissue FulfilmentMode = "reissue"
+)
+
+// ValidFulfilmentMode reports whether mode is part of the closed vocabulary.
+func ValidFulfilmentMode(mode FulfilmentMode) bool {
+	switch mode {
+	case FulfilmentInitial, FulfilmentReissue:
+		return true
+	default:
+		return false
+	}
+}
+
+// FulfilmentState is the closed job vocabulary. A completed job is removed
+// from its order, so there is deliberately no "done" state.
+type FulfilmentState string
+
+const (
+	FulfilmentQueued     FulfilmentState = "queued"
+	FulfilmentPublishing FulfilmentState = "publishing"
+	FulfilmentDeadLetter FulfilmentState = "dead_letter"
+)
+
+// ValidFulfilmentState reports whether state is part of the closed vocabulary.
+func ValidFulfilmentState(state FulfilmentState) bool {
+	switch state {
+	case FulfilmentQueued, FulfilmentPublishing, FulfilmentDeadLetter:
+		return true
+	default:
+		return false
+	}
+}
+
+// FulfilmentReason is the closed vocabulary of stable refusal codes a job may
+// record. It is deliberately not free text: a payment reference, signed URL or
+// credential must never reach the durable job or its audit rows.
+type FulfilmentReason string
+
+const (
+	// FulfilmentReasonCapacity means no account/node had a free slot.
+	FulfilmentReasonCapacity FulfilmentReason = "capacity"
+	// FulfilmentReasonTenantSuspended means the owning tenant is not active.
+	FulfilmentReasonTenantSuspended FulfilmentReason = "tenant_suspended"
+	// FulfilmentReasonTargetChanged means the selected node/slot/generation
+	// no longer matches what the attempt reserved.
+	FulfilmentReasonTargetChanged FulfilmentReason = "target_changed"
+	// FulfilmentReasonPublishFailed means the external publication failed.
+	FulfilmentReasonPublishFailed FulfilmentReason = "publish_failed"
+	// FulfilmentReasonTimeout means publication did not answer in time.
+	FulfilmentReasonTimeout FulfilmentReason = "timeout"
+	// FulfilmentReasonInternal means the attempt failed for an unclassified
+	// internal reason.
+	FulfilmentReasonInternal FulfilmentReason = "internal"
+	// FulfilmentReasonInterrupted means a restart requeued the attempt; no
+	// attempt actually failed.
+	FulfilmentReasonInterrupted FulfilmentReason = "interrupted"
+	// FulfilmentReasonEntitlementExpired means the paid term ended before a
+	// publication could commit, so the job is dead-lettered without service.
+	FulfilmentReasonEntitlementExpired FulfilmentReason = "entitlement_expired"
+)
+
+// ValidFulfilmentReason reports whether reason is part of the closed
+// vocabulary. The empty value is not a reason.
+func ValidFulfilmentReason(reason FulfilmentReason) bool {
+	switch reason {
+	case FulfilmentReasonCapacity, FulfilmentReasonTenantSuspended,
+		FulfilmentReasonTargetChanged, FulfilmentReasonPublishFailed,
+		FulfilmentReasonTimeout, FulfilmentReasonInternal,
+		FulfilmentReasonInterrupted, FulfilmentReasonEntitlementExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// FulfilmentJob is the durable publication work one order owns. The store
+// creates it once, keeps it across restarts and removes it only after the
+// entitlement commit; a nil Order.Fulfilment is the absence of work.
+//
+// Attempts counts real publication attempts, not queued waits or duplicate
+// callbacks. AttemptLeaseID is the fencing token of the attempt currently
+// publishing, so a late abort from an earlier attempt cannot rewrite the
+// current schedule. EntitlementExpiresAt freezes the paid term the job must
+// not outlive: PaidAt+LeaseTTLSeconds for initial work, the grant's original
+// expiry for a reissue. NextAttemptAt is nil while an attempt is in flight and
+// for a dead-lettered job. LastReason is the closed refusal code; LastError is
+// a bounded, sanitized detail. Blocked marks a dead-lettered job that needs an
+// operator; it is false for every job that may still run automatically.
+type FulfilmentJob struct {
+	OrderID              string           `json:"orderId"`
+	Mode                 FulfilmentMode   `json:"mode"`
+	State                FulfilmentState  `json:"state"`
+	Attempts             int              `json:"attempts"`
+	AttemptLeaseID       string           `json:"attemptLeaseId,omitempty"`
+	EntitlementExpiresAt string           `json:"entitlementExpiresAt"`
+	NextAttemptAt        *string          `json:"nextAttemptAt,omitempty"`
+	LastReason           FulfilmentReason `json:"lastReason,omitempty"`
+	LastError            string           `json:"lastError,omitempty"`
+	Blocked              bool             `json:"blocked,omitempty"`
+	UpdatedAt            string           `json:"updatedAt"`
 }
 
 // OrderCreateRequest is the POST /v1/portal/orders body. The idempotency key

@@ -147,7 +147,9 @@ type Snapshot struct {
 	// Every field is additive and omitempty, so a pre-order snapshot restores
 	// with an empty catalogue and no orders. Order rows carry only the
 	// idempotency/request hashes, never the raw key; payment events carry no
-	// card data, signature or raw provider payload.
+	// card data, signature or raw provider payload. Each order row also
+	// carries its optional fulfilment job: a snapshot written before the job
+	// model restores with nil jobs, and an older build ignores the field.
 	Plans         []model.Plan         `json:"plans,omitempty"`
 	Orders        []orderRecord        `json:"orders,omitempty"`
 	PaymentEvents []model.PaymentEvent `json:"paymentEvents,omitempty"`

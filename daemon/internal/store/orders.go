@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,45 @@ const (
 	maxOrderReferenceLen = 200
 	maxOrderReasonLen    = 300
 	orderIDPrefix        = "ord-"
+)
+
+// MaxFulfilmentAttempts bounds automatic publication attempts. Attempts 1..7
+// are retried after fulfilmentBackoff; the eighth failure dead-letters the job
+// and leaves resolution to an operator.
+const MaxFulfilmentAttempts = 8
+
+// maxFulfilmentDetailLen bounds the sanitized operator detail stored on a job.
+// The reason itself is a closed code; this is the only free-form field, so it
+// is short, single-line and scrubbed of anything that could be a reference or
+// credential.
+const maxFulfilmentDetailLen = 160
+
+// fulfilmentBackoff is the exact delay after each failed attempt 1..7.
+var fulfilmentBackoff = [...]time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	45 * time.Second,
+	2 * time.Minute,
+	5 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+}
+
+// Fulfilment detail scrubbing. A publication error can embed a signed URL, an
+// email, a keyed secret or a trade reference; none of those may enter the
+// durable job or an audit row. The patterns replace a whole match instead of
+// truncating it, because a partially masked secret is still a secret.
+var (
+	fulfilmentDetailURL   = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://\S*`)
+	fulfilmentDetailEmail = regexp.MustCompile(`\S*@\S*`)
+	// fulfilmentDetailSecret keeps the key for operator context and replaces
+	// the value, so "token=SECRET", "password is hunter2" and "trade 20261026"
+	// cannot survive.
+	fulfilmentDetailSecret = regexp.MustCompile(`(?i)\b(token|password|passwd|secret|api[_-]?key|access[_-]?key|authorization|auth|bearer|cookie|session|payment[_-]?(?:id|ref)|charge[_-]?id|transaction|txn|receipt\s*no|receipt[_-]?no|receipt|trade\s*no|trade[_-]?no|trade|reference|ref|signature|sign)\b\.?\s*(?:is|was|set to|equals|[:=])?\s*\S+`)
+	// fulfilmentDetailDigits matches a standalone numeric reference such as a
+	// trade number that appears without a key.
+	fulfilmentDetailDigits = regexp.MustCompile(`\d{8,}`)
+	fulfilmentDetailRun    = regexp.MustCompile(`[A-Za-z0-9_\-]{12,}`)
 )
 
 // RefundDecision is what a RefundPolicy answers for one refund request.
@@ -1116,6 +1156,447 @@ func (s *Store) RollbackOrderReissue(orderID, leaseID, previousLeaseID, reason s
 	return nil
 }
 
+// FulfilmentAttempt is what one BeginFulfilment call reserved: the 1-based
+// attempt number and the fencing token the matching AbortFulfilment must
+// present. P0-2B extends the publication attempt with the provisional lease
+// it reserves.
+type FulfilmentAttempt struct {
+	OrderID string
+	Mode    model.FulfilmentMode
+	Number  int
+	LeaseID string
+}
+
+// EnqueueFulfilment attaches the order's single publication job. It is
+// idempotent for the same mode: a replay returns the existing job untouched,
+// so a duplicate settlement cannot create a second job. A job is created only
+// for an order that can use it — paid without a grant for initial, active with
+// an ended unexpired grant for reissue — never for a terminal or
+// review-required order, and it freezes the paid term the job must not
+// outlive. An initial job enqueued after that term already ended is recorded
+// directly as dead-lettered, so the payment/refund liability stays visible
+// instead of being silently dropped.
+func (s *Store) EnqueueFulfilment(orderID string, mode model.FulfilmentMode) (model.Order, error) {
+	orderID = strings.TrimSpace(orderID)
+	mode = model.FulfilmentMode(strings.TrimSpace(string(mode)))
+	switch {
+	case orderID == "":
+		return model.Order{}, invalidf("orderId is required")
+	case !model.ValidFulfilmentMode(mode):
+		return model.Order{}, invalidf("fulfilment mode must be initial or reissue")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return model.Order{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if terminalOrderState(order.State) {
+		return model.Order{}, conflictf("order %q is %s; terminal orders never resume", order.ID, order.State)
+	}
+	if order.ReviewRequired {
+		return model.Order{}, conflictf("order %q requires review; fulfilment is blocked", order.ID)
+	}
+	if order.Fulfilment != nil {
+		if order.Fulfilment.Mode == mode {
+			return cloneOrder(*order), nil
+		}
+		return model.Order{}, conflictf("order %q already has a %s fulfilment job",
+			order.ID, order.Fulfilment.Mode)
+	}
+
+	now := s.now()
+	s.sweepExpiredLocked(now)
+	switch mode {
+	case model.FulfilmentInitial:
+		if order.State != model.OrderPaid {
+			return model.Order{}, conflictf("order %q is %s; an initial job needs a paid order",
+				order.ID, order.State)
+		}
+		if order.Grant != nil {
+			return model.Order{}, conflictf("order %q already owns an entitlement grant", order.ID)
+		}
+	case model.FulfilmentReissue:
+		if order.State != model.OrderActive {
+			return model.Order{}, conflictf("order %q is %s; a reissue job needs an active order",
+				order.ID, order.State)
+		}
+		if order.Grant == nil || order.Grant.RevokedAt != nil {
+			return model.Order{}, conflictf("order %q has no live entitlement grant to reissue", order.ID)
+		}
+		expires, ok := leaseExpiry(order.Grant.ExpiresAt)
+		if !ok || !expires.After(now) {
+			return model.Order{}, conflictf("order %q entitlement expired at %s",
+				order.ID, order.Grant.ExpiresAt)
+		}
+		if s.grantLeaseActiveLocked(order, now) {
+			return model.Order{}, conflictf("order %q entitlement lease %s is still active",
+				order.ID, order.Grant.LeaseID)
+		}
+	}
+
+	expires, ok := orderFulfilmentExpiry(*order, mode)
+	if !ok {
+		return model.Order{}, conflictf("order %q has no valid paid term", order.ID)
+	}
+	job := &model.FulfilmentJob{
+		OrderID:              order.ID,
+		Mode:                 mode,
+		State:                model.FulfilmentQueued,
+		EntitlementExpiresAt: iso(expires),
+		NextAttemptAt:        ptrString(iso(now)),
+		UpdatedAt:            iso(now),
+	}
+	if !expires.After(now) {
+		// An initial job whose paid term already ended can never serve.
+		s.deadLetterFulfilmentLocked(order, job, model.FulfilmentReasonEntitlementExpired,
+			"paid term ended before fulfilment", now)
+	}
+	order.Fulfilment = job
+	return cloneOrder(*order), nil
+}
+
+// BeginFulfilment starts one publication attempt. It is the store's
+// single-winner gate: only a queued, unblocked, non-dead-lettered job on a
+// non-terminal, non-review order may begin, and the attempt count and the
+// publishing state are written under the same lock, so concurrent or repeated
+// calls cannot start a second attempt. A queued wait or a duplicate callback
+// never increments Attempts; only this call does. A job whose frozen paid term
+// has ended is dead-lettered here instead of consuming an attempt: service
+// after expiry is impossible, so the job becomes an operator item.
+func (s *Store) BeginFulfilment(orderID string) (FulfilmentAttempt, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return FulfilmentAttempt{}, invalidf("orderId is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return FulfilmentAttempt{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if terminalOrderState(order.State) {
+		return FulfilmentAttempt{}, conflictf("order %q is %s; terminal orders never resume",
+			order.ID, order.State)
+	}
+	if order.ReviewRequired {
+		return FulfilmentAttempt{}, conflictf("order %q requires review; fulfilment is blocked", order.ID)
+	}
+	job := order.Fulfilment
+	switch {
+	case job == nil:
+		return FulfilmentAttempt{}, conflictf("order %q has no fulfilment job", order.ID)
+	case job.Blocked:
+		return FulfilmentAttempt{}, conflictf(
+			"order %q fulfilment is blocked; an operator retry is required", order.ID)
+	case job.State == model.FulfilmentPublishing:
+		return FulfilmentAttempt{}, conflictf("order %q already has an attempt publishing", order.ID)
+	case job.State == model.FulfilmentDeadLetter:
+		return FulfilmentAttempt{}, conflictf(
+			"order %q fulfilment is dead-lettered; an operator retry is required", order.ID)
+	case job.State != model.FulfilmentQueued:
+		return FulfilmentAttempt{}, conflictf("order %q fulfilment job is %s", order.ID, job.State)
+	}
+	if job.Attempts >= MaxFulfilmentAttempts {
+		return FulfilmentAttempt{}, conflictf("order %q used all %d fulfilment attempts",
+			order.ID, MaxFulfilmentAttempts)
+	}
+	switch job.Mode {
+	case model.FulfilmentInitial:
+		if order.State != model.OrderPaid {
+			return FulfilmentAttempt{}, conflictf("order %q is %s; an initial attempt needs a paid order",
+				order.ID, order.State)
+		}
+	case model.FulfilmentReissue:
+		if order.State != model.OrderActive {
+			return FulfilmentAttempt{}, conflictf("order %q is %s; a reissue attempt needs an active order",
+				order.ID, order.State)
+		}
+	}
+
+	now := s.now()
+	expires, ok := leaseExpiry(job.EntitlementExpiresAt)
+	if !ok {
+		return FulfilmentAttempt{}, conflictf("order %q fulfilment job has no valid paid term", order.ID)
+	}
+	if !expires.After(now) {
+		s.deadLetterFulfilmentLocked(order, job, model.FulfilmentReasonEntitlementExpired,
+			"paid term ended at "+job.EntitlementExpiresAt, now)
+		return FulfilmentAttempt{}, conflictf("order %q entitlement expired at %s",
+			order.ID, job.EntitlementExpiresAt)
+	}
+
+	job.Attempts++
+	job.State = model.FulfilmentPublishing
+	job.Blocked = false
+	job.AttemptLeaseID = fulfilmentAttemptLeaseID(order.ID, job.Attempts)
+	// NextAttemptAt describes when a queued job becomes due; while an attempt
+	// is in flight the abort schedules the next one.
+	job.NextAttemptAt = nil
+	job.UpdatedAt = iso(now)
+	return FulfilmentAttempt{
+		OrderID: order.ID,
+		Mode:    job.Mode,
+		Number:  job.Attempts,
+		LeaseID: job.AttemptLeaseID,
+	}, nil
+}
+
+// AbortFulfilment records a failed attempt and schedules the next one. reason
+// is a closed code, never free text, so a payment reference, signed URL or
+// credential cannot enter the durable job through it. detail is optional
+// operator context; it is scrubbed and bounded before it is stored or audited.
+// The attempt lease must match the in-flight attempt, so a late abort from an
+// earlier attempt cannot overwrite the current schedule. Attempts 1..7 are
+// retried after 5s/15s/45s/2m/5m/15m/30m; the eighth failure, or any
+// non-retryable failure, dead-letters the job and stops automatic retries.
+func (s *Store) AbortFulfilment(orderID, attemptLeaseID string, reason model.FulfilmentReason, detail string, retryable bool) (model.Order, error) {
+	orderID = strings.TrimSpace(orderID)
+	attemptLeaseID = strings.TrimSpace(attemptLeaseID)
+	switch {
+	case orderID == "":
+		return model.Order{}, invalidf("orderId is required")
+	case attemptLeaseID == "":
+		return model.Order{}, invalidf("attemptLeaseId is required")
+	case !model.ValidFulfilmentReason(reason):
+		return model.Order{}, invalidf("fulfilment reason %q is not a known code", string(reason))
+	}
+	detail = sanitizeFulfilmentDetail(detail)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return model.Order{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if terminalOrderState(order.State) {
+		return model.Order{}, conflictf("order %q is %s; terminal orders never resume",
+			order.ID, order.State)
+	}
+	job := order.Fulfilment
+	switch {
+	case job == nil:
+		return model.Order{}, conflictf("order %q has no fulfilment job", order.ID)
+	case job.State != model.FulfilmentPublishing:
+		return model.Order{}, conflictf("order %q has no attempt publishing", order.ID)
+	case job.Attempts < 1:
+		return model.Order{}, conflictf("order %q attempt count is inconsistent", order.ID)
+	case job.AttemptLeaseID != attemptLeaseID:
+		return model.Order{}, conflictf("order %q attempt lease %q is stale", order.ID, attemptLeaseID)
+	}
+
+	now := s.now()
+	if !retryable || job.Attempts >= MaxFulfilmentAttempts {
+		s.deadLetterFulfilmentLocked(order, job, reason, detail, now)
+		return cloneOrder(*order), nil
+	}
+
+	delay := fulfilmentBackoff[job.Attempts-1]
+	next := now.Add(delay)
+	job.State = model.FulfilmentQueued
+	job.Blocked = false
+	job.LastReason = reason
+	job.LastError = detail
+	job.AttemptLeaseID = ""
+	job.NextAttemptAt = ptrString(iso(next))
+	job.UpdatedAt = iso(now)
+	text := fmt.Sprintf("attempt %d failed · retry in %s · %s", job.Attempts, delay, reason)
+	if detail != "" {
+		text += " · " + detail
+	}
+	s.addAuditLocked(model.SeverityWarn, "system", "fulfilment.retry", order.ID, text,
+		map[string]string{
+			"orderId":       order.ID,
+			"mode":          string(job.Mode),
+			"attempts":      strconv.Itoa(job.Attempts),
+			"reason":        string(reason),
+			"nextAttemptAt": iso(next),
+		})
+	return cloneOrder(*order), nil
+}
+
+// DueFulfilments returns the queued jobs whose next attempt is due, oldest
+// order first so the bounded worker cannot starve an old paid order behind a
+// stream of new ones. A publishing or dead-lettered job is never due, and a
+// terminal order never returns to the queue.
+func (s *Store) DueFulfilments(now time.Time) []model.Order {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]model.Order, 0)
+	for i := len(s.orders) - 1; i >= 0; i-- {
+		record := &s.orders[i]
+		job := record.Fulfilment
+		if job == nil || job.State != model.FulfilmentQueued ||
+			terminalOrderState(record.State) {
+			continue
+		}
+		if !fulfilmentDue(job.NextAttemptAt, now) {
+			continue
+		}
+		out = append(out, cloneOrder(record.Order))
+	}
+	return out
+}
+
+// RecoverFulfilments requeues every attempt a restart interrupted. A
+// publishing job has no durable proof that its publication completed, so it
+// returns to the queue immediately with the same attempt count: only a real
+// BeginFulfilment increments Attempts. Queued and dead-lettered jobs are left
+// alone; a dead letter is an operator queue, never an automatic retry. A job
+// left on a terminal order is stale work and is dropped.
+func (s *Store) RecoverFulfilments() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	for i := range s.orders {
+		order := &s.orders[i].Order
+		job := order.Fulfilment
+		if job == nil || job.State != model.FulfilmentPublishing {
+			continue
+		}
+		if terminalOrderState(order.State) {
+			order.Fulfilment = nil
+			continue
+		}
+		job.State = model.FulfilmentQueued
+		job.Blocked = false
+		job.AttemptLeaseID = ""
+		job.LastReason = model.FulfilmentReasonInterrupted
+		job.LastError = ""
+		job.NextAttemptAt = ptrString(iso(now))
+		job.UpdatedAt = iso(now)
+		s.addAuditLocked(model.SeverityWarn, "system", "fulfilment.interrupted", order.ID,
+			"publication interrupted by restart; attempt requeued without incrementing attempts",
+			map[string]string{
+				"orderId":  order.ID,
+				"mode":     string(job.Mode),
+				"attempts": strconv.Itoa(job.Attempts),
+			})
+	}
+	return nil
+}
+
+// fulfilmentAttemptLeaseID derives the fencing token of one attempt. It is
+// deterministic from persisted state (order id and attempt count), so a
+// restart cannot mint a different token for the same in-flight attempt, and it
+// is unique per attempt, so an abort from an earlier attempt is rejected. The
+// publication slice replaces the token with the provisional lease it reserves.
+func fulfilmentAttemptLeaseID(orderID string, attempt int) string {
+	return fmt.Sprintf("lease-%s-a%d", orderID, attempt)
+}
+
+// orderFulfilmentExpiry returns the paid term a job must not outlive. Initial
+// fulfilment freezes PaidAt+LeaseTTLSeconds; a reissue keeps the grant's
+// original expiry so a retry can never extend the paid term.
+func orderFulfilmentExpiry(order model.Order, mode model.FulfilmentMode) (time.Time, bool) {
+	switch mode {
+	case model.FulfilmentInitial:
+		if order.PaidAt == nil {
+			return time.Time{}, false
+		}
+		paidAt, ok := leaseExpiry(*order.PaidAt)
+		if !ok {
+			return time.Time{}, false
+		}
+		return paidAt.Add(time.Duration(order.Plan.LeaseTTLSeconds) * time.Second), true
+	case model.FulfilmentReissue:
+		if order.Grant == nil {
+			return time.Time{}, false
+		}
+		return leaseExpiry(order.Grant.ExpiresAt)
+	default:
+		return time.Time{}, false
+	}
+}
+
+// deadLetterFulfilmentLocked marks a job as requiring an operator. detail is
+// sanitized and bounded here, so every caller is safe; it is repeated only in
+// the audit detail, never as a meta value. The caller holds s.mu for writing.
+func (s *Store) deadLetterFulfilmentLocked(order *model.Order, job *model.FulfilmentJob,
+	reason model.FulfilmentReason, detail string, now time.Time) {
+	detail = sanitizeFulfilmentDetail(detail)
+	job.State = model.FulfilmentDeadLetter
+	job.Blocked = true
+	job.AttemptLeaseID = ""
+	job.NextAttemptAt = nil
+	job.LastReason = reason
+	job.LastError = detail
+	job.UpdatedAt = iso(now)
+	text := fmt.Sprintf("attempt %d · no automatic retry · %s", job.Attempts, reason)
+	if detail != "" {
+		text += " · " + detail
+	}
+	s.addAuditLocked(model.SeverityCritical, "system", "fulfilment.dead_letter", order.ID, text,
+		map[string]string{
+			"orderId":              order.ID,
+			"mode":                 string(job.Mode),
+			"attempts":             strconv.Itoa(job.Attempts),
+			"reason":               string(reason),
+			"entitlementExpiresAt": job.EntitlementExpiresAt,
+		})
+}
+
+// sanitizeFulfilmentDetail reduces an upstream publication message to one
+// bounded, single-line operator detail. URLs, email-like values, query or
+// fragment tails and reference/token-like runs are replaced wholesale; the
+// result is capped at maxFulfilmentDetailLen runes.
+func sanitizeFulfilmentDetail(raw string) string {
+	text := strings.Join(strings.Fields(raw), " ")
+	if text == "" {
+		return ""
+	}
+	text = fulfilmentDetailURL.ReplaceAllString(text, "[redacted]")
+	text = fulfilmentDetailEmail.ReplaceAllString(text, "[redacted]")
+	text = fulfilmentDetailSecret.ReplaceAllString(text, "$1 [redacted]")
+	if i := strings.IndexAny(text, "?#"); i >= 0 {
+		text = strings.TrimSpace(text[:i]) + " [redacted]"
+	}
+	// Long runs are replaced before short numeric tails: otherwise a token
+	// such as sk_live_SECRET1234567890 would lose only its digits and keep
+	// the credential prefix.
+	text = fulfilmentDetailRun.ReplaceAllStringFunc(text, func(run string) string {
+		if strings.ContainsAny(run, "0123456789") || len(run) >= 32 {
+			return "[redacted]"
+		}
+		return run
+	})
+	text = fulfilmentDetailDigits.ReplaceAllString(text, "[redacted]")
+	runes := []rune(text)
+	if len(runes) > maxFulfilmentDetailLen {
+		text = string(runes[:maxFulfilmentDetailLen-1]) + "…"
+	}
+	return text
+}
+
+// fulfilmentDue reports whether a queued job's schedule has arrived. A missing
+// or unparsable timestamp is due: work is never stranded because of a bad
+// clock string (restore validates it, so this is a safety net).
+func fulfilmentDue(next *string, now time.Time) bool {
+	if next == nil {
+		return true
+	}
+	at, ok := leaseExpiry(*next)
+	if !ok {
+		return true
+	}
+	return !at.After(now)
+}
+
+// terminalOrderState reports whether state is one that never resumes.
+func terminalOrderState(state model.OrderState) bool {
+	switch state {
+	case model.OrderCancelled, model.OrderRefunded, model.OrderChargedBack:
+		return true
+	default:
+		return false
+	}
+}
+
 // nextOrderLeaseIDLocked returns an id for a replacement lease that cannot
 // collide with the original order lease or any ended row. The original
 // activation uses "lease-<orderID>"; later re-issues append -rN.
@@ -1313,6 +1794,7 @@ func (snap *Snapshot) validateOrders() error {
 				droppedLeases[record.Grant.LeaseID] = struct{}{}
 			}
 			record.Grant = nil
+			record.Fulfilment = nil
 			record.State = model.OrderCancelled
 			if validOrderTimestamp(record.CreatedAt) {
 				record.CancelledAt = ptrString(record.CreatedAt)
@@ -1331,6 +1813,27 @@ func (snap *Snapshot) validateOrders() error {
 				grant.QuotaBytes <= 0 || !validOrderTimestamp(grant.ExpiresAt) ||
 				(grant.RevokedAt != nil && !validOrderTimestamp(*grant.RevokedAt)) {
 				quarantine("malformed grant")
+			}
+		}
+		if record.Fulfilment != nil {
+			if terminalOrderState(record.State) {
+				// A terminal order never resumes, so a restored job is stale
+				// work, not an entitlement. Dropping it must not touch the
+				// recorded money or the terminal state.
+				record.Fulfilment = nil
+			} else if reason := fulfilmentJobInvalidReason(*record, *record.Fulfilment); reason != "" {
+				// A job is publication work, not money. Drop only the job and
+				// flag review; the order's state, payment facts and grant are
+				// preserved so a malformed job can never erase a payment.
+				record.Fulfilment = nil
+				record.ReviewRequired = true
+				snap.quarantinedOrders = append(snap.quarantinedOrders, id+": "+reason)
+			} else {
+				// A detail written by an older build or a hand edit can still
+				// carry a credential. Scrub it on load so the persisted job
+				// never keeps a URL, reference or token verbatim; the job's
+				// state, schedule and attempts stay intact.
+				record.Fulfilment.LastError = sanitizeFulfilmentDetail(record.Fulfilment.LastError)
 			}
 		}
 	}
@@ -1439,6 +1942,110 @@ func validOrderTimestamp(value string) bool {
 	return err == nil
 }
 
+// fulfilmentJobInvalidReason reports the first malformed field of a restored
+// job: the closed vocabularies, attempt bounds, timestamps, the per-state
+// schedule/lease/blocked rules, the frozen paid term and the job's
+// compatibility with its order. The returned text is a bounded reason, never a
+// value from the row. A malformed job is dropped and the order is flagged for
+// review; the order state and its payment facts are never rewritten here.
+func fulfilmentJobInvalidReason(record orderRecord, job model.FulfilmentJob) string {
+	order := record.Order
+	if job.OrderID != order.ID {
+		return "fulfilment job for another order"
+	}
+	if !model.ValidFulfilmentMode(job.Mode) {
+		return "invalid fulfilment mode"
+	}
+	if !model.ValidFulfilmentState(job.State) {
+		return "invalid fulfilment state"
+	}
+	if job.Attempts < 0 || job.Attempts > MaxFulfilmentAttempts {
+		return "fulfilment attempts out of range"
+	}
+	if !validOrderTimestamp(job.UpdatedAt) {
+		return "invalid fulfilment updatedAt"
+	}
+	if !validOrderTimestamp(job.EntitlementExpiresAt) {
+		return "invalid fulfilment entitlement expiry"
+	}
+	if job.LastError != "" && (len([]rune(job.LastError)) > maxFulfilmentDetailLen ||
+		strings.ContainsAny(job.LastError, "\r\n\t")) {
+		return "invalid fulfilment lastError"
+	}
+	if job.LastReason != "" && !model.ValidFulfilmentReason(job.LastReason) {
+		return "unknown fulfilment reason"
+	}
+	if job.NextAttemptAt != nil && !validOrderTimestamp(*job.NextAttemptAt) {
+		return "invalid fulfilment nextAttemptAt"
+	}
+	switch job.Mode {
+	case model.FulfilmentInitial:
+		if order.State != model.OrderPaid {
+			return "initial fulfilment job on a non-paid order"
+		}
+		if order.Grant != nil {
+			return "initial fulfilment job on a granted order"
+		}
+	case model.FulfilmentReissue:
+		if order.State != model.OrderActive {
+			return "reissue fulfilment job on a non-active order"
+		}
+	}
+	wantExpires, ok := orderFulfilmentExpiry(order, job.Mode)
+	if !ok {
+		return "order has no valid paid term"
+	}
+	gotExpires, ok := leaseExpiry(job.EntitlementExpiresAt)
+	if !ok || !gotExpires.Equal(wantExpires) {
+		return "fulfilment entitlement expiry mismatch"
+	}
+	switch job.State {
+	case model.FulfilmentQueued:
+		if job.Attempts >= MaxFulfilmentAttempts {
+			return "queued fulfilment job exhausted its attempts"
+		}
+		if job.AttemptLeaseID != "" {
+			return "queued fulfilment job holds an attempt lease"
+		}
+		if job.NextAttemptAt == nil {
+			return "queued fulfilment job without a schedule"
+		}
+		if job.Blocked {
+			return "queued fulfilment job is blocked"
+		}
+	case model.FulfilmentPublishing:
+		if job.Attempts < 1 {
+			return "publishing fulfilment job without an attempt"
+		}
+		if job.AttemptLeaseID == "" {
+			return "publishing fulfilment job without an attempt lease"
+		}
+		if job.NextAttemptAt != nil {
+			return "publishing fulfilment job with a schedule"
+		}
+		if job.Blocked {
+			return "publishing fulfilment job is blocked"
+		}
+	case model.FulfilmentDeadLetter:
+		// Attempts may be zero: a paid term that ended before the first
+		// attempt dead-letters at enqueue time, and that operator item must
+		// survive a restart.
+		if job.AttemptLeaseID != "" {
+			return "dead-lettered fulfilment job holds an attempt lease"
+		}
+		if job.NextAttemptAt != nil {
+			return "dead-lettered fulfilment job with a schedule"
+		}
+		if !job.Blocked {
+			return "dead-lettered fulfilment job is not blocked"
+		}
+		if job.LastReason == "" {
+			return "dead-lettered fulfilment job without a reason"
+		}
+	}
+	return ""
+}
+
 // PaymentEvents returns the recorded provider events, newest first.
 func (s *Store) PaymentEvents() []model.PaymentEvent {
 	s.mu.RLock()
@@ -1535,6 +2142,11 @@ func cloneOrder(order model.Order) model.Order {
 	if order.Grant != nil {
 		grant := cloneGrant(*order.Grant)
 		order.Grant = &grant
+	}
+	if order.Fulfilment != nil {
+		job := *order.Fulfilment
+		job.NextAttemptAt = copyStringPtr(job.NextAttemptAt)
+		order.Fulfilment = &job
 	}
 	return order
 }

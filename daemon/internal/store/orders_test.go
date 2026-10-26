@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1072,5 +1074,1264 @@ func TestActivationRetryDoesNotTreatEndedGrantLeaseAsActive(t *testing.T) {
 	}
 	if len(f.st.Leases()) != 0 {
 		t.Fatalf("retry created %d leases without a live grant", len(f.st.Leases()))
+	}
+}
+
+// paidOrderWithoutGrant settles an order while the fixture's user is
+// suspended. The existing settlement path then records the payment and leaves
+// the order paid without a grant, which is the state an initial fulfilment job
+// starts from.
+func (f *orderFixture) paidOrderWithoutGrant(t *testing.T, key string) model.Order {
+	t.Helper()
+	order := f.createOrder(t, key)
+	if _, err := f.st.SetUserEnabled(f.user.ID, false); err != nil {
+		t.Fatalf("suspend user: %v", err)
+	}
+	paid := f.apply(t, f.settleEvent(order.ID, "evt-"+key, "receipt-"+key))
+	if paid.State != model.OrderPaid || paid.Grant != nil {
+		t.Fatalf("settled while suspended = %+v, want paid without a grant", paid)
+	}
+	return paid
+}
+
+func enqueueInitial(t *testing.T, st *Store, orderID string) model.Order {
+	t.Helper()
+	order, err := st.EnqueueFulfilment(orderID, model.FulfilmentInitial)
+	if err != nil {
+		t.Fatalf("EnqueueFulfilment(%s, initial): %v", orderID, err)
+	}
+	return order
+}
+
+func fulfilmentJobOf(t *testing.T, st *Store, orderID string) model.FulfilmentJob {
+	t.Helper()
+	order, ok := st.Order(orderID)
+	if !ok {
+		t.Fatalf("order %q missing", orderID)
+	}
+	if order.Fulfilment == nil {
+		t.Fatalf("order %q has no fulfilment job", orderID)
+	}
+	return *order.Fulfilment
+}
+
+func requireNextAttempt(t *testing.T, job model.FulfilmentJob, want time.Time) {
+	t.Helper()
+	if job.NextAttemptAt == nil {
+		t.Fatalf("job in state %s has no next attempt, want %s", job.State, iso(want))
+	}
+	got, ok := leaseExpiry(*job.NextAttemptAt)
+	if !ok || !got.Equal(want) {
+		t.Fatalf("next attempt = %s, want %s", *job.NextAttemptAt, iso(want))
+	}
+}
+
+func TestEnqueueFulfilmentIsIdempotentPerOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "enqueue")
+	if paid.Fulfilment != nil {
+		t.Fatalf("paid order already carries a job: %+v", paid.Fulfilment)
+	}
+
+	queued := enqueueInitial(t, f.st, paid.ID)
+	job := queued.Fulfilment
+	if job == nil || job.OrderID != paid.ID || job.Mode != model.FulfilmentInitial ||
+		job.State != model.FulfilmentQueued || job.Attempts != 0 || job.AttemptLeaseID != "" {
+		t.Fatalf("enqueued job = %+v", job)
+	}
+	requireNextAttempt(t, *job, *f.now)
+	firstUpdated := job.UpdatedAt
+
+	// A replay returns the same job: no second job, no schedule rewrite.
+	*f.now = f.now.Add(time.Minute)
+	replay := enqueueInitial(t, f.st, paid.ID)
+	if replay.Fulfilment == nil || replay.Fulfilment.UpdatedAt != firstUpdated ||
+		replay.Fulfilment.Attempts != 0 || replay.Fulfilment.State != model.FulfilmentQueued {
+		t.Fatalf("replayed job = %+v, want the original", replay.Fulfilment)
+	}
+
+	// A different mode for the same order is a conflict, never a second job.
+	if _, err := f.st.EnqueueFulfilment(paid.ID, model.FulfilmentReissue); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second mode error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.EnqueueFulfilment(paid.ID, "renew"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown mode error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.st.EnqueueFulfilment("ord-missing", model.FulfilmentInitial); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown order error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestEnqueueFulfilmentRefusesInapplicableOrders(t *testing.T) {
+	f := newOrderFixture(t)
+	awaiting := f.createOrder(t, "awaiting")
+	if _, err := f.st.EnqueueFulfilment(awaiting.ID, model.FulfilmentInitial); !errors.Is(err, ErrConflict) {
+		t.Fatalf("initial job for awaiting order error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.EnqueueFulfilment(awaiting.ID, model.FulfilmentReissue); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue job for awaiting order error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.BeginFulfilment(awaiting.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin without a job error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(awaiting.ID, "lease-x", model.FulfilmentReasonInternal, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abort without a job error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.CancelOrder(awaiting.ID, "tenant"); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	if _, err := f.st.EnqueueFulfilment(awaiting.ID, model.FulfilmentInitial); !errors.Is(err, ErrConflict) {
+		t.Fatalf("initial job for cancelled order error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.BeginFulfilment(awaiting.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin on cancelled order error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.AbortFulfilment(awaiting.ID, "lease-x", model.FulfilmentReasonInternal, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abort on cancelled order error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.BeginFulfilment("ord-missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("begin unknown order error = %v, want ErrNotFound", err)
+	}
+	if _, err := f.st.AbortFulfilment("ord-missing", "lease-x", model.FulfilmentReasonInternal, "", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("abort unknown order error = %v, want ErrNotFound", err)
+	}
+
+	// A paid order accepts only the initial mode.
+	paid := f.paidOrderWithoutGrant(t, "paid-only")
+	if _, err := f.st.EnqueueFulfilment(paid.ID, model.FulfilmentReissue); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue job for paid order error = %v, want ErrConflict", err)
+	}
+}
+
+func TestEnqueueFulfilmentReissueNeedsEndedUnexpiredGrant(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "reissue-job")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-reissue-job", "receipt-reissue-job"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v, want active with a grant", active)
+	}
+	// A serving lease has nothing to reissue, and an active order never gets
+	// an initial job.
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue while serving error = %v, want ErrConflict", err)
+	}
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentInitial); !errors.Is(err, ErrConflict) {
+		t.Fatalf("initial job for active order error = %v, want ErrConflict", err)
+	}
+
+	// End the grant's lease the way a daemon restart does.
+	lease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := f.st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	queued, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue)
+	if err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	if queued.Fulfilment == nil || queued.Fulfilment.Mode != model.FulfilmentReissue ||
+		queued.Fulfilment.State != model.FulfilmentQueued || queued.Fulfilment.Attempts != 0 {
+		t.Fatalf("reissue job = %+v", queued.Fulfilment)
+	}
+	attempt, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(reissue): %v", err)
+	}
+	if attempt.Mode != model.FulfilmentReissue || attempt.Number != 1 || attempt.LeaseID == "" {
+		t.Fatalf("reissue attempt = %+v", attempt)
+	}
+
+	// A paid term that has expired cannot be reissued.
+	f2 := newOrderFixture(t)
+	expiring := f2.createOrder(t, "expired")
+	f2.apply(t, f2.settleEvent(expiring.ID, "evt-expired", "receipt-expired"))
+	*f2.now = f2.now.Add(time.Duration(f2.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	if _, err := f2.st.EnqueueFulfilment(expiring.ID, model.FulfilmentReissue); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reissue after expiry error = %v, want ErrConflict", err)
+	}
+}
+
+func TestFulfilmentBeginAbortFencing(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "fence")
+	enqueueInitial(t, f.st, paid.ID)
+
+	// Nothing is in flight before the first begin.
+	if _, err := f.st.AbortFulfilment(paid.ID, "lease-stale", model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abort before begin error = %v, want ErrConflict", err)
+	}
+
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if attempt.OrderID != paid.ID || attempt.Mode != model.FulfilmentInitial ||
+		attempt.Number != 1 || attempt.LeaseID == "" {
+		t.Fatalf("first attempt = %+v", attempt)
+	}
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentPublishing || job.Attempts != 1 ||
+		job.AttemptLeaseID != attempt.LeaseID || job.NextAttemptAt != nil {
+		t.Fatalf("publishing job = %+v", job)
+	}
+	// One in-flight attempt per job.
+	if _, err := f.st.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second begin while publishing error = %v, want ErrConflict", err)
+	}
+
+	// A stale attempt lease cannot abort the current attempt.
+	if _, err := f.st.AbortFulfilment(paid.ID, "lease-stale", model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale abort error = %v, want ErrConflict", err)
+	}
+	if got := fulfilmentJobOf(t, f.st, paid.ID); got.State != model.FulfilmentPublishing || got.Attempts != 1 {
+		t.Fatalf("stale abort changed the job: %+v", got)
+	}
+
+	queued, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	job = *queued.Fulfilment
+	if job.State != model.FulfilmentQueued || job.Attempts != 1 ||
+		job.AttemptLeaseID != "" || job.LastReason != model.FulfilmentReasonCapacity {
+		t.Fatalf("aborted job = %+v", job)
+	}
+	requireNextAttempt(t, job, f.now.Add(5*time.Second))
+	// The same attempt cannot abort twice.
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate abort error = %v, want ErrConflict", err)
+	}
+
+	second, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(second): %v", err)
+	}
+	if second.Number != 2 || second.LeaseID == attempt.LeaseID {
+		t.Fatalf("second attempt = %+v, want a distinct lease from %q", second, attempt.LeaseID)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abort with the first attempt lease error = %v, want ErrConflict", err)
+	}
+	aborted, err := f.st.AbortFulfilment(paid.ID, second.LeaseID, model.FulfilmentReasonCapacity, "", true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(second): %v", err)
+	}
+	if aborted.Fulfilment.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", aborted.Fulfilment.Attempts)
+	}
+	requireNextAttempt(t, *aborted.Fulfilment, f.now.Add(15*time.Second))
+}
+
+func TestFulfilmentBackoffScheduleAndDeadLetter(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "backoff")
+	enqueueInitial(t, f.st, paid.ID)
+
+	schedule := []time.Duration{
+		5 * time.Second, 15 * time.Second, 45 * time.Second,
+		2 * time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute,
+	}
+	for i, delay := range schedule {
+		attempt, err := f.st.BeginFulfilment(paid.ID)
+		if err != nil {
+			t.Fatalf("begin attempt %d: %v", i+1, err)
+		}
+		if attempt.Number != i+1 {
+			t.Fatalf("attempt number = %d, want %d", attempt.Number, i+1)
+		}
+		aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true)
+		if err != nil {
+			t.Fatalf("abort attempt %d: %v", i+1, err)
+		}
+		job := *aborted.Fulfilment
+		if job.State != model.FulfilmentQueued || job.Attempts != i+1 {
+			t.Fatalf("attempt %d job = %+v", i+1, job)
+		}
+		requireNextAttempt(t, job, f.now.Add(delay))
+		*f.now = f.now.Add(delay)
+	}
+	if got := countAudit(f.st, "fulfilment.retry"); got != 7 {
+		t.Fatalf("fulfilment.retry rows = %d, want 7", got)
+	}
+
+	// The eighth failure dead-letters instead of scheduling another retry.
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("begin eighth attempt: %v", err)
+	}
+	if attempt.Number != MaxFulfilmentAttempts {
+		t.Fatalf("attempt number = %d, want %d", attempt.Number, MaxFulfilmentAttempts)
+	}
+	dead, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true)
+	if err != nil {
+		t.Fatalf("abort eighth attempt: %v", err)
+	}
+	job := *dead.Fulfilment
+	if job.State != model.FulfilmentDeadLetter || job.Attempts != MaxFulfilmentAttempts ||
+		job.AttemptLeaseID != "" || job.NextAttemptAt != nil {
+		t.Fatalf("dead-lettered job = %+v", job)
+	}
+	if _, err := f.st.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin after dead letter error = %v, want ErrConflict", err)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(24 * time.Hour)); len(due) != 0 {
+		t.Fatalf("dead-lettered job is due: %+v", due)
+	}
+	event := findAudit(t, f.st, "fulfilment.dead_letter", func(e model.AuditEvent) bool {
+		return e.Meta["orderId"] == paid.ID
+	})
+	if event.Severity != model.SeverityCritical || event.Meta["attempts"] != "8" {
+		t.Fatalf("dead-letter audit = %+v", event)
+	}
+
+	// A non-retryable failure dead-letters at attempt one.
+	f2 := newOrderFixture(t)
+	paid2 := f2.paidOrderWithoutGrant(t, "nonretry")
+	enqueueInitial(t, f2.st, paid2.ID)
+	first, err := f2.st.BeginFulfilment(paid2.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(non-retryable): %v", err)
+	}
+	refused, err := f2.st.AbortFulfilment(paid2.ID, first.LeaseID, model.FulfilmentReasonPublishFailed, "publication refused", false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(non-retryable): %v", err)
+	}
+	if refused.Fulfilment.State != model.FulfilmentDeadLetter ||
+		refused.Fulfilment.Attempts != 1 || refused.Fulfilment.NextAttemptAt != nil {
+		t.Fatalf("non-retryable job = %+v", refused.Fulfilment)
+	}
+}
+
+func TestFulfilmentPersistenceRoundtrip(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "persist")
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	before := fulfilmentJobOf(t, f.st, paid.ID)
+
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"fulfilment"`)) {
+		t.Fatalf("snapshot does not carry the fulfilment job")
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	after := fulfilmentJobOf(t, restored, paid.ID)
+	if !fulfilmentJobsEqual(before, after) {
+		t.Fatalf("restored job = %+v, want %+v", after, before)
+	}
+	// The restored job continues from its persisted attempt count.
+	next, err := restored.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment after restore: %v", err)
+	}
+	if next.Number != 2 {
+		t.Fatalf("attempt after restore = %d, want 2", next.Number)
+	}
+
+	// An order without a job keeps the old snapshot shape: the field is
+	// omitted and loads back as nil.
+	f2 := newOrderFixture(t)
+	plain := f2.paidOrderWithoutGrant(t, "no-job")
+	plainData, err := f2.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(no job): %v", err)
+	}
+	if bytes.Contains(plainData, []byte(`"fulfilment"`)) {
+		t.Fatalf("snapshot without a job carries the field")
+	}
+	plainRestored := newEmptyWithClock(func() time.Time { return *f2.now }, nil)
+	if err := plainRestored.Restore(plainData); err != nil {
+		t.Fatalf("Restore(no job): %v", err)
+	}
+	plainOrder, ok := plainRestored.Order(plain.ID)
+	if !ok || plainOrder.Fulfilment != nil || plainOrder.State != model.OrderPaid {
+		t.Fatalf("restored plain order = %+v, ok=%t", plainOrder, ok)
+	}
+
+	// A job restored beside a terminal order is stale work: the order and its
+	// recorded money survive, the job is dropped.
+	f3 := newOrderFixture(t)
+	refundOrder := f3.paidOrderWithoutGrant(t, "refunded-job")
+	enqueueInitial(t, f3.st, refundOrder.ID)
+	refunded, err := f3.st.RecordManualRefund(refundOrder.ID, "refund-receipt", "customer request", "operator")
+	if err != nil {
+		t.Fatalf("RecordManualRefund: %v", err)
+	}
+	if refunded.State != model.OrderRefunded {
+		t.Fatalf("refunded order = %+v", refunded)
+	}
+	refundData, err := f3.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(refunded): %v", err)
+	}
+	refundRestored := newEmptyWithClock(func() time.Time { return *f3.now }, nil)
+	if err := refundRestored.Restore(refundData); err != nil {
+		t.Fatalf("Restore(refunded): %v", err)
+	}
+	stored, ok := refundRestored.Order(refundOrder.ID)
+	if !ok || stored.State != model.OrderRefunded || stored.Fulfilment != nil ||
+		stored.RefundedAt == nil || stored.ReviewRequired {
+		t.Fatalf("restored refunded order = %+v, ok=%t", stored, ok)
+	}
+}
+
+func fulfilmentJobsEqual(a, b model.FulfilmentJob) bool {
+	if a.OrderID != b.OrderID || a.Mode != b.Mode || a.State != b.State ||
+		a.Attempts != b.Attempts || a.AttemptLeaseID != b.AttemptLeaseID ||
+		a.EntitlementExpiresAt != b.EntitlementExpiresAt || a.Blocked != b.Blocked ||
+		a.LastReason != b.LastReason || a.LastError != b.LastError ||
+		a.UpdatedAt != b.UpdatedAt {
+		return false
+	}
+	if (a.NextAttemptAt == nil) != (b.NextAttemptAt == nil) {
+		return false
+	}
+	return a.NextAttemptAt == nil || *a.NextAttemptAt == *b.NextAttemptAt
+}
+
+func TestRestoreDropsMalformedFulfilmentJobWithoutLosingMoney(t *testing.T) {
+	const validStamp = "2026-10-01T12:00:00Z"
+	cases := []struct {
+		name   string
+		mutate func(*model.FulfilmentJob)
+	}{
+		{"unknown state", func(j *model.FulfilmentJob) { j.State = "done" }},
+		{"unknown mode", func(j *model.FulfilmentJob) { j.Mode = "renew" }},
+		{"attempts above bound", func(j *model.FulfilmentJob) { j.Attempts = MaxFulfilmentAttempts + 1 }},
+		{"negative attempts", func(j *model.FulfilmentJob) { j.Attempts = -1 }},
+		{"publishing without lease", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentPublishing
+			j.Attempts = 1
+			j.AttemptLeaseID = ""
+		}},
+		{"publishing without attempt", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentPublishing
+			j.Attempts = 0
+			j.AttemptLeaseID = "lease-x"
+		}},
+		{"publishing with schedule", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentPublishing
+			j.Attempts = 1
+			j.AttemptLeaseID = "lease-x"
+			j.NextAttemptAt = ptrString(validStamp)
+		}},
+		{"publishing blocked", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentPublishing
+			j.Attempts = 1
+			j.AttemptLeaseID = "lease-x"
+			j.Blocked = true
+		}},
+		{"queued holding a lease", func(j *model.FulfilmentJob) {
+			j.Attempts = 1
+			j.AttemptLeaseID = "lease-x"
+		}},
+		{"queued after the last attempt", func(j *model.FulfilmentJob) {
+			j.Attempts = MaxFulfilmentAttempts
+		}},
+		{"queued without schedule", func(j *model.FulfilmentJob) { j.NextAttemptAt = nil }},
+		{"queued blocked", func(j *model.FulfilmentJob) { j.Blocked = true }},
+		{"dead letter with schedule", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentDeadLetter
+			j.Attempts = 1
+			j.Blocked = true
+			j.LastReason = model.FulfilmentReasonInternal
+			j.NextAttemptAt = ptrString(validStamp)
+		}},
+		{"dead letter not blocked", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentDeadLetter
+			j.Attempts = 1
+			j.LastReason = model.FulfilmentReasonInternal
+		}},
+		{"dead letter without reason", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentDeadLetter
+			j.Attempts = 1
+			j.Blocked = true
+		}},
+		{"dead letter holding a lease", func(j *model.FulfilmentJob) {
+			j.State = model.FulfilmentDeadLetter
+			j.Attempts = 1
+			j.Blocked = true
+			j.LastReason = model.FulfilmentReasonInternal
+			j.AttemptLeaseID = "lease-x"
+		}},
+		{"reissue job on paid order", func(j *model.FulfilmentJob) {
+			j.Mode = model.FulfilmentReissue
+		}},
+		{"foreign order", func(j *model.FulfilmentJob) { j.OrderID = "ord-999" }},
+		{"invalid next attempt", func(j *model.FulfilmentJob) { j.NextAttemptAt = ptrString("tomorrow") }},
+		{"invalid updatedAt", func(j *model.FulfilmentJob) { j.UpdatedAt = "" }},
+		{"missing entitlement expiry", func(j *model.FulfilmentJob) { j.EntitlementExpiresAt = "" }},
+		{"entitlement expiry mismatch", func(j *model.FulfilmentJob) {
+			j.EntitlementExpiresAt = "2020-01-01T00:00:00Z"
+		}},
+		{"unknown reason", func(j *model.FulfilmentJob) {
+			j.LastReason = model.FulfilmentReason("trade_ref_123")
+		}},
+		{"overlong last error", func(j *model.FulfilmentJob) {
+			j.LastError = strings.Repeat("x", maxFulfilmentDetailLen+1)
+		}},
+		{"multi-line last error", func(j *model.FulfilmentJob) {
+			j.LastError = "first\nsecond"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrderFixture(t)
+			paid := f.paidOrderWithoutGrant(t, "quarantine-job")
+			enqueueInitial(t, f.st, paid.ID)
+			data, err := f.st.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+			var snap Snapshot
+			if err := json.Unmarshal(data, &snap); err != nil {
+				t.Fatalf("decode snapshot: %v", err)
+			}
+			if len(snap.Orders) != 1 || snap.Orders[0].Fulfilment == nil {
+				t.Fatalf("snapshot orders = %+v", snap.Orders)
+			}
+			tc.mutate(snap.Orders[0].Fulfilment)
+			corrupt, err := json.Marshal(&snap)
+			if err != nil {
+				t.Fatalf("encode corrupt snapshot: %v", err)
+			}
+			restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+			if err := restored.Restore(corrupt); err != nil {
+				t.Fatalf("Restore: %v", err)
+			}
+			order, ok := restored.Order(paid.ID)
+			if !ok {
+				t.Fatalf("order disappeared")
+			}
+			// Only the job is dropped: the paid state, its timestamps, the
+			// provider reference and the payment events must all survive.
+			if !order.ReviewRequired || order.State != model.OrderPaid ||
+				order.Fulfilment != nil || order.Grant != nil ||
+				order.PaidAt == nil || order.ProviderRef == nil || order.CancelledAt != nil {
+				t.Fatalf("order after dropped job = %+v", order)
+			}
+			if got := len(restored.PaymentEvents()); got != 1 {
+				t.Fatalf("payment events after dropped job = %d, want 1", got)
+			}
+			if order.Plan.AmountMinor != f.plan.AmountMinor {
+				t.Fatalf("plan amount after dropped job = %d, want %d",
+					order.Plan.AmountMinor, f.plan.AmountMinor)
+			}
+		})
+	}
+}
+
+func TestRestoreDropsInitialJobOnActiveOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "active-initial")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-active-initial", "receipt-active-initial"))
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant")
+	}
+
+	// White-box: attach an initial job the way a corrupt document would.
+	f.st.mu.Lock()
+	idx := f.st.orderIndexLocked(order.ID)
+	expires, ok := orderFulfilmentExpiry(f.st.orders[idx].Order, model.FulfilmentInitial)
+	if !ok {
+		f.st.mu.Unlock()
+		t.Fatalf("active order has no paid term")
+	}
+	f.st.orders[idx].Order.Fulfilment = &model.FulfilmentJob{
+		OrderID:              order.ID,
+		Mode:                 model.FulfilmentInitial,
+		State:                model.FulfilmentQueued,
+		EntitlementExpiresAt: iso(expires),
+		NextAttemptAt:        ptrString(iso(*f.now)),
+		UpdatedAt:            iso(*f.now),
+	}
+	f.st.mu.Unlock()
+
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	stored, ok := restored.Order(order.ID)
+	if !ok || stored.State != model.OrderActive || stored.Grant == nil ||
+		stored.Fulfilment != nil || !stored.ReviewRequired {
+		t.Fatalf("restored active order = %+v, ok=%t", stored, ok)
+	}
+	if len(restored.Leases()) != 1 {
+		t.Fatalf("dropping the job revoked service: leases=%d", len(restored.Leases()))
+	}
+}
+
+func TestRecoverFulfilmentsRequeuesInterruptedAttempts(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "recover")
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if job := fulfilmentJobOf(t, restored, paid.ID); job.State != model.FulfilmentPublishing ||
+		job.Attempts != 1 || job.AttemptLeaseID != attempt.LeaseID {
+		t.Fatalf("restored publishing job = %+v", job)
+	}
+
+	if err := restored.RecoverFulfilments(); err != nil {
+		t.Fatalf("RecoverFulfilments: %v", err)
+	}
+	job := fulfilmentJobOf(t, restored, paid.ID)
+	if job.State != model.FulfilmentQueued || job.Attempts != 1 ||
+		job.AttemptLeaseID != "" || job.LastReason != model.FulfilmentReasonInterrupted {
+		t.Fatalf("recovered job = %+v", job)
+	}
+	requireNextAttempt(t, job, *f.now)
+	if due := restored.DueFulfilments(*f.now); len(due) != 1 || due[0].ID != paid.ID {
+		t.Fatalf("due after recovery = %+v", due)
+	}
+	if got := countAudit(restored, "fulfilment.interrupted"); got != 1 {
+		t.Fatalf("fulfilment.interrupted rows = %d, want 1", got)
+	}
+
+	// Recovery is idempotent: a queued job is not touched and no second
+	// interrupted row is written.
+	if err := restored.RecoverFulfilments(); err != nil {
+		t.Fatalf("second RecoverFulfilments: %v", err)
+	}
+	if again := fulfilmentJobOf(t, restored, paid.ID); !fulfilmentJobsEqual(job, again) {
+		t.Fatalf("second recovery changed the job: %+v, want %+v", again, job)
+	}
+	if got := countAudit(restored, "fulfilment.interrupted"); got != 1 {
+		t.Fatalf("fulfilment.interrupted rows after second recovery = %d, want 1", got)
+	}
+
+	// A dead letter is an operator queue, never an automatic retry.
+	f2 := newOrderFixture(t)
+	dead := f2.paidOrderWithoutGrant(t, "recover-dead")
+	enqueueInitial(t, f2.st, dead.ID)
+	first, err := f2.st.BeginFulfilment(dead.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(dead): %v", err)
+	}
+	if _, err := f2.st.AbortFulfilment(dead.ID, first.LeaseID, model.FulfilmentReasonPublishFailed, "publication refused", false); err != nil {
+		t.Fatalf("AbortFulfilment(dead): %v", err)
+	}
+	if err := f2.st.RecoverFulfilments(); err != nil {
+		t.Fatalf("RecoverFulfilments(dead): %v", err)
+	}
+	deadJob := fulfilmentJobOf(t, f2.st, dead.ID)
+	if deadJob.State != model.FulfilmentDeadLetter || deadJob.Attempts != 1 || deadJob.NextAttemptAt != nil {
+		t.Fatalf("recovered dead letter = %+v", deadJob)
+	}
+	if got := countAudit(f2.st, "fulfilment.interrupted"); got != 0 {
+		t.Fatalf("dead letter wrote %d interrupted rows", got)
+	}
+}
+
+func TestDueFulfilmentsHonoursSchedule(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "due")
+	if due := f.st.DueFulfilments(*f.now); len(due) != 0 {
+		t.Fatalf("due before enqueue = %+v", due)
+	}
+	enqueueInitial(t, f.st, paid.ID)
+	if due := f.st.DueFulfilments(*f.now); len(due) != 1 || due[0].ID != paid.ID {
+		t.Fatalf("due after enqueue = %+v", due)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(-time.Second)); len(due) != 0 {
+		t.Fatalf("job is due before its schedule: %+v", due)
+	}
+
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(time.Hour)); len(due) != 0 {
+		t.Fatalf("publishing job is due: %+v", due)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID, model.FulfilmentReasonCapacity, "", true); err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(4 * time.Second)); len(due) != 0 {
+		t.Fatalf("job is due before the first backoff: %+v", due)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(5 * time.Second)); len(due) != 1 {
+		t.Fatalf("job is not due at the first backoff: %+v", due)
+	}
+
+	*f.now = f.now.Add(5 * time.Second)
+	second, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(second): %v", err)
+	}
+	if _, err := f.st.AbortFulfilment(paid.ID, second.LeaseID, model.FulfilmentReasonCapacity, "", true); err != nil {
+		t.Fatalf("AbortFulfilment(second): %v", err)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(14 * time.Second)); len(due) != 0 {
+		t.Fatalf("job is due before the second backoff: %+v", due)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(15 * time.Second)); len(due) != 1 {
+		t.Fatalf("job is not due at the second backoff: %+v", due)
+	}
+}
+
+func TestConcurrentBeginFulfilmentStartsOneAttempt(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "race")
+	enqueueInitial(t, f.st, paid.ID)
+
+	const workers = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan FulfilmentAttempt, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			attempt, err := f.st.BeginFulfilment(paid.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- attempt
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	won := make([]FulfilmentAttempt, 0, workers)
+	for attempt := range results {
+		won = append(won, attempt)
+	}
+	if len(won) != 1 {
+		t.Fatalf("concurrent begins succeeded %d times, want exactly one", len(won))
+	}
+	for err := range errs {
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("losing begin error = %v, want ErrConflict", err)
+		}
+	}
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentPublishing || job.Attempts != 1 ||
+		job.AttemptLeaseID != won[0].LeaseID {
+		t.Fatalf("job after the race = %+v, winner = %+v", job, won[0])
+	}
+}
+
+// flagOrderReview applies a wrong-amount settlement to a paid order. The
+// existing event path records the mismatch review-only and leaves the order
+// paid, which is the state fulfilment must refuse.
+func flagOrderReview(t *testing.T, f *orderFixture, orderID string) model.Order {
+	t.Helper()
+	event := f.settleEvent(orderID, "evt-review-"+orderID, "receipt-review-"+orderID)
+	event.AmountMinor = 1
+	reviewed := f.apply(t, event)
+	if !reviewed.ReviewRequired || reviewed.State != model.OrderPaid {
+		t.Fatalf("wrong-amount settlement = %+v, want paid with review", reviewed)
+	}
+	return reviewed
+}
+
+func TestEnqueueFulfilmentRefusesReviewRequiredOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "review-enqueue")
+	flagOrderReview(t, f, paid.ID)
+
+	if _, err := f.st.EnqueueFulfilment(paid.ID, model.FulfilmentInitial); !errors.Is(err, ErrConflict) {
+		t.Fatalf("enqueue on review order error = %v, want ErrConflict", err)
+	}
+	order, ok := f.st.Order(paid.ID)
+	if !ok || order.Fulfilment != nil || !order.ReviewRequired || order.State != model.OrderPaid {
+		t.Fatalf("review order after enqueue = %+v, ok=%t", order, ok)
+	}
+}
+
+func TestBeginFulfilmentRefusesReviewRequiredOrder(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "review-begin")
+	enqueueInitial(t, f.st, paid.ID)
+	flagOrderReview(t, f, paid.ID)
+
+	if _, err := f.st.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin on review order error = %v, want ErrConflict", err)
+	}
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.Blocked {
+		t.Fatalf("review order job changed: %+v", job)
+	}
+}
+
+func TestFulfilmentExpiredPaidTermDeadLetters(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "expired-queued")
+	queued := enqueueInitial(t, f.st, paid.ID)
+	wantExpires, ok := orderFulfilmentExpiry(queued, model.FulfilmentInitial)
+	if !ok || queued.Fulfilment.EntitlementExpiresAt != iso(wantExpires) {
+		t.Fatalf("job expiry = %q, want %q", queued.Fulfilment.EntitlementExpiresAt, iso(wantExpires))
+	}
+
+	*f.now = f.now.Add(time.Duration(f.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	if _, err := f.st.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin after paid-term expiry error = %v, want ErrConflict", err)
+	}
+	job := fulfilmentJobOf(t, f.st, paid.ID)
+	if job.State != model.FulfilmentDeadLetter || !job.Blocked || job.Attempts != 0 ||
+		job.AttemptLeaseID != "" || job.NextAttemptAt != nil ||
+		job.LastReason != model.FulfilmentReasonEntitlementExpired {
+		t.Fatalf("expired job = %+v", job)
+	}
+	if due := f.st.DueFulfilments(f.now.Add(time.Hour)); len(due) != 0 {
+		t.Fatalf("expired dead letter is due: %+v", due)
+	}
+	event := findAudit(t, f.st, "fulfilment.dead_letter", func(e model.AuditEvent) bool {
+		return e.Meta["orderId"] == paid.ID
+	})
+	if event.Severity != model.SeverityCritical ||
+		event.Meta["reason"] != string(model.FulfilmentReasonEntitlementExpired) {
+		t.Fatalf("dead-letter audit = %+v", event)
+	}
+	// The payment and its order state survive: only the work is dead.
+	order, ok := f.st.Order(paid.ID)
+	if !ok || order.State != model.OrderPaid || order.PaidAt == nil || order.Grant != nil {
+		t.Fatalf("expired order = %+v, ok=%t", order, ok)
+	}
+
+	// An initial job enqueued after the term already ended records the dead
+	// letter directly instead of dropping the liability.
+	f2 := newOrderFixture(t)
+	late := f2.paidOrderWithoutGrant(t, "expired-enqueue")
+	*f2.now = f2.now.Add(time.Duration(f2.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	expired, err := f2.st.EnqueueFulfilment(late.ID, model.FulfilmentInitial)
+	if err != nil {
+		t.Fatalf("EnqueueFulfilment(expired): %v", err)
+	}
+	lateJob := *expired.Fulfilment
+	if lateJob.State != model.FulfilmentDeadLetter || !lateJob.Blocked || lateJob.Attempts != 0 ||
+		lateJob.LastReason != model.FulfilmentReasonEntitlementExpired {
+		t.Fatalf("late enqueue job = %+v", lateJob)
+	}
+	if _, err := f2.st.BeginFulfilment(late.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin on late enqueue error = %v, want ErrConflict", err)
+	}
+
+	// A queued reissue whose paid term ends is dead-lettered the same way.
+	f3 := newOrderFixture(t)
+	order3 := f3.createOrder(t, "expired-reissue")
+	active := f3.apply(t, f3.settleEvent(order3.ID, "evt-expired-reissue", "receipt-expired-reissue"))
+	if active.Grant == nil {
+		t.Fatalf("settled order has no grant")
+	}
+	lease, ok := f3.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease missing")
+	}
+	if _, _, _, err := f3.st.DemoteNode(lease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	if _, err := f3.st.EnqueueFulfilment(order3.ID, model.FulfilmentReissue); err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	*f3.now = f3.now.Add(time.Duration(f3.plan.LeaseTTLSeconds)*time.Second + time.Second)
+	if _, err := f3.st.BeginFulfilment(order3.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin after reissue expiry error = %v, want ErrConflict", err)
+	}
+	reissueJob := fulfilmentJobOf(t, f3.st, order3.ID)
+	if reissueJob.State != model.FulfilmentDeadLetter || !reissueJob.Blocked ||
+		reissueJob.Attempts != 0 || reissueJob.LastReason != model.FulfilmentReasonEntitlementExpired {
+		t.Fatalf("expired reissue job = %+v", reissueJob)
+	}
+}
+
+func TestAbortFulfilmentRejectsUnknownReasonAndSanitizesDetail(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "sanitize")
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+
+	// Free text, a reference or a credential is not a reason code.
+	for _, raw := range []string{
+		"no_capacity",
+		"202610261234567890",
+		"https://pay.example/notify?token=SECRET",
+	} {
+		if _, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+			model.FulfilmentReason(raw), "", true); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("abort reason %q error = %v, want ErrInvalid", raw, err)
+		}
+	}
+	if job := fulfilmentJobOf(t, f.st, paid.ID); job.State != model.FulfilmentPublishing || job.Attempts != 1 {
+		t.Fatalf("rejected abort changed the job: %+v", job)
+	}
+
+	sensitive := "token=SECRET password hunter2 trade 20261026 api_key=abcDEF123 " +
+		"receipt no. ABCD-1234 " +
+		"https://pay.example/notify?trade=202610261234567890 token=sk_live_SECRET1234567890 " +
+		"mail ops@example.com"
+	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, sensitive, true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(sensitive detail): %v", err)
+	}
+	job := *aborted.Fulfilment
+	if job.State != model.FulfilmentQueued || job.LastReason != model.FulfilmentReasonPublishFailed {
+		t.Fatalf("aborted job = %+v", job)
+	}
+	for _, needle := range []string{
+		"http", "202610261234567890", "20261026", "SECRET", "sk_live",
+		"hunter2", "abcDEF123", "ABCD-1234", "@", "example.com",
+	} {
+		if strings.Contains(job.LastError, needle) {
+			t.Fatalf("last error kept sensitive text %q: %q", needle, job.LastError)
+		}
+	}
+	if len([]rune(job.LastError)) > maxFulfilmentDetailLen {
+		t.Fatalf("last error length = %d, want <= %d",
+			len([]rune(job.LastError)), maxFulfilmentDetailLen)
+	}
+	for _, event := range f.st.Audit(50) {
+		for key, value := range event.Meta {
+			for _, needle := range []string{"SECRET", "hunter2", "abcDEF123", "ABCD-1234", "202610261234567890"} {
+				if strings.Contains(value, needle) {
+					t.Fatalf("audit meta %s kept sensitive text %q: %q", key, needle, value)
+				}
+			}
+		}
+		for _, needle := range []string{"SECRET", "hunter2", "abcDEF123", "ABCD-1234", "202610261234567890"} {
+			if strings.Contains(event.Detail, needle) {
+				t.Fatalf("audit detail kept sensitive text %q: %q", needle, event.Detail)
+			}
+		}
+	}
+
+	// A long but harmless detail is bounded, not rejected.
+	second, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(second): %v", err)
+	}
+	long := strings.Repeat("publication retry scheduled ", 20)
+	bounded, err := f.st.AbortFulfilment(paid.ID, second.LeaseID,
+		model.FulfilmentReasonTimeout, long, true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(long detail): %v", err)
+	}
+	if got := len([]rune(bounded.Fulfilment.LastError)); got > maxFulfilmentDetailLen {
+		t.Fatalf("bounded detail length = %d, want <= %d", got, maxFulfilmentDetailLen)
+	}
+}
+
+func TestFulfilmentJobJSONRoundtrip(t *testing.T) {
+	next := "2026-10-01T12:00:30Z"
+	cases := []struct {
+		name string
+		job  model.FulfilmentJob
+	}{
+		{"queued retry", model.FulfilmentJob{
+			OrderID: "ord-001", Mode: model.FulfilmentInitial, State: model.FulfilmentQueued,
+			Attempts: 2, EntitlementExpiresAt: "2026-10-01T13:00:00Z",
+			NextAttemptAt: &next, LastReason: model.FulfilmentReasonCapacity,
+			LastError: "no free slot", UpdatedAt: "2026-10-01T12:00:00Z",
+		}},
+		{"publishing", model.FulfilmentJob{
+			OrderID: "ord-001", Mode: model.FulfilmentReissue, State: model.FulfilmentPublishing,
+			Attempts: 1, AttemptLeaseID: "lease-ord-001-a1",
+			EntitlementExpiresAt: "2026-10-01T13:00:00Z",
+			UpdatedAt:            "2026-10-01T12:00:00Z",
+		}},
+		{"dead letter", model.FulfilmentJob{
+			OrderID: "ord-001", Mode: model.FulfilmentInitial, State: model.FulfilmentDeadLetter,
+			Attempts: MaxFulfilmentAttempts, EntitlementExpiresAt: "2026-10-01T13:00:00Z",
+			LastReason: model.FulfilmentReasonPublishFailed, LastError: "gateway refused",
+			Blocked: true, UpdatedAt: "2026-10-01T12:00:00Z",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(model.Order{ID: "ord-001", Fulfilment: &tc.job})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var decoded model.Order
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if decoded.Fulfilment == nil || !fulfilmentJobsEqual(*decoded.Fulfilment, tc.job) {
+				t.Fatalf("roundtrip job = %+v, want %+v", decoded.Fulfilment, tc.job)
+			}
+		})
+	}
+
+	// A nil job keeps the pre-fulfilment shape.
+	plain, err := json.Marshal(model.Order{ID: "ord-002"})
+	if err != nil {
+		t.Fatalf("Marshal(nil job): %v", err)
+	}
+	if bytes.Contains(plain, []byte(`"fulfilment"`)) {
+		t.Fatalf("nil job serialized: %s", plain)
+	}
+
+	// Optional fields stay omitted; the frozen paid term is always present.
+	queued, err := json.Marshal(model.FulfilmentJob{
+		OrderID: "ord-003", Mode: model.FulfilmentInitial, State: model.FulfilmentQueued,
+		EntitlementExpiresAt: "2026-10-01T13:00:00Z", UpdatedAt: "2026-10-01T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Marshal(queued): %v", err)
+	}
+	for _, absent := range []string{
+		`"attemptLeaseId"`, `"nextAttemptAt"`, `"lastReason"`, `"lastError"`, `"blocked"`,
+	} {
+		if bytes.Contains(queued, []byte(absent)) {
+			t.Fatalf("optional field %s serialized: %s", absent, queued)
+		}
+	}
+	if !bytes.Contains(queued, []byte(`"entitlementExpiresAt"`)) {
+		t.Fatalf("required entitlement expiry omitted: %s", queued)
+	}
+}
+
+func TestFulfilmentReadsAreIsolatedCopies(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "clone")
+	queued := enqueueInitial(t, f.st, paid.ID)
+	if queued.Fulfilment == nil || queued.Fulfilment.NextAttemptAt == nil {
+		t.Fatalf("enqueued job = %+v", queued.Fulfilment)
+	}
+
+	assertStored := func(stage string) {
+		t.Helper()
+		stored := fulfilmentJobOf(t, f.st, paid.ID)
+		if stored.Attempts != 0 || stored.AttemptLeaseID != "" ||
+			stored.NextAttemptAt == nil || *stored.NextAttemptAt != iso(*f.now) {
+			t.Fatalf("%s: store job was mutated through a copy: %+v", stage, stored)
+		}
+	}
+	// Enqueue returns a copy.
+	*queued.Fulfilment.NextAttemptAt = "1999-01-01T00:00:00Z"
+	queued.Fulfilment.Attempts = 99
+	queued.Fulfilment.AttemptLeaseID = "lease-tampered"
+	assertStored("enqueue")
+
+	// Order, Orders and DueFulfilments return independent copies.
+	read, ok := f.st.Order(paid.ID)
+	if !ok || read.Fulfilment == nil {
+		t.Fatalf("Order = %+v, ok=%t", read, ok)
+	}
+	*read.Fulfilment.NextAttemptAt = "1999-01-01T00:00:00Z"
+	read.Fulfilment.Attempts = 7
+	assertStored("order")
+
+	all := f.st.Orders()
+	if len(all) != 1 || all[0].Fulfilment == nil {
+		t.Fatalf("Orders = %+v", all)
+	}
+	*all[0].Fulfilment.NextAttemptAt = "1999-01-01T00:00:00Z"
+	all[0].Fulfilment.Attempts = 6
+	assertStored("orders")
+
+	due := f.st.DueFulfilments(*f.now)
+	if len(due) != 1 || due[0].Fulfilment == nil {
+		t.Fatalf("DueFulfilments = %+v", due)
+	}
+	*due[0].Fulfilment.NextAttemptAt = "1999-01-01T00:00:00Z"
+	due[0].Fulfilment.Attempts = 5
+	assertStored("due")
+
+	// Abort returns a copy too.
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment: %v", err)
+	}
+	aborted, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonCapacity, "", true)
+	if err != nil {
+		t.Fatalf("AbortFulfilment: %v", err)
+	}
+	if aborted.Fulfilment == nil || aborted.Fulfilment.NextAttemptAt == nil {
+		t.Fatalf("aborted job = %+v", aborted.Fulfilment)
+	}
+	wantNext := f.now.Add(5 * time.Second)
+	*aborted.Fulfilment.NextAttemptAt = "1999-01-01T00:00:00Z"
+	aborted.Fulfilment.Attempts = 4
+	stored := fulfilmentJobOf(t, f.st, paid.ID)
+	if stored.Attempts != 1 || stored.NextAttemptAt == nil || *stored.NextAttemptAt != iso(wantNext) {
+		t.Fatalf("abort: store job was mutated through a copy: %+v", stored)
+	}
+}
+
+func TestSanitizeFulfilmentDetail(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		gone []string
+		keep []string
+	}{
+		{"keyed token", "token=SECRET", []string{"SECRET"}, []string{"token"}},
+		{"password value", "password hunter2", []string{"hunter2"}, []string{"password"}},
+		{"password filler", "password is hunter2", []string{"hunter2"}, []string{"password"}},
+		{"trade number", "trade 20261026", []string{"20261026"}, []string{"trade"}},
+		{"trade no", "trade no 20261026", []string{"20261026"}, []string{"trade no"}},
+		{"receipt reference", "receipt no. ABCD-1234", []string{"ABCD-1234"}, []string{"receipt no"}},
+		{"api key", "api_key=abcDEF123", []string{"abcDEF123"}, []string{"api_key"}},
+		{"signed url", "https://pay.example/notify?token=SECRET",
+			[]string{"http", "SECRET", "pay.example"}, nil},
+		{"email", "ops@example.com", []string{"ops", "example.com", "@"}, nil},
+		{"long token", "sk_live_SECRET1234567890", []string{"SECRET", "sk_live"}, nil},
+		{"standalone number", "receipt 202610261234567890",
+			[]string{"202610261234567890"}, []string{"receipt"}},
+		{"safe prose", "no free slot for this order", nil,
+			[]string{"no free slot for this order"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFulfilmentDetail(tc.raw)
+			for _, needle := range tc.gone {
+				if strings.Contains(got, needle) {
+					t.Fatalf("sanitized %q still contains %q", got, needle)
+				}
+			}
+			for _, needle := range tc.keep {
+				if !strings.Contains(got, needle) {
+					t.Fatalf("sanitized %q dropped %q", got, needle)
+				}
+			}
+		})
+	}
+
+	long := strings.Repeat("publication retry scheduled ", 20)
+	if got := len([]rune(sanitizeFulfilmentDetail(long))); got > maxFulfilmentDetailLen {
+		t.Fatalf("bounded detail length = %d, want <= %d", got, maxFulfilmentDetailLen)
+	}
+}
+
+func TestRestoreKeepsZeroAttemptDeadLetter(t *testing.T) {
+	f := newOrderFixture(t)
+	paid := f.paidOrderWithoutGrant(t, "expired-persist")
+	*f.now = f.now.Add(time.Duration(f.plan.LeaseTTLSeconds)*time.Second + time.Second)
+
+	expired, err := f.st.EnqueueFulfilment(paid.ID, model.FulfilmentInitial)
+	if err != nil {
+		t.Fatalf("EnqueueFulfilment(expired): %v", err)
+	}
+	before := *expired.Fulfilment
+	if before.State != model.FulfilmentDeadLetter || before.Attempts != 0 || !before.Blocked {
+		t.Fatalf("expired job = %+v", before)
+	}
+
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	after := fulfilmentJobOf(t, restored, paid.ID)
+	if !fulfilmentJobsEqual(before, after) {
+		t.Fatalf("restored dead letter = %+v, want %+v", after, before)
+	}
+	if after.Attempts != 0 || !after.Blocked ||
+		after.LastReason != model.FulfilmentReasonEntitlementExpired {
+		t.Fatalf("restored dead letter = %+v", after)
+	}
+	// It stays an operator item: never due, never automatically retried.
+	if due := restored.DueFulfilments(*f.now); len(due) != 0 {
+		t.Fatalf("restored dead letter is due: %+v", due)
+	}
+	if _, err := restored.BeginFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin on restored dead letter error = %v, want ErrConflict", err)
+	}
+}
+
+func TestRestoreScrubsFulfilmentDetail(t *testing.T) {
+	cases := []struct {
+		name   string
+		detail string
+		gone   []string
+	}{
+		{"url token", "https://pay.example/notify?token=SECRET", []string{"pay.example", "SECRET"}},
+		{"receipt reference", "receipt no. ABCD-1234", []string{"ABCD-1234"}},
+		{"keyed secret", "password hunter2", []string{"hunter2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrderFixture(t)
+			paid := f.paidOrderWithoutGrant(t, "scrub-detail")
+			enqueueInitial(t, f.st, paid.ID)
+			data, err := f.st.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+			var snap Snapshot
+			if err := json.Unmarshal(data, &snap); err != nil {
+				t.Fatalf("decode snapshot: %v", err)
+			}
+			if len(snap.Orders) != 1 || snap.Orders[0].Fulfilment == nil {
+				t.Fatalf("snapshot orders = %+v", snap.Orders)
+			}
+			snap.Orders[0].Fulfilment.LastError = tc.detail
+			corrupt, err := json.Marshal(&snap)
+			if err != nil {
+				t.Fatalf("encode snapshot: %v", err)
+			}
+
+			restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+			if err := restored.Restore(corrupt); err != nil {
+				t.Fatalf("Restore: %v", err)
+			}
+			order, ok := restored.Order(paid.ID)
+			if !ok || order.Fulfilment == nil {
+				t.Fatalf("restored order = %+v, ok=%t; job must survive a scrubbed detail", order, ok)
+			}
+			if order.Fulfilment.State != model.FulfilmentQueued || order.Fulfilment.Attempts != 0 {
+				t.Fatalf("restored job = %+v", order.Fulfilment)
+			}
+			for _, needle := range tc.gone {
+				if strings.Contains(order.Fulfilment.LastError, needle) {
+					t.Fatalf("restored detail kept %q: %q", needle, order.Fulfilment.LastError)
+				}
+			}
+			if got := len([]rune(order.Fulfilment.LastError)); got > maxFulfilmentDetailLen {
+				t.Fatalf("restored detail length = %d, want <= %d", got, maxFulfilmentDetailLen)
+			}
+			// A later save must not resurrect the sensitive text either.
+			resaved, err := restored.Snapshot()
+			if err != nil {
+				t.Fatalf("Snapshot(restored): %v", err)
+			}
+			for _, needle := range tc.gone {
+				if bytes.Contains(resaved, []byte(needle)) {
+					t.Fatalf("re-saved snapshot kept %q", needle)
+				}
+			}
+		})
 	}
 }
