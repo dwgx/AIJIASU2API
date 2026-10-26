@@ -3690,3 +3690,290 @@ func TestChargebackDuringReissuePublishingReleasesReservation(t *testing.T) {
 		t.Fatalf("late calls changed the charged-back reissue order: %+v", stored)
 	}
 }
+
+// deadLetterInitial drives a paid order's initial job to dead letter with one
+// failed attempt, returning the stored order. A non-retryable abort is the
+// shortest path to the operator item an explicit retry must consume.
+func deadLetterInitial(t *testing.T, f *orderFixture, key, detail string) model.Order {
+	t.Helper()
+	paid := f.paidOrderWithoutGrant(t, key)
+	enqueueInitial(t, f.st, paid.ID)
+	attempt, err := f.st.BeginFulfilment(paid.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(%s): %v", paid.ID, err)
+	}
+	dead, err := f.st.AbortFulfilment(paid.ID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, detail, false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(%s): %v", paid.ID, err)
+	}
+	if dead.Fulfilment == nil || dead.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("job after non-retryable abort = %+v, want dead_letter", dead.Fulfilment)
+	}
+	return dead
+}
+
+func TestRetryFulfilmentRequeuesDeadLetter(t *testing.T) {
+	f := newOrderFixture(t)
+	dead := deadLetterInitial(t, f, "retry-dead", "publication refused")
+	before := *dead.Fulfilment
+	if before.Attempts != 1 || !before.Blocked || before.NextAttemptAt != nil ||
+		before.LastReason != model.FulfilmentReasonPublishFailed || before.LastError == "" {
+		t.Fatalf("dead-lettered job = %+v", before)
+	}
+
+	retried, err := f.st.RetryFulfilment(dead.ID)
+	if err != nil {
+		t.Fatalf("RetryFulfilment: %v", err)
+	}
+	job := retried.Fulfilment
+	if job == nil {
+		t.Fatal("retried order lost its fulfilment job")
+	}
+	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.Blocked ||
+		job.LastReason != "" || job.LastError != "" ||
+		job.AttemptLeaseID != "" || job.PublishedLeaseID != "" || job.CleanupPending {
+		t.Fatalf("requeued job = %+v", job)
+	}
+	if job.Mode != model.FulfilmentInitial || job.OrderID != dead.ID {
+		t.Fatalf("requeued job identity = %+v", job)
+	}
+	if job.EntitlementExpiresAt != before.EntitlementExpiresAt {
+		t.Fatalf("retry changed the paid term: %s -> %s",
+			before.EntitlementExpiresAt, job.EntitlementExpiresAt)
+	}
+	requireNextAttempt(t, *job, *f.now)
+	if retried.State != model.OrderPaid || retried.Grant != nil || retried.PaidAt == nil {
+		t.Fatalf("retried order = %+v, want the same paid order", retried)
+	}
+
+	event := findAudit(t, f.st, "fulfilment.retry_requested", func(e model.AuditEvent) bool {
+		return e.Meta["orderId"] == dead.ID
+	})
+	if event.Meta["attempts"] != "1" || event.Meta["mode"] != string(model.FulfilmentInitial) {
+		t.Fatalf("retry_requested audit = %+v", event)
+	}
+
+	// The requeued job is due immediately and starts a fresh attempt count.
+	due := f.st.DueFulfilments(*f.now)
+	if len(due) != 1 || due[0].ID != dead.ID {
+		t.Fatalf("due jobs after retry = %+v, want %s", orderIDs(due), dead.ID)
+	}
+	attempt, err := f.st.BeginFulfilment(dead.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment after retry: %v", err)
+	}
+	if attempt.Number != 1 {
+		t.Fatalf("attempt after retry = %d, want 1", attempt.Number)
+	}
+}
+
+func TestRetryFulfilmentRefusesIneligibleOrders(t *testing.T) {
+	t.Run("active order already serves", func(t *testing.T) {
+		f := newOrderFixture(t)
+		order := f.createOrder(t, "retry-active")
+		active := f.apply(t, f.settleEvent(order.ID, "evt-retry-active", "receipt-retry-active"))
+		if active.State != model.OrderActive || active.Fulfilment != nil {
+			t.Fatalf("settled order = %+v, want active without work", active)
+		}
+		if _, err := f.st.RetryFulfilment(active.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on active order error = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("paid without a job", func(t *testing.T) {
+		f := newOrderFixture(t)
+		paid := f.paidOrderWithoutGrant(t, "retry-paid-no-job")
+		if paid.Fulfilment != nil {
+			t.Fatalf("paid order already carries a job: %+v", paid.Fulfilment)
+		}
+		if _, err := f.st.RetryFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on paid order without a job error = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("queued job", func(t *testing.T) {
+		f := newOrderFixture(t)
+		paid := f.paidOrderWithoutGrant(t, "retry-queued")
+		enqueueInitial(t, f.st, paid.ID)
+		if _, err := f.st.RetryFulfilment(paid.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on queued job error = %v, want ErrConflict", err)
+		}
+		job := fulfilmentJobOf(t, f.st, paid.ID)
+		if job.State != model.FulfilmentQueued || job.Attempts != 0 {
+			t.Fatalf("queued job changed: %+v", job)
+		}
+	})
+
+	t.Run("published attempt", func(t *testing.T) {
+		f := newOrderFixture(t)
+		stored, _ := f.publishingInitial(t, "retry-published")
+		if _, err := f.st.RetryFulfilment(stored.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on published attempt error = %v, want ErrConflict", err)
+		}
+		job := fulfilmentJobOf(t, f.st, stored.ID)
+		if job.State != model.FulfilmentPublishing || job.PublishedLeaseID == "" {
+			t.Fatalf("published job changed: %+v", job)
+		}
+	})
+
+	t.Run("cleanup pending", func(t *testing.T) {
+		f := newOrderFixture(t)
+		stored, attempt := f.publishingInitial(t, "retry-cleanup")
+		if _, err := f.st.MarkFulfilmentCleanupPending(stored.ID, attempt.LeaseID,
+			model.FulfilmentReasonPublishFailed, "withdrawal failed"); err != nil {
+			t.Fatalf("MarkFulfilmentCleanupPending: %v", err)
+		}
+		before := fulfilmentJobOf(t, f.st, stored.ID)
+		if _, err := f.st.RetryFulfilment(stored.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on cleanup-pending job error = %v, want ErrConflict", err)
+		}
+		after := fulfilmentJobOf(t, f.st, stored.ID)
+		if !after.CleanupPending || after.State != model.FulfilmentPublishing ||
+			after.Attempts != before.Attempts || after.NextAttemptAt == nil ||
+			*after.NextAttemptAt != *before.NextAttemptAt {
+			t.Fatalf("cleanup-pending job changed: %+v -> %+v", before, after)
+		}
+	})
+
+	t.Run("review required", func(t *testing.T) {
+		f := newOrderFixture(t)
+		dead := deadLetterInitial(t, f, "retry-review", "")
+		flagOrderReview(t, f, dead.ID)
+		if _, err := f.st.RetryFulfilment(dead.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on review order error = %v, want ErrConflict", err)
+		}
+		job := fulfilmentJobOf(t, f.st, dead.ID)
+		if job.State != model.FulfilmentDeadLetter || job.Attempts != 1 || !job.Blocked {
+			t.Fatalf("review-order job changed: %+v", job)
+		}
+	})
+
+	t.Run("terminal order", func(t *testing.T) {
+		f := newOrderFixture(t)
+		dead := deadLetterInitial(t, f, "retry-terminal", "")
+		refunded, err := f.st.RecordManualRefund(dead.ID, "refund-retry-terminal",
+			"customer request", "operator")
+		if err != nil {
+			t.Fatalf("RecordManualRefund: %v", err)
+		}
+		if refunded.State != model.OrderRefunded || refunded.Fulfilment != nil {
+			t.Fatalf("refunded order = %+v, want terminal without work", refunded)
+		}
+		if _, err := f.st.RetryFulfilment(dead.ID); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry on terminal order error = %v, want ErrConflict", err)
+		}
+	})
+
+	t.Run("unknown and empty id", func(t *testing.T) {
+		f := newOrderFixture(t)
+		if _, err := f.st.RetryFulfilment("ord-missing"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("retry unknown order error = %v, want ErrNotFound", err)
+		}
+		if _, err := f.st.RetryFulfilment("  "); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("retry empty id error = %v, want ErrInvalid", err)
+		}
+	})
+}
+
+// TestRetryFulfilmentRequeuesReissueDeadLetter pins the operator retry for the
+// other dead-letter shape: an active order whose replacement publication
+// failed. The order is active but not serving — its grant lease ended — so the
+// dead-lettered reissue job is the operator item, and the retry must requeue
+// that same mode without touching the grant or the paid term.
+func TestRetryFulfilmentRequeuesReissueDeadLetter(t *testing.T) {
+	f := newOrderFixture(t)
+	order := f.createOrder(t, "retry-reissue")
+	active := f.apply(t, f.settleEvent(order.ID, "evt-retry-reissue", "receipt-retry-reissue"))
+	if active.State != model.OrderActive || active.Grant == nil {
+		t.Fatalf("settled order = %+v, want active with a grant", active)
+	}
+	oldLease, ok := f.st.Lease(active.Grant.LeaseID)
+	if !ok {
+		t.Fatalf("grant lease %q missing", active.Grant.LeaseID)
+	}
+	if _, _, _, err := f.st.DemoteNode(oldLease.NodeID); err != nil {
+		t.Fatalf("DemoteNode: %v", err)
+	}
+	reviveOrderNode(t, f.st, oldLease)
+	if _, err := f.st.EnqueueFulfilment(order.ID, model.FulfilmentReissue); err != nil {
+		t.Fatalf("EnqueueFulfilment(reissue): %v", err)
+	}
+	attempt, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(reissue): %v", err)
+	}
+	if attempt.Mode != model.FulfilmentReissue {
+		t.Fatalf("attempt mode = %s, want reissue", attempt.Mode)
+	}
+	dead, err := f.st.AbortFulfilment(order.ID, attempt.LeaseID,
+		model.FulfilmentReasonTargetChanged, "", false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(reissue): %v", err)
+	}
+	if dead.Fulfilment == nil || dead.Fulfilment.State != model.FulfilmentDeadLetter ||
+		dead.Fulfilment.Attempts != 1 {
+		t.Fatalf("reissue dead letter = %+v", dead.Fulfilment)
+	}
+
+	retried, err := f.st.RetryFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("RetryFulfilment(reissue): %v", err)
+	}
+	job := retried.Fulfilment
+	if job == nil || job.Mode != model.FulfilmentReissue || job.State != model.FulfilmentQueued ||
+		job.Attempts != 0 || job.Blocked {
+		t.Fatalf("requeued reissue job = %+v", job)
+	}
+	if retried.State != model.OrderActive || retried.Grant == nil ||
+		retried.Grant.LeaseID != active.Grant.LeaseID || retried.Grant.RevokedAt != nil {
+		t.Fatalf("retried order = %+v, want the same active grant", retried)
+	}
+	next, err := f.st.BeginFulfilment(order.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment after reissue retry: %v", err)
+	}
+	if next.Mode != model.FulfilmentReissue || next.Number != 1 ||
+		next.PreviousLeaseID != active.Grant.LeaseID {
+		t.Fatalf("reissue attempt after retry = %+v", next)
+	}
+}
+
+func TestRetryFulfilmentPersistenceRoundtrip(t *testing.T) {
+	f := newOrderFixture(t)
+	dead := deadLetterInitial(t, f, "retry-persist", "publish failed")
+	retried, err := f.st.RetryFulfilment(dead.ID)
+	if err != nil {
+		t.Fatalf("RetryFulfilment: %v", err)
+	}
+	before := *retried.Fulfilment
+
+	data, err := f.st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *f.now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	after := fulfilmentJobOf(t, restored, dead.ID)
+	if !fulfilmentJobsEqual(before, after) {
+		t.Fatalf("restored retry = %+v, want %+v", after, before)
+	}
+	if after.State != model.FulfilmentQueued || after.Attempts != 0 || after.Blocked ||
+		after.LastReason != "" || after.LastError != "" {
+		t.Fatalf("restored requeued job = %+v", after)
+	}
+	order, ok := restored.Order(dead.ID)
+	if !ok || order.State != model.OrderPaid || order.Grant != nil || order.Fulfilment == nil {
+		t.Fatalf("restored order = %+v, ok=%t", order, ok)
+	}
+	// The restored job resumes from a clean attempt count.
+	attempt, err := restored.BeginFulfilment(dead.ID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment after restore: %v", err)
+	}
+	if attempt.Number != 1 || attempt.Mode != model.FulfilmentInitial {
+		t.Fatalf("attempt after restore = %+v", attempt)
+	}
+}

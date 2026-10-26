@@ -592,6 +592,7 @@ func (s *Server) routes(rt *router) {
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/refund", s.handleRefundOrder)
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/chargeback", s.handleChargebackOrder)
 	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/cancel", s.handleAdminCancelOrder)
+	rt.handle(http.MethodPost, "/v1/admin/orders/{id}/actions/retry-fulfilment", s.handleRetryFulfilment)
 	s.registerOrderReissueRoutes(rt)
 
 	// Customer portal chains (DESIGN-TENANT). Both are opt-in: without

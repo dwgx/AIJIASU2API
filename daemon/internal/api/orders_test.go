@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,6 +125,124 @@ func chargebackOrderAPI(t *testing.T, ts *httptest.Server, orderID, reference st
 	t.Helper()
 	return apiCall(t, ts, http.MethodPost, "/v1/admin/orders/"+orderID+"/chargeback",
 		model.OrderChargebackRequest{Reference: reference, Reason: "bank dispute"})
+}
+
+func retryFulfilmentAPI(t *testing.T, ts *httptest.Server, orderID string) (*http.Response, []byte) {
+	t.Helper()
+	return apiCall(t, ts, http.MethodPost,
+		"/v1/admin/orders/"+orderID+"/actions/retry-fulfilment", nil)
+}
+
+// settleThroughStore records a settlement without the admin route. The route
+// now attaches the initial fulfilment job to a paid order, so this store-level
+// call is how a test reaches the bare "paid, no work" shape the retry route
+// must refuse. The user is suspended for the settlement so activation cannot
+// grant a lease, then resumed so the job helpers below can reserve.
+func settleThroughStore(t *testing.T, st *store.Store, orderID, key string) model.Order {
+	t.Helper()
+	if _, err := st.SetUserEnabled("u-01", false); err != nil {
+		t.Fatalf("suspend user: %v", err)
+	}
+	settled, err := st.ApplyPaymentEvent(model.ProviderManual, model.PaymentEvent{
+		Provider:    model.ProviderManual,
+		ID:          "evt-" + key,
+		Kind:        model.PaymentSettled,
+		OrderID:     orderID,
+		ProviderRef: "receipt-" + key,
+		OccurredAt:  time.Now().UTC().Format(time.RFC3339),
+	}, "operator")
+	if err != nil {
+		t.Fatalf("ApplyPaymentEvent(%s): %v", key, err)
+	}
+	if _, err := st.SetUserEnabled("u-01", true); err != nil {
+		t.Fatalf("resume user: %v", err)
+	}
+	if settled.State != model.OrderPaid || settled.Grant != nil || settled.Fulfilment != nil {
+		t.Fatalf("store settlement %s = %+v, want paid without a grant or job", key, settled)
+	}
+	return settled
+}
+
+// deadLetterOrder drives a paid order's initial job to dead letter with one
+// non-retryable abort: the operator item the retry route consumes.
+func deadLetterOrder(t *testing.T, st *store.Store, orderID string) model.Order {
+	t.Helper()
+	freeFixtureCapacity(t, st)
+	if _, err := st.EnqueueFulfilment(orderID, model.FulfilmentInitial); err != nil {
+		t.Fatalf("EnqueueFulfilment(%s): %v", orderID, err)
+	}
+	attempt, err := st.BeginFulfilment(orderID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(%s): %v", orderID, err)
+	}
+	dead, err := st.AbortFulfilment(orderID, attempt.LeaseID,
+		model.FulfilmentReasonPublishFailed, "publication refused", false)
+	if err != nil {
+		t.Fatalf("AbortFulfilment(%s): %v", orderID, err)
+	}
+	if dead.Fulfilment == nil || dead.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("job after non-retryable abort = %+v, want dead_letter", dead.Fulfilment)
+	}
+	return dead
+}
+
+// publishingOrder parks an order's initial job after its publication was
+// recorded, the shape whose external identity is still unaccounted for.
+func publishingOrder(t *testing.T, st *store.Store, orderID string) (model.Order, store.FulfilmentAttempt) {
+	t.Helper()
+	freeFixtureCapacity(t, st)
+	if _, err := st.EnqueueFulfilment(orderID, model.FulfilmentInitial); err != nil {
+		t.Fatalf("EnqueueFulfilment(%s): %v", orderID, err)
+	}
+	attempt, err := st.BeginFulfilment(orderID)
+	if err != nil {
+		t.Fatalf("BeginFulfilment(%s): %v", orderID, err)
+	}
+	if _, err := st.MarkFulfilmentPublished(orderID, attempt.LeaseID); err != nil {
+		t.Fatalf("MarkFulfilmentPublished(%s): %v", orderID, err)
+	}
+	stored, ok := st.Order(orderID)
+	if !ok {
+		t.Fatalf("order %q missing", orderID)
+	}
+	return stored, attempt
+}
+
+// flagOrderReview quarantines a paid order the way conflicting evidence does:
+// a settlement for the wrong amount flags review and changes nothing else.
+func flagOrderReview(t *testing.T, st *store.Store, orderID, key string) model.Order {
+	t.Helper()
+	flagged, err := st.ApplyPaymentEvent(model.ProviderManual, model.PaymentEvent{
+		Provider:    model.ProviderManual,
+		ID:          "evt-review-" + key,
+		Kind:        model.PaymentSettled,
+		OrderID:     orderID,
+		ProviderRef: "receipt-review-" + key,
+		AmountMinor: 1,
+		OccurredAt:  time.Now().UTC().Format(time.RFC3339),
+	}, "operator")
+	if err != nil {
+		t.Fatalf("ApplyPaymentEvent(review %s): %v", key, err)
+	}
+	if !flagged.ReviewRequired || flagged.State != model.OrderPaid {
+		t.Fatalf("wrong-amount settlement = %+v, want paid with review", flagged)
+	}
+	return flagged
+}
+
+func findAuditRow(t *testing.T, st *store.Store, action, orderID string) model.AuditEvent {
+	t.Helper()
+	var found *model.AuditEvent
+	for _, event := range st.Audit(10000) {
+		if event.Action == action && event.Target == orderID {
+			copy := event
+			found = &copy
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %s audit row for %s", action, orderID)
+	}
+	return *found
 }
 
 func stripeTestHeader(secret string, body []byte, timestamp int64) http.Header {
@@ -1120,5 +1239,315 @@ func TestPortalCreateOrderAfterEndedLeaseDoesNot409(t *testing.T) {
 	}
 	if got := sink.count(webhook.EventLeaseReissued); got != 1 {
 		t.Fatalf("lease.reissued events = %d, want 1", got)
+	}
+}
+
+// TestAdminRetryFulfilmentRequeuesDeadLetter is the AJS-441 operator row: a
+// dead-lettered job is requeued by the admin route, becomes due immediately
+// with a fresh attempt count, and changes nothing financial.
+func TestAdminRetryFulfilmentRequeuesDeadLetter(t *testing.T) {
+	ts, st, _ := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "retry-dead@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "retry-dead")
+	paid := settleThroughStore(t, st, order.ID, "retry-dead")
+	dead := deadLetterOrder(t, st, paid.ID)
+	before := *dead.Fulfilment
+	if before.Attempts != 1 || !before.Blocked || before.LastReason != model.FulfilmentReasonPublishFailed {
+		t.Fatalf("dead-lettered job = %+v", before)
+	}
+	leasesBefore := len(st.Leases())
+	paymentsBefore := len(st.PaymentEvents())
+
+	// The route is an admin mutation: without the CSRF header it is refused
+	// and the dead letter stays untouched.
+	unsigned := newRequest(t, http.MethodPost,
+		ts.URL+"/v1/admin/orders/"+order.ID+"/actions/retry-fulfilment", nil)
+	unsigned.Header.Set("Authorization", "Bearer "+testToken)
+	resp, body := doRequest(t, ts, unsigned)
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorCode(t, body, CodeForbidden)
+	if stored, _ := st.Order(order.ID); stored.Fulfilment == nil ||
+		stored.Fulfilment.State != model.FulfilmentDeadLetter {
+		t.Fatalf("refused retry changed the job: %+v", stored.Fulfilment)
+	}
+
+	resp, body = retryFulfilmentAPI(t, ts, order.ID)
+	requireStatus(t, resp, http.StatusAccepted)
+	retried := decodeBody[model.Order](t, body)
+	job := retried.Fulfilment
+	if job == nil {
+		t.Fatal("retried order lost its fulfilment job")
+	}
+	if job.State != model.FulfilmentQueued || job.Attempts != 0 || job.Blocked ||
+		job.LastReason != "" || job.LastError != "" || job.AttemptLeaseID != "" ||
+		job.PublishedLeaseID != "" || job.CleanupPending {
+		t.Fatalf("requeued job = %+v", job)
+	}
+	if job.Mode != model.FulfilmentInitial || job.OrderID != order.ID {
+		t.Fatalf("requeued job identity = %+v", job)
+	}
+	if job.EntitlementExpiresAt != before.EntitlementExpiresAt {
+		t.Fatalf("retry changed the paid term: %s -> %s",
+			before.EntitlementExpiresAt, job.EntitlementExpiresAt)
+	}
+	if job.NextAttemptAt == nil {
+		t.Fatal("requeued job is not due immediately")
+	}
+	// The retry re-drives the same sale: no grant, no lease, no payment.
+	if retried.State != model.OrderPaid || retried.Grant != nil || retried.PaidAt == nil {
+		t.Fatalf("retried order = %+v, want the same paid order", retried)
+	}
+	if len(st.Leases()) != leasesBefore || len(st.PaymentEvents()) != paymentsBefore {
+		t.Fatalf("retry moved money or capacity: leases %d -> %d, payments %d -> %d",
+			leasesBefore, len(st.Leases()), paymentsBefore, len(st.PaymentEvents()))
+	}
+	due := st.DueFulfilments(time.Now().UTC())
+	if len(due) != 1 || due[0].ID != order.ID {
+		t.Fatalf("due jobs after retry = %+v, want %s", due, order.ID)
+	}
+	// The requeued job starts a fresh attempt count.
+	if attempt, err := st.BeginFulfilment(order.ID); err != nil || attempt.Number != 1 {
+		t.Fatalf("attempt after retry = %+v, err = %v, want attempt 1", attempt, err)
+	}
+}
+
+// TestAdminRetryFulfilmentRefusesIneligibleOrders pins every refusal: the
+// route never resurrects work that already committed, never mints a second
+// publication identity and never bypasses review.
+func TestAdminRetryFulfilmentRefusesIneligibleOrders(t *testing.T) {
+	newOrder := func(t *testing.T, email, key string) (*httptest.Server, *store.Store, model.Order) {
+		t.Helper()
+		ts, st, _ := newOrderTestServer(t, Config{})
+		plan := createOrderPlan(t, ts, true, 3000)
+		_, cookie, csrf := activePortalTenant(t, ts, st, email, "u-01")
+		order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, key)
+		return ts, st, order
+	}
+
+	t.Run("active order already serves", func(t *testing.T) {
+		ts, st, order := newOrder(t, "retry-active@example.com", "retry-active")
+		freeFixtureCapacity(t, st)
+		resp, body := settleOrderAPI(t, ts, order.ID, "receipt-retry-active", true)
+		requireStatus(t, resp, http.StatusOK)
+		if settled := decodeBody[model.Order](t, body); settled.State != model.OrderActive {
+			t.Fatalf("settled order = %+v, want active", settled)
+		}
+		leasesBefore := len(st.Leases())
+
+		resp, body = retryFulfilmentAPI(t, ts, order.ID)
+		requireStatus(t, resp, http.StatusConflict)
+		requireErrorCode(t, body, CodeConflict)
+		stored, _ := st.Order(order.ID)
+		if stored.State != model.OrderActive || stored.Fulfilment != nil || len(st.Leases()) != leasesBefore {
+			t.Fatalf("refused retry changed a serving order: %+v", stored)
+		}
+	})
+
+	t.Run("paid without a job", func(t *testing.T) {
+		ts, st, order := newOrder(t, "retry-paid-no-job@example.com", "retry-paid-no-job")
+		paid := settleThroughStore(t, st, order.ID, "retry-paid-no-job")
+		if paid.Fulfilment != nil {
+			t.Fatalf("paid order already carries a job: %+v", paid.Fulfilment)
+		}
+
+		resp, body := retryFulfilmentAPI(t, ts, order.ID)
+		requireStatus(t, resp, http.StatusConflict)
+		requireErrorCode(t, body, CodeConflict)
+		stored, _ := st.Order(order.ID)
+		if stored.State != model.OrderPaid || stored.Fulfilment != nil {
+			t.Fatalf("refused retry created work: %+v", stored.Fulfilment)
+		}
+	})
+
+	t.Run("cleanup pending", func(t *testing.T) {
+		ts, st, order := newOrder(t, "retry-cleanup@example.com", "retry-cleanup")
+		settleThroughStore(t, st, order.ID, "retry-cleanup")
+		stored, attempt := publishingOrder(t, st, order.ID)
+		if _, err := st.MarkFulfilmentCleanupPending(stored.ID, attempt.LeaseID,
+			model.FulfilmentReasonPublishFailed, "withdrawal failed"); err != nil {
+			t.Fatalf("MarkFulfilmentCleanupPending: %v", err)
+		}
+		before, ok := st.Order(order.ID)
+		if !ok || before.Fulfilment == nil || !before.Fulfilment.CleanupPending {
+			t.Fatalf("cleanup-pending order = %+v", before)
+		}
+
+		resp, body := retryFulfilmentAPI(t, ts, order.ID)
+		requireStatus(t, resp, http.StatusConflict)
+		requireErrorCode(t, body, CodeConflict)
+		after, ok := st.Order(order.ID)
+		if !ok || after.Fulfilment == nil || !after.Fulfilment.CleanupPending ||
+			after.Fulfilment.State != model.FulfilmentPublishing ||
+			after.Fulfilment.PublishedLeaseID != before.Fulfilment.PublishedLeaseID ||
+			after.Fulfilment.Attempts != before.Fulfilment.Attempts {
+			t.Fatalf("cleanup-pending job changed: %+v -> %+v", before.Fulfilment, after.Fulfilment)
+		}
+	})
+
+	t.Run("review required", func(t *testing.T) {
+		ts, st, order := newOrder(t, "retry-review@example.com", "retry-review")
+		settleThroughStore(t, st, order.ID, "retry-review")
+		deadLetterOrder(t, st, order.ID)
+		flagOrderReview(t, st, order.ID, "retry-review")
+
+		resp, body := retryFulfilmentAPI(t, ts, order.ID)
+		requireStatus(t, resp, http.StatusConflict)
+		requireErrorCode(t, body, CodeConflict)
+		stored, _ := st.Order(order.ID)
+		if stored.Fulfilment == nil || stored.Fulfilment.State != model.FulfilmentDeadLetter ||
+			stored.Fulfilment.Attempts != 1 || !stored.Fulfilment.Blocked {
+			t.Fatalf("review-order job changed: %+v", stored.Fulfilment)
+		}
+	})
+
+	t.Run("unknown order", func(t *testing.T) {
+		ts, _, _ := newOrder(t, "retry-unknown@example.com", "retry-unknown")
+		resp, body := retryFulfilmentAPI(t, ts, "ord-missing")
+		requireStatus(t, resp, http.StatusNotFound)
+		requireErrorCode(t, body, CodeNotFound)
+	})
+}
+
+// TestAdminRetryFulfilmentAuditsOperatorRetry proves the route writes the
+// operator-visible audit row: the retry and its audit commit together.
+func TestAdminRetryFulfilmentAuditsOperatorRetry(t *testing.T) {
+	ts, st, _ := newOrderTestServer(t, Config{})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "retry-audit@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "retry-audit")
+	settleThroughStore(t, st, order.ID, "retry-audit")
+	deadLetterOrder(t, st, order.ID)
+
+	resp, _ := retryFulfilmentAPI(t, ts, order.ID)
+	requireStatus(t, resp, http.StatusAccepted)
+	event := findAuditRow(t, st, "fulfilment.retry_requested", order.ID)
+	if event.Meta["orderId"] != order.ID ||
+		event.Meta["mode"] != string(model.FulfilmentInitial) ||
+		event.Meta["attempts"] != "1" {
+		t.Fatalf("retry_requested audit = %+v", event)
+	}
+	if !strings.Contains(event.Detail, "retry requested after 1 attempts") {
+		t.Fatalf("retry_requested detail = %q", event.Detail)
+	}
+}
+
+// TestManualSettleAtCapacityQueuesFulfilmentJob is the AJS-441 honesty row: a
+// settlement whose activation is refused still answers 200 with the paid order,
+// attaches the durable initial job and attempts it once with a bounded context
+// instead of claiming service.
+func TestManualSettleAtCapacityQueuesFulfilmentJob(t *testing.T) {
+	fulfiller := &recordingFulfiller{}
+	ts, st, _ := newOrderTestServer(t, Config{Fulfiller: fulfiller})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "settle-capacity@example.com", "u-01")
+	// The seeded account holds the user's only slot, so activation is refused.
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "settle-capacity")
+	leasesBefore := len(st.Leases())
+
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-capacity", true)
+	requireStatus(t, resp, http.StatusOK)
+	paid := decodeBody[model.Order](t, body)
+	if paid.State != model.OrderPaid || paid.Grant != nil {
+		t.Fatalf("settled at capacity = %+v, want paid without a grant", paid)
+	}
+	job := paid.Fulfilment
+	if job == nil || job.State != model.FulfilmentQueued || job.Mode != model.FulfilmentInitial ||
+		job.Attempts != 0 || job.NextAttemptAt == nil {
+		t.Fatalf("settled order job = %+v, want a queued initial job", job)
+	}
+	if len(st.Leases()) != leasesBefore {
+		t.Fatalf("settlement at capacity created a lease")
+	}
+	stored, ok := st.Order(order.ID)
+	if !ok || stored.State != model.OrderPaid || stored.Fulfilment == nil ||
+		stored.Fulfilment.State != model.FulfilmentQueued {
+		t.Fatalf("stored order = %+v, want paid with the queued job", stored)
+	}
+
+	fulfiller.mu.Lock()
+	calls, deadline, alive := fulfiller.calls, fulfiller.deadline, fulfiller.alive
+	fulfiller.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("fulfilment attempts = %d, want exactly one", calls)
+	}
+	if !alive {
+		t.Fatal("the immediate attempt ran on a cancelled request context")
+	}
+	if remaining := time.Until(deadline); remaining < 8*time.Second || remaining > 11*time.Second {
+		t.Fatalf("attempt deadline = %s away, want the bounded ~10s context", remaining)
+	}
+}
+
+// TestManualSettleWithCapacityActivatesWithoutQueueingJob is the other half:
+// when activation succeeds inline the order answers active with one grant, no
+// job is attached and the fulfiller is never asked to publish.
+func TestManualSettleWithCapacityActivatesWithoutQueueingJob(t *testing.T) {
+	fulfiller := &recordingFulfiller{}
+	ts, st, _ := newOrderTestServer(t, Config{Fulfiller: fulfiller})
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "settle-active@example.com", "u-01")
+	freeFixtureCapacity(t, st)
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "settle-active")
+	leasesBefore := len(st.Leases())
+
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-active", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	if active.State != model.OrderActive || active.Grant == nil || active.Fulfilment != nil {
+		t.Fatalf("settled order = %+v, want active with one grant and no job", active)
+	}
+	if len(st.Leases()) != leasesBefore+1 {
+		t.Fatalf("leases = %d, want %d", len(st.Leases()), leasesBefore+1)
+	}
+	fulfiller.mu.Lock()
+	calls := fulfiller.calls
+	fulfiller.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("settle published work for an order that already serves: %d attempts", calls)
+	}
+}
+
+// TestManualSettleReportsTheAttemptedState proves the settle response is
+// reloaded after the immediate attempt: the payment is recorded while the
+// seeded lease holds the only slot, that attempt releases the blocker and
+// publishes, and the same response answers active instead of paid.
+func TestManualSettleReportsTheAttemptedState(t *testing.T) {
+	publisher := &epayFulfilPublisher{}
+	ts, st, sink, _ := newEpayFulfilmentServer(t, publisher)
+	plan := createOrderPlan(t, ts, true, 3000)
+	_, cookie, csrf := activePortalTenant(t, ts, st, "settle-release@example.com", "u-01")
+	order, _ := createPortalOrder(t, ts, cookie, csrf, plan.ID, "settle-release")
+
+	resp, body := settleOrderAPI(t, ts, order.ID, "receipt-release", true)
+	requireStatus(t, resp, http.StatusOK)
+	active := decodeBody[model.Order](t, body)
+	if active.State != model.OrderActive || active.Grant == nil || active.Fulfilment != nil {
+		t.Fatalf("settle response = %+v, want active with the published grant", active)
+	}
+	if publisher.count() != 1 {
+		t.Fatalf("publications = %d, want the one immediate attempt", publisher.count())
+	}
+	// The attempt released the seeded reservations and published exactly one
+	// serving lease; no provisional row may survive the commit.
+	accountLeases := 0
+	for _, lease := range st.Leases() {
+		if lease.Status == model.LeasePendingPublication {
+			t.Fatalf("committed order left a provisional reservation: %+v", lease)
+		}
+		if lease.AccountID == "acc-01" {
+			accountLeases++
+		}
+	}
+	if accountLeases != 1 {
+		t.Fatalf("account leases = %d, want exactly the one published row", accountLeases)
+	}
+	if sink.count(webhook.EventOrderActivated) != 1 || sink.count(webhook.EventLeaseCreated) != 1 {
+		t.Fatalf("events = %v, want one order.activated and one lease.created", sink.types())
+	}
+	stored, ok := st.Order(order.ID)
+	if !ok || stored.State != model.OrderActive || stored.Grant == nil ||
+		stored.Grant.LeaseID != active.Grant.LeaseID {
+		t.Fatalf("stored order = %+v, want the active order the response reported", stored)
 	}
 }

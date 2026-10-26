@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -120,7 +121,8 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 // handleSettleOrder records an admin's offline settlement attestation. It
 // requires a receipt reference and an explicit offline-funds confirmation; it
 // never claims an online payment occurred. The payment is recorded even when
-// activation is blocked, in which case the order stays paid and retryable.
+// activation is blocked, in which case the order stays paid and carries the
+// durable initial fulfilment job for the worker to retry.
 func (s *Server) handleSettleOrder(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ManualPayments == nil {
 		writeError(w, http.StatusServiceUnavailable, CodeUpstreamUnavailable,
@@ -153,7 +155,52 @@ func (s *Server) handleSettleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.emitOrderTransition(before, after)
-	writeJSON(w, http.StatusOK, after)
+	writeJSON(w, http.StatusOK, s.orderServiceView(s.attemptSettlementFulfilment(r, after)))
+}
+
+// settleFulfilTimeout bounds the immediate publication attempt a manual
+// settlement makes after the money is durable. It is the notify path's bound:
+// the payment is already committed, so a slow control plane must not hold the
+// admin request open, and a failed attempt leaves the job queued for the worker
+// and its backoff.
+const settleFulfilTimeout = epayNotifyFulfilTimeout
+
+// attemptSettlementFulfilment attaches the durable initial job to a paid order
+// that has no grant (activation was refused by capacity, a suspended user or a
+// missing target) and attempts that job once. The payment is already committed,
+// so neither a refused enqueue nor a failed attempt may turn the settlement
+// into an error: the returned order is whatever the store reports now, paid or
+// active. A review-flagged order gets no work, and an order that is already
+// serving has nothing to publish.
+func (s *Server) attemptSettlementFulfilment(r *http.Request, order model.Order) model.Order {
+	if order.State != model.OrderPaid || order.Grant != nil || order.ReviewRequired {
+		return order
+	}
+	queued, err := s.store.EnqueueFulfilment(order.ID, model.FulfilmentInitial)
+	if err != nil {
+		// The payment is already durable: a refused enqueue (a job of another
+		// mode, a state that no longer takes work) must not turn a recorded
+		// settlement into an error response.
+		s.logger.Warn("settle_fulfilment_enqueue_failed", "order_id", order.ID, "error", err)
+		return order
+	}
+	order = queued
+	if s.cfg.Fulfiller == nil {
+		// Queue-only deployment: the worker owns the attempt.
+		return order
+	}
+	// Detach the attempt from the request: a client disconnect must not
+	// cancel a publication that has already reserved a lease.
+	fulfilCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), settleFulfilTimeout)
+	_, fulfilErr := s.cfg.Fulfiller.FulfilNow(fulfilCtx, order.ID)
+	cancel()
+	if fulfilErr != nil {
+		s.logger.Warn("settle_fulfilment_failed", "order_id", order.ID, "error", fulfilErr)
+	}
+	if reloaded, ok := s.store.Order(order.ID); ok {
+		return reloaded
+	}
+	return order
 }
 
 // handleRefundOrder records an already completed full offline refund. It never
@@ -217,6 +264,24 @@ func (s *Server) handleAdminCancelOrder(w http.ResponseWriter, r *http.Request) 
 	}
 	s.emitOrderTransition(before, after)
 	writeJSON(w, http.StatusOK, after)
+}
+
+// handleRetryFulfilment requeues a dead-lettered fulfilment job. It is the
+// operator escape hatch once the blocker (capacity, a target change, a vendor
+// outage) is fixed offline: the same job becomes due immediately with its
+// attempt counter reset, so the full backoff schedule applies again. Mode, the
+// paid term, the payment facts and the order state are untouched, and no grant
+// or payment is created. Only a dead-lettered job qualifies; an order that
+// already serves, a paid order with no job, a job whose published identity is
+// still unaccounted for, and a review-flagged order answer 409. An unknown
+// order answers 404.
+func (s *Server) handleRetryFulfilment(w http.ResponseWriter, r *http.Request) {
+	order, err := s.store.RetryFulfilment(pathParam(r, "id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.orderServiceView(order))
 }
 
 // stripeWebhookLimitPerMin bounds unauthenticated webhook attempts per client

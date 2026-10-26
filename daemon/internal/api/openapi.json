@@ -6644,7 +6644,7 @@
           "Order Admin"
         ],
         "summary": "Record an admin's offline settlement attestation; never claims an online payment.",
-        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in. The payment is recorded even when activation is blocked. When the order stays paid without a grant (capacity, a suspended user, a missing target), the handler attaches the durable initial fulfilment job and, when a fulfiller is configured, attempts it once with a bounded deadline; a failed attempt leaves the job queued for the worker and its backoff. The response is the order as the store now reports it, active with one grant or paid with a queued job.",
         "x-implementation-phase": "P0",
         "parameters": [
           {
@@ -6666,7 +6666,7 @@
         },
         "responses": {
           "200": {
-            "description": "Payment recorded. The order is paid (activation blocked or retryable) or active with one grant.",
+            "description": "Payment recorded. The order is active with one grant, or paid with a queued fulfilment job when activation was refused.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6846,6 +6846,52 @@
         "responses": {
           "200": {
             "description": "Cancelled order, or the unchanged row on an idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/admin/orders/{id}/actions/retry-fulfilment": {
+      "post": {
+        "operationId": "retryOrderFulfilment",
+        "tags": [
+          "Order Admin"
+        ],
+        "summary": "Requeue a dead-lettered fulfilment job after an offline blocker is fixed.",
+        "description": "Available to the admin bearer regardless of AJS_TENANT_PORTAL; the customer portal chains remain opt-in. The order's existing job becomes due immediately with its attempt counter reset, so the full backoff schedule applies again. Mode, the paid term, the payment facts and the order state are untouched: no grant, lease or payment is created. Only a dead-lettered job qualifies; an order that already serves, a paid order with no job, a job with a published attempt or pending external cleanup, and a review-flagged order answer 409.",
+        "x-implementation-phase": "P0",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PathID"
+          },
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Job requeued and due now. The body is the order carrying its queued fulfilment job; the worker performs the publication.",
             "content": {
               "application/json": {
                 "schema": {

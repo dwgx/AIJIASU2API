@@ -2547,6 +2547,88 @@ func (s *Store) RecoverFulfilments() error {
 	return nil
 }
 
+// RetryFulfilment is the operator escape hatch for a dead-lettered job: it
+// requeues exactly that job with its attempt counter reset, so a blocker fixed
+// offline gets the full backoff schedule again. Only a dead-lettered job may
+// reset. A job whose published identity is still unaccounted for
+// (PublishedLeaseID or CleanupPending) is refused because a retry must never
+// publish a second lease, and an order that is already serving (active) or paid
+// with no job at all has no operator item to re-drive. Refusals are typed store
+// errors and mutate nothing.
+//
+// Mode, the paid term, the payment facts and the order state are untouched: a
+// retry re-runs the same publication, never a new sale. The reset and its
+// fulfilment.retry_requested audit row commit together under s.mu.
+func (s *Store) RetryFulfilment(orderID string) (model.Order, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return model.Order{}, invalidf("orderId is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.orderIndexLocked(orderID)
+	if idx < 0 {
+		return model.Order{}, notFoundf("order %q not found", orderID)
+	}
+	order := &s.orders[idx].Order
+	if terminalOrderState(order.State) {
+		return model.Order{}, conflictf("order %q is %s; terminal orders never resume",
+			order.ID, order.State)
+	}
+	job := order.Fulfilment
+	if job == nil {
+		// Nothing durable can be re-driven: the job either committed or never
+		// existed. An active order already serves, and a paid order without a
+		// job has no publication work to reset.
+		switch order.State {
+		case model.OrderActive:
+			return model.Order{}, conflictf("order %q is active and has no fulfilment job to retry", order.ID)
+		case model.OrderPaid:
+			return model.Order{}, conflictf("order %q is paid but has no fulfilment job to retry", order.ID)
+		default:
+			return model.Order{}, conflictf("order %q has no fulfilment job to retry", order.ID)
+		}
+	}
+	switch {
+	case job.CleanupPending:
+		// The externally accepted identity was never withdrawn; retrying would
+		// publish a second lease while the first still exists.
+		return model.Order{}, conflictf("order %q attempt %q is awaiting external cleanup",
+			order.ID, job.PublishedLeaseID)
+	case job.PublishedLeaseID != "":
+		return model.Order{}, conflictf(
+			"order %q has a published attempt; commit or clean it up first", order.ID)
+	case job.State != model.FulfilmentDeadLetter:
+		return model.Order{}, conflictf(
+			"order %q fulfilment job is %s; only a dead-lettered job can be retried",
+			order.ID, job.State)
+	case order.ReviewRequired:
+		return model.Order{}, conflictf("order %q requires review; fulfilment retry is blocked", order.ID)
+	}
+
+	now := s.now()
+	attempts := job.Attempts
+	job.State = model.FulfilmentQueued
+	job.Attempts = 0
+	job.Blocked = false
+	job.LastReason = ""
+	job.LastError = ""
+	job.NextAttemptAt = ptrString(iso(now))
+	job.UpdatedAt = iso(now)
+	s.addAuditLocked(model.SeverityInfo, "system", "fulfilment.retry_requested", order.ID,
+		fmt.Sprintf("retry requested after %d attempts · %s", attempts, job.Mode),
+		map[string]string{
+			"orderId":  order.ID,
+			"mode":     string(job.Mode),
+			"attempts": strconv.Itoa(attempts),
+		})
+	if err := s.commitLocked(); err != nil {
+		return model.Order{}, err
+	}
+	return cloneOrder(*order), nil
+}
+
 // orderFulfilmentExpiry returns the paid term a job must not outlive. Initial
 // fulfilment freezes PaidAt+LeaseTTLSeconds; a reissue keeps the grant's
 // original expiry so a retry can never extend the paid term.
