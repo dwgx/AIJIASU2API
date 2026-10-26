@@ -101,6 +101,13 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: 'api keys allowlist quota platform 密钥 白名单 配额 平台 用户',
       },
       {
+        to: '/tenants',
+        labelKey: 'nav.tenants',
+        icon: ApcUsersIcon,
+        keywords:
+          'tenants customers invitations onboarding activation portal 租户 客户 邀请 激活 开通 门户',
+      },
+      {
         to: '/requests',
         labelKey: 'nav.requests',
         icon: ApcRequestsIcon,

@@ -2057,3 +2057,50 @@ export interface DeviceImportConflict {
   importedFingerprint: string
   reason: DeviceImportConflictReason | string
 }
+
+/* Customer tenants and onboarding invitations ---------------------------- */
+
+export type TenantStatus = 'pending' | 'active' | 'suspended'
+
+/** Admin view of a customer portal identity; never carries a password hash. */
+export interface Tenant {
+  id: string
+  email: string
+  displayName: string
+  status: TenantStatus
+  userId: string | null
+  createdAt: string
+  approvedAt: string | null
+  suspendedAt: string | null
+}
+
+export type TenantInviteStatus = 'pending' | 'redeemed' | 'expired'
+
+/** Invitation metadata. The one-time code itself is never part of this row. */
+export interface TenantInvite {
+  id: string
+  email: string
+  displayName: string
+  status: TenantInviteStatus
+  createdAt: string
+  expiresAt: string
+  createdBy: string
+  redeemedAt: string | null
+  tenantId: string | null
+}
+
+/** POST /v1/admin/tenants/invites — `code` is shown once and not persisted. */
+export interface TenantInviteCreated {
+  invite: TenantInvite
+  code: string
+}
+
+export interface TenantInviteCreateRequest {
+  email: string
+  displayName?: string
+}
+
+/** POST /v1/admin/tenants/{id}/approve — the dashboard binds an existing user. */
+export interface TenantApproveRequest {
+  userId: string
+}

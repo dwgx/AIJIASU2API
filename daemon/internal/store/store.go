@@ -221,6 +221,10 @@ type Store struct {
 	// tenants and no identity backfill.
 	tenants        []tenantRecord
 	portalSessions []model.PortalSession
+	// tenantInvites are the one-time onboarding codes. CodeHash is a SHA-256
+	// digest; the raw code is never stored. Additive snapshot state like the
+	// tenant rows above.
+	tenantInvites []tenantInviteRecord
 
 	// tenantHashSem bounds concurrent Argon2 calls. It is a leaf semaphore:
 	// it is never acquired while s.mu is held, so a slow hash cannot block the
@@ -242,18 +246,19 @@ type Store struct {
 	paymentEvents []model.PaymentEvent
 	refundPolicy  RefundPolicy
 
-	accountSeq   int
-	userSeq      int
-	keySeq       int
-	scopedKeySeq int
-	tenantSeq    int
-	planSeq      int
-	orderSeq     int
-	mutationSeq  int
-	auditSeq     int
-	scheduleSeq  int
-	runSeq       int
-	webhookSeq   int
+	accountSeq      int
+	userSeq         int
+	keySeq          int
+	scopedKeySeq    int
+	tenantSeq       int
+	tenantInviteSeq int
+	planSeq         int
+	orderSeq        int
+	mutationSeq     int
+	auditSeq        int
+	scheduleSeq     int
+	runSeq          int
+	webhookSeq      int
 }
 
 // New returns a store seeded with the dashboard mock dataset. It exists for
@@ -339,6 +344,7 @@ func newEmptyWithClock(now func() time.Time, sealer Sealer) *Store {
 		webhookDeliveries:  []model.WebhookDelivery{},
 		webhookOutbox:      []WebhookOutboxEntry{},
 		tenants:            []tenantRecord{},
+		tenantInvites:      []tenantInviteRecord{},
 		portalSessions:     []model.PortalSession{},
 		tenantHashSem:      make(chan struct{}, tenantHashConcurrency),
 		plans:              []model.Plan{},

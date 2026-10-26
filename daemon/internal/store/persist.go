@@ -136,6 +136,13 @@ type Snapshot struct {
 	PortalSessions []model.PortalSession `json:"portalSessions,omitempty"`
 	TenantSeq      int                   `json:"tenantSeq,omitempty"`
 
+	// TenantInvites is the one-time onboarding invitation state. It is
+	// additive and omitempty like the tenant rows: a snapshot from before the
+	// invite flow restores with no invitations. Only the SHA-256 digest of a
+	// code is persisted; the raw code never enters this document.
+	TenantInvites   []tenantInviteRecord `json:"tenantInvites,omitempty"`
+	TenantInviteSeq int                  `json:"tenantInviteSeq,omitempty"`
+
 	// Plans, Orders and PaymentEvents are the order state (DESIGN-ORDERS).
 	// Every field is additive and omitempty, so a pre-order snapshot restores
 	// with an empty catalogue and no orders. Order rows carry only the
@@ -293,6 +300,12 @@ func (s *Store) Snapshot() ([]byte, error) {
 		snap.PortalSessions[i] = session
 	}
 	snap.TenantSeq = s.tenantSeq
+	snap.TenantInvites = make([]tenantInviteRecord, len(s.tenantInvites))
+	for i, rec := range s.tenantInvites {
+		snap.TenantInvites[i] = rec
+		snap.TenantInvites[i].TenantInvite = cloneTenantInvite(rec.TenantInvite)
+	}
+	snap.TenantInviteSeq = s.tenantInviteSeq
 	snap.Plans = make([]model.Plan, len(s.plans))
 	for i, plan := range s.plans {
 		snap.Plans[i] = clonePlan(plan)
@@ -492,6 +505,11 @@ func (s *Store) Restore(data []byte) error {
 		s.portalSessions = []model.PortalSession{}
 	}
 	s.tenantSeq = snap.TenantSeq
+	s.tenantInvites = snap.TenantInvites
+	if s.tenantInvites == nil {
+		s.tenantInvites = []tenantInviteRecord{}
+	}
+	s.tenantInviteSeq = snap.TenantInviteSeq
 	// Order state is installed after validation quarantined broken rows, so a
 	// malformed order cannot grant an entitlement. An older snapshot restores
 	// with an empty catalogue and no orders.
@@ -800,6 +818,7 @@ func (snap *Snapshot) validate() error {
 	if err := snap.validateTenants(users); err != nil {
 		return err
 	}
+	snap.validateTenantInvites()
 	snap.validatePortalSessions()
 	if err := snap.validatePlans(); err != nil {
 		return err
@@ -1692,6 +1711,9 @@ func (snap *Snapshot) normalize() {
 	if snap.Tenants == nil {
 		snap.Tenants = []tenantRecord{}
 	}
+	if snap.TenantInvites == nil {
+		snap.TenantInvites = []tenantInviteRecord{}
+	}
 	if snap.PortalSessions == nil {
 		snap.PortalSessions = []model.PortalSession{}
 	}
@@ -1708,6 +1730,9 @@ func (snap *Snapshot) normalize() {
 	snap.WebhookOutbox = normalizeWebhookOutbox(snap.WebhookOutbox)
 	for _, tenant := range snap.Tenants {
 		snap.TenantSeq = max(snap.TenantSeq, sequenceOf(tenant.ID, "t-"))
+	}
+	for _, invite := range snap.TenantInvites {
+		snap.TenantInviteSeq = max(snap.TenantInviteSeq, sequenceOf(invite.ID, "inv-"))
 	}
 	for _, plan := range snap.Plans {
 		snap.PlanSeq = max(snap.PlanSeq, sequenceOf(plan.ID, planIDPrefix))

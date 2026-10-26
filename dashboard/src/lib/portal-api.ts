@@ -69,6 +69,19 @@ export interface PortalSignupResult {
   status: 'pending'
 }
 
+/** GET /v1/portal/invites/{code} — invitee-facing fields only. */
+export interface PortalInviteView {
+  email: string
+  displayName: string
+  expiresAt: string
+}
+
+/** POST /v1/portal/invites/{code}/activate. */
+export interface PortalInviteActivateInput {
+  password: string
+  displayName?: string
+}
+
 export interface PortalKeyCreated {
   key: ApiKey
   secret: string
@@ -213,8 +226,17 @@ interface MockTenant extends PortalTenant {
   password: string
 }
 
+interface MockPortalInvite {
+  code: string
+  email: string
+  displayName: string
+  expiresAt: string
+  redeemedAt: string | null
+}
+
 interface MockPortalState {
   tenants: MockTenant[]
+  invites: MockPortalInvite[]
   sessionTenantId: string | null
   sessionSeq: number
   signupSeq: number
@@ -226,11 +248,16 @@ export const MOCK_PORTAL_EMAIL = 'ada@example.com'
 export const MOCK_PORTAL_PASSWORD = 'portal-demo-2026'
 export const MOCK_PENDING_EMAIL = 'pending@example.com'
 export const MOCK_SUSPENDED_EMAIL = 'suspended@example.com'
+/** Deterministic code for the seeded activation-page fixture. */
+export const MOCK_PORTAL_INVITE_CODE = 'ajs_invite_mock_2026'
+export const MOCK_PORTAL_INVITE_EMAIL = 'invitee@example.com'
 const MOCK_PORTAL_USER_ID = 'u-01'
 const MOCK_DAY_MS = 86_400_000
 const MOCK_USAGE_DEFAULT_DAYS = 30
 const MOCK_USAGE_MAX_DAYS = 366
 export const PORTAL_PASSWORD_MIN = 10
+/** The daemon's tenant password minimum; keep the activation form aligned. */
+export const PORTAL_INVITE_PASSWORD_MIN = 12
 
 /**
  * A fresh key per create dialog. Retrying a failed submit with the same key is
@@ -278,6 +305,15 @@ function mockStateValue(): MockPortalState {
       mockTenant('tenant-01', MOCK_PORTAL_EMAIL, 'Ada Ops', 'active', MOCK_PORTAL_USER_ID, now),
       mockTenant('tenant-02', MOCK_PENDING_EMAIL, 'Pending Applicant', 'pending', null, now),
       mockTenant('tenant-03', MOCK_SUSPENDED_EMAIL, 'Suspended Tenant', 'suspended', 'u-02', now),
+    ],
+    invites: [
+      {
+        code: MOCK_PORTAL_INVITE_CODE,
+        email: MOCK_PORTAL_INVITE_EMAIL,
+        displayName: 'Invited Customer',
+        expiresAt: mockRFC3339(now + 48 * 3_600_000),
+        redeemedAt: null,
+      },
     ],
     sessionTenantId: null,
     sessionSeq: 0,
@@ -375,6 +411,51 @@ function mockSignup(input: PortalSignupInput): PortalSignupResult {
     })
   }
   return { status: 'pending' }
+}
+
+function mockPreviewInvite(code: string): PortalInviteView {
+  const invite = mockStateValue().invites.find((candidate) => candidate.code === code.trim())
+  if (!invite) throw new PortalError(404, 'Invitation not found', 'NOT_FOUND')
+  if (invite.redeemedAt) throw new PortalError(409, 'Invitation already redeemed', 'INVITE_REDEEMED')
+  if (Date.parse(invite.expiresAt) <= Date.now()) {
+    throw new PortalError(410, 'Invitation expired', 'INVITE_EXPIRED')
+  }
+  return { email: invite.email, displayName: invite.displayName, expiresAt: invite.expiresAt }
+}
+
+function mockActivateInvite(code: string, input: PortalInviteActivateInput): PortalTenant {
+  const state = mockStateValue()
+  const invite = state.invites.find((candidate) => candidate.code === code.trim())
+  if (!invite) throw new PortalError(404, 'Invitation not found', 'NOT_FOUND')
+  if (invite.redeemedAt) throw new PortalError(409, 'Invitation already redeemed', 'INVITE_REDEEMED')
+  if (Date.parse(invite.expiresAt) <= Date.now()) {
+    throw new PortalError(410, 'Invitation expired', 'INVITE_EXPIRED')
+  }
+  if (input.password.length < PORTAL_INVITE_PASSWORD_MIN) {
+    throw new PortalError(400, `Password must be at least ${PORTAL_INVITE_PASSWORD_MIN} characters`, 'INVALID_ARGUMENT')
+  }
+  const displayName = (input.displayName ?? '').trim() || invite.displayName
+  if (!displayName) throw new PortalError(400, 'Display name is required', 'INVALID_ARGUMENT')
+  if (state.tenants.some((tenant) => tenant.email === invite.email)) {
+    throw new PortalError(409, 'That email already belongs to a tenant', 'CONFLICT')
+  }
+  state.signupSeq += 1
+  const now = Date.now()
+  const tenant: MockTenant = {
+    id: `tenant-i${String(state.signupSeq).padStart(2, '0')}`,
+    email: invite.email,
+    displayName,
+    status: 'pending',
+    userId: null,
+    createdAt: mockRFC3339(now),
+    approvedAt: null,
+    suspendedAt: null,
+    password: input.password,
+  }
+  state.tenants.push(tenant)
+  invite.redeemedAt = mockRFC3339(now)
+  const { password: _password, ...view } = tenant
+  return view
 }
 
 function mockCurrentSession(): PortalSession {
@@ -713,6 +794,36 @@ function mockAudit(query: PortalAuditQuery = {}): AuditEvent[] {
  * ------------------------------------------------------------------------ */
 
 export const portalApi = {
+  /**
+   * GET /v1/portal/invites/{code} — validates a one-time code without
+   * consuming it. Public: no cookie and no CSRF token is sent.
+   */
+  async previewInvite(code: string): Promise<PortalInviteView> {
+    if (mockEnabled()) {
+      await wait()
+      return mockPreviewInvite(code)
+    }
+    return request<PortalInviteView>(`/v1/portal/invites/${encodeURIComponent(code)}`, {
+      csrf: false,
+    })
+  },
+
+  /**
+   * POST /v1/portal/invites/{code}/activate — sets the password and creates a
+   * pending tenant. The code is single-use; a replay fails with a portal error.
+   */
+  async activateInvite(code: string, input: PortalInviteActivateInput): Promise<PortalTenant> {
+    if (mockEnabled()) {
+      await wait()
+      return mockActivateInvite(code, input)
+    }
+    return request<PortalTenant>(`/v1/portal/invites/${encodeURIComponent(code)}/activate`, {
+      method: 'POST',
+      body: input,
+      csrf: false,
+    })
+  },
+
   async signup(input: PortalSignupInput): Promise<PortalSignupResult> {
     if (mockEnabled()) {
       await wait()

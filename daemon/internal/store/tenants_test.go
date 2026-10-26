@@ -458,3 +458,184 @@ func TestOldSnapshotLoadsWithNoTenants(t *testing.T) {
 		t.Fatalf("existing user was not preserved")
 	}
 }
+
+func createTestInvite(t *testing.T, st *Store, email, name string) model.TenantInviteCreated {
+	t.Helper()
+	created, err := st.CreateTenantInvite(model.TenantInviteCreateRequest{
+		Email: email, DisplayName: name,
+	}, "alice")
+	if err != nil {
+		t.Fatalf("create invite %s: %v", email, err)
+	}
+	return created
+}
+
+func TestTenantInviteCodeIsShownOnceAndStoredHashed(t *testing.T) {
+	st, now := newTenantStore(t)
+	created := createTestInvite(t, st, "  Invitee@Example.COM ", "Invitee")
+	if len(created.Code) != 64 {
+		t.Fatalf("code length = %d, want 64 hex characters", len(created.Code))
+	}
+	if created.Invite.Email != "invitee@example.com" || created.Invite.DisplayName != "Invitee" {
+		t.Fatalf("invite = %+v", created.Invite)
+	}
+	if created.Invite.Status != model.TenantInvitePending || created.Invite.RedeemedAt != nil || created.Invite.TenantID != nil {
+		t.Fatalf("new invite status = %+v", created.Invite)
+	}
+	expires, err := time.Parse(time.RFC3339Nano, created.Invite.ExpiresAt)
+	if err != nil {
+		t.Fatalf("expiresAt: %v", err)
+	}
+	if got := expires.Sub(*now); got != TenantInviteTTL {
+		t.Fatalf("ttl = %v, want %v", got, TenantInviteTTL)
+	}
+
+	// The raw code never reaches the snapshot; only its digest does.
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if bytes.Contains(data, []byte(created.Code)) {
+		t.Fatal("snapshot persisted the raw invite code")
+	}
+	if !bytes.Contains(data, []byte(portalHash(created.Code))) {
+		t.Fatal("snapshot did not persist the invite code hash")
+	}
+
+	view, err := st.PreviewTenantInvite(created.Code)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if view.Email != "invitee@example.com" || view.DisplayName != "Invitee" || view.ExpiresAt != created.Invite.ExpiresAt {
+		t.Fatalf("preview = %+v", view)
+	}
+
+	row, ok := findStoreAudit(st.Audit(20), "invite.created")
+	if !ok {
+		t.Fatal("no invite.created audit row")
+	}
+	if row.Actor != "alice" || row.Target != "invitee@example.com" {
+		t.Fatalf("invite.created row = %+v", row)
+	}
+}
+
+func TestTenantInviteRedeemIsSingleUse(t *testing.T) {
+	st, _ := newTenantStore(t)
+	created := createTestInvite(t, st, "redeem@example.com", "")
+	tenant, err := st.RedeemTenantInvite(created.Code, model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "Redeemed User",
+	})
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	if tenant.Status != model.TenantPending || tenant.UserID != nil {
+		t.Fatalf("redeemed tenant = %+v, want pending with no user", tenant)
+	}
+	if got, ok := st.AuthenticateTenant("redeem@example.com", tenantTestPassword); !ok || got.ID != tenant.ID {
+		t.Fatalf("activated password did not verify: %v/%q", ok, got.ID)
+	}
+
+	invites := st.TenantInvites()
+	if len(invites) != 1 || invites[0].Status != model.TenantInviteRedeemed || invites[0].TenantID == nil || *invites[0].TenantID != tenant.ID {
+		t.Fatalf("invite after redeem = %+v", invites)
+	}
+	if _, err := st.PreviewTenantInvite(created.Code); !errors.Is(err, ErrInviteRedeemed) {
+		t.Fatalf("preview after redeem = %v, want ErrInviteRedeemed", err)
+	}
+	if _, err := st.RedeemTenantInvite(created.Code, model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "Second User",
+	}); !errors.Is(err, ErrInviteRedeemed) {
+		t.Fatalf("second redeem = %v, want ErrInviteRedeemed", err)
+	}
+	if got := len(st.Tenants()); got != 1 {
+		t.Fatalf("second redeem created a tenant: %d", got)
+	}
+
+	row, ok := findStoreAudit(st.Audit(20), "invite.redeemed")
+	if !ok {
+		t.Fatal("no invite.redeemed audit row")
+	}
+	if row.Actor != "alice" || row.Target != "redeem@example.com" {
+		t.Fatalf("invite.redeemed row = %+v", row)
+	}
+}
+
+func TestTenantInviteExpiryAndWrongCode(t *testing.T) {
+	st, now := newTenantStore(t)
+	if _, err := st.PreviewTenantInvite("not-a-real-code"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong preview = %v, want ErrNotFound", err)
+	}
+	if _, err := st.RedeemTenantInvite("not-a-real-code", model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "Nobody",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong redeem = %v, want ErrNotFound", err)
+	}
+
+	created := createTestInvite(t, st, "expire@example.com", "Expiring")
+	*now = now.Add(TenantInviteTTL)
+	if _, err := st.PreviewTenantInvite(created.Code); !errors.Is(err, ErrInviteExpired) {
+		t.Fatalf("expired preview = %v, want ErrInviteExpired", err)
+	}
+	if _, err := st.RedeemTenantInvite(created.Code, model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "Too Late",
+	}); !errors.Is(err, ErrInviteExpired) {
+		t.Fatalf("expired redeem = %v, want ErrInviteExpired", err)
+	}
+	if got := len(st.Tenants()); got != 0 {
+		t.Fatalf("expired invite created %d tenants", got)
+	}
+}
+
+func TestTenantInviteRejectsDuplicateAddresses(t *testing.T) {
+	st, _ := newTenantStore(t)
+	created := createTestInvite(t, st, "dup@example.com", "First")
+	if _, err := st.CreateTenantInvite(model.TenantInviteCreateRequest{
+		Email: "DUP@example.com", DisplayName: "Second",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second pending invite = %v, want ErrConflict", err)
+	}
+	if _, err := st.RedeemTenantInvite(created.Code, model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "First",
+	}); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	if _, err := st.CreateTenantInvite(model.TenantInviteCreateRequest{
+		Email: "dup@example.com", DisplayName: "Third",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("invite for existing tenant = %v, want ErrConflict", err)
+	}
+}
+
+func TestTenantInviteSurvivesSnapshotAndRestore(t *testing.T) {
+	st, now := newTenantStore(t)
+	created := createTestInvite(t, st, "roundtrip@example.com", "Round Trip")
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	restored := newEmptyWithClock(func() time.Time { return *now }, nil)
+	if err := restored.Restore(data); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := restored.PreviewTenantInvite(created.Code); err != nil {
+		t.Fatalf("preview after restore: %v", err)
+	}
+	tenant, err := restored.RedeemTenantInvite(created.Code, model.TenantInviteActivateRequest{
+		Password: tenantTestPassword, DisplayName: "Round Trip",
+	})
+	if err != nil {
+		t.Fatalf("redeem after restore: %v", err)
+	}
+	if tenant.Status != model.TenantPending {
+		t.Fatalf("restored tenant = %+v", tenant)
+	}
+}
+
+func findStoreAudit(events []model.AuditEvent, action string) (model.AuditEvent, bool) {
+	for _, event := range events {
+		if event.Action == action {
+			return event, true
+		}
+	}
+	return model.AuditEvent{}, false
+}

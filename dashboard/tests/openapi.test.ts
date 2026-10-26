@@ -194,8 +194,8 @@ describe('docs/openapi.json', () => {
   })
 
   it('keeps the expected path and operation counts', () => {
-    expect(Object.keys(doc.paths)).toHaveLength(113)
-    expect(entries).toHaveLength(139)
+    expect(Object.keys(doc.paths)).toHaveLength(116)
+    expect(entries).toHaveLength(143)
   })
 
   it('documents the real-time debugger trace and stream', () => {
@@ -321,6 +321,8 @@ describe('docs/openapi.json', () => {
     const portalPaths: Record<string, true> = {
       '/v1/portal/signup': true,
       '/v1/portal/login': true,
+      '/v1/portal/invites/{code}': true,
+      '/v1/portal/invites/{code}/activate': true,
       '/v1/portal/session': true,
       '/v1/portal/logout': true,
       '/v1/portal/leases': true,

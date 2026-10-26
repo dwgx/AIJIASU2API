@@ -276,3 +276,73 @@ func (s *Server) handlePortalRevokeKey(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// handleCreateTenantInvite issues one one-time activation code. The code is
+// returned in this response only; the store keeps a SHA-256 digest. The admin
+// operator becomes the audit actor for both creation and later redemption.
+func (s *Server) handleCreateTenantInvite(w http.ResponseWriter, r *http.Request) {
+	var in model.TenantInviteCreateRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	created, err := s.store.CreateTenantInvite(in, s.auditActor(r))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// handleListTenantInvites returns invitation metadata only. The raw code is
+// unrecoverable by design, so there is no field for it in this response.
+func (s *Server) handleListTenantInvites(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.TenantInvites())
+}
+
+// handlePortalPreviewInvite validates an activation code without consuming it.
+// It is public because the invitee has no session yet; the code is the
+// credential and the per-IP/per-code buckets bound guessing.
+func (s *Server) handlePortalPreviewInvite(w http.ResponseWriter, r *http.Request) {
+	ip := s.portalClientIP(r)
+	if !s.portalLimit(w, "portal:invite:ip:"+ip, portalInviteIPLimit,
+		"too many invitation checks from this address") {
+		return
+	}
+	code := pathParam(r, "code")
+	if !s.portalLimit(w, "portal:invite:code:"+portalInviteKey(code), portalInviteCodeLimit,
+		"too many attempts for this invitation") {
+		return
+	}
+	view, err := s.store.PreviewTenantInvite(code)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// handlePortalActivateInvite consumes the one-time code and creates a pending
+// tenant. The invitee still needs operator approval before login; activation
+// never creates a user, lease or key.
+func (s *Server) handlePortalActivateInvite(w http.ResponseWriter, r *http.Request) {
+	ip := s.portalClientIP(r)
+	if !s.portalLimit(w, "portal:invite:ip:"+ip, portalInviteIPLimit,
+		"too many activation attempts from this address") {
+		return
+	}
+	code := pathParam(r, "code")
+	if !s.portalLimit(w, "portal:invite:code:"+portalInviteKey(code), portalInviteCodeLimit,
+		"too many attempts for this invitation") {
+		return
+	}
+	var in model.TenantInviteActivateRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	tenant, err := s.store.RedeemTenantInvite(code, in)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tenant)
+}

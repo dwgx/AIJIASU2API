@@ -88,3 +88,58 @@ type TenantApproveRequest struct {
 	UserID string           `json:"userId"`
 	User   *CreateUserInput `json:"user"`
 }
+
+// TenantInviteStatus is the derived lifecycle of an onboarding invitation.
+// Only pending invitations can be redeemed; expired and redeemed rows stay in
+// the admin list for attribution but their codes are dead.
+type TenantInviteStatus string
+
+const (
+	TenantInvitePending  TenantInviteStatus = "pending"
+	TenantInviteRedeemed TenantInviteStatus = "redeemed"
+	TenantInviteExpired  TenantInviteStatus = "expired"
+)
+
+// TenantInvite is the admin-facing invitation row. CodeHash is store-only and
+// never part of this type: the raw activation code is returned exactly once by
+// the create call and cannot be recovered afterwards.
+type TenantInvite struct {
+	ID          string             `json:"id"`
+	Email       string             `json:"email"`
+	DisplayName string             `json:"displayName"`
+	Status      TenantInviteStatus `json:"status"`
+	CreatedAt   string             `json:"createdAt"`
+	ExpiresAt   string             `json:"expiresAt"`
+	CreatedBy   string             `json:"createdBy"`
+	RedeemedAt  *string            `json:"redeemedAt"`
+	TenantID    *string            `json:"tenantId"`
+}
+
+// TenantInviteCreateRequest is the POST /v1/admin/tenants/invites body.
+// DisplayName is optional; when empty the invitee supplies it at activation.
+type TenantInviteCreateRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+}
+
+// TenantInviteCreated is the create response. Code is the one-time activation
+// secret and is never persisted in plaintext.
+type TenantInviteCreated struct {
+	Invite TenantInvite `json:"invite"`
+	Code   string       `json:"code"`
+}
+
+// TenantInviteView is the public preview returned for a valid code. It
+// deliberately omits the creator, tenant id and all hashes.
+type TenantInviteView struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	ExpiresAt   string `json:"expiresAt"`
+}
+
+// TenantInviteActivateRequest is the POST /v1/portal/invites/{code}/activate
+// body. DisplayName overrides the invitation's optional name when supplied.
+type TenantInviteActivateRequest struct {
+	Password    string `json:"password"`
+	DisplayName string `json:"displayName"`
+}

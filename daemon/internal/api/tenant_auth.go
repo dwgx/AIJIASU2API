@@ -33,6 +33,8 @@ const (
 	portalSignupEmailLimit     = 3
 	portalLoginIPLimit         = 10
 	portalLoginEmailLimit      = 5
+	portalInviteIPLimit        = 10
+	portalInviteCodeLimit      = 5
 	portalKeyWriteLimitPerMin  = 10
 	portalMaxEmailBucketKeyLen = 254
 )
@@ -146,11 +148,17 @@ func (s *Server) servePortalAuth(w http.ResponseWriter, r *http.Request, next ht
 	next.ServeHTTP(w, withPortalPrincipal(r, principal))
 }
 
-// isPublicPortalPath reports the two unauthenticated protocol paths. The
-// method is deliberately not checked: a wrong method reaches the router, which
-// answers 405, instead of failing a session check that was never required.
+// isPublicPortalPath reports the unauthenticated protocol paths. The method is
+// deliberately not checked: a wrong method reaches the router, which answers
+// 405, instead of failing a session check that was never required.
 func isPublicPortalPath(path string) bool {
-	return path == "/v1/portal/signup" || path == "/v1/portal/login"
+	if path == "/v1/portal/signup" || path == "/v1/portal/login" {
+		return true
+	}
+	// Invitation preview and activation are public by design: the one-time
+	// code is the credential and the caller has no session yet. Unsafe methods
+	// still pass the origin check in servePortalAuth.
+	return path == "/v1/portal/invites" || strings.HasPrefix(path, "/v1/portal/invites/")
 }
 
 // allowPortalOrigin requires the exact configured Origin on every unsafe
@@ -208,6 +216,13 @@ func portalEmailKey(raw string) string {
 		return hex.EncodeToString(sum[:])
 	}
 	return email
+}
+
+// portalInviteKey hashes an activation code before it becomes a limiter key.
+// The raw code is a bearer secret and must not sit in a long-lived map.
+func portalInviteKey(raw string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(sum[:])
 }
 
 // portalClientIP resolves the caller address. Forwarding headers are trusted

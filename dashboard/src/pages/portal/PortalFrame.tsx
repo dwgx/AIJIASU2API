@@ -16,7 +16,7 @@ type Translate = (key: string, params?: TranslationParams) => string
 export function portalErrorText(
   error: unknown,
   t: Translate,
-  context: 'login' | 'signup' | 'action' = 'action',
+  context: 'login' | 'signup' | 'activate' | 'action' = 'action',
 ): string {
   if (error instanceof PortalError) {
     if (error.status === 401) {
@@ -24,6 +24,9 @@ export function portalErrorText(
     }
     if (error.status === 429) {
       return t('portal.error.rateLimited', { seconds: error.retryAfterSec ?? 30 })
+    }
+    if (context === 'activate' && (error.status === 404 || error.status === 409 || error.status === 410)) {
+      return t('portal.activate.invalid')
     }
     if (error.status === 503) return t('portal.error.unavailable')
     if (error.status === 403) {

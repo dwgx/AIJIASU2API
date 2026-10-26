@@ -24,8 +24,10 @@ import (
 // the tenant auth path can answer a uniform 401 and a status refusal with 403
 // without inventing a reason an attacker could use to enumerate accounts.
 var (
-	ErrUnauthorized = errors.New("unauthorized")
-	ErrForbidden    = errors.New("forbidden")
+	ErrUnauthorized   = errors.New("unauthorized")
+	ErrForbidden      = errors.New("forbidden")
+	ErrInviteExpired  = errors.New("invite expired")
+	ErrInviteRedeemed = errors.New("invite already redeemed")
 )
 
 // Portal session and tenant bounds. The absolute expiry is the cookie lifetime;
@@ -42,6 +44,15 @@ const (
 	MaxTenantPasswordLen = 256
 	MaxTenantEmailLen    = 254
 	MaxTenantNameLen     = 80
+
+	// TenantInviteTTL is the fixed lifetime of an onboarding code. The code is
+	// single-use and stored only as a SHA-256 digest; the admin UI shows it
+	// once at creation because the daemon cannot recover it later.
+	TenantInviteTTL = 72 * time.Hour
+	// MaxTenantInvites bounds the retained invitation history. Redemption
+	// requires scanning this slice, so an unbounded list would turn an admin
+	// action into a linear scan of arbitrary size.
+	MaxTenantInvites = 1000
 )
 
 // Argon2id parameters. The encoded hash carries them, so a future change
@@ -67,6 +78,15 @@ type tenantRecord struct {
 	model.Tenant
 	PasswordHash string `json:"passwordHash"`
 	invalid      string
+}
+
+// tenantInviteRecord is the store-only invitation row. CodeHash is the
+// SHA-256 digest of the one-time activation code; the raw code exists only in
+// the create response. invalid is process-only like tenantRecord.invalid.
+type tenantInviteRecord struct {
+	model.TenantInvite
+	CodeHash string `json:"codeHash"`
+	invalid  string
 }
 
 // SignupTenant stores a pending tenant. A duplicate canonical email is
@@ -122,6 +142,198 @@ func (s *Store) SignupTenant(in model.TenantSignupInput) error {
 	s.tenants = append([]tenantRecord{rec}, s.tenants...)
 	s.addAuditLocked(model.SeverityInfo, "portal", "tenant.signup", email, "pending approval")
 	return nil
+}
+
+// CreateTenantInvite stores one single-use onboarding code for an email. The
+// raw code is returned exactly once; only its SHA-256 digest is persisted. A
+// tenant that already exists and an unexpired pending invitation for the same
+// address are both refused so a second code cannot race the first one.
+func (s *Store) CreateTenantInvite(in model.TenantInviteCreateRequest, actor ...string) (model.TenantInviteCreated, error) {
+	email, err := canonicalTenantEmail(in.Email)
+	if err != nil {
+		return model.TenantInviteCreated{}, err
+	}
+	name := ""
+	if strings.TrimSpace(in.DisplayName) != "" {
+		name, err = canonicalTenantName(in.DisplayName)
+		if err != nil {
+			return model.TenantInviteCreated{}, err
+		}
+	}
+	code, codeHash, err := newPortalToken()
+	if err != nil {
+		return model.TenantInviteCreated{}, fmt.Errorf("generate tenant invite: %w", err)
+	}
+
+	now := s.now()
+	expires := now.Add(TenantInviteTTL)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tenantEmailIndexLocked(email) >= 0 {
+		return model.TenantInviteCreated{}, conflictf("email %q is already registered", email)
+	}
+	for i := range s.tenantInvites {
+		rec := &s.tenantInvites[i]
+		if rec.Email != email || rec.invalid != "" {
+			continue
+		}
+		if tenantInviteStatus(*rec, now) == model.TenantInvitePending {
+			return model.TenantInviteCreated{}, conflictf("an active invitation already exists for %q", email)
+		}
+	}
+
+	s.tenantInviteSeq++
+	rec := tenantInviteRecord{
+		TenantInvite: model.TenantInvite{
+			ID:          fmt.Sprintf("inv-%02d", s.tenantInviteSeq),
+			Email:       email,
+			DisplayName: name,
+			Status:      model.TenantInvitePending,
+			CreatedAt:   iso(now),
+			ExpiresAt:   iso(expires),
+			CreatedBy:   auditActorArg(actor),
+		},
+		CodeHash: codeHash,
+	}
+	s.tenantInvites = append([]tenantInviteRecord{rec}, s.tenantInvites...)
+	if len(s.tenantInvites) > MaxTenantInvites {
+		s.tenantInvites = s.tenantInvites[:MaxTenantInvites]
+	}
+	s.addAuditLocked(model.SeverityInfo, rec.CreatedBy, "invite.created", email,
+		"one-time activation code issued, expires "+rec.ExpiresAt,
+		map[string]string{"inviteId": rec.ID, "expiresAt": rec.ExpiresAt})
+	return model.TenantInviteCreated{Invite: cloneTenantInvite(rec.TenantInvite), Code: code}, nil
+}
+
+// TenantInvites returns every invitation, newest first. Status is derived at
+// read time so an expired row cannot keep a stale "pending" label.
+func (s *Store) TenantInvites() []model.TenantInvite {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := s.now()
+	out := make([]model.TenantInvite, len(s.tenantInvites))
+	for i, rec := range s.tenantInvites {
+		view := cloneTenantInvite(rec.TenantInvite)
+		view.Status = tenantInviteStatus(rec, now)
+		out[i] = view
+	}
+	return out
+}
+
+// PreviewTenantInvite validates a code without consuming it. Wrong codes are
+// indistinguishable from unknown ones; an expired or redeemed code reports a
+// stable reason so the activation page can explain the failure.
+func (s *Store) PreviewTenantInvite(code string) (model.TenantInviteView, error) {
+	code = strings.TrimSpace(code)
+	if code == "" || len(code) > 128 {
+		return model.TenantInviteView{}, notFoundf("invitation not found")
+	}
+	hash := portalHash(code)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	idx := s.tenantInviteIndexLocked(hash)
+	if idx < 0 || s.tenantInvites[idx].invalid != "" {
+		return model.TenantInviteView{}, notFoundf("invitation not found")
+	}
+	rec := &s.tenantInvites[idx]
+	switch tenantInviteStatus(*rec, s.now()) {
+	case model.TenantInviteRedeemed:
+		return model.TenantInviteView{}, ErrInviteRedeemed
+	case model.TenantInviteExpired:
+		return model.TenantInviteView{}, ErrInviteExpired
+	}
+	return model.TenantInviteView{
+		Email:       rec.Email,
+		DisplayName: rec.DisplayName,
+		ExpiresAt:   rec.ExpiresAt,
+	}, nil
+}
+
+// RedeemTenantInvite consumes one code and creates a pending tenant with the
+// chosen password. Hashing happens outside the store lock; the single-use
+// check is repeated after re-acquiring it so two concurrent redemptions cannot
+// both create a tenant.
+func (s *Store) RedeemTenantInvite(code string, in model.TenantInviteActivateRequest) (model.Tenant, error) {
+	code = strings.TrimSpace(code)
+	if code == "" || len(code) > 128 {
+		return model.Tenant{}, notFoundf("invitation not found")
+	}
+	if err := validateTenantPassword(in.Password); err != nil {
+		return model.Tenant{}, err
+	}
+
+	s.mu.RLock()
+	idx := s.tenantInviteIndexLocked(portalHash(code))
+	if idx < 0 || s.tenantInvites[idx].invalid != "" {
+		s.mu.RUnlock()
+		return model.Tenant{}, notFoundf("invitation not found")
+	}
+	rec := s.tenantInvites[idx]
+	switch tenantInviteStatus(rec, s.now()) {
+	case model.TenantInviteRedeemed:
+		s.mu.RUnlock()
+		return model.Tenant{}, ErrInviteRedeemed
+	case model.TenantInviteExpired:
+		s.mu.RUnlock()
+		return model.Tenant{}, ErrInviteExpired
+	}
+	s.mu.RUnlock()
+
+	name := strings.TrimSpace(in.DisplayName)
+	if name == "" {
+		name = rec.DisplayName
+	}
+	name, err := canonicalTenantName(name)
+	if err != nil {
+		return model.Tenant{}, err
+	}
+	hash, err := s.hashTenantPassword(in.Password)
+	if err != nil {
+		return model.Tenant{}, err
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx = s.tenantInviteIndexLocked(portalHash(code))
+	if idx < 0 || s.tenantInvites[idx].invalid != "" {
+		return model.Tenant{}, notFoundf("invitation not found")
+	}
+	recPtr := &s.tenantInvites[idx]
+	switch tenantInviteStatus(*recPtr, now) {
+	case model.TenantInviteRedeemed:
+		return model.Tenant{}, ErrInviteRedeemed
+	case model.TenantInviteExpired:
+		return model.Tenant{}, ErrInviteExpired
+	}
+	if s.tenantEmailIndexLocked(recPtr.Email) >= 0 {
+		return model.Tenant{}, conflictf("email %q is already registered", recPtr.Email)
+	}
+
+	s.tenantSeq++
+	tenant := tenantRecord{
+		Tenant: model.Tenant{
+			ID:          fmt.Sprintf("t-%02d", s.tenantSeq),
+			Email:       recPtr.Email,
+			DisplayName: name,
+			Status:      model.TenantPending,
+			CreatedAt:   iso(now),
+		},
+		PasswordHash: hash,
+	}
+	s.tenants = append([]tenantRecord{tenant}, s.tenants...)
+	recPtr.RedeemedAt = ptrString(iso(now))
+	recPtr.TenantID = ptrString(tenant.ID)
+	recPtr.Status = model.TenantInviteRedeemed
+	actor := strings.TrimSpace(recPtr.CreatedBy)
+	if actor == "" {
+		actor = "operator"
+	}
+	s.addAuditLocked(model.SeverityInfo, actor, "invite.redeemed", recPtr.Email,
+		"tenant "+tenant.ID+" created pending approval",
+		map[string]string{"inviteId": recPtr.ID, "tenantId": tenant.ID})
+	return cloneTenant(tenant.Tenant), nil
 }
 
 // AuthenticateTenant verifies a password. The bool is false for an unknown
@@ -544,6 +756,37 @@ func (s *Store) tenantEmailIndexLocked(email string) int {
 	return -1
 }
 
+// tenantInviteIndexLocked finds an invitation by code digest. Invitations are
+// newest first, so the first match is also the most recent row.
+func (s *Store) tenantInviteIndexLocked(codeHash string) int {
+	for i := range s.tenantInvites {
+		if s.tenantInvites[i].CodeHash == codeHash {
+			return i
+		}
+	}
+	return -1
+}
+
+// tenantInviteStatus derives pending/redeemed/expired from the row. A row with
+// an unparseable expiry is treated as expired: fail closed rather than keeping
+// a malformed code redeemable.
+func tenantInviteStatus(rec tenantInviteRecord, now time.Time) model.TenantInviteStatus {
+	if rec.RedeemedAt != nil {
+		return model.TenantInviteRedeemed
+	}
+	expires, err := time.Parse(time.RFC3339Nano, rec.ExpiresAt)
+	if err != nil || !now.Before(expires) {
+		return model.TenantInviteExpired
+	}
+	return model.TenantInvitePending
+}
+
+func cloneTenantInvite(invite model.TenantInvite) model.TenantInvite {
+	invite.RedeemedAt = copyStringPtr(invite.RedeemedAt)
+	invite.TenantID = copyStringPtr(invite.TenantID)
+	return invite
+}
+
 func (s *Store) sessionIndexLocked(idHash string) int {
 	for i := range s.portalSessions {
 		if s.portalSessions[i].IDHash == idHash {
@@ -813,6 +1056,79 @@ func tenantInvalidReason(rec *tenantRecord, users map[string]struct{}, emailCoun
 		} else if rec.SuspendedAt != nil {
 			return "active tenant carries suspendedAt"
 		}
+	}
+	return ""
+}
+
+// validateTenantInvites drops rows that cannot be redeemed safely. An
+// invitation is additive state: dropping one only invalidates its code, which
+// is the fail-closed direction, while a malformed row must never keep a code
+// alive or point a redeemed invite at a foreign tenant.
+func (snap *Snapshot) validateTenantInvites() {
+	tenants := make(map[string]*tenantRecord, len(snap.Tenants))
+	for i := range snap.Tenants {
+		tenants[snap.Tenants[i].ID] = &snap.Tenants[i]
+	}
+	seenIDs := make(map[string]struct{}, len(snap.TenantInvites))
+	seenCodes := make(map[string]struct{}, len(snap.TenantInvites))
+	valid := make([]tenantInviteRecord, 0, len(snap.TenantInvites))
+	for _, rec := range snap.TenantInvites {
+		rec.invalid = tenantInviteInvalidReason(rec, tenants)
+		if rec.invalid != "" {
+			continue
+		}
+		if _, ok := seenIDs[rec.ID]; ok {
+			continue
+		}
+		if _, ok := seenCodes[rec.CodeHash]; ok {
+			continue
+		}
+		seenIDs[rec.ID] = struct{}{}
+		seenCodes[rec.CodeHash] = struct{}{}
+		valid = append(valid, rec)
+	}
+	sort.SliceStable(valid, func(i, j int) bool { return valid[i].CreatedAt > valid[j].CreatedAt })
+	if len(valid) > MaxTenantInvites {
+		valid = valid[:MaxTenantInvites]
+	}
+	snap.TenantInvites = valid
+}
+
+func tenantInviteInvalidReason(rec tenantInviteRecord, tenants map[string]*tenantRecord) string {
+	if strings.TrimSpace(rec.ID) == "" {
+		return "invitation has no id"
+	}
+	canonical, err := canonicalTenantEmail(rec.Email)
+	if err != nil || canonical != rec.Email {
+		return "invitation email is not canonical"
+	}
+	if !isLowerHex(rec.CodeHash, 64) {
+		return "invitation code hash is malformed"
+	}
+	if !validRFC3339(rec.CreatedAt) || !validRFC3339(rec.ExpiresAt) {
+		return "invitation timestamps are invalid"
+	}
+	created, err := time.Parse(time.RFC3339Nano, rec.CreatedAt)
+	if err != nil {
+		return "invitation createdAt is invalid"
+	}
+	expires, err := time.Parse(time.RFC3339Nano, rec.ExpiresAt)
+	if err != nil || !expires.After(created) {
+		return "invitation expiry is invalid"
+	}
+	if rec.RedeemedAt != nil {
+		if !validRFC3339(*rec.RedeemedAt) {
+			return "invitation redeemedAt is invalid"
+		}
+		if rec.TenantID == nil {
+			return "redeemed invitation has no tenant"
+		}
+		tenant, ok := tenants[*rec.TenantID]
+		if !ok || tenant.Email != rec.Email || tenant.invalid != "" {
+			return "redeemed invitation points at a missing tenant"
+		}
+	} else if rec.TenantID != nil {
+		return "pending invitation already names a tenant"
 	}
 	return ""
 }

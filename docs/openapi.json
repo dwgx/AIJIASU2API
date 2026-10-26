@@ -7095,6 +7095,222 @@
           }
         }
       }
+    },
+    "/v1/admin/tenants/invites": {
+      "get": {
+        "operationId": "listTenantInvites",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "List invitation metadata; the one-time code is never returned.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Invitation history, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TenantInvite"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createTenantInvite",
+        "tags": [
+          "Tenant Admin"
+        ],
+        "summary": "Create a one-time tenant activation code, shown exactly once.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "201": {
+            "description": "Invitation created. `code` is the only copy and expires after 72 hours.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInviteCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminCSRF"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantInviteCreateRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/portal/invites/{code}": {
+      "get": {
+        "operationId": "portalPreviewInvite",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Validate a one-time activation code without consuming it.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Invitation is valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInviteView"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "410": {
+            "description": "The invitation expired and can no longer be used.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "One-time activation code from the invitation link."
+          }
+        ],
+        "security": []
+      }
+    },
+    "/v1/portal/invites/{code}/activate": {
+      "post": {
+        "operationId": "portalActivateInvite",
+        "tags": [
+          "Portal"
+        ],
+        "summary": "Consume a one-time code and create a pending tenant with a password.",
+        "x-implementation-phase": "P0",
+        "responses": {
+          "200": {
+            "description": "Activation accepted; the tenant is pending operator approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tenant"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "410": {
+            "description": "The invitation expired and can no longer be used.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "One-time activation code from the invitation link."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantInviteActivateRequest"
+              }
+            }
+          }
+        },
+        "security": []
+      }
     }
   },
   "components": {
@@ -8755,7 +8971,10 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ready", "not_ready"]
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
           },
           "service": {
             "type": "string"
@@ -14144,6 +14363,156 @@
         },
         "required": [
           "payUrl"
+        ]
+      },
+      "TenantInviteStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "redeemed",
+          "expired"
+        ],
+        "description": "pending codes can be redeemed; redeemed codes were consumed; expired codes passed their 72-hour lifetime."
+      },
+      "TenantInvite": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "Canonical lowercase address."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "Optional name captured by the operator; empty when the invitee supplies it at activation."
+          },
+          "status": {
+            "$ref": "#/components/schemas/TenantInviteStatus"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp, 72 hours after creation."
+          },
+          "createdBy": {
+            "type": "string",
+            "description": "Admin operator that issued the invitation."
+          },
+          "redeemedAt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFC 3339 timestamp, or null while pending."
+          },
+          "tenantId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tenant created by redemption, or null while pending."
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "displayName",
+          "status",
+          "createdAt",
+          "expiresAt",
+          "createdBy",
+          "redeemedAt",
+          "tenantId"
+        ]
+      },
+      "TenantInviteCreateRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 254
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "Optional; the invitee may override it at activation."
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "TenantInviteCreated": {
+        "type": "object",
+        "properties": {
+          "invite": {
+            "$ref": "#/components/schemas/TenantInvite"
+          },
+          "code": {
+            "type": "string",
+            "writeOnly": true,
+            "description": "One-time activation code, shown only in this response. The daemon stores only its SHA-256 digest."
+          }
+        },
+        "required": [
+          "invite",
+          "code"
+        ]
+      },
+      "TenantInviteView": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "RFC 3339 timestamp."
+          }
+        },
+        "required": [
+          "email",
+          "displayName",
+          "expiresAt"
+        ]
+      },
+      "TenantInviteActivateRequest": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 12,
+            "maxLength": 256,
+            "description": "Hashed with Argon2id; never stored or logged in plaintext."
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "Overrides the invitation display name when supplied."
+          }
+        },
+        "required": [
+          "password"
         ]
       }
     }

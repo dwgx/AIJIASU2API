@@ -200,7 +200,7 @@ func (scope portalAuditScope) owns(event model.AuditEvent) bool {
 		return portalTenantAction(event.Action)
 	}
 	if scope.email != "" && strings.EqualFold(event.Target, scope.email) {
-		return strings.HasPrefix(event.Action, "tenant.")
+		return strings.HasPrefix(event.Action, "tenant.") || strings.HasPrefix(event.Action, "invite.")
 	}
 	if _, ok := scope.orderIDs[event.Target]; ok {
 		return true

@@ -1074,7 +1074,7 @@ It is the console's half of the daemon's tenant chain: a live build needs `AJS_T
 page shows its failure state. Mock mode is always exercisable and seeds one active tenant (linked
 to `u-01`), one pending applicant and one suspended tenant.
 
-- **Routes.** `/portal/login`, `/portal/signup`, `/portal/pending` and `/portal` (tabs **Leases**,
+- **Routes.** `/portal/login`, `/portal/signup`, `/portal/pending`, `/portal/activate` and `/portal` (tabs **Leases**,
   **Usage**, **Keys**, **Plans**, **Orders**, **Activity**); any other `/portal/*` path redirects
   to `/portal`. A visitor without a session (401) is redirected to the login page; a 403 renders
   the suspended/not-allowed message instead of an empty panel.
@@ -1167,6 +1167,7 @@ the provider's hosted checkout and never marks an order paid.
 | `/orders` | Orders | plan card (price, lease term, monthly quota, activate/deactivate confirm), order table filtered by state or review flag with payment-provider column and epay status chip, offline-receipt attestation, activation retry, offline refund and cancel confirms, grant expiry; every dialog states that no online payment is taken |
 | `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor (the daemon's gate enforces it, with the monthly quota, only under `AJS_GATE_AUTH=userpass`) |
+| `/tenants` | Tenants | customer portal directory, status filter, approve/suspend/resume, and **Invite tenant**: a one-time activation code shown exactly once with its `/portal/activate?code=…` link; invitation history shows status only |
 | `/requests` | Requests | gate-flow table with search/time/status/method/protocol/account-node/user/source filters, user and protocol columns, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, CSV export of `/v1/audit/export.csv` with the active severity filter and an `X-Truncated` warning |
 | `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
@@ -1176,6 +1177,7 @@ the provider's hosted checkout and never marks an order paid.
 | `/portal/login` | Portal sign in | email/password against `/v1/portal/login`, one uniform credential message, pending/suspended refusal, rate-limit copy with `Retry-After`, link to signup |
 | `/portal/signup` | Portal signup | name, email, password + confirmation with local validation, then the pending page; no session is issued |
 | `/portal/pending` | Portal pending | the application-received state and the operator-approval explanation |
+| `/portal/activate` | Portal activation | one-time invite activation: previews `?code=`, validates the password locally, sets it, and reports the pending-approval state; used/expired/wrong codes get one stable refusal |
 | `/portal` | Portal dashboard | standalone customer shell: **Leases**, **Usage** (7/30/90 days, zero-filled chart), **Keys** (issue with show-once secret, revoke confirm), **Plans** (active plans, create order under an idempotency key), **Orders** (own orders, payment-status banner, **Pay now** → 易支付 `payUrl` in a new tab, **Offline settlement** when epay is disabled, cancel confirm) and **Activity** (own audit rows, cursor load-more); redirects to login without a session |
 
 `*` redirects to `/`.
@@ -1184,7 +1186,7 @@ the provider's hosted checkout and never marks an order paid.
 
 ```text
 src/
-  App.tsx                 lazy routes: 14 operator pages under the admin shell + 4 portal routes
+  App.tsx                 lazy routes: 15 operator pages under the admin shell + 5 portal routes
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
@@ -1268,6 +1270,8 @@ tests/
   webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
   platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
   portal.test.tsx         portal client cookie/CSRF contract, mock tenant scoping, signup/pending, own-data UI, zh
+  portal-activate.test.tsx one-time invite activation: happy path, wrong code, local validation, zh
+  tenants.test.tsx        tenant directory, one-time invite code/link, duplicate refusal, zh
   portal-activity.test.tsx tenant-scoped activity rows, cursor load-more, empty state, zh
   orders.test.tsx         portal plans/orders and admin orders/plans: idempotency, honest states, lease-ended restore, attestation, refund, review flag, zh
 ```

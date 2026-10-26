@@ -41,6 +41,8 @@ const (
 	CodeRateLimited         = "RATE_LIMITED"
 	CodeUnauthorized        = "UNAUTHORIZED"
 	CodeForbidden           = "FORBIDDEN"
+	CodeInviteExpired       = "INVITE_EXPIRED"
+	CodeInviteRedeemed      = "INVITE_REDEEMED"
 	CodeMethodNotAllowed    = "METHOD_NOT_ALLOWED"
 	CodeInternal            = "INTERNAL"
 )
@@ -556,6 +558,8 @@ func (s *Server) routes(rt *router) {
 	if s.cfg.TenantPortal {
 		rt.handle(http.MethodPost, "/v1/portal/signup", s.handlePortalSignup)
 		rt.handle(http.MethodPost, "/v1/portal/login", s.handlePortalLogin)
+		rt.handle(http.MethodGet, "/v1/portal/invites/{code}", s.handlePortalPreviewInvite)
+		rt.handle(http.MethodPost, "/v1/portal/invites/{code}/activate", s.handlePortalActivateInvite)
 		rt.handle(http.MethodGet, "/v1/portal/session", s.handlePortalSession)
 		rt.handle(http.MethodPost, "/v1/portal/logout", s.handlePortalLogout)
 		rt.handle(http.MethodGet, "/v1/portal/leases", s.handlePortalLeases)
@@ -572,6 +576,8 @@ func (s *Server) routes(rt *router) {
 		rt.handle(http.MethodPost, "/v1/portal/orders/{id}/cancel", s.handlePortalCancelOrder)
 
 		rt.handle(http.MethodGet, "/v1/admin/tenants", s.handleListTenants)
+		rt.handle(http.MethodGet, "/v1/admin/tenants/invites", s.handleListTenantInvites)
+		rt.handle(http.MethodPost, "/v1/admin/tenants/invites", s.handleCreateTenantInvite)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/approve", s.handleApproveTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/suspend", s.handleSuspendTenant)
 		rt.handle(http.MethodPost, "/v1/admin/tenants/{id}/resume", s.handleResumeTenant)
@@ -957,6 +963,10 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrInvalid):
 		writeError(w, http.StatusBadRequest, CodeInvalidArgument, err.Error())
+	case errors.Is(err, store.ErrInviteExpired):
+		writeError(w, http.StatusGone, CodeInviteExpired, "invitation expired")
+	case errors.Is(err, store.ErrInviteRedeemed):
+		writeError(w, http.StatusConflict, CodeInviteRedeemed, "invitation already redeemed")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
 	case errors.Is(err, store.ErrConflict):

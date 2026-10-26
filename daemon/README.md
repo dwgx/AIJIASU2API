@@ -1970,6 +1970,14 @@ tenant-admin chains are separate.
   `userId` or a `CreateUserInput` and commits the optional user creation, the link, activation and
   the audit row under one lock. `suspend` disables the user and revokes the tenant's sessions and
   every API/scoped key it owns; `resume` re-enables the user but never un-revokes a key.
+- **One-time onboarding invites (AJS-413).** `POST /v1/admin/tenants/invites` issues a 32-byte
+  activation code for an email. Only its SHA-256 digest is stored; the code is returned once,
+  expires after 72 hours and is single-use. `GET /v1/portal/invites/{code}` previews a valid code
+  without consuming it; `POST /v1/portal/invites/{code}/activate` sets the password and creates a
+  pending tenant (still requiring approval, which is the separate bind above). The public paths
+  are origin-checked and rate-limited per IP and per code; `invite.created` and `invite.redeemed`
+  audit rows carry the issuing operator. The code is never emailed — the operator copies it from
+  the Tenants page.
 
 Operations: back up `state.json` before enabling; serve the portal only over HTTPS (the cookie is
 `Secure`); set `AJS_TENANT_ORIGIN` to the exact portal origin; and put a TLS-terminating proxy in
