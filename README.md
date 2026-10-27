@@ -85,10 +85,10 @@ As of 2026-10-26:
   operations, leases, usage, events) with typed errors and retry/backoff; see
   [`sdk/README.md`](sdk/README.md).
 - `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
-  Vite 6, TypeScript, 17 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Orders,
-  Device Pool, Users, Tenants, Requests, Logs, Debug, Schedules, Settings, Backup, Lab) in a
-  graphite-and-mint design system with accent themes (Mint/Indigo/Violet/Orange), a table/cards
-  switch for Accounts, and command-palette search for accounts and nodes. The sidebar
+  Vite 6, TypeScript, 15 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Device Pool,
+  Users, Requests, Logs, Debug, Schedules, Settings, Backup, Lab) in a graphite-and-mint design
+  system with accent themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and
+  command-palette search for accounts and nodes. The sidebar
   collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
   is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
   2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
@@ -116,22 +116,11 @@ As of 2026-10-26:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. The same bundle also serves the customer portal as a separate shell —
-  `/portal/login`, `/portal/signup`, `/portal/pending` and `/portal` with **Leases**, **Usage**,
-  **Keys**, **Plans**, **Orders** and **Activity** tabs — using the daemon's `__Host-ajs_portal`
-  cookie (no bearer, no Web Storage) and an in-memory CSRF token; mock mode seeds one active, one
-  pending and one suspended tenant. Plans creates an order under a per-dialog idempotency key and
-  Orders lists only the tenant's own orders with a **Pay now** 易支付 checkout, an
-  offline-settlement fallback and a cancel confirm; an active order whose grant lease ended shows
-  its localized reason and a **Restore service** action that re-issues the same grant without a
-  second order, grant or charge. The operator **Orders** page filters by state
-  or review flag, toggles plan activation, attests an offline receipt, records an offline refund
-  and cancels — every one of those dialogs says it moves no money and charges no card.
-  512 Vitest tests in 57 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 454 Vitest tests in 52 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
-  identity, 客户中心 for portal, 流量额度 for quota), and account labels, server names, IPs and API
+  identity, 设备池 for device pool, 流量额度 for quota), and account labels, server names, IPs and API
   values are data and are never translated. Settings is a
   nine-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
   Access, Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later**
@@ -387,8 +376,8 @@ As of 2026-10-26:
   reconciliation records a gateway-confirmed payment. In every case the daemon never charges a
   card, stores no card data and sends no payment request. Refund and chargeback record evidence
   and revoke the entitlement; they transfer nothing. Plan activation, the single grant per order and
-  the review quarantine have store and HTTP coverage only, and the operator and portal order
-  surfaces have run against the deterministic mock store, not a browser against a live order.
+  the review quarantine have store and HTTP coverage only; the console no longer ships an order or
+  tenant surface, and no browser has driven one against a live order.
 
 The remaining product layer — live multi-account coexistence on one daemon — is designed but not
 proven; per-account multi-slot is implemented and offline-tested, and the live account still has
@@ -496,7 +485,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (512 tests in 57 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (454 tests in 52 files), `cd daemon && go test ./...`
 (1367 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of
