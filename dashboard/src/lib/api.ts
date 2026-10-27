@@ -42,17 +42,6 @@ import {
   resetMockDb,
   syncAccountCounts,
 } from './mock'
-import {
-  mockAdminOrders,
-  mockAdminPlans,
-  mockCancelOrder,
-  mockEpayEnabled,
-  mockRefundOrder,
-  mockRetryFulfilment,
-  mockSettleOrder,
-  mockSetPlanActive,
-  resetOrderMock,
-} from './order-mock'
 import { ApiError, DevicePoolError, UnauthorizedError } from './errors'
 import { DEBUG_KINDS, WEBHOOK_EVENTS } from './types'
 import type {
@@ -122,11 +111,8 @@ import type {
   NodeState,
   Operation,
   OperationQuery,
-  Order,
   PanelSettings,
   PanelUser,
-  PaymentStatus,
-  Plan,
   ProxyNode,
   RenewalAccountView,
   RenewalPlan,
@@ -156,11 +142,6 @@ import type {
   UsageQuery,
   UsageSummary,
   UsageTarget,
-  Tenant,
-  TenantApproveRequest,
-  TenantInvite,
-  TenantInviteCreateRequest,
-  TenantInviteCreated,
   WebhookCreate,
   WebhookCreated,
   WebhookDeliveriesQuery,
@@ -2766,155 +2747,6 @@ function mockDebugStream(options: SubscribeDebugOptions): DebugStreamHandle {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Admin tenant and invitation mock
- * ------------------------------------------------------------------------ */
-
-interface MockTenantState {
-  tenants: Tenant[]
-  invites: TenantInvite[]
-  tenantSeq: number
-  inviteSeq: number
-}
-
-let mockTenantState: MockTenantState | null = null
-
-function mockTenantStateValue(): MockTenantState {
-  if (mockTenantState) return mockTenantState
-  const now = Date.now()
-  const day = 86_400_000
-  mockTenantState = {
-    tenants: [
-      {
-        id: 't-01',
-        email: 'ada@example.com',
-        displayName: 'Ada Ops',
-        status: 'active',
-        userId: 'u-01',
-        createdAt: new Date(now - 12 * day).toISOString(),
-        approvedAt: new Date(now - 10 * day).toISOString(),
-        suspendedAt: null,
-      },
-      {
-        id: 't-02',
-        email: 'pending@example.com',
-        displayName: 'Pending Applicant',
-        status: 'pending',
-        userId: null,
-        createdAt: new Date(now - 3 * day).toISOString(),
-        approvedAt: null,
-        suspendedAt: null,
-      },
-      {
-        id: 't-03',
-        email: 'suspended@example.com',
-        displayName: 'Suspended Tenant',
-        status: 'suspended',
-        userId: 'u-02',
-        createdAt: new Date(now - 20 * day).toISOString(),
-        approvedAt: new Date(now - 19 * day).toISOString(),
-        suspendedAt: new Date(now - 2 * day).toISOString(),
-      },
-    ],
-    invites: [],
-    tenantSeq: 3,
-    inviteSeq: 0,
-  }
-  return mockTenantState
-}
-
-function resetTenantMock(): void {
-  mockTenantState = null
-}
-
-function mockTenantInviteStatus(invite: TenantInvite): TenantInvite['status'] {
-  if (invite.redeemedAt) return 'redeemed'
-  return Date.parse(invite.expiresAt) <= Date.now() ? 'expired' : 'pending'
-}
-
-function mockListTenants(): Tenant[] {
-  return clone(mockTenantStateValue().tenants)
-}
-
-function mockListTenantInvites(): TenantInvite[] {
-  return mockTenantStateValue().invites.map((invite) => ({
-    ...clone(invite),
-    status: mockTenantInviteStatus(invite),
-  }))
-}
-
-function mockCreateTenantInvite(input: TenantInviteCreateRequest): TenantInviteCreated {
-  const state = mockTenantStateValue()
-  const email = input.email.trim().toLowerCase()
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new ApiError(400, 'Enter a valid email address', 'INVALID_ARGUMENT')
-  }
-  if (state.tenants.some((tenant) => tenant.email === email)) {
-    throw new ApiError(409, 'That email already belongs to a tenant', 'CONFLICT')
-  }
-  if (state.invites.some((invite) => invite.email === email && mockTenantInviteStatus(invite) === 'pending')) {
-    throw new ApiError(409, 'An active invitation already exists for that email', 'CONFLICT')
-  }
-  const now = Date.now()
-  state.inviteSeq += 1
-  const invite: TenantInvite = {
-    id: `inv-${String(state.inviteSeq).padStart(2, '0')}`,
-    email,
-    displayName: input.displayName?.trim() ?? '',
-    status: 'pending',
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + 72 * 3_600_000).toISOString(),
-    createdBy: 'operator',
-    redeemedAt: null,
-    tenantId: null,
-  }
-  state.invites = [invite, ...state.invites]
-  return {
-    invite: clone(invite),
-    code: `ajs_inv_mock_${String(state.inviteSeq).padStart(2, '0')}`,
-  }
-}
-
-function mockApproveTenant(id: string, userId: string): Tenant {
-  const state = mockTenantStateValue()
-  const tenant = state.tenants.find((candidate) => candidate.id === id)
-  if (!tenant) throw new ApiError(404, 'Tenant not found', 'NOT_FOUND')
-  if (tenant.status !== 'pending') throw new ApiError(409, 'Tenant is not pending', 'CONFLICT')
-  if (!getDb().users.some((user) => user.id === userId)) {
-    throw new ApiError(404, 'User not found', 'NOT_FOUND')
-  }
-  if (state.tenants.some((candidate) => candidate.id !== id && candidate.userId === userId)) {
-    throw new ApiError(409, 'User is already linked to another tenant', 'CONFLICT')
-  }
-  tenant.userId = userId
-  tenant.status = 'active'
-  tenant.approvedAt = new Date().toISOString()
-  tenant.suspendedAt = null
-  return clone(tenant)
-}
-
-function mockSuspendTenant(id: string): Tenant {
-  const state = mockTenantStateValue()
-  const tenant = state.tenants.find((candidate) => candidate.id === id)
-  if (!tenant) throw new ApiError(404, 'Tenant not found', 'NOT_FOUND')
-  if (tenant.status === 'suspended') return clone(tenant)
-  if (tenant.status !== 'active') throw new ApiError(409, 'Tenant is not active', 'CONFLICT')
-  tenant.status = 'suspended'
-  tenant.suspendedAt = new Date().toISOString()
-  return clone(tenant)
-}
-
-function mockResumeTenant(id: string): Tenant {
-  const state = mockTenantStateValue()
-  const tenant = state.tenants.find((candidate) => candidate.id === id)
-  if (!tenant) throw new ApiError(404, 'Tenant not found', 'NOT_FOUND')
-  if (tenant.status === 'active') return clone(tenant)
-  if (tenant.status !== 'suspended') throw new ApiError(409, 'Tenant is not suspended', 'CONFLICT')
-  tenant.status = 'active'
-  tenant.suspendedAt = null
-  return clone(tenant)
-}
-
 export const api = {
   async listAccounts(): Promise<Account[]> {
     if (!USE_MOCK) return http<Account[]>('/v1/accounts')
@@ -3301,65 +3133,6 @@ export const api = {
     if (!USE_MOCK) return http<PanelUser[]>('/v1/users')
     await wait()
     return clone(getDb().users)
-  },
-
-  /** GET /v1/admin/tenants — every portal identity, newest first. */
-  async listTenants(): Promise<Tenant[]> {
-    if (!USE_MOCK) return http<Tenant[]>('/v1/admin/tenants')
-    await wait()
-    return mockListTenants()
-  },
-
-  /** GET /v1/admin/tenants/invites — metadata only; codes are unrecoverable. */
-  async listTenantInvites(): Promise<TenantInvite[]> {
-    if (!USE_MOCK) return http<TenantInvite[]>('/v1/admin/tenants/invites')
-    await wait()
-    return mockListTenantInvites()
-  },
-
-  /**
-   * POST /v1/admin/tenants/invites — the response carries the only copy of the
-   * one-time activation code. The caller must show it once and never store it.
-   */
-  async createTenantInvite(input: TenantInviteCreateRequest): Promise<TenantInviteCreated> {
-    if (!USE_MOCK) {
-      return http<TenantInviteCreated>('/v1/admin/tenants/invites', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      })
-    }
-    await wait()
-    return mockCreateTenantInvite(input)
-  },
-
-  /** POST /v1/admin/tenants/{id}/approve — binds an existing user. */
-  async approveTenant(id: string, input: TenantApproveRequest): Promise<Tenant> {
-    if (!USE_MOCK) {
-      return http<Tenant>(`/v1/admin/tenants/${encodeURIComponent(id)}/approve`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      })
-    }
-    await wait()
-    return mockApproveTenant(id, input.userId)
-  },
-
-  /** POST /v1/admin/tenants/{id}/suspend — revokes sessions and keys. */
-  async suspendTenant(id: string): Promise<Tenant> {
-    if (!USE_MOCK) {
-      return http<Tenant>(`/v1/admin/tenants/${encodeURIComponent(id)}/suspend`, { method: 'POST' })
-    }
-    await wait()
-    return mockSuspendTenant(id)
-  },
-
-  /** POST /v1/admin/tenants/{id}/resume — re-enables the linked user. */
-  async resumeTenant(id: string): Promise<Tenant> {
-    if (!USE_MOCK) {
-      return http<Tenant>(`/v1/admin/tenants/${encodeURIComponent(id)}/resume`, { method: 'POST' })
-    }
-    await wait()
-    return mockResumeTenant(id)
   },
 
   async setUserEnabled(id: string, enabled: boolean): Promise<PanelUser> {
@@ -4398,119 +4171,10 @@ export const api = {
     })
   },
 
-  /** GET /v1/admin/plans — the full catalog, including deactivated plans. */
-  async listPlans(): Promise<Plan[]> {
-    if (!USE_MOCK) return http<Plan[]>('/v1/admin/plans')
-    await wait()
-    return mockAdminPlans()
-  },
-
-  /**
-   * Payment-provider state for the admin surface. The daemon's settings payload
-   * may carry an additive `epayEnabled` flag; when it does not, the chip stays
-   * "unknown" instead of turning an absent field into a disabled claim.
-   */
-  async providerStatus(): Promise<PaymentStatus> {
-    if (USE_MOCK) {
-      await wait()
-      return { epay: mockEpayEnabled() ? 'enabled' : 'disabled' }
-    }
-    try {
-      const settings = await http<PanelSettings>('/v1/settings')
-      if (typeof settings.epayEnabled === 'boolean') {
-        return { epay: settings.epayEnabled ? 'enabled' : 'disabled' }
-      }
-      return { epay: 'unknown', reason: 'this daemon does not report an epay status' }
-    } catch {
-      return { epay: 'unknown', reason: 'payment status could not be read' }
-    }
-  },
-
-  /** GET /v1/admin/orders — every tenant's orders, newest first. */
-  async listOrders(): Promise<Order[]> {
-    if (!USE_MOCK) return http<Order[]>('/v1/admin/orders')
-    await wait()
-    return mockAdminOrders()
-  },
-
-  /**
-   * POST /v1/admin/orders/{id}/settle — attest an offline receipt. This never
-   * charges a card or claims an online transaction; a nonempty reference is
-   * required and a settlement on `paid` retries activation.
-   */
-  async settleOrder(id: string, reference: string): Promise<Order> {
-    if (!USE_MOCK) {
-      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/settle`, {
-        method: 'POST',
-        body: JSON.stringify({ reference, offlineFundsReceived: true }),
-      })
-    }
-    await wait()
-    return mockSettleOrder(id, reference)
-  },
-
-  /** POST /v1/admin/orders/{id}/cancel — awaiting-payment orders only. */
-  async cancelOrder(id: string): Promise<Order> {
-    if (!USE_MOCK) {
-      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/cancel`, {
-        method: 'POST',
-      })
-    }
-    await wait()
-    return mockCancelOrder(id)
-  },
-
-  /**
-   * POST /v1/admin/orders/{id}/refund — records a refund the operator already
-   * completed offline; it does not transfer money. Full refunds only.
-   */
-  async refundOrder(id: string, reference: string): Promise<Order> {
-    if (!USE_MOCK) {
-      return http<Order>(`/v1/admin/orders/${encodeURIComponent(id)}/refund`, {
-        method: 'POST',
-        body: JSON.stringify({ reference }),
-      })
-    }
-    await wait()
-    return mockRefundOrder(id, reference)
-  },
-
-  /**
-   * POST /v1/admin/orders/{id}/actions/retry-fulfilment — requeue a
-   * dead-lettered publication job with a fresh attempt budget. Only the job
-   * changes: the mode, the paid term and the order state are untouched. A job
-   * that is still scheduled, publishing or awaiting external cleanup answers
-   * 409 with the blocker in the message.
-   */
-  async retryFulfilment(id: string): Promise<Order> {
-    if (!USE_MOCK) {
-      return http<Order>(
-        `/v1/admin/orders/${encodeURIComponent(id)}/actions/retry-fulfilment`,
-        { method: 'POST' },
-      )
-    }
-    await wait()
-    return mockRetryFulfilment(id)
-  },
-
-  /** PATCH /v1/admin/plans/{id} — activate/deactivate; snapshots stay priced. */
-  async setPlanActive(id: string, active: boolean): Promise<Plan> {
-    if (!USE_MOCK) {
-      return http<Plan>(`/v1/admin/plans/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ active }),
-      })
-    }
-    await wait()
-    return mockSetPlanActive(id, active)
-  },
-
   async resetMock(): Promise<void> {
     if (!USE_MOCK) return
     await wait()
     resetMockDb()
-    resetOrderMock()
-    resetTenantMock()
     mockSelections.clear()
     mockScheduleState = null
     mockWebhookState = null

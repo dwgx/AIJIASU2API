@@ -1,6 +1,6 @@
 # AJiaSu Proxy Console
 
-Operator dashboard for `ajs-accountd` — accounts, nodes, leases, orders and plans, the device pool,
+Operator dashboard for `ajs-accountd` — accounts, nodes, leases, the device pool,
 users, usage, request telemetry, the audit trail, schedules, webhook receivers, gate health and a
 read-only Lab instrument in one graphite-and-mint APC surface. **Mock-first:** `npm run dev` and
 `npm run build:mock` run on deterministic in-memory data and never contact AJiaSu, a vendor binary
@@ -10,7 +10,7 @@ closed instead of emitting the demo (see [Modes](#modes) and [Live mode](#live-m
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 512 tests in 57 files.
+- Tests: Vitest + React Testing Library + jsdom, 454 tests in 52 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -81,7 +81,7 @@ npm run dev        # http://127.0.0.1:5173 (mock data)
 npm run build:mock # tsc -b && vite build --mode mock → dist/ demo console
 VITE_USE_MOCK=false npm run build   # tsc -b && vite build → dist/ live bundle
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 512 tests in 57 files
+npm test           # Vitest, 454 tests in 52 files
 npm run typecheck  # tsc -b
 ```
 
@@ -213,7 +213,6 @@ SSE instead of polling.
 | Schedules | 15 s | schedules poll at 15 s, the account list at 30 s |
 | Device pool | 30 s | `/v1/device-pool`; the assign dialog loads the account list once on mount |
 | Usage | — | manual only; the window/filter change triggers the request |
-| Orders | — | manual only; orders and the plan catalogue load on mount and **Refresh** |
 | Webhooks | — | manual only; load on mount and **Refresh** |
 | Settings | — | manual only |
 
@@ -905,7 +904,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 512 Vitest tests in 57 files (65 at the 2026-10-23 record; see
+- 454 Vitest tests in 52 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a
@@ -957,27 +956,6 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   deliveries drawer (newest-first rows, the 50-row page and the last-delivery read from index 0).
   `tests/platform-client.test.ts` pins the client contract for renewal, usage,
   health and webhooks (live URL/query/method/bearer header and deterministic mock data).
-  `tests/portal.test.tsx` covers the customer portal: the client sends `credentials:"include"`
-  with the `X-CSRF-Token` header on unsafe calls and never a bearer, maps 401/429 without
-  persisting the token, keeps leases/usage/keys scoped to the signed-in tenant in mock parity,
-  issues a show-once secret and revokes only owned keys, refuses pending and suspended logins,
-  keeps signup pending-only, signs in and writes nothing to Web Storage, rejects bad credentials
-  with one message, validates the signup form before calling the daemon, redirects a visitor
-  without a session, renders own leases, usage tiles and the zero-filled chart, and renders the
-  portal in Chinese.
-  `tests/orders.test.tsx` covers the order wave end to end. The portal block lists only active
-  plans with price, term and quota, creates an order after the confirmation that says no online
-  payment is taken, replays a per-dialog `Idempotency-Key` with `X-CSRF-Token` and no bearer,
-  turns a changed plan or a second open order into the daemon's 409 copy, renders awaiting, paid,
-  active, refunded and review-required states honestly, cancels an awaiting order, answers a
-  foreign cancel without leaking its existence, shows a service-interrupted order with its
-  localized ended-lease reason, restores service through the reissue action, re-issues an ended
-  same-plan order on create without a second charge, and renders the action in Chinese. The admin
-  block filters every tenant's orders by
-  state and review flag, requires a receipt reference before attesting an offline payment, retries
-  activation, records an offline refund, cancels an awaiting order, deactivates and reactivates a
-  plan while existing snapshots keep their price, hides a deactivated plan from new orders, and
-  renders both order surfaces in Chinese.
   `tests/lab.test.tsx` covers the Lab page: overview posture badges and effective flags (a secret
   value never reaches the DOM), gate counters plus redacted session SIDs, the `enabled:false`
   bodies for gates/sessions and egress, servers/protocol/device tabs, log pause/resume and
@@ -1075,95 +1053,6 @@ Interaction proof on the mock build at 1440×900 (Playwright-core driving `/usr/
 | `screenshots/toast.png` | `/leases` → first **Copy** → toast `Proxy URL copied` |
 | `screenshots/mobile-nav.png` | 390×844 → **Open navigation** → sidebar drawer |
 
-## Customer portal
-
-`/portal/*` is a second, customer-facing surface in the same bundle, served without the operator
-shell, the admin navigation or the panel token gate (`src/pages/portal/`, `src/lib/portal-api.ts`).
-It is the console's half of the daemon's tenant chain: a live build needs `AJS_TENANT_PORTAL=1` plus
-`AJS_TENANT_ORIGIN` on the daemon, and without the flag every `/v1/portal/*` call is a 404 and each
-page shows its failure state. Mock mode is always exercisable and seeds one active tenant (linked
-to `u-01`), one pending applicant and one suspended tenant.
-
-- **Routes.** `/portal/login`, `/portal/signup`, `/portal/pending`, `/portal/activate` and `/portal` (tabs **Leases**,
-  **Usage**, **Keys**, **Plans**, **Orders**, **Activity**); any other `/portal/*` path redirects
-  to `/portal`. A visitor without a session (401) is redirected to the login page; a 403 renders
-  the suspended/not-allowed message instead of an empty panel.
-- **Session.** The client sends `credentials:"include"` and never a bearer token, and it writes no
-  token to `localStorage` or `sessionStorage`. The cookie is the daemon's `__Host-ajs_portal`
-  (`Secure; HttpOnly; SameSite=Strict; Path=/`); the CSRF token from login (or from
-  `GET /v1/portal/session` after a reload) lives in memory for the tab and is replayed as
-  `X-CSRF-Token` on every unsafe call (logout, key issue, key revoke).
-- **Signup and approval.** Signup posts email, display name and a password, then shows the pending
-  page — it creates no user, lease or key, and a duplicate address gets the same 202. The form's
-  local minimum is 10 characters while the daemon requires 12, so a 10–11 character password
-  passes the form and is refused by the server. The daemon answers a pending or suspended tenant
-  with a 403 and no cookie (bad credentials are a uniform 401), and the UI shows one shared
-  inactive-tenant message. Approval, suspension and resume
-  stay in the operator API (`/v1/admin/tenants*`), never in the portal.
-- **Own data.** Leases show the linked user's rows only (platform, node, gate, status, expiry,
-  requests, bytes); Usage offers 7/30/90-day windows with tiles and a zero-filled daily chart over
-  the tenant's rows; Keys lists metadata only, issues a key with a show-once secret and revokes
-  after a confirmation. Plans lists active plans only and creates an order under a per-dialog
-  idempotency key; Orders lists only the tenant's own orders with an always-visible
-  payment-status banner, a review-required banner, a **Pay now** button for an awaiting order
-  (opens the returned 易支付 `payUrl` in a new tab) and a clear **Offline settlement** state when
-  the adapter answers 503, plus a cancel confirm. Opening checkout never marks an order paid.
-  An active order whose grant lease ended (for example after a daemon restart) shows a
-  **Service interrupted** badge, the localized reason projected from the daemon's durable
-  `leaseEnds` log, and a **Restore service** button that calls
-  `POST /v1/portal/orders/{id}/reissue`; a successful restore keeps the original order and paid
-  expiry and clears the interruption. The daemon's per-IP, per-address and per-tenant buckets
-  answer 429 with `Retry-After`, which the page surfaces as a wait-in-seconds message.
-- **Copy.** Errors are stable portal strings rather than daemon messages: one credential refusal,
-  one rate-limit line, one unavailable line and one generic failure, in both languages.
-
-## Orders and plans
-
-`/orders` is the operator settlement surface over `/v1/admin/orders` and `/v1/admin/plans`; the
-portal's **Plans** and **Orders** tabs are its customer half (`/v1/portal/plans`,
-`/v1/portal/orders`). The daemon owns the state machine, and the console never invents a payment:
-every manual dialog records something that already happened offline, while **Pay now** only opens
-the provider's hosted checkout and never marks an order paid.
-
-- **States.** `awaiting_payment → paid → active`; `awaiting_payment → cancelled`;
-  `paid|active → refunded|charged_back`. `paid` means the money was recorded and activation is
-  pending (the badge reads *Paid — activation pending*). `reviewRequired` outranks the stored state
-  in the badge and in the filter, and any reversal the daemon cannot apply cleanly is flagged for
-  review instead of guessed.
-- **Plans.** The admin **Plans** card lists every plan — inactive included — with price, lease term
-  and monthly quota; the switch is a confirm that deactivates or reactivates it. Deactivation only
-  blocks new orders: existing orders keep their immutable priced snapshot, which the confirm says.
-  The portal lists active plans only and says checkout is available when the operator enables
-  易支付, otherwise an administrator records offline settlement.
-- **Order creation (portal).** **Create order** opens a summary confirm that states the request
-  takes no online payment; one idempotency key is generated per open dialog, so a retry replays the
-  order instead of duplicating it. A 409 (changed plan or an existing open order) is shown as the
-  open-order explanation.
-- **Manual settlement (admin).** **Mark offline payment received** requires a receipt reference and
-  records funds already received offline — it does not charge a card or move money. A `paid` order
-  offers **Retry activation**; the daemon's entitlement grant is keyed by order id, so a retry or
-  a restart grants one lease and the plan's monthly quota once.
-- **Refunds and chargebacks.** **Record offline refund** requires a reference, records a refund
-  already completed offline, revokes the grant immediately and keeps the payment history. The
-  daemon records a chargeback from external evidence and always flags review. Neither control
-  transfers money; a partial or unsupported reversal is left for review without mutation.
-- **易支付 (epay) checkout.** The portal **Orders** tab shows **Pay now** for an awaiting order;
-  `POST /v1/portal/orders/{id}/checkout` returns a hosted `payUrl`, which the page opens in a new
-  tab. A checkout records provider intent only — the order stays `awaiting_payment` until a
-  verified notify or a 60-second reconciliation query settles it. A 503 replaces the button with
-  **Offline settlement**. The daemon enables epay only when `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID` and
-  `AJS_EPAY_KEY` are all set (`AJS_EPAY_SIGN_TYPE` must be MD5; `AJS_EPAY_NOTIFY_URL` and
-  `AJS_EPAY_RETURN_URL` default to the tenant origin). The admin order table adds a provider badge
-  (`manual` / `epay` / `stripe`) and an epay enabled/disabled chip from the daemon status field
-  when present.
-- **Stripe-compatible stub.** `POST /v1/payments/stripe` is the Stripe-compatible provider
-  route; it verifies a signature over the raw body and stays disabled (503) until
-  `AJS_STRIPE_WEBHOOK_SECRET` is configured. The console has no control for it and never shows a
-  card form.
-- **Mock.** Mock mode seeds plans and orders across `paid`, `active`, `cancelled` (one flagged for
-  review), `refunded` and `charged_back`, applies the same state rules in memory, and adds an
-  `awaiting_payment` row when an order is created.
-
 ## Routes
 
 | Route | Page | Primary surfaces |
@@ -1174,21 +1063,14 @@ the provider's hosted checkout and never marks an order paid.
 | `/nodes` | Nodes | **Catalog** (real vendor servers grouped by region, server-side paging/filter/sort, offline China map from the daemon `geo` aggregate, target/connect/reconnect/disconnect with confirm, local multi-select, current-node marker) and **Connected** (region/state filters including `STALE`, latency sparklines, success/capacity meters, drain toggle, detail drawer with localized region, `Not measured` success, clock-skew stamp, vendor-claim egress and **Verify egress**) |
 | `/operations` | Operations | durable select-node history (state, account, target, started/finished, duration, error code) with a state filter and shared pagination; select-node form (account, retained-catalog server, `ifCurrent`, timeout) that follows the 202 operation to its terminal state; polls only while a record is queued or running |
 | `/leases` | Leases | sticky-lease callout, copy proxy URL, create dialog (user, platform, optional account pin, TTL, per-dialog idempotency key), rotate, release confirm, TTL |
-| `/orders` | Orders | plan card (price, lease term, monthly quota, activate/deactivate confirm), order table filtered by state or review flag with payment-provider column and epay status chip, offline-receipt attestation, activation retry, offline refund and cancel confirms, grant expiry; every dialog states that no online payment is taken |
 | `/device-pool` | Device pool | count chips (total/available/assigned/retired/quarantined), state and platform filters, debounced search, hash-only table, generate/export/import dialogs, typed-token release/retire/quarantine/purge, assign dialog, detail drawer with sealed-material warnings |
 | `/users` | Users | user cards, quota meters, API keys, show-once secret, revoke, allowlist editor (the daemon's gate enforces it, with the monthly quota, only under `AJS_GATE_AUTH=userpass`) |
-| `/tenants` | Tenants | customer portal directory, status filter, approve/suspend/resume, and **Invite tenant**: a one-time activation code shown exactly once with its `/portal/activate?code=…` link; invitation history shows status only |
 | `/requests` | Requests | gate-flow table with search/time/status/method/protocol/account-node/user/source filters, user and protocol columns, shared pagination footer, row detail drawer, mutation lab drawer |
 | `/logs` | Logs | severity/actor filters, paginated audit table, CSV export of `/v1/audit/export.csv` with the active severity filter and an `X-Truncated` warning |
 | `/schedules` | Schedules | schedule table (trigger, target, action, last result, next run), create/edit dialog with a pure next-run preview, run-now with `RUN` confirm for destructive actions, pause/resume, delete confirm, run-history drawer, renewal-sweep card |
 | `/lab` | Lab | tabs: Overview, Gates & sessions (paginated), Egress (guarded check), Servers (server-paged), Protocol, Device, Logs (paginated), Diagnostics; environment badges; account picker for Servers/Device |
 | `/settings` | Settings | nine-section shell with sticky rail: General, Appearance, Language, Connection, Leases, Updates, Integrations, Access, Audit; dirty save/reset, honest **Stored only**/**Coming later** states; Integrations carries the live webhook registry and Access the scoped-key manager |
 | `/backup` | Backup | create a passphrase-sealed `.ajsb` envelope and download it, inspect a pasted/uploaded envelope header plus manifest, and dry-run a restore diff; apply stays disabled with the `AJS_BACKUP_ALLOW_RESTORE`/no-LIVE-node explanation |
-| `/portal/login` | Portal sign in | email/password against `/v1/portal/login`, one uniform credential message, pending/suspended refusal, rate-limit copy with `Retry-After`, link to signup |
-| `/portal/signup` | Portal signup | name, email, password + confirmation with local validation, then the pending page; no session is issued |
-| `/portal/pending` | Portal pending | the application-received state and the operator-approval explanation |
-| `/portal/activate` | Portal activation | one-time invite activation: previews `?code=`, validates the password locally, sets it, and reports the pending-approval state; used/expired/wrong codes get one stable refusal |
-| `/portal` | Portal dashboard | standalone customer shell: **Leases**, **Usage** (7/30/90 days, zero-filled chart), **Keys** (issue with show-once secret, revoke confirm), **Plans** (active plans, create order under an idempotency key), **Orders** (own orders, payment-status banner, **Pay now** → 易支付 `payUrl` in a new tab, **Offline settlement** when epay is disabled, cancel confirm) and **Activity** (own audit rows, cursor load-more); redirects to login without a session |
 
 `*` redirects to `/`.
 
@@ -1196,16 +1078,14 @@ the provider's hosted checkout and never marks an order paid.
 
 ```text
 src/
-  App.tsx                 lazy routes: 15 operator pages under the admin shell + 5 portal routes
+  App.tsx                 lazy routes: 15 operator pages under the admin shell
   main.tsx                entry, self-hosted Inter / JetBrains Mono
   styles/app.css          tokens, shell, components, responsive, light theme, accents
   lib/
-    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*, Schedule*, Usage*, Health*, Webhook*, Plan, Order, EntitlementGrant
+    types.ts              Account, Node, Lease, PanelUser, ApiKey, RequestLog, AuditEvent, Metrics, Lab*, Schedule*, Usage*, Health*, Webhook*
     mock.ts               6 accounts · 12 nodes · 8 leases · 4 users · 40 requests · 20 audit rows · 7 device-pool records
-    order-mock.ts         deterministic plans and orders (paid/active/cancelled/refunded/charged_back) + state rules
     lab.ts                mock Lab fixtures: gates, sessions, egress, profiles, logs, diagnostics
-    api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false; admin orders/plans
-    portal-api.ts         tenant client: cookie session, in-memory CSRF, mock tenants, plans/orders, PortalError
+    api.ts                typed client; mock by default, fetch when VITE_USE_MOCK=false
     nodes.ts              catalog query state + region grouping + client-side geo filters
     geo.ts                offline province/city resolution and map aggregation
     format.ts             bytes, dates, TTL, proxy URL helpers
@@ -1229,10 +1109,8 @@ src/
     schedules/            ScheduleDialog, ScheduleHistoryDrawer, RenewalSweepCard, schedules.css
     devicepool/           GenerateDeviceDialog, DeviceExportDialog, DeviceImportDialog, LifecycleDialog, DeviceDetailDrawer, shared.ts, device-pool.css
     usage/                UsageChart
-    orders/               OrderState badge/money/term formatters
     lab/                  Overview, Sessions, Servers, Protocol, Device, Logs, Diagnostics tabs
-  pages/                  Overview, Usage, Accounts, Nodes, Operations, Leases, Orders, DevicePool, Users, Requests, Logs, Schedules, Lab, Settings, Backup
-  pages/portal/           PortalLogin, PortalSignup, PortalPending, PortalDashboard, PortalLeases, PortalUsage, PortalKeys, PortalPlans, PortalOrders, PortalFrame
+  pages/                  Overview, Usage, Accounts, Nodes, Operations, Leases, DevicePool, Users, Requests, Logs, Debug, Schedules, Lab, Settings, Backup
 tests/
   setup.ts                jsdom polyfills (ResizeObserver, clipboard, matchMedia)
   a11y-mobile.test.tsx    icon-only names, skip link, scroll regions, 390 px row cards, touch targets
@@ -1279,11 +1157,6 @@ tests/
   health-panel.test.tsx   health states, compact/full variants, disabled reason, stale poll
   webhooks.test.tsx       registry load, create show-once secret, enable 409, delete, deliveries
   platform-client.test.ts renewal/usage/health/webhook client contract: live URL/method/header and mock data
-  portal.test.tsx         portal client cookie/CSRF contract, mock tenant scoping, signup/pending, own-data UI, zh
-  portal-activate.test.tsx one-time invite activation: happy path, wrong code, local validation, zh
-  tenants.test.tsx        tenant directory, one-time invite code/link, duplicate refusal, zh
-  portal-activity.test.tsx tenant-scoped activity rows, cursor load-more, empty state, zh
-  orders.test.tsx         portal plans/orders and admin orders/plans: idempotency, honest states, lease-ended restore, attestation, refund, review flag, zh
 ```
 
 ### Accounts views
@@ -1419,8 +1292,6 @@ contract only):
 | Usage | `GET /v1/usage?from=&to=&account=&userId=` | `[PROPOSED]`; served by `ajs-accountd` |
 | Gate health | `GET /v1/health/nodes` | `[PROPOSED]`; served by `ajs-accountd` |
 | Webhooks | `GET/POST /v1/webhooks`, `PATCH/DELETE /v1/webhooks/{id}`, `GET /v1/webhooks/{id}/deliveries` | `[PROPOSED]`; served by `ajs-accountd` |
-| Plans and orders (admin) | `GET/POST /v1/admin/plans`, `GET/PATCH/DELETE /v1/admin/plans/{id}`, `GET /v1/admin/orders?tenantId=&userId=&state=&limit=&offset=`, `GET /v1/admin/orders/{id}`, `POST /v1/admin/orders/{id}/{settle,refund,chargeback,cancel}` | `[PROPOSED]`; served by `ajs-accountd` |
-| Plans and orders (portal) | `GET /v1/portal/plans`, `GET/POST /v1/portal/orders`, `GET /v1/portal/orders/{id}`, `POST /v1/portal/orders/{id}/cancel` | `[PROPOSED]`; served by `ajs-accountd` |
 | Lab egress check (explicit probe) | `POST /v1/lab/egress-check` | `[PROPOSED]`; served by `ajs-accountd` |
 
 Every path in this table is served by `ajs-accountd` in `daemon/` (an in-memory store persisted
@@ -1657,12 +1528,6 @@ and reports healthy on `/healthz`.
 - Webhooks are real daemon deliveries, but the delivery ring is in memory (last 200 attempts per
   endpoint, lost on a restart) and the signing secret survives a restart only with
   `AJS_MASTER_KEY`. The page never simulates a delivery or re-shows a secret.
-- Orders are an offline ledger, not a payment integration. **Mark offline payment received** and
-  **Record offline refund** attest that money already moved outside the system; the console never
-  charges a card, stores no card data and offers no checkout. The daemon's Stripe-compatible
-  webhook is disabled (503) unless `AJS_STRIPE_WEBHOOK_SECRET` is set, and no real provider event
-  has reached it. The order and plan surfaces have run against the mock store and `httptest` only,
-  and a partial or unsupported reversal is flagged for review instead of applied.
 - Plaintext export needs `AJS_ALLOW_PLAINTEXT_EXPORT=1` on the daemon and the `EXPORT`
   confirmation in the dialog; the dashboard cannot override the gate, and encrypted `.ajsx`
   export is the default.
