@@ -1,0 +1,22 @@
+# AIJIASU2API docs
+
+> Public documentation for the ajs-accountd control-plane API: scoped keys, catalog, leases, the loopback gate, errors, SDKs and honest limits.
+
+Links are root-relative; resolve them against the origin that serves `/docs`. Mirrors are English-only; the console page carries English and Chinese.
+
+## Start here
+
+- [Overview and quickstart](/docs/overview.md): Read the catalog, create a lease for one account, and connect through the loopback gate.
+- [Authentication](/docs/authentication.md): Bearer credentials, CSRF on unsafe methods, and the rate-limit headers a scoped key receives.
+- [Scopes and grants](/docs/scopes.md): The scope table, the key subject rule, and how accountIds/regions narrow every read and write.
+- [Errors](/docs/errors.md): One envelope, a closed code enum, and which failures are safe to retry.
+- [SDKs](/docs/sdks.md): The Go and TypeScript clients, their retry policy, and what has actually been run.
+- [Honest limits](/docs/limits.md): Loopback gates, no public ingress, one session slot, and the opt-in state journal.
+
+## Reference
+
+- [API reference index](/docs/reference.md): 2 public and 54 scoped operations from docs/openapi.json.
+
+## Scope
+
+This mirror covers the 56 public and scoped operations. The 92 admin-only operations are omitted; their counts appear in the console appendix only. No credential is included in any file here.
