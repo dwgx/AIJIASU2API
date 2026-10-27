@@ -3,8 +3,9 @@
 This directory is the engineering half of release gate 2: a production-like
 deployment of `ajs-accountd` and the dashboard **without Docker**. It provides
 nginx TLS termination, a token-free customer portal bundle, an admin origin
-whose bearer never reaches a browser, a hardened systemd unit, a firewall
-table that matches `deploy/nftables/`, and `check.sh` as the gate.
+whose bearer never reaches a browser, a public TLS-terminated HTTP CONNECT
+edge for the loopback gate, a hardened systemd unit, a firewall table that
+matches `deploy/nftables/`, and `check.sh` as the gate.
 
 Nothing here is a credential. There are no certificates, private keys, tokens
 or filled-in environment files in this tree — only paths, placeholders and the
@@ -41,12 +42,13 @@ all temp paths inside that directory, runs a real `nginx -t` as the invoking
 user, starts that staged config to prove unknown Hosts are refused on :80/:443,
 the portal redirect is canonical and the public API allowlist routes (proxied
 path, admin/portal `404`, static `/healthz`, `403` on a disallowed method),
-asserts the Content-Security-Policy on the staged responses and boots
-`/portal/login` in headless Chromium against a loopback fixture of the same
-vhosts, validates the YAML inventory, scans the kit for committed secrets,
-starts a daemon binary to prove `/readyz` fails on an unwritable state
-directory, verifies the systemd unit, and compares the production firewall rule
-with `deploy/nftables/ajs-panel.nft`.
+completes a TLS handshake on the public gate port with a dead backend and
+asserts the served certificate, asserts the Content-Security-Policy on the
+staged responses and boots `/portal/login` in headless Chromium against a
+loopback fixture of the same vhosts, validates the YAML inventory, scans the
+kit for committed secrets, starts a daemon binary to prove `/readyz` fails on
+an unwritable state directory, verifies the systemd unit, and compares the
+production firewall rule with `deploy/nftables/ajs-panel.nft`.
 
 ## What the kit contains
 
@@ -56,6 +58,7 @@ with `deploy/nftables/ajs-panel.nft`.
 | `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
 | `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, CSP, portal-only routes |
 | `nginx/sites-available/ajs-api.conf` | public API origin: TLS, deny-by-default allowlist of the 54 scoped operations, no edge credential |
+| `nginx/streams-available/ajs-gate.conf` | public gate data plane: 11 TLS stream servers, 13000-13010 -> loopback HTTP CONNECT 14000-14010, no SOCKS5 |
 | `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, per-operator Basic auth, proxy-injected bearer |
 | `nginx/snippets/ajs-tls.conf` | shared TLS 1.2+/1.3 policy |
 | `nginx/snippets/ajs-proxy-common.conf` | `X-Forwarded-For` overwrite + trusted-proxy note |
@@ -84,7 +87,7 @@ tree or generated on the host.
 | Name | Record | Exposure |
 |---|---|---|
 | `panel.example.com` | `A` (and `AAAA` if the host has IPv6) to the host's public address | public internet |
-| `api.example.com` | `A` (and `AAAA` if the host has IPv6) to the host's public address | public internet — the scoped-key API only; the gate data plane stays loopback |
+| `api.example.com` | `A` (and `AAAA` if the host has IPv6) to the host's public address | public internet — scoped-key API on `:443` and the TLS gate edge on 13000-13010; the SOCKS5 gate stays loopback |
 | `admin.example.com` | private DNS, split-horizon, or `/etc/hosts` to `127.0.0.1` | loopback or VPN only — do **not** create a public record |
 
 Replace `panel.example.com`, `api.example.com` and `admin.example.com` in:
@@ -99,6 +102,21 @@ with no path, query or trailing slash. The daemon refuses a path and uses the
 value for the portal's exact `Origin` check. `AJS_ADMIN_ORIGINS` must be the
 admin SPA's exact bare origin (`https://admin.example.com:8443` in this kit);
 unsafe admin requests from any other `Origin` are refused before the handler.
+
+### Public address (gate data plane)
+
+`nginx/streams-available/ajs-gate.conf` binds this host's public IPv4 address on
+13000-13010, the address the `api.example.com` `A` record points at. It must
+**not** be `0.0.0.0` and must **not** be `127.0.0.1`: `ajs-accountd` owns
+`127.0.0.1:13000-13010` for the SOCKS5 gate, so a wildcard listen on the same
+numbers fails with `EADDRINUSE` — or, if nginx starts first, pushes the
+daemon's gate allocator to 13011+ and every port in the static map points at
+the wrong node. Replace `203.0.113.10` (an RFC 5737 documentation address) in
+all 11 servers with the real address; `nginx -t` refuses to start while it is
+still a documentation address because it cannot be bound. On an IPv6-enabled
+host add `listen [::]:<port> ssl;` beside each `listen` line. A NAT'd host
+binds its interface address (the one DNAT forwards the public address to), not
+the public address itself.
 
 ### Host boundary
 
@@ -164,6 +182,13 @@ openssl x509 -in /etc/ajs/tls/panel.example.com/fullchain.pem -noout -text \
 `api.example.com` is a *sibling* of `panel.example.com`, so the portal's HSTS
 `includeSubDomains` does not cover it; `ajs-api.conf` therefore includes the
 same `ajs-security-headers.conf` and sends its own HSTS.
+
+`nginx/streams-available/ajs-gate.conf` reuses the same
+`/etc/ajs/tls/api.example.com` pair on all 11 stream servers. There is no
+second certificate and no second ACME challenge: renewing the panel pair and
+reloading nginx renews the gate edge too. The stream servers pin
+`TLSv1.2 TLSv1.3` and turn session tickets off, matching the HTTP policy in
+`nginx.conf`.
 
 The nginx master reads the pair at startup. Renewals require
 `systemctl reload nginx`; certbot's deploy hook can do that. Keys must be
@@ -237,7 +262,8 @@ their feature is used:
 | `AJS_EPAY_RETURN_URL` | derived | set to `https://panel.example.com/portal` if the gateway needs it |
 | `AJS_STRIPE_WEBHOOK_SECRET` | empty | empty leaves `POST /v1/payments/stripe` at 503 |
 | `AJS_GATE_AUTH` | RFC 1929 | leave unset; `loopback` is a compatibility wire only |
-| `AJS_GATE_HTTP` | off | loopback gate HTTP bridge, off by default |
+| `AJS_GATE_HTTP` | `1` | starts the per-node loopback HTTP CONNECT listener that `streams-enabled/ajs-gate.conf` publishes; `0`/unset leaves the public ports completing TLS and then closing |
+| `AJS_GATE_HTTP_OFFSET` | `1000` | must stay 1000: the stream map hard-codes the backend at lease port + 1000 (14000-14010) |
 | `AJS_FLOW_METER` | on | set `0` only if per-flow request-log rows are unwanted |
 
 The full variable reference is in [`daemon/README.md`](../../daemon/README.md#configuration).
@@ -263,6 +289,8 @@ sudo install -m 0755 ajs-accountd-linux-amd64 /usr/local/bin/ajs-accountd
 sudo install -m 0600 -o root -g root \
   deploy/production/systemd/ajs-accountd.env.example /etc/ajs/accountd.env
 sudo -e /etc/ajs/accountd.env
+# Keep AJS_GATE_HTTP=1 and AJS_GATE_HTTP_OFFSET=1000 when the public gate
+# edge from step 5 is enabled; without them the stream map has no backend.
 
 # 3. systemd
 sudo install -m 0644 deploy/production/systemd/ajs-accountd.service /etc/systemd/system/
@@ -277,12 +305,15 @@ sudo rm -rf /var/lib/ajs/production/portal /var/lib/ajs/production/admin
 sudo cp -a /tmp/ajs-bundles/portal /var/lib/ajs/production/portal
 sudo cp -a /tmp/ajs-bundles/admin  /var/lib/ajs/production/admin
 
-# 5. nginx
-sudo apt-get install -y nginx
+# 5. nginx (libnginx-mod-stream provides the public gate edge on Debian/Ubuntu)
+sudo apt-get install -y nginx libnginx-mod-stream
 sudo cp deploy/production/nginx/nginx.conf /etc/nginx/nginx.conf
 sudo cp deploy/production/nginx/ajs-mime.types /etc/nginx/ajs-mime.types
 sudo cp deploy/production/nginx/snippets/*.conf /etc/nginx/snippets/
 sudo cp deploy/production/nginx/sites-available/ajs-*.conf /etc/nginx/sites-enabled/
+sudo install -d -m 0755 /etc/nginx/streams-enabled
+# Replace 203.0.113.10 with this host's public address first (Owner inputs).
+sudo cp deploy/production/nginx/streams-available/ajs-gate.conf /etc/nginx/streams-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # 6. Admin operator accounts: unique role, API token and Basic password
@@ -323,8 +354,13 @@ The AJS LAN rule is byte-for-byte the rule owned by
 ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept
 ```
 
-`check.sh` fails if the two drift. Gate ports (for example acc-07's `:13012`)
-remain loopback-only and are not opened by either table.
+`check.sh` fails if the two drift. The production table additionally opens TCP
+13000-13010 for the public gate edge (`streams-enabled/ajs-gate.conf`). Those
+are the nginx listeners only: the daemon's SOCKS5 gate on
+`127.0.0.1:13000-13010` and the HTTP CONNECT backend on
+`127.0.0.1:14000-14010` stay loopback-only and are not opened by either table.
+A node's gate port above the static map (for example acc-07's `:13012`) has no
+public edge and stays loopback-only too.
 
 ## Routing model
 
@@ -341,6 +377,10 @@ customer SDK/CLI ── HTTPS ──> nginx :443 (api.example.com)
                      ├── 41 allowlisted paths -> 127.0.0.1:2261 (scoped key, no edge credential)
                      ├── /healthz       -> static "ok" (edge liveness)
                      └── everything else -> 404 (admin namespace, portal, payments)
+
+proxy client ── HTTPS CONNECT ──> nginx stream :13000-13010 (api.example.com)
+                     └── 127.0.0.1:14000-14010 (gate HTTP CONNECT, scoped key)
+                     the SOCKS5 gate on 127.0.0.1:13000-13010 is never public
 
 operator ── SSH tunnel/VPN ──> nginx 127.0.0.1:8443 (admin.example.com)
                      ├── /               -> /var/lib/ajs/production/admin (SPA)
@@ -401,14 +441,16 @@ a scanner and `/v1/backup`, `/v1/users` and `/v1/lab/*`.
 | `api.example.com` everything else | yes (404) | — | none issued |
 | `admin.example.com` SPA + `/v1/*` | **no** | `127.0.0.1:8443` or VPN | HTTP Basic + mapped operator bearer |
 | daemon `127.0.0.1:2261` | **no** | loopback only | operator bearer / portal cookie / scoped key |
-| gate ports `127.0.0.1:13000+`, `:14000+` | **no** | loopback only | scoped key with `proxy:connect` |
-| `api.example.com` → gate data plane | **no** | — | not proxied by any vhost |
+| `api.example.com` `:13000-13010` (TLS HTTP CONNECT) | yes | — | scoped key with `proxy:connect` (user id + key) |
+| gate SOCKS5 `127.0.0.1:13000-13010` | **no** | loopback only | scoped key with `proxy:connect` |
+| gate HTTP CONNECT backend `127.0.0.1:14000-14010` | **no** | loopback only | the gate itself |
 
-The last row is the one customers discover at integration time: the API edge
-lets a customer provision, meter and automate, but it does **not** let them
-consume the proxy from their own network. The gate stays loopback (three
-independent checks in `daemon/internal/gate`) and the tunnel leg needs an
-SSH/VPN forward that is re-pointed whenever a lease rebinds.
+The gate data plane is reachable from the internet only as HTTP CONNECT over
+TLS on 13000-13010. The SOCKS5 listener on the same numbers stays loopback
+(three independent checks in `daemon/internal/gate`), so `curl --socks5
+127.0.0.1:13003` works only on the host or through an SSH forward; a customer's
+client must speak CONNECT-over-TLS. A lease port above the static map
+(`13011+`) has no public edge, and the admin origin is never published.
 
 #### Precondition: strict RBAC, no insecure mode
 
@@ -452,6 +494,98 @@ sudo nginx -t && sudo systemctl reload nginx
 Blast radius is the API edge alone: the portal, admin and default-deny vhosts
 and the gate keep their connections. Leave the DNS record in place; it then
 answers `421` from the default-deny listener until the vhost returns.
+
+### Public gate data plane: TLS-terminated HTTP CONNECT
+
+`streams-available/ajs-gate.conf` publishes the gate's **HTTP CONNECT**
+listener. The daemon keeps every listener on loopback — the SOCKS5 gate on
+`127.0.0.1:<leasePort>` and the opt-in HTTP CONNECT gate on
+`127.0.0.1:<leasePort + 1000>` — and nginx is the only process with a public
+socket. The stream module relays opaque bytes, so it cannot answer, rewrite or
+authenticate CONNECT: `Proxy-Authorization` reaches the gate untouched and
+never appears in an nginx log.
+
+| Lease port | Public TLS (nginx) | Gate HTTP CONNECT (loopback) | SOCKS5 gate (loopback, never public) |
+|---|---|---|---|
+| 13000 | `api.example.com:13000` | `127.0.0.1:14000` | `127.0.0.1:13000` |
+| 13001 | `api.example.com:13001` | `127.0.0.1:14001` | `127.0.0.1:13001` |
+| 13002 | `api.example.com:13002` | `127.0.0.1:14002` | `127.0.0.1:13002` |
+| 13003 | `api.example.com:13003` | `127.0.0.1:14003` | `127.0.0.1:13003` |
+| 13004 | `api.example.com:13004` | `127.0.0.1:14004` | `127.0.0.1:13004` |
+| 13005 | `api.example.com:13005` | `127.0.0.1:14005` | `127.0.0.1:13005` |
+| 13006 | `api.example.com:13006` | `127.0.0.1:14006` | `127.0.0.1:13006` |
+| 13007 | `api.example.com:13007` | `127.0.0.1:14007` | `127.0.0.1:13007` |
+| 13008 | `api.example.com:13008` | `127.0.0.1:14008` | `127.0.0.1:13008` |
+| 13009 | `api.example.com:13009` | `127.0.0.1:14009` | `127.0.0.1:13009` |
+| 13010 | `api.example.com:13010` | `127.0.0.1:14010` | `127.0.0.1:13010` |
+
+**Client.** `GET /v1/leases/{id}` returns `connection.port` — the lease port,
+`gatePort`. Dial that port over HTTPS with the same two credentials the SOCKS5
+gate takes:
+
+```bash
+curl -x "https://u-01:$AJS_SK@api.example.com:13000" https://example.com/
+# equivalent, credentials separate from the proxy URL
+curl --proxy "https://api.example.com:13000" --proxy-user "u-01:$AJS_SK" https://example.com/
+```
+
+`<user>` is the panel user id and `<ajs_sk_...>` is a scoped key carrying
+`proxy:connect`; the key must be active, belong to that user, allow the gate's
+account and have exactly one active lease on it. That is the same admission
+pipeline as the SOCKS5 gate — key check, user enabled/allowlist/quota, account
+quota, one flow-slot pool — and the same wire contract: `200 Connection
+Established`, `407` with `Proxy-Authenticate: Basic realm="apc"` for a
+missing or wrong credential, `403` for an allowlist/identity refusal, `429`
+with `Retry-After` for quota, `503` while draining. The gate re-checks the
+lease at CONNECT, so revoking the key or ending the lease cuts the next
+connection; an admitted tunnel finishes with the identity it authenticated.
+
+**TLS.** All 11 servers reuse `/etc/ajs/tls/api.example.com/fullchain.pem` and
+`privkey.pem` — the panel certificate with the api SAN, so a renewal reloads
+both edges — pin `TLSv1.2 TLSv1.3`, turn session tickets off and allow 10
+concurrent connections per source address (`limit_conn ajs_gate_conn`).
+`proxy_timeout 1h` is an idle timeout, not a one-hour cap on a tunnel. The
+stream module has no `limit_req`, no `429` body and no `Retry-After`, so the
+gate's own admission stays the authority. Every `listen` carries `ssl` and no
+backend points at a SOCKS5 port: there is no plaintext gate port.
+
+**Not exposed.** The SOCKS5 gate (`127.0.0.1:13000-13010`), the HTTP CONNECT
+backend (`127.0.0.1:14000-14010`), the admin origin (`127.0.0.1:8443`) and the
+daemon API (`127.0.0.1:2261`). Only the HTTP CONNECT listener is published,
+and only through TLS. A lease port above the static map (node 12 and later,
+`13011+`) has no public edge until a server block is added.
+
+**Precondition.** `AJS_GATE_HTTP=1` and `AJS_GATE_HTTP_OFFSET=1000` in
+`/etc/ajs/accountd.env`, then one daemon restart to create the listener.
+Without it the public ports complete the TLS handshake and close; the gate
+never sees a request. The SOCKS5 gate is unaffected either way. The listen
+address is an owner input (see **Public address** above): never the wildcard
+and never `127.0.0.1`, because the daemon owns those numbers on loopback.
+
+**Rollout and rollback.** Rollout is one file and one reload; rollback is
+removing the file and reloading. No daemon restart, no certificate change, no
+data change, no DNS change.
+
+```bash
+# 1. the daemon has the backend listener
+sudo grep -E '^AJS_GATE_HTTP' /etc/ajs/accountd.env   # AJS_GATE_HTTP=1
+ss -ltn 'sport = :14000'                              # one listener per live node
+
+# 2. enable the edge (the public address must already be replaced)
+sudo cp deploy/production/nginx/streams-available/ajs-gate.conf /etc/nginx/streams-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# 3. canary one lease port
+curl -x "https://u-01:$AJS_SK@api.example.com:13000" https://example.com/
+
+# rollback
+sudo rm /etc/nginx/streams-enabled/ajs-gate.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+A reload keeps established tunnels on the old workers until they go idle or
+the client closes. The firewall rule may stay after a rollback — the ports
+then refuse connections because nothing listens — or be removed with the edge.
 
 ### Customer origin: token-free and portal-only
 
@@ -783,16 +917,20 @@ state directory.
 3. a secret scan over every kit file: PEM private keys/certificates, token
    assignments, literal `Authorization: Bearer` values, and bare 64-hex
    strings; the admin-token template must contain only `${AJS_ADMIN_TOKEN}`;
-4. a real `nginx -t` on a staged copy of both vhosts with a generated
-   self-signed certificate, a dummy 64-character token and a throwaway
-   operator htpasswd. The staged config
+4. a real `nginx -t` on a staged copy of all four vhosts plus the gate stream
+   map, with generated self-signed certificates, a dummy 64-character token
+   and a throwaway operator htpasswd. The staged config
    rewrites the PID file and every `*_temp_path` into the throwaway tree, so
    the nginx stage passes as an unprivileged user on stock Debian/Ubuntu nginx
    without writing `/run/nginx.pid` or `/var/lib/nginx/*`. Because nginx -t
    opens the listening sockets even in test mode, an unprivileged run retries
    in an isolated user+network namespace (`unshare -Urn`) where it can bind
-   :80/:443. Production mode requires host nginx; Docker
-   `nginx:1.29-alpine` staging is dev-only (`AJS_CHECK_NGINX_DOCKER=1`);
+   :80/:443 and 13000-13010. A dynamic stream module is staged through
+   `/etc/nginx/modules-enabled` with an absolute `load_module` path; a host
+   without the module is a production `FAIL` (install `libnginx-mod-stream`)
+   and a dev `SKIP` that still parses the HTTP vhosts. Production mode
+   requires host nginx; Docker `nginx:1.29-alpine` staging is dev-only
+   (`AJS_CHECK_NGINX_DOCKER=1`);
 5. a runtime nginx probe on the staged `:80`/`:443` listeners: an unknown
    HTTP `Host` must be closed (`444`), an unknown HTTPS `Host` and an
    IP-literal `Host` must answer `421`, the portal HTTP redirect must use the
@@ -804,7 +942,11 @@ state directory.
    `/v1/portal/session` and `/v1/whoami` must be `404`, `PATCH /v1/leases`
    must be `403` from `limit_except`, `/healthz` must be a static `200 "ok"`,
    an unknown Host carrying an API path must still be `421`, and the API HTTP
-   listener must `301` to the fixed `https://api.example.com`. The probe
+   listener must `301` to the fixed `https://api.example.com`. It also
+   completes a TLS handshake against the staged gate listener on
+   `127.0.0.1:13003` — whose backend is dead — and requires the served
+   certificate to name `api.example.com`, proving TLS termination rather than
+   a plaintext SOCKS5 forward. The probe
    prefers an isolated network namespace (`unshare -n` as root, `unshare -Urn`
    otherwise) so a running host nginx does not conflict with the staged
    listeners;
@@ -883,6 +1025,19 @@ state directory.
     its methods, every proxying location maps back to a scoped operation, and
     every named `404` is an admin-only path. It prints the observed counts
     (currently `COUNT paths=41 operations=54 proxying_locations=41`).
+16. the public gate data plane (`streams-available/ajs-gate.conf`): the
+    top-level `stream` block, the `ajs_gate_conn` zone inside it and the
+    `streams-enabled` include; 11 servers whose `listen` ports are exactly
+    13000-13010 with `ssl` on every one, whose backends are exactly
+    `127.0.0.1:14000-14010` and never a SOCKS5 port, and whose 11 server
+    blocks all carry the api certificate pair, TLS 1.2/1.3, tickets off, a 5s
+    connect timeout, a 1h proxy timeout, `limit_conn ajs_gate_conn 10` and
+    `access_log off`; one explicit public listen address (never the wildcard
+    or loopback, which would collide with the daemon's own SOCKS5 listener);
+    and no header rewrite or edge credential. The staged tree binds loopback
+    for `nginx -t` and the runtime probe, which completes a TLS handshake on
+    `127.0.0.1:13003` with a dead backend and requires the api.example.com
+    certificate.
 
 In production mode every item above is required: a missing tool is a `FAIL`
 and the summary reports the required-skip count. Production mode also refuses
@@ -894,6 +1049,21 @@ requirement.
 
 ## Recorded verification (2026-10-27)
 
+- **Public gate edge (AJS-469), WSL2 Ubuntu 24.04, nginx 1.24.0 (Ubuntu) with
+  `libnginx-mod-stream`:** `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS (176 checks, 1 skipped; not a production gate)`. The single
+  skip is the root-only AJS-412 ownership proof. The staged `nginx -t` parsed
+  the four HTTP vhosts *and* the gate stream map (`unshare -Urn nginx`); the
+  dynamic stream module was staged through `modules-enabled` with an absolute
+  `load_module` path. The runtime probe completed a TLS handshake on the
+  staged `127.0.0.1:13003` with a dead backend and served the throwaway
+  certificate for `api.example.com`, which proves TLS termination rather than
+  a plaintext SOCKS5 forward. The static assertions observed 11 servers,
+  `listen` ports 13000-13010 (all `ssl`), backends `127.0.0.1:14000-14010`,
+  the api certificate pair, `proxy_timeout 1h`, `limit_conn ajs_gate_conn 10`
+  and one explicit public listen address. The CSP fixture strips the stream
+  block because it serves only the HTTP vhosts. This is a dev result; the
+  production gate (`sudo -E`) is still required on the release host.
 - **Public API edge (AJS-468), WSL2 Ubuntu 24.04, nginx 1.24.0 (Ubuntu):**
   `bash deploy/production/check.sh --dev` →
   `check: DEV-PASS (159 checks, 1 skipped; not a production gate)`. The single
@@ -1023,11 +1193,13 @@ before the next release.
 ## Limitations
 
 - **Single host, no HA.** One nginx, one daemon, one state directory.
-- **The API edge is not proxy ingress.** `api.example.com` serves the 54
-  scoped control-plane operations. It does not expose the gate data plane:
-  gate ports stay loopback and a customer still needs an SSH/VPN forward that
-  is re-pointed after every lease rebind. Treat the edge as the
-  provisioning/billing/automation surface, not as "the proxy is public".
+- **Two public edges, one static gate map.** `api.example.com:443` serves the
+  54 scoped control-plane operations; `api.example.com:13000-13010` serves
+  TLS HTTP CONNECT into the loopback gate. The SOCKS5 gate stays loopback
+  only. The stream map is static: node 12 and later (`13011+`) have no public
+  port until a server block is added, and a lease that rebinds to another node
+  changes its port, so a client must re-read `GET /v1/leases/{id}` after a
+  switch.
 - **Strict daemon RBAC, restart-based revocation.** `viewer`, `operator` and
   `admin` are enforced per route. Operator files are outside panel backups;
   role/token removal takes effect after nginx reload and daemon restart.

@@ -30,7 +30,10 @@
 #
 # Tools:
 #   nginx (or set AJS_NGINX_BIN=/usr/sbin/nginx; Docker with
-#   nginx:1.29-alpine + AJS_CHECK_NGINX_DOCKER=1, dev mode)
+#   nginx:1.29-alpine + AJS_CHECK_NGINX_DOCKER=1, dev mode). Debian/Ubuntu
+#   build the stream module as a dynamic module, so libnginx-mod-stream must
+#   be installed: the public gate edge is a top-level stream block, and
+#   production mode fails without it.
 #   python3 + PyYAML (or ruby, or yq) for YAML validation
 #   openssl for the throwaway nginx test certificate
 #   systemd-analyze for unit verification
@@ -158,6 +161,7 @@ nginx/sites-available/ajs-portal.conf
 nginx/sites-available/ajs-admin.conf
 nginx/sites-available/ajs-api.conf
 nginx/sites-available/ajs-default.conf
+nginx/streams-available/ajs-gate.conf
 systemd/ajs-accountd.service
 systemd/ajs-accountd.env.example
 firewall/ajs-production.nft
@@ -376,13 +380,45 @@ else
     skip "nginx not installed; production gate requires a real nginx -t (install nginx or set AJS_NGINX_BIN)"
 fi
 
+# Debian/Ubuntu build the stream module as a dynamic module
+# (--with-stream=dynamic) and load it from /etc/nginx/modules-enabled, which
+# the kit's nginx.conf includes. Staging writes that loader with an absolute
+# path because the staged prefix is the throwaway tree, not /usr. A host
+# without the module cannot parse the public gate edge at all: that is a
+# release blocker in production and an explicit skip in dev.
+stream_support=static
+stream_module_path=""
+if [ "$nginx_mode" = host ]; then
+    nginx_v_output=$("$nginx_bin" -V 2>&1)
+    if printf '%s' "$nginx_v_output" | grep -q -- '--with-stream=dynamic'; then
+        stream_support=dynamic
+        modules_path=$(printf '%s\n' "$nginx_v_output" | tr ' ' '\n' | sed -n 's|^--modules-path=||p' | sed -n '1p')
+        [ -n "$modules_path" ] || modules_path=/usr/lib/nginx/modules
+        for stream_candidate in "$modules_path/ngx_stream_module.so" \
+            /usr/lib/nginx/modules/ngx_stream_module.so \
+            /usr/lib64/nginx/modules/ngx_stream_module.so; do
+            if [ -r "$stream_candidate" ]; then stream_module_path=$stream_candidate; break; fi
+        done
+    elif ! printf '%s' "$nginx_v_output" | grep -q -- '--with-stream'; then
+        stream_support=absent
+    fi
+fi
+if [ "$nginx_mode" = docker ]; then
+    # The official nginx:1.29-alpine build compiles the stream module in.
+    stream_support=static
+fi
+if [ "$stream_support" = dynamic ] && [ -z "$stream_module_path" ]; then
+    stream_support=absent
+fi
+
 if [ -n "$nginx_mode" ]; then
     if ! command -v openssl >/dev/null 2>&1; then
         skip "openssl not found; cannot generate the throwaway nginx test certificate"
     else
         nginx_tmp=$(mktemp -d) || { fail "cannot create temporary nginx directory"; nginx_tmp=""; }
         if [ -n "$nginx_tmp" ]; then
-            mkdir -p "$nginx_tmp/sites-enabled" "$nginx_tmp/snippets" "$nginx_tmp/logs" \
+            mkdir -p "$nginx_tmp/sites-enabled" "$nginx_tmp/streams-enabled" \
+                "$nginx_tmp/modules-enabled" "$nginx_tmp/snippets" "$nginx_tmp/logs" \
                 "$nginx_tmp/certs/panel.example.com" "$nginx_tmp/certs/admin.example.com" \
                 "$nginx_tmp/certs/api.example.com" \
                 "$nginx_tmp/temp/client_body" "$nginx_tmp/temp/proxy" \
@@ -394,6 +430,10 @@ if [ -n "$nginx_mode" ]; then
             cp "$kit/nginx/sites-available/ajs-admin.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-api.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-default.conf" "$nginx_tmp/sites-enabled/"
+            cp "$kit/nginx/streams-available/ajs-gate.conf" "$nginx_tmp/streams-enabled/"
+            if [ "$stream_support" = dynamic ]; then
+                printf 'load_module %s;\n' "$stream_module_path" > "$nginx_tmp/modules-enabled/50-mod-stream.conf"
+            fi
 
             # nginx resolves auth_basic_user_file at config load. Stage a
             # throwaway htpasswd beside the rewritten /etc/nginx root; the
@@ -430,10 +470,38 @@ if [ -n "$nginx_mode" ]; then
             if [ "$nginx_mode" = docker ]; then nginx_root=/work; else nginx_root=$nginx_tmp; fi
 
             # Rewrite the host paths to the throwaway tree.
-            for f in "$nginx_tmp/nginx.conf" "$nginx_tmp/sites-enabled/"*.conf; do
+            for f in "$nginx_tmp/nginx.conf" "$nginx_tmp/sites-enabled/"*.conf "$nginx_tmp/streams-enabled/"*.conf; do
                 sed -i.bak "s|/etc/nginx|$nginx_root|g; s|/etc/ajs/tls|$nginx_root/certs|g; s|/var/log/nginx|$nginx_root/logs|g" "$f"
                 rm -f "$f.bak"
             done
+            # The gate edge listens on this host's public address, never the
+            # wildcard: ajs-accountd owns 127.0.0.1:13000-13010 for the SOCKS5
+            # gate. The staged tree has no public address, so the staged
+            # servers bind loopback for nginx -t and the TLS probe; the shipped
+            # address form is asserted statically below.
+            sed -i.bak -E 's|^[[:space:]]*listen[[:space:]]+[0-9.]+:([0-9]+[[:space:]]+ssl;)|    listen 127.0.0.1:\1|' \
+                "$nginx_tmp/streams-enabled/ajs-gate.conf"
+            rm -f "$nginx_tmp/streams-enabled/ajs-gate.conf.bak"
+            if [ "$stream_support" = absent ]; then
+                if [ "$mode" = production ]; then
+                    fail "nginx has no stream module; install libnginx-mod-stream or build nginx --with-stream"
+                else
+                    skip "nginx stream module absent; the public gate edge cannot be parsed (dev mode)"
+                fi
+                # Keep the http stage meaningful: drop the top-level stream
+                # block from the staged copy only. The shipped nginx.conf is
+                # asserted statically below.
+                awk '
+                    /^[[:space:]]*stream[[:space:]]*\{/ { drop = 1; depth = 0 }
+                    drop {
+                        depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+                        if (depth <= 0) drop = 0
+                        next
+                    }
+                    { print }
+                ' "$nginx_tmp/nginx.conf" > "$nginx_tmp/nginx.nostream.conf" \
+                    && mv "$nginx_tmp/nginx.nostream.conf" "$nginx_tmp/nginx.conf"
+            fi
             if [ "$nginx_mode" = docker ]; then
                 sed -i.bak 's/^user .*/user nginx;/' "$nginx_tmp/nginx.conf"
                 rm -f "$nginx_tmp/nginx.conf.bak"
@@ -513,7 +581,12 @@ if [ -n "$nginx_mode" ]; then
                 else
                     nginx_label="nginx:1.29-alpine"
                 fi
-                pass "nginx -t: portal, admin, api and default vhosts ($nginx_label; $nginx_via)"
+                if [ "$stream_support" = absent ]; then
+                    nginx_subject="portal, admin, api and default vhosts (stream block not staged: module absent)"
+                else
+                    nginx_subject="portal, admin, api and default vhosts plus the gate stream map"
+                fi
+                pass "nginx -t: $nginx_subject ($nginx_label; $nginx_via)"
             else
                 fail "nginx -t failed: $(printf '%s' "$nginx_output" | tr '\n' ' ' | cut -c1-500)"
             fi
@@ -527,6 +600,7 @@ if [ -n "$nginx_mode" ]; then
                 [ -n "$panel_host" ] || panel_host=panel.example.com
                 api_host=$(awk '$1 == "server_name" {gsub(/;/, "", $2); print $2; exit}' "$kit/nginx/sites-available/ajs-api.conf")
                 [ -n "$api_host" ] || api_host=api.example.com
+                if [ "$stream_support" = absent ]; then stream_probe=0; else stream_probe=1; fi
                 cat > "$nginx_tmp/probe.sh" <<'AJS_NGINX_PROBE'
 #!/bin/sh
 set -u
@@ -536,6 +610,7 @@ nginx_bin=$3
 ip_bin=${4:-}
 panel_host=${5:-panel.example.com}
 api_host=${6:-api.example.com}
+stream_probe=${7:-0}
 if [ -n "$ip_bin" ]; then "$ip_bin" link set lo up 2>/dev/null || true; fi
 "$nginx_bin" -p "$root/" -c "$config" >/dev/null 2>&1 || { echo "nginx_start_failed"; exit 1; }
 cleanup() { "$nginx_bin" -p "$root/" -c "$config" -s stop >/dev/null 2>&1 || true; }
@@ -569,6 +644,22 @@ api_whoami=$(api "https://$api_host/v1/whoami")
 api_method=$(api -X PATCH "https://$api_host/v1/leases")
 api_unknown=$(api --resolve attacker.invalid:443:127.0.0.1 "https://attacker.invalid/v1/leases")
 api_http=$(curl -sS -o /dev/null -D - --max-time 3 -H "Host: $api_host" http://127.0.0.1/v1/leases 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{code=$2} /^Location:/{sub(/\r$/,""); loc=$2} END{print code "|" loc}')
+
+# Public gate data plane (AJS-469). The staged stream server on 13003 has a
+# dead backend (127.0.0.1:14003), so the TLS handshake is the only thing that
+# can succeed: if the certificate is served, nginx terminated TLS on the
+# public gate port instead of forwarding plaintext SOCKS5.
+gate_cert=""
+if [ "$stream_probe" = "1" ] && command -v openssl >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        gate_cert=$(timeout 10 openssl s_client -connect 127.0.0.1:13003 -servername "$api_host" -showcerts </dev/null 2>/dev/null \
+            | openssl x509 -noout -subject -ext subjectAltName 2>/dev/null | tr '\n' ' ')
+    else
+        gate_cert=$(openssl s_client -connect 127.0.0.1:13003 -servername "$api_host" -showcerts </dev/null 2>/dev/null \
+            | openssl x509 -noout -subject -ext subjectAltName 2>/dev/null | tr '\n' ' ')
+    fi
+fi
+printf 'gate_cert=%s\n' "$gate_cert"
 printf 'http_unknown=%s\n' "$http_unknown"
 printf 'https_unknown=%s\n' "$https_unknown"
 printf 'https_ip=%s\n' "$https_ip"
@@ -596,13 +687,13 @@ AJS_NGINX_PROBE
                     # :80/:443 listeners, which may already belong to a running
                     # nginx. As real root, nginx can still setuid to the
                     # configured worker user, so keep the config unchanged.
-                    probe_out=$(unshare -n sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" 2>&1)
+                    probe_out=$(unshare -n sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" "$stream_probe" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                     if [ "$probe_rc" -ne 0 ]; then
                         # Namespace unavailable/blocked: fall back to the real
                         # listeners, which is valid only when they are free.
-                        probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" 2>&1)
+                        probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" "$stream_probe" 2>&1)
                         probe_rc=$?
                     fi
                 elif command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
@@ -612,11 +703,11 @@ AJS_NGINX_PROBE
                     sed -i.bak -E 's|^[[:space:]]*user[[:space:]]+[^;]+;|user root;|' "$nginx_tmp/nginx.probe.conf"
                     rm -f "$nginx_tmp/nginx.probe.conf.bak"
                     probe_config="$nginx_tmp/nginx.probe.conf"
-                    probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" 2>&1)
+                    probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" "$stream_probe" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                 elif [ "$(id -u)" -eq 0 ]; then
-                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" 2>&1)
+                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" "$stream_probe" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                 else
@@ -725,6 +816,19 @@ AJS_NGINX_PROBE
                         pass "api HTTP listener redirects to the fixed canonical origin (301)"
                     else
                         fail "api HTTP redirect wrong: ${api_http:-<none>}"
+                    fi
+
+                    # --- public gate data plane (AJS-469) -------------------
+                    if [ "$stream_probe" = "1" ]; then
+                        gate_cert=$(printf '%s\n' "$probe_out" | sed -n 's/^gate_cert=//p')
+                        case $gate_cert in
+                            *api.example.com*)
+                                pass "gate edge 13003 terminates TLS and serves the api.example.com certificate" ;;
+                            *)
+                                fail "gate edge 13003 served no api.example.com certificate: ${gate_cert:-<none>}" ;;
+                        esac
+                    else
+                        skip "gate TLS probe skipped: nginx stream module absent"
                     fi
                 elif [ "$probe_ran" -eq 1 ] && [ "$probe_rc" -ne 0 ]; then
                     fail "nginx runtime probe failed: $(printf '%s' "$probe_out" | tr '\n' ' ' | cut -c1-300)"
@@ -1383,6 +1487,110 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+section "public gate data plane (AJS-469)"
+# The stream block is the only place nginx can publish the gate: the daemon
+# refuses a non-loopback listen, and the stream module relays CONNECT bytes so
+# the gate still authenticates the scoped key itself. These assertions pin the
+# shape the runtime probe cannot see (the staged copy binds loopback).
+gate_conf="$kit/nginx/streams-available/ajs-gate.conf"
+gate_zone_ok=0
+if awk '
+    /^stream[[:space:]]*\{/ { in_stream = 1 }
+    in_stream && /^[[:space:]]*limit_conn_zone[[:space:]]+\$binary_remote_addr[[:space:]]+zone=ajs_gate_conn:10m;/ { found = 1 }
+    /^\}/ { in_stream = 0 }
+    END { exit !found }
+' "$kit/nginx/nginx.conf" 2>/dev/null; then
+    gate_zone_ok=1
+fi
+if grep -qE '^stream[[:space:]]*\{' "$kit/nginx/nginx.conf" \
+    && grep -qE '^[[:space:]]*include[[:space:]]+/etc/nginx/streams-enabled/\*\.conf;' "$kit/nginx/nginx.conf" \
+    && [ "$gate_zone_ok" -eq 1 ]; then
+    pass "nginx.conf has a top-level stream block with the ajs_gate_conn zone and streams-enabled include"
+else
+    fail "nginx.conf is missing the stream block, the ajs_gate_conn zone inside it, or the streams-enabled include"
+fi
+if grep -qE '^[[:space:]]*include[[:space:]]+/etc/nginx/modules-enabled/\*\.conf;' "$kit/nginx/nginx.conf"; then
+    pass "nginx.conf loads the packaged dynamic modules (stream is dynamic on Debian/Ubuntu)"
+else
+    fail "nginx.conf does not include /etc/nginx/modules-enabled/*.conf; a dynamic stream module cannot load"
+fi
+
+gate_servers=$(grep -cE '^[[:space:]]*server[[:space:]]*\{' "$gate_conf" 2>/dev/null || true)
+gate_listen_lines=$(grep -cE '^[[:space:]]*listen[[:space:]]' "$gate_conf" 2>/dev/null || true)
+gate_listen_ssl=$(grep -cE '^[[:space:]]*listen[[:space:]]+[^:]+:[0-9]+[[:space:]]+ssl;' "$gate_conf" 2>/dev/null || true)
+gate_listen_plain=$(grep -E '^[[:space:]]*listen[[:space:]]' "$gate_conf" 2>/dev/null | grep -vE '[[:space:]]ssl;' | wc -l | tr -d ' ')
+gate_ports=$(grep -E '^[[:space:]]*listen[[:space:]]' "$gate_conf" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*listen[[:space:]]+[^:]+:([0-9]+)[[:space:]]+ssl;.*$/\1/' | sort -n | tr '\n' ' ')
+gate_backends=$(grep -E '^[[:space:]]*proxy_pass[[:space:]]' "$gate_conf" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*proxy_pass[[:space:]]+127\.0\.0\.1:([0-9]+);.*$/\1/' | sort -n | tr '\n' ' ')
+expected_gate_ports=$(seq 13000 13010 | tr '\n' ' ')
+expected_gate_backends=$(seq 14000 14010 | tr '\n' ' ')
+if [ "${gate_servers:-0}" = "11" ] && [ "${gate_listen_lines:-0}" = "11" ] \
+    && [ "$gate_ports" = "$expected_gate_ports" ] \
+    && [ "$gate_backends" = "$expected_gate_backends" ]; then
+    pass "gate stream map: 11 servers, public 13000-13010 -> loopback HTTP CONNECT 14000-14010"
+else
+    fail "gate stream map wrong: servers=${gate_servers:-0} listens=${gate_listen_lines:-0} ports=[${gate_ports}] backends=[${gate_backends}]"
+fi
+if [ "${gate_listen_ssl:-0}" = "11" ] && [ "${gate_listen_plain:-1}" = "0" ]; then
+    pass "every gate stream listener has ssl (no plaintext gate port)"
+else
+    fail "gate stream listeners without ssl: ${gate_listen_plain:-?} of ${gate_listen_lines:-0} (SOCKS5 must never be published in the clear)"
+fi
+# A backend on 13000-13010 would relay plaintext SOCKS5 to the daemon's gate;
+# the edge must only ever reach the HTTP CONNECT listener.
+if grep -qE '^[[:space:]]*proxy_pass[[:space:]]+127\.0\.0\.1:130[0-9][0-9];' "$gate_conf"; then
+    fail "gate stream map proxies to the SOCKS5 gate ports; only the HTTP CONNECT listener may be published"
+else
+    pass "gate stream map never proxies to the SOCKS5 gate ports (no plaintext SOCKS5)"
+fi
+# 0.0.0.0 or 127.0.0.1 would collide with the daemon's own loopback SOCKS5
+# listener on the same numbers (EADDRINUSE, or a shifted gate allocator).
+gate_listen_addr=$(grep -E '^[[:space:]]*listen[[:space:]]' "$gate_conf" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*listen[[:space:]]+([^:]+):.*$/\1/' | sort -u | tr '\n' ' ')
+gate_addr_bad=""
+for gate_addr in $gate_listen_addr; do
+    case $gate_addr in
+        0.0.0.0|127.0.0.1|'*'|'[::]'|'::') gate_addr_bad="$gate_addr_bad $gate_addr" ;;
+    esac
+done
+gate_addr_count=$(printf '%s\n' "$gate_listen_addr" | wc -w | tr -d ' ')
+if [ "${gate_addr_count:-0}" = "1" ] && [ -z "$gate_addr_bad" ]; then
+    pass "gate stream listeners bind one explicit public address (${gate_listen_addr% })"
+else
+    fail "gate stream listeners use a wildcard, loopback or mixed address (${gate_listen_addr:-<none>}); they must bind the public address"
+fi
+gate_tls_bad=""
+while IFS='|' read -r gate_label gate_re; do
+    [ -n "$gate_label" ] || continue
+    gate_hits=$(grep -cE -- "$gate_re" "$gate_conf" 2>/dev/null || true)
+    if [ "${gate_hits:-0}" != "11" ]; then
+        gate_tls_bad="$gate_tls_bad ${gate_label}=${gate_hits:-0}/11"
+    fi
+done <<'AJS_GATE_DIRECTIVES'
+cert|^[[:space:]]*ssl_certificate[[:space:]]+/etc/ajs/tls/api\.example\.com/fullchain\.pem;$
+key|^[[:space:]]*ssl_certificate_key[[:space:]]+/etc/ajs/tls/api\.example\.com/privkey\.pem;$
+protocols|^[[:space:]]*ssl_protocols[[:space:]]+TLSv1\.2[[:space:]]+TLSv1\.3;$
+tickets|^[[:space:]]*ssl_session_tickets[[:space:]]+off;$
+connect|^[[:space:]]*proxy_connect_timeout[[:space:]]+5s;$
+timeout|^[[:space:]]*proxy_timeout[[:space:]]+1h;$
+limit|^[[:space:]]*limit_conn[[:space:]]+ajs_gate_conn[[:space:]]+10;$
+log|^[[:space:]]*access_log[[:space:]]+off;$
+AJS_GATE_DIRECTIVES
+if [ -z "$gate_tls_bad" ]; then
+    pass "gate stream map reuses the api.example.com pair with TLS 1.2/1.3, 1h proxy timeout, per-IP conn cap and no access log"
+else
+    fail "gate stream map is missing per-server directives:$gate_tls_bad"
+fi
+gate_rewrite=$(grep -vE '^[[:space:]]*#' "$gate_conf" 2>/dev/null \
+    | grep -E 'proxy_set_header|auth_basic|(^|[^A-Za-z-])Authorization[[:space:]]' || true)
+if [ -z "$gate_rewrite" ]; then
+    pass "gate stream map relays bytes: no header rewrite and no edge credential"
+else
+    fail "gate stream map tries to rewrite or authenticate HTTP: $(printf '%s' "$gate_rewrite" | tr '\n' ';' | cut -c1-200)"
+fi
+
+# ---------------------------------------------------------------------------
 section "admin operator auth (runtime)"
 # Prove the admin edge itself enforces per-operator HTTP Basic auth and forwards
 # the authenticated username. The upstream is a tiny Python server; an
@@ -1688,6 +1896,22 @@ else
             "$csp_tmp/temp/uwsgi" "$csp_tmp/temp/scgi" \
             "$csp_tmp/www/portal/assets" "$csp_tmp/www/portal/docs" "$csp_tmp/www/admin/assets"
         cp "$kit/nginx/nginx.conf" "$csp_tmp/nginx.conf"
+        # The CSP fixture serves only the HTTP vhosts: drop the dynamic-module
+        # include and the gate stream block so the fixture never binds
+        # 13000-13010 and never needs the stream module. The main nginx stage
+        # parses the stream map.
+        sed -E -i.bak '/^[[:space:]]*include[[:space:]]+\/etc\/nginx\/modules-enabled\/\*\.conf;$/d' "$csp_tmp/nginx.conf"
+        rm -f "$csp_tmp/nginx.conf.bak"
+        awk '
+            /^[[:space:]]*stream[[:space:]]*\{/ { drop = 1; depth = 0 }
+            drop {
+                depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+                if (depth <= 0) drop = 0
+                next
+            }
+            { print }
+        ' "$csp_tmp/nginx.conf" > "$csp_tmp/nginx.nostream.conf" \
+            && mv "$csp_tmp/nginx.nostream.conf" "$csp_tmp/nginx.conf"
         cp "$kit/nginx/ajs-mime.types" "$csp_tmp/ajs-mime.types"
         cp "$kit/nginx/snippets/"*.conf "$csp_tmp/snippets/"
         cp "$kit/nginx/sites-available/ajs-portal.conf" "$csp_tmp/sites-enabled/"
@@ -2434,7 +2658,7 @@ fi
 
 # ---------------------------------------------------------------------------
 section "README inputs"
-for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_RBAC_STRICT AJS_ADMIN_OPERATORS_FILE AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd render-admin-operators admin-operators DNS TLS api.example.com rollback; do
+for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_RBAC_STRICT AJS_ADMIN_OPERATORS_FILE AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd render-admin-operators admin-operators DNS TLS api.example.com rollback AJS_GATE_HTTP AJS_GATE_HTTP_OFFSET 13000 14000 streams-enabled SOCKS5 leasePort; do
     if grep -q "$token" "$kit/README.md"; then
         pass "README documents: $token"
     else

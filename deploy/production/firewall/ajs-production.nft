@@ -45,9 +45,18 @@ table inet ajs_production {
 
         # Customer portal, the public API origin (api.<domain>) and ACME
         # HTTP-01. The API vhost is a third name on this same 443 listener, so
-        # it opens no new port: enabling it needs no firewall change. Gate
-        # ports stay loopback-only and are deliberately absent here.
+        # it opens no new port: enabling it needs no firewall change.
         tcp dport { 80, 443 } accept comment "AJS portal/API HTTP/HTTPS"
+
+        # Public gate data plane (AJS-469): nginx terminates TLS for HTTP
+        # CONNECT on 13000-13010 and forwards to 127.0.0.1:14000-14010. Only
+        # the nginx side is opened. The daemon's SOCKS5 gate on
+        # 127.0.0.1:13000-13010 and the HTTP backend on 127.0.0.1:14000-14010
+        # stay loopback-only, and the admin origin on 8443 stays VPN-only.
+        # Removing streams-enabled/ajs-gate.conf leaves these ports open but
+        # with nothing listening, so they refuse connections; drop this rule
+        # too if the edge is retired for good.
+        tcp dport 13000-13010 accept comment "AJS gate HTTP CONNECT (TLS)"
 
         # The repo-owned AJS LAN block — keep in sync with deploy/nftables/ajs-panel.nft.
         ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept
