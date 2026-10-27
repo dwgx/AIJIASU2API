@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="AIJIASU2API mark">
+  <rect width="64" height="64" rx="16" fill="#0c1b2a"/>
+  <path d="M16 47V30a16 16 0 0 1 32 0v17" fill="none" stroke="#c8f0df" stroke-width="5" stroke-linecap="round"/>
+  <path d="M24 47V31a8 8 0 0 1 16 0v16" fill="none" stroke="#0f6b63" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="32" cy="46" r="4" fill="#f0654a"/>
+</svg>

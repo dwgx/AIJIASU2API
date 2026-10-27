@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+# Static project landing page. No private paths are published here.

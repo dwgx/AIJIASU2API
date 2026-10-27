@@ -39,6 +39,7 @@ The public demonstration edge is live:
 - API and rendered documentation: `https://ajs.dwgx.top:2055` and
   `https://ajs.dwgx.top:2055/docs`
 - HTTPS CONNECT proxy: `gate.dwgx.top`, live map `13000-13010`
+- **Website:** <https://dwgx.github.io/AIJIASU2API/> — static project landing page; source in `site/`
 
 It is operator-run and invite-only, requires an `ajs_sk_` key issued by the operator, and may be
 withdrawn without notice. There is no self-service signup and no SLA. The public API edge applies
