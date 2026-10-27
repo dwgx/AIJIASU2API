@@ -492,10 +492,17 @@ func TestOutboxDeadLetterRemovesEntry(t *testing.T) {
 // digest and an already-spent retry budget are dropped from the store, and the
 // spent one reports the dead letter the crash interrupted.
 func TestOutboxRestoreSkipsUnusableEntries(t *testing.T) {
+	// The restored entry must not be delivered before the assertions below: a
+	// fast 204 would drain the outbox and OutboxLen would race the assertion.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
+	defer unblock()
 
 	outbox := newMemoryOutbox()
 	clock := newFakeClock()
@@ -571,6 +578,7 @@ func TestOutboxRestoreSkipsUnusableEntries(t *testing.T) {
 	if len(deadLetters) != 1 || deadLetters[0].ID != "spent:2" || deadLetters[0].Status != StatusDeadLetter {
 		t.Fatalf("dead letters = %+v, want one spent:2", deadLetters)
 	}
+	unblock()
 	waitFor(t, "the restored delivery to finish", func() bool {
 		return dispatcher.Pending() == 0 && outbox.len() == 0
 	})

@@ -194,7 +194,7 @@ jobs:
       - name: Install gate tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nginx nftables python3-yaml
+          sudo apt-get install -y --no-install-recommends nginx libnginx-mod-stream nftables python3-yaml
           sudo systemctl stop nginx || true
 
       - name: Set up Go
