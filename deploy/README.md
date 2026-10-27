@@ -94,8 +94,9 @@ builds `ajs-accountd-linux-amd64`, `ajs-accountd-windows-amd64.exe`, `ajs-accoun
 and `dashboard-dist.tar.gz`, checksums them, and attaches the six files (`MANIFEST.txt` and
 `SHA256SUMS` included) to the GitHub Release. `release.yml` attaches no assets, so the checksum
 file always covers the complete set. Nothing is hard-coded — the images land at
-`ghcr.io/<repository_owner>/ajs-accountd:<tag>` and `ghcr.io/<repository_owner>/ajs-dashboard:<tag>`
-(plus `:latest`), and the release body lists the image tags and the update command.
+`ghcr.io/<repository_owner>/ajs-accountd:<tag>` and `ghcr.io/<repository_owner>/ajs-dashboard:<tag>`;
+a final tag also moves `:latest`, while a pre-release tag (one containing `-`) leaves `:latest`
+unchanged. The release body lists the image tags and the update command.
 
 The release workflow builds the dashboard image with `VITE_USE_MOCK=false` and an empty
 same-origin `VITE_API_BASE`; `dashboard/Dockerfile` refuses a mock build. The image is token-free:
@@ -474,12 +475,12 @@ and `RESIN_PROXY_TOKEN`: no `AJS_*` key reaches that container.
 ```bash
 cd /srv/dwgxhomecloud/scratch/loveplus-deploy
 docker build -f daemon/Dockerfile -t ajs-accountd:test .        # exit 0
-cd dashboard
-docker build -t ajs-dashboard:test .                            # exit 0, live default
-docker build --build-arg VITE_USE_MOCK=false \
+docker build -f dashboard/Dockerfile -t ajs-dashboard:test .    # exit 0, live default
+docker build -f dashboard/Dockerfile \
+  --build-arg VITE_USE_MOCK=false \
   --build-arg VITE_API_BASE=http://127.0.0.1:2261 \
   -t ajs-dashboard:test-live .                                  # exit 0
-cd ../deploy
+cd deploy
 docker compose --env-file .env.example build                    # exit 0, both images
 ```
 

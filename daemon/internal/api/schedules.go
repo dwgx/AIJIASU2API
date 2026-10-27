@@ -326,8 +326,11 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "schedule not found")
 		return
 	}
+	// The body is optional: an absent body keeps the schedule's own guard.
+	// The body-limit middleware always wraps r.Body, so ContentLength — not
+	// the http.NoBody sentinel — is what distinguishes "no body" here.
 	var input model.ScheduleRunInput
-	if r.Body != nil && r.Body != http.NoBody {
+	if r.ContentLength != 0 {
 		if !decodeJSON(w, r, &input) {
 			return
 		}

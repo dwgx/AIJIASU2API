@@ -268,9 +268,9 @@ replace ajsproxy => ../emulator
 ```
 
 The `replace` makes `emulator` and `daemon` sibling directories; the daemon
-therefore cannot be built from a checkout that lacks the emulator. The daemon
-`go` directive is `1.26.0` because the emulator module declares that language
-version; with `GOTOOLCHAIN=auto` the toolchain switches automatically.
+therefore cannot be built from a checkout that lacks the emulator. Both modules
+declare `go 1.26.10` (the patched release floor); with `GOTOOLCHAIN=auto` the
+toolchain switches automatically.
 
 `internal/account.NewProtocol()` wires `fvfacade.DefaultRegistry()` and the
 carrier the default profile declares. `Linux423Binary.Transport` is
@@ -825,8 +825,9 @@ address.
   literal loopback address exactly like the SOCKS5 gate and refuses a wildcard, LAN/public or
   hostname bind, so the credential never crosses a network — but anything that can read loopback
   traffic on the host can read it. The 407 is stateless — one challenge per connection, no session
-  or cookie — and there is no second factor; revoking the API key is the only cut-off, and it
-  applies to the next connection.
+  or cookie — and there is no second factor; revoking the API key is the only cut-off, and it now
+  closes established tunnels within the entitlement interval (10s default), not only the next
+  connection.
 - Port allocation: the controller reserves both `p` and `p+offset` for every
   running gate and every stored node, and a bind failure on either half retries
   the next base port. `Start` is all-or-nothing, so a node never comes up with

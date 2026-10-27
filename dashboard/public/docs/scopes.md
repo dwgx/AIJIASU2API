@@ -10,6 +10,8 @@ A scoped key needs the exact scope of the matched route. A key carrying `admin` 
 
 `proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the live public HTTPS CONNECT edge at `gate.dwgx.top`. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.
 
+The event stream and the audit log are operator-global, not customer-readable. `GET /v1/events`, `GET /v1/events/stream`, `GET /v1/audit` and `GET /v1/audit/export.csv` are served to the admin token and to keys carrying the `admin` scope only: the ring mixes every tenant’s order, lease and schedule metadata, and an audit row names every tenant’s actor, target and free text, so neither can be partitioned by account or by user. Every other scoped key answers `403 FORBIDDEN` with `reason: "admin_required"` even when it carries `events:read`/`audit:read` and no `accountIds`/`regions`; a key without those scopes is refused earlier with `scope_required`. `GET /metrics` keeps the narrower rule and is refused only to an account-restricted key (`scoped_key_restricted`).
+
 ## Scope catalogue
 
 | Scope | Grants | Representative routes |
@@ -22,14 +24,14 @@ A scoped key needs the exact scope of the matched route. A key carrying `admin` 
 | `leases:write` | Create, rotate and revoke the key user’s leases. | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `proxy:connect` | Authenticate at a gate and connect through the key user’s lease. | `SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT gate.dwgx.top:<port>` |
 | `requests:read` | Read the request log. | `GET /v1/requests` |
-| `audit:read` | Read and export the audit log. | `GET /v1/audit`, `GET /v1/audit/export.csv` |
+| `audit:read` | Name the audit routes; reading them still needs the `admin` grant (operator-global). | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics. | `GET /metrics`, `GET /v1/metrics` |
 | `settings:read` | Read settings and schedules. | `GET /v1/settings`, `GET /v1/schedules` |
 | `settings:write` | Patch settings and schedules. | `PATCH /v1/settings`, `POST /v1/schedules` |
 | `usage:read` | Usage aggregation. | `GET /v1/usage` |
 | `renewal:read` | Renewal plan table and per-account expiry. | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` |
 | `health:read` | Loopback gate health. | `GET /v1/health/nodes` |
-| `events:read` | Event replay and the SSE stream. | `GET /v1/events`, `GET /v1/events/stream` |
+| `events:read` | Name the event routes; reading them still needs the `admin` grant (operator-global). | `GET /v1/events`, `GET /v1/events/stream` |
 | `admin` | Every route, including admin-only surfaces. | All routes. |
 
 ## proxy:connect is the gate
@@ -48,8 +50,8 @@ Both lists narrow reads and writes. An account matches when the id list is empty
 
 Writes are narrowed too. A key restricted to `acc-02` is refused on every mutation of another account, including `PATCH`/`DELETE /v1/accounts/{id}`, the login/logout/connect/disconnect/reconnect/select-node actions, the selection routes, lease create/rotate/revoke, node drain/undrain/probe and operation cancel. `POST /v1/leases` must name an allowed `accountId`; a restricted key that omits it is refused, because the store would otherwise pick any free account. A write naming an account-shaped id the store cannot resolve answers the same `403` as a foreign account, so a mutation cannot probe whether an account, node or operation exists.
 
-Reads keep `404` for an unknown id and `403` for a known account outside the key. Global, unattributed surfaces are still refused to a restricted key rather than guessed: `GET /v1/audit`, `GET /metrics` and the event stream. `GET /v1/topology` is projected to the key’s visible nodes, and `GET /v1/health/nodes` is filtered. A key carrying `admin` ignores both lists.
+Reads keep `404` for an unknown id and `403` for a known account outside the key. Global, unattributed surfaces are refused rather than guessed. `GET /metrics` is refused to an account-restricted key with `reason: "scoped_key_restricted"`; `GET /v1/audit`, `GET /v1/audit/export.csv` and the event stream are operator-global and refused to every non-admin scoped key with `reason: "admin_required"`, restricted or not. `GET /v1/topology` is projected to the key’s visible nodes, and `GET /v1/health/nodes` is filtered. A key carrying `admin` ignores both lists.
 
 ## Keys minted before the grant rule
 
-A key minted before the account-grant rule with an account, catalog, lease or `proxy:connect` scope fails closed with `403` on every non-admin route until it is reissued. A key whose scopes are all global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`, `renewal:read`, `health:read`) may omit both lists; that means “not narrowed by account”.
+A key minted before the account-grant rule with an account, catalog, lease or `proxy:connect` scope fails closed with `403` on every non-admin route until it is reissued. A key whose scopes are all global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`, `renewal:read`, `health:read`) may omit both lists; that means “not narrowed by account”. `events:read` and `audit:read` are global, not customer-readable: the routes they name are operator-global and also need the `admin` grant.

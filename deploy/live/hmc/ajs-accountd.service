@@ -1,0 +1,21 @@
+[Unit]
+Description=AIJIASU2API account daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/dwgxhomecloud/scratch/ajs-deploy-20261024/daemon
+EnvironmentFile=/srv/dwgxhomecloud/scratch/ajs-deploy-20261024/daemon/.env
+ExecStart=/srv/dwgxhomecloud/scratch/ajs-deploy-20261024/daemon/ajs-accountd-61625b0
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/srv/dwgxhomecloud/scratch/ajs-multimodule/daemon/data
+
+[Install]
+WantedBy=multi-user.target

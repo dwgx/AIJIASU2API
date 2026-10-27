@@ -55,11 +55,29 @@ func ParseAuthMode(raw string) (AuthMode, error) {
 // LeaseID is the one active lease the credential was resolved against at the
 // gate's account; it is an identifier, never a secret. Admission re-reads that
 // lease so a flow cannot outlive the entitlement it was authenticated for.
+//
+// KeyID and KeyKind name the credential the flow authenticated with, so the
+// entitlement watch can re-read the same row while the tunnel relays: a key
+// that was revoked or expired since the handshake closes the flow. Neither
+// field carries key material.
 type Principal struct {
 	UserID   string
 	UserName string
 	LeaseID  string
+	KeyID    string
+	KeyKind  string
 }
+
+// Credential kinds recorded in Principal.KeyKind. The gate itself never reads
+// the key store; the Authenticator's entitlement callback resolves the kind
+// back to the row it came from, so the value is a closed vocabulary rather than
+// free-form input.
+const (
+	// KeyKindAPIKey is a legacy panel API key (the pre-scoped-key credential).
+	KeyKindAPIKey = "api_key"
+	// KeyKindScopedKey is an ajs_sk_ scoped key.
+	KeyKindScopedKey = "scoped_key"
+)
 
 // Authenticated reports whether p names a panel user.
 func (p Principal) Authenticated() bool {

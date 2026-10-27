@@ -5,8 +5,9 @@
 # six files (and their SHA256SUMS) stay the complete, consistent set.
 #
 # Nothing is built until the `verify` job passes: it calls the reusable
-# verify.yml (Go, dashboard and SDK suites) and the `package` job needs it, so
-# a red suite cannot produce or attach release assets.
+# verify.yml full gate (pins, notices, govulncheck, lockfile/audit, live
+# build, production kit) and the `package` job needs it, so a red suite cannot
+# produce or attach release assets.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
@@ -45,16 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
@@ -82,8 +83,21 @@ jobs:
             --out dist \
             --build-dashboard
 
+      - name: Verify release archives carry the notices
+        # package.sh fails closed on its own; this second check reads the
+        # finished release files the way a consumer would, so the workflow log
+        # proves the shipped archives contain the texts (R2).
+        run: |
+          for archive in dist/dashboard-dist.tar.gz dist/deploy-kit.tar.gz; do
+            for notice in LICENSE NOTICE THIRD-PARTY-NOTICES.md; do
+              tar -tzf "$archive" | grep -qxF "./$notice" \
+                || { echo "$archive is missing $notice" >&2; exit 1; }
+            done
+          done
+          echo 'release archive notices: OK'
+
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ajs-package-${{ steps.version.outputs.value }}
           if-no-files-found: error
@@ -97,9 +111,10 @@ jobs:
 
       - name: Attach artifacts to the GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
           files: |

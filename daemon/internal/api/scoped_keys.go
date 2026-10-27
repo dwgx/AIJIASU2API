@@ -17,6 +17,10 @@ const (
 	// ReasonScopedKeyRestricted means the key's accountIds/regions exclude
 	// the requested surface.
 	ReasonScopedKeyRestricted = "scoped_key_restricted"
+	// ReasonAdminRequired means the route is operator-global: the admin token
+	// or a key carrying the admin scope is required and no other scoped key is
+	// served, whatever its scopes or account grant say.
+	ReasonAdminRequired = "admin_required"
 )
 
 // routeScopes maps a registered route pattern to the scope a scoped key needs.
@@ -85,7 +89,12 @@ var routeScopes = map[string]model.Scope{
 	http.MethodPost + " /v1/leases/{id}/actions/rotate": model.ScopeLeasesWrite,
 	http.MethodDelete + " /v1/leases/{id}":              model.ScopeLeasesWrite,
 
-	http.MethodGet + " /v1/requests":         model.ScopeRequestsRead,
+	http.MethodGet + " /v1/requests": model.ScopeRequestsRead,
+	// The audit log is operator-global: rows carry every tenant's actor,
+	// target, email and free text, so the route scope alone is not enough. The
+	// handlers require an admin principal and refuse every other scoped key
+	// with admin_required; audit:read stays in the table so a key without it is
+	// refused with the more specific scope_required.
 	http.MethodGet + " /v1/audit":            model.ScopeAuditRead,
 	http.MethodGet + " /v1/audit/export.csv": model.ScopeAuditRead,
 
@@ -102,9 +111,12 @@ var routeScopes = map[string]model.Scope{
 	http.MethodGet + " /v1/renewal/accounts/{id}": model.ScopeRenewalRead,
 	http.MethodGet + " /v1/health/nodes":          model.ScopeHealthRead,
 
-	// The replay ring and its SSE stream are one read grant. The handlers
-	// additionally refuse a key restricted by accountIds/regions: the ring is
-	// global, so no per-account filter can be applied honestly.
+	// The replay ring and its SSE stream are operator-global. The route scope
+	// still requires events:read so a key without it is refused with
+	// scope_required, but the handlers additionally require an admin
+	// principal: every non-admin scoped key answers 403 admin_required, since
+	// the ring carries every tenant's events and no per-account or per-user
+	// filter can be applied honestly.
 	http.MethodGet + " /v1/events":        model.ScopeEventsRead,
 	http.MethodGet + " /v1/events/stream": model.ScopeEventsRead,
 
@@ -395,6 +407,24 @@ func (s *Server) restrictedKey(r *http.Request) (model.ScopedKey, bool) {
 		return model.ScopedKey{}, false
 	}
 	return key, true
+}
+
+// denyOperatorOnly answers 403 for any scoped key that is not an admin
+// principal. Some surfaces are operator-global rather than tenant data: the
+// audit log carries every tenant's actor, target and free text, and the event
+// ring carries every account's order, lease and schedule metadata. Neither can
+// be partitioned honestly for a customer key, so the admin token or a key
+// carrying the admin scope is required and every other scoped key is refused
+// with admin_required regardless of its scopes or accountIds/regions. It
+// reports whether the response was written.
+func (s *Server) denyOperatorOnly(w http.ResponseWriter, r *http.Request, surface string) bool {
+	key, ok := scopedKeyFromRequest(r)
+	if !ok || hasScope(key.Scopes, model.ScopeAdmin) {
+		return false
+	}
+	writeErrorReason(w, http.StatusForbidden, CodeForbidden, ReasonAdminRequired,
+		surface+" is operator-global and is not available to a customer key", nil)
+	return true
 }
 
 // denyGlobalRead answers 403 for a restricted key on a surface that is global

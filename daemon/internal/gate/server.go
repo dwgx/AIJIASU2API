@@ -8,8 +8,10 @@
 // the default) or the no-auth method (AuthLoopback, the explicit opt-in
 // compatibility wire), or the HTTP CONNECT method with Basic proxy
 // credentials, admits at most Limit concurrent flows across both, relays
-// bytes between the client and one Session flow, and exposes counters plus a
-// drain/undrain state machine for the node supervisor.
+// bytes between the client and one Session flow, revalidates the authenticated
+// entitlement while a flow relays (closing both sides when the configured
+// callback refuses), and exposes counters plus a drain/undrain state machine
+// for the node supervisor.
 //
 // The Session seam is deliberately one method (OpenFlow), so an
 // account.FlowSession or a test fake satisfies it structurally. The gate never
@@ -81,6 +83,11 @@ const (
 	// reply, so a client that stops mid-frame cannot pin a handler for the
 	// whole handshake budget.
 	defaultAuthTimeout = 3 * time.Second
+
+	// defaultEntitlementInterval bounds how long a revoked or expired key or
+	// lease keeps an established tunnel relaying. It is a revocation latency,
+	// not a traffic timeout: the check re-reads durable rows.
+	defaultEntitlementInterval = 10 * time.Second
 )
 
 var (
@@ -180,6 +187,16 @@ type Config struct {
 	// UserPolicy is the post-CONNECT per-user policy in AuthUserPass mode.
 	// Nil answers SOCKS5 0x02 with policy_unavailable.
 	UserPolicy UserPolicy
+	// EntitlementCheck revalidates the authenticated principal while a flow
+	// relays. The gate calls it once per EntitlementInterval after CONNECT
+	// succeeded; a false result closes the client and the remote immediately,
+	// so a key or lease revoked (or expired) after the handshake cannot keep
+	// relaying. Nil disables the watch: AuthLoopback carries no principal to
+	// revalidate.
+	EntitlementCheck func(Principal) bool
+	// EntitlementInterval bounds how long a revoked or expired entitlement
+	// keeps relaying. Default 10s; a test may shorten it.
+	EntitlementInterval time.Duration
 }
 
 // Session opens one proxied TCP flow. *account.FlowSession satisfies it: the
@@ -289,6 +306,9 @@ func NewServer(cfg Config, session Session) (*Server, error) {
 	}
 	if cfg.AuthTimeout <= 0 {
 		cfg.AuthTimeout = defaultAuthTimeout
+	}
+	if cfg.EntitlementInterval <= 0 {
+		cfg.EntitlementInterval = defaultEntitlementInterval
 	}
 	if cfg.DrainGrace <= 0 {
 		cfg.DrainGrace = defaultDrainGrace
@@ -742,7 +762,21 @@ func (s *Server) handle(client net.Conn) {
 	}
 	s.accepted.Add(1)
 
+	// The relay is the only part of the flow that outlives the handshake, so
+	// the entitlement watch runs exactly there: a key or lease revoked (or
+	// expired) after CONNECT closes both sides instead of relaying on a dead
+	// entitlement. stopWatch ends the watcher once relay returns.
+	stopWatch := s.watchEntitlement(principal, func() {
+		_ = client.Close()
+		_ = remote.Close()
+	})
+	defer stopWatch()
+
 	in, out, quotaStopped := relay(client, remote, &s.ingress, &s.egress, s.meterProgress(principal.UserID))
+	// The relay is the only blocking part of the flow; stop the watcher the
+	// moment it returns. The deferred call is the same idempotent stop and
+	// covers every earlier return.
+	stopWatch()
 	record := FlowRecord{
 		StartedAt:  started,
 		UserID:     principal.UserID,
@@ -1255,6 +1289,47 @@ func (s *Server) meterProgress(userID string) func(int64) bool {
 	}
 	accountID := s.cfg.AccountID
 	return func(n int64) bool { return s.cfg.MeterProgress(userID, accountID, n) }
+}
+
+// watchEntitlement revalidates principal once per EntitlementInterval while a
+// flow relays and runs abort (which closes both sides) as soon as the callback
+// refuses. Admission only proves the entitlement at CONNECT; this is the
+// revocation and expiry window after it.
+//
+// The returned stop function ends the watch and waits for the goroutine, so no
+// watcher outlives its flow; it is idempotent and is called once the relay
+// returned. A server without a callback returns a no-op stop and starts no
+// goroutine.
+func (s *Server) watchEntitlement(principal Principal, abort func()) func() {
+	check := s.cfg.EntitlementCheck
+	if check == nil || principal.UserID == "" {
+		return func() {}
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		ticker := time.NewTicker(s.cfg.EntitlementInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !check(principal) {
+					abort()
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
+	}
 }
 
 // relay copies bytes in both directions until both copies end, then closes

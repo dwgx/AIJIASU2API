@@ -28,8 +28,8 @@ export const docsPages: DocsPage[] = [
           {
             kind: 'p',
             text: {
-              en: 'The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. `GET /healthz` and `GET /readyz` are unauthenticated; every other route, including `/metrics`, needs a bearer.',
-              zh: '公网受限密钥 API 已在 `https://ajs.dwgx.top:2055` 上线，同一源也在 `https://ajs.dwgx.top:2055/docs` 提供本指南。它只承载受限密钥白名单，其余路径一律返回 `404`。同主机客户端使用回环控制面 `http://127.0.0.1:2261`（`AJS_LISTEN`），它仍然是完整契约。`GET /healthz` 与 `GET /readyz` 无需认证；其余路由（包括 `/metrics`）都需要 Bearer 凭据。',
+              en: 'The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. At the public edge only `GET /healthz` is served without a bearer, as a static `200 "ok"`. `GET /readyz` and `GET /metrics` are **not** routed there and answer `404`; readiness is on the loopback origin (and on the portal origin only if that optional template is installed), and `/v1/metrics` (scope `metrics:read`) is the working metrics route.',
+              zh: '公网受限密钥 API 已在 `https://ajs.dwgx.top:2055` 上线，同一源也在 `https://ajs.dwgx.top:2055/docs` 提供本指南。它只承载受限密钥白名单，其余路径一律返回 `404`。同主机客户端使用回环控制面 `http://127.0.0.1:2261`（`AJS_LISTEN`），它仍然是完整契约。公网入口上只有 `GET /healthz` 无需凭据，返回静态 `200 "ok"`。`GET /readyz` 与 `GET /metrics` **没有**在该入口路由，会返回 `404`；就绪检查在回环源上（只有安装可选门户模板时才在门户源上），可用的指标路由是 `/v1/metrics`（作用域 `metrics:read`）。',
             },
           },
           {
@@ -40,8 +40,8 @@ export const docsPages: DocsPage[] = [
               zh: '公网入口已上线',
             },
             text: {
-              en: 'The scoped-key API and this documentation are live at `https://ajs.dwgx.top:2055` (`/docs`), and the TLS HTTPS CONNECT proxy is live at `gate.dwgx.top:13000-13010`. Only the SOCKS5 gate stays loopback.',
-              zh: '受限密钥 API 与本指南已在 `https://ajs.dwgx.top:2055`（`/docs`）上线，TLS HTTPS CONNECT 代理已在 `gate.dwgx.top:13000-13010` 上线。只有 SOCKS5 网关仍保持在回环。',
+              en: 'The scoped-key API and this documentation are live at `https://ajs.dwgx.top:2055` (`/docs`), and the TLS HTTPS CONNECT stream map is live on `gate.dwgx.top:13000-13010` — one port per running gate, so only ports with a live node serve. Only the SOCKS5 gate stays loopback.',
+              zh: '受限密钥 API 与本指南已在 `https://ajs.dwgx.top:2055`（`/docs`）上线，TLS HTTPS CONNECT stream 映射已在 `gate.dwgx.top:13000-13010` 上线——每个运行中的网关一个端口，因此只有存在在线节点的端口才可用。只有 SOCKS5 网关仍保持在回环。',
             },
           },
           {
@@ -55,8 +55,8 @@ curl -sS http://127.0.0.1:2261/readyz`,
           {
             kind: 'p',
             text: {
-              en: 'At the edge `/healthz` is a static `200 "ok"`; `/readyz` and the rest of the control plane stay on the loopback origin.',
-              zh: '在公网入口上，`/healthz` 是静态 `200 "ok"`；`/readyz` 以及控制面的其余部分仍在回环源上。',
+              en: 'At the edge `/healthz` is a static `200 "ok"`; `/readyz`, `/metrics` and the rest of the control plane stay on the loopback origin. The generated reference lists the contract, so it still shows both operations; at this edge they are `404`.',
+              zh: '在公网入口上，`/healthz` 是静态 `200 "ok"`；`/readyz`、`/metrics` 以及控制面的其余部分仍在回环源上。生成的参考按契约列出操作，因此仍会显示这两项；在该入口上它们是 `404`。',
             },
           },
         ],
@@ -529,8 +529,8 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
           {
             kind: 'p',
             text: {
-              en: 'A missing or invalid bearer answers `401 UNAUTHORIZED` with the JSON error envelope. A key that lacks the route scope answers `403 FORBIDDEN` with `reason: "scope_required"`; a key whose grants exclude the target answers `403` with `reason: "scoped_key_restricted"`. Clients branch on `reason`, not on the human-readable message.',
-              zh: '缺少或无效的 Bearer 会返回 `401 UNAUTHORIZED` 和 JSON 错误信封。密钥缺少路由所需作用域时返回 `403 FORBIDDEN`，`reason` 为 `scope_required`；授权范围排除目标时返回 `403`，`reason` 为 `scoped_key_restricted`。客户端应依据 `reason` 分支，而不是人类可读的 `message`。',
+              en: 'A missing or invalid bearer answers `401 UNAUTHORIZED` with the JSON error envelope. A key that lacks the route scope answers `403 FORBIDDEN` with `reason: "scope_required"`; a key whose grants exclude the target answers `403` with `reason: "scoped_key_restricted"`; a key calling an operator-global surface (the audit log or the event stream) without the `admin` scope answers `403` with `reason: "admin_required"`. A suspended user’s key is refused `401` until the user is resumed. Clients branch on `reason`, not on the human-readable message.',
+              zh: '缺少或无效的 Bearer 会返回 `401 UNAUTHORIZED` 和 JSON 错误信封。密钥缺少路由所需作用域时返回 `403 FORBIDDEN`，`reason` 为 `scope_required`；授权范围排除目标时返回 `403`，`reason` 为 `scoped_key_restricted`；没有 `admin` 作用域却调用运营者全局接口（审计日志或事件流）时返回 `403`，`reason` 为 `admin_required`。用户被暂停期间其密钥一律返回 `401`，直到用户恢复。客户端应依据 `reason` 分支，而不是人类可读的 `message`。',
             },
           },
           {
@@ -581,6 +581,13 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
             text: {
               en: '`proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the live public HTTPS CONNECT edge at `gate.dwgx.top`. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.',
               zh: '`proxy:connect` 是唯一没有 HTTP 路由的作用域：它授权网关——回环 SOCKS5 监听以及 `gate.dwgx.top` 上已上线的公网 HTTPS CONNECT 入口。管理员专属能力——设备池、用户、API 密钥、受限密钥管理、Webhook、备份、Lab 遥测——即使密钥带有受限授权也仍然只有管理员可用。',
+            },
+          },
+          {
+            kind: 'p',
+            text: {
+              en: 'The event stream and the audit log are operator-global, not customer-readable. `GET /v1/events`, `GET /v1/events/stream`, `GET /v1/audit` and `GET /v1/audit/export.csv` are served to the admin token and to keys carrying the `admin` scope only: the ring mixes every tenant’s order, lease and schedule metadata, and an audit row names every tenant’s actor, target and free text, so neither can be partitioned by account or by user. Every other scoped key answers `403 FORBIDDEN` with `reason: "admin_required"` even when it carries `events:read`/`audit:read` and no `accountIds`/`regions`; a key without those scopes is refused earlier with `scope_required`. `GET /metrics` keeps the narrower rule and is refused only to an account-restricted key (`scoped_key_restricted`).',
+              zh: '事件流与审计日志属于运营者全局能力，客户不可读。`GET /v1/events`、`GET /v1/events/stream`、`GET /v1/audit` 和 `GET /v1/audit/export.csv` 只对管理员令牌以及带 `admin` 作用域的密钥开放：事件环混合了所有租户的订单、租约与调度元数据，审计行则包含所有租户的操作者、目标与自由文本，因此无法按账号或按用户切分。其他受限密钥一律返回 `403 FORBIDDEN`，`reason` 为 `admin_required`，即使它带有 `events:read`/`audit:read` 且没有 `accountIds`/`regions`；缺少这些作用域的密钥会更早以 `scope_required` 拒绝。`GET /metrics` 保持更窄的规则，只对带账号限制的密钥拒绝（`scoped_key_restricted`）。',
             },
           },
         ],
@@ -678,7 +685,10 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
               ],
               [
                 { en: '`audit:read`', zh: '`audit:read`' },
-                { en: 'Read and export the audit log.', zh: '读取并导出审计日志。' },
+                {
+                  en: 'Name the audit routes; reading them still needs the `admin` grant (operator-global).',
+                  zh: '指明审计路由；读取仍需 `admin` 授权（运营者全局）。',
+                },
                 {
                   en: '`GET /v1/audit`, `GET /v1/audit/export.csv`',
                   zh: '`GET /v1/audit`、`GET /v1/audit/export.csv`',
@@ -728,7 +738,10 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
               ],
               [
                 { en: '`events:read`', zh: '`events:read`' },
-                { en: 'Event replay and the SSE stream.', zh: '事件重放与 SSE 流。' },
+                {
+                  en: 'Name the event routes; reading them still needs the `admin` grant (operator-global).',
+                  zh: '指明事件路由；读取仍需 `admin` 授权（运营者全局）。',
+                },
                 {
                   en: '`GET /v1/events`, `GET /v1/events/stream`',
                   zh: '`GET /v1/events`、`GET /v1/events/stream`',
@@ -800,8 +813,8 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
           {
             kind: 'p',
             text: {
-              en: 'Reads keep `404` for an unknown id and `403` for a known account outside the key. Global, unattributed surfaces are still refused to a restricted key rather than guessed: `GET /v1/audit`, `GET /metrics` and the event stream. `GET /v1/topology` is projected to the key’s visible nodes, and `GET /v1/health/nodes` is filtered. A key carrying `admin` ignores both lists.',
-              zh: '读取时，未知 id 返回 `404`，已知但在授权外的账号返回 `403`。全局、无归属的接口对受限密钥仍然直接拒绝，而不是猜测：`GET /v1/audit`、`GET /metrics` 和事件流。`GET /v1/topology` 会投影为该密钥可见的节点，`GET /v1/health/nodes` 会被过滤。带 `admin` 的密钥忽略这两个列表。',
+              en: 'Reads keep `404` for an unknown id and `403` for a known account outside the key. Global, unattributed surfaces are refused rather than guessed. `GET /metrics` is refused to an account-restricted key with `reason: "scoped_key_restricted"`; `GET /v1/audit`, `GET /v1/audit/export.csv` and the event stream are operator-global and refused to every non-admin scoped key with `reason: "admin_required"`, restricted or not. `GET /v1/topology` is projected to the key’s visible nodes, and `GET /v1/health/nodes` is filtered. A key carrying `admin` ignores both lists.',
+              zh: '读取时，未知 id 返回 `404`，已知但在授权外的账号返回 `403`。全局、无归属的接口直接拒绝，而不是猜测。`GET /metrics` 对带账号限制的密钥以 `scoped_key_restricted` 拒绝；`GET /v1/audit`、`GET /v1/audit/export.csv` 和事件流属于运营者全局能力，对所有非管理员受限密钥一律以 `admin_required` 拒绝，无论是否带账号限制。`GET /v1/topology` 会投影为该密钥可见的节点，`GET /v1/health/nodes` 会被过滤。带 `admin` 的密钥忽略这两个列表。',
             },
           },
         ],
@@ -813,8 +826,8 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
           {
             kind: 'p',
             text: {
-              en: 'A key minted before the account-grant rule with an account, catalog, lease or `proxy:connect` scope fails closed with `403` on every non-admin route until it is reissued. A key whose scopes are all global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`, `renewal:read`, `health:read`) may omit both lists; that means “not narrowed by account”.',
-              zh: '在账号授权规则之前创建、且带有账号、目录、租约或 `proxy:connect` 作用域的密钥，会在所有非管理员路由上以 `403` 失败关闭，直到重新签发。作用域全部为全局的密钥（`usage:read`、`requests:read`、`metrics:read`、`events:read`、`settings:*`、`audit:read`、`renewal:read`、`health:read`）可以省略两个列表，表示“不按账号收窄”。',
+              en: 'A key minted before the account-grant rule with an account, catalog, lease or `proxy:connect` scope fails closed with `403` on every non-admin route until it is reissued. A key whose scopes are all global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`, `renewal:read`, `health:read`) may omit both lists; that means “not narrowed by account”. `events:read` and `audit:read` are global, not customer-readable: the routes they name are operator-global and also need the `admin` grant.',
+              zh: '在账号授权规则之前创建、且带有账号、目录、租约或 `proxy:connect` 作用域的密钥，会在所有非管理员路由上以 `403` 失败关闭，直到重新签发。作用域全部为全局的密钥（`usage:read`、`requests:read`、`metrics:read`、`events:read`、`settings:*`、`audit:read`、`renewal:read`、`health:read`）可以省略两个列表，表示“不按账号收窄”。`events:read` 与 `audit:read` 属于全局但客户不可读：它们对应的路由是运营者全局的，还需要 `admin` 授权。',
             },
           },
         ],
@@ -897,8 +910,8 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
                 { en: '403', zh: '403' },
                 { en: '`FORBIDDEN`', zh: '`FORBIDDEN`' },
                 {
-                  en: '`scope_required`, `scoped_key_restricted`.',
-                  zh: '`scope_required`、`scoped_key_restricted`。',
+                  en: '`scope_required`, `scoped_key_restricted`, `admin_required` (operator-global surface: audit and the event stream).',
+                  zh: '`scope_required`、`scoped_key_restricted`、`admin_required`（运营者全局接口：审计与事件流）。',
                 },
               ],
               [
@@ -1034,7 +1047,7 @@ curl -x "https://u-01:$AJS_API_KEY@gate.dwgx.top:$AJS_PROXY_PORT" https://exampl
           {
             kind: 'p',
             text: {
-              en: 'The Go client lives in `sdk/go` (module `ajssdk`). It is hand-written against `docs/openapi.json`, dependency-free, and covers accounts, catalog, select-node operations, leases, usage and events. It sends `Authorization: Bearer` and `X-AJS-CSRF: 1` on unsafe methods, omits `Origin`, retries transport errors plus `429`/`500`/`502`/`503`/`504` with backoff, honours `Retry-After`, polls a `202` to a terminal operation, and generates an `Idempotency-Key` for `CreateLease`.',
+              en: 'The Go client lives in `sdk/go` (module `ajssdk`). It is hand-written against `docs/openapi.json`, dependency-free, and covers accounts, catalog and nodes, select-node operations, leases, requests, usage and events. It sends `Authorization: Bearer` and `X-AJS-CSRF: 1` on unsafe methods, omits `Origin`, retries transport errors plus `429`/`500`/`502`/`503`/`504` with backoff, honours `Retry-After`, polls a `202` to a terminal operation, and generates an `Idempotency-Key` for `CreateLease`.',
               zh: 'Go 客户端位于 `sdk/go`（模块 `ajssdk`），针对 `docs/openapi.json` 手写，无第三方依赖，覆盖账号、目录、select-node 操作、租约、用量和事件。它会在非安全方法上发送 `Authorization: Bearer` 和 `X-AJS-CSRF: 1`，不发送 `Origin`，对传输错误以及 `429`/`500`/`502`/`503`/`504` 退避重试，遵守 `Retry-After`，把 `202` 轮询到终态，并为 `CreateLease` 生成 `Idempotency-Key`。',
             },
           },
@@ -1052,8 +1065,8 @@ lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "u-01", Platf
           {
             kind: 'p',
             text: {
-              en: 'Exported methods: `ListAccounts`, `CreateAccount`, `GetAccount`, `PatchAccount`, `DeleteAccount`, `LoginAccount`, `LogoutAccount`, `ListAccountServers`, `SelectNode`, `WaitOperation`, `ListOperations`, `GetOperation`, `CancelOperation`, `ListLeases`, `CreateLease`, `RotateLease`, `ReleaseLease`, `GetUsage`, `ListEvents`, `StreamEvents`, `FollowEvents`.',
-              zh: '导出的方法：`ListAccounts`、`CreateAccount`、`GetAccount`、`PatchAccount`、`DeleteAccount`、`LoginAccount`、`LogoutAccount`、`ListAccountServers`、`SelectNode`、`WaitOperation`、`ListOperations`、`GetOperation`、`CancelOperation`、`ListLeases`、`CreateLease`、`RotateLease`、`ReleaseLease`、`GetUsage`、`ListEvents`、`StreamEvents`、`FollowEvents`。',
+              en: 'Exported methods: `ListAccounts`, `CreateAccount`, `GetAccount`, `PatchAccount`, `DeleteAccount`, `LoginAccount`, `LogoutAccount`, `ListAccountServers`, `SelectNode`, `WaitOperation`, `ListOperations`, `GetOperation`, `CancelOperation`, `ListNodes`, `ListLeases`, `CreateLease`, `RotateLease`, `ReleaseLease`, `GetLease`, `ListRequests`, `GetUsage`, `ListEvents`, `StreamEvents`, `FollowEvents`.',
+              zh: '导出的方法：`ListAccounts`、`CreateAccount`、`GetAccount`、`PatchAccount`、`DeleteAccount`、`LoginAccount`、`LogoutAccount`、`ListAccountServers`、`SelectNode`、`WaitOperation`、`ListOperations`、`GetOperation`、`CancelOperation`、`ListNodes`、`ListLeases`、`CreateLease`、`RotateLease`、`ReleaseLease`、`GetLease`、`ListRequests`、`GetUsage`、`ListEvents`、`StreamEvents`、`FollowEvents`。',
             },
           },
         ],
@@ -1065,7 +1078,7 @@ lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "u-01", Platf
           {
             kind: 'p',
             text: {
-              en: 'The TypeScript client lives in `sdk/ts` (package `@ajs/sdk`). It exposes the same methods in camelCase, plus `ApiError`, `OperationFailure` and `streamEvents()` as an async generator. It retries every `5xx`; the rest of the policy matches the Go client.',
+              en: 'The TypeScript client lives in `sdk/ts` (package `@ajs/sdk`). It exposes the same methods in camelCase — including `listNodes`, `getLease` and `listRequests` — plus `ApiError`, `OperationFailure` and `streamEvents()` as an async generator. It retries every `5xx`; the rest of the policy matches the Go client.',
               zh: 'TypeScript 客户端位于 `sdk/ts`（包名 `@ajs/sdk`），以 camelCase 暴露同样的方法，并额外提供 `ApiError`、`OperationFailure` 和异步生成器 `streamEvents()`。它重试所有 `5xx`，其余策略与 Go 客户端一致。',
             },
           },
@@ -1118,8 +1131,8 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
           {
             kind: 'p',
             text: {
-              en: 'The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. Only that HTTP listener is published, through nginx `stream` with TLS on 13000-13010 at `gate.dwgx.top`.',
-              zh: 'SOCKS5 网关绑定 `127.0.0.1:13000-13010`。`AJS_GATE_HTTP=1` 会在 `gatePort + AJS_GATE_HTTP_OFFSET`（偏移 `1000`，即 14000-14010）上增加一个回环 HTTP `CONNECT` 监听，准入流程相同。只有这个 HTTP 监听会对外发布：由 nginx `stream` 在 `gate.dwgx.top` 的 13000-13010 上以 TLS 提供。',
+              en: 'The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. Only that HTTP listener is published, through nginx `stream` with TLS on 13000-13010 at `gate.dwgx.top`. The reviewed kit forwards straight to `14000-14010`; the live VPS forwards `13000-13010` to chisel-local `15000-15010`, and the tunnel delivers to the HMC’s `14000-14010`. The public port is the lease port either way; the backend port is not.',
+              zh: 'SOCKS5 网关绑定 `127.0.0.1:13000-13010`。`AJS_GATE_HTTP=1` 会在 `gatePort + AJS_GATE_HTTP_OFFSET`（偏移 `1000`，即 14000-14010）上增加一个回环 HTTP `CONNECT` 监听，准入流程相同。只有这个 HTTP 监听会对外发布：由 nginx `stream` 在 `gate.dwgx.top` 的 13000-13010 上以 TLS 提供。评审过的套件直接转发到 `14000-14010`；线上 VPS 把 `13000-13010` 转发到 chisel 本地 `15000-15010`，再由隧道送到 HMC 的 `14000-14010`。两种情况下公网端口都是租约端口，后端端口则不是。',
             },
           },
           {
@@ -1137,8 +1150,8 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
                 zh: '守护进程上 `AJS_GATE_HTTP=1`；为 `0` 或未设置时，公网端口会完成 TLS 握手后立即关闭，因为后端没有监听。',
               },
               {
-                en: '`AJS_GATE_HTTP_OFFSET=1000`; the stream map hard-codes the backend at lease port + 1000 (14000-14010).',
-                zh: '`AJS_GATE_HTTP_OFFSET=1000`；stream 映射把后端硬编码为租约端口 + 1000（14000-14010）。',
+                en: '`AJS_GATE_HTTP_OFFSET=1000`; the daemon backend is lease port + 1000 (14000-14010). The live VPS reaches it through a chisel forward on 15000-15010, so do not assume the public port equals the backend port.',
+                zh: '`AJS_GATE_HTTP_OFFSET=1000`；守护进程后端是租约端口 + 1000（14000-14010）。线上 VPS 通过 chisel 转发 `15000-15010` 到达它，因此不要把公网端口当作后端端口。',
               },
               {
                 en: 'The TLS certificate covers the name customers dial: `gate.dwgx.top`.',
@@ -1155,8 +1168,8 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
             tone: 'warn',
             title: { en: 'No public SOCKS5', zh: '没有公网 SOCKS5' },
             text: {
-              en: 'SOCKS5 remains loopback and tunnel-only: nothing publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the map (`13011+`) has no public edge at all. The HTTPS CONNECT edge is live at `gate.dwgx.top:13000-13010`.',
-              zh: 'SOCKS5 仍然只走回环与隧道：没有任何组件发布它，其他主机上的 SOCKS5 客户端仍需运维提供隧道。映射之外的租约端口（`13011+`）完全没有公网入口。HTTPS CONNECT 入口已在 `gate.dwgx.top:13000-13010` 上线。',
+              en: 'SOCKS5 remains loopback and tunnel-only: nothing publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the map (`13011+`) has no public edge at all. The HTTPS CONNECT stream map is live on `gate.dwgx.top:13000-13010`, one TLS port per running gate; a port whose node is not live completes TLS and then closes.',
+              zh: 'SOCKS5 仍然只走回环与隧道：没有任何组件发布它，其他主机上的 SOCKS5 客户端仍需运维提供隧道。映射之外的租约端口（`13011+`）完全没有公网入口。HTTPS CONNECT stream 映射已在 `gate.dwgx.top:13000-13010` 上线，每个运行中的网关一个 TLS 端口；节点不在线的端口会完成 TLS 后立即关闭。',
             },
           },
         ],
@@ -1168,15 +1181,15 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
           {
             kind: 'p',
             text: {
-              en: 'Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). SOCKS5, the admin origin and the portal routes stay private.',
-              zh: '两个公网入口已上线：受限密钥 API 与本指南位于 `https://ajs.dwgx.top:2055`（仅放行 41 条路径 / 54 个操作，`/healthz` 为静态响应），TLS HTTPS CONNECT stream 映射位于 `gate.dwgx.top`（13000-13010）。SOCKS5、管理源与门户路由保持私有。',
+              en: 'Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge currently serves 53 of the 54 end-to-end: `GET /metrics` answers `404` because the origin proxies only `/v1/`, so use `/v1/metrics`. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.',
+              zh: '两个公网入口已上线：受限密钥 API 与本指南位于 `https://ajs.dwgx.top:2055`（默认拒绝的白名单；只有 `/healthz` 是静态且无需凭据），TLS HTTPS CONNECT stream 映射位于 `gate.dwgx.top`（13000-13010）。评审过的 vhost 放行 `docs/openapi.json` 中的受限操作集合——54 个操作、41 条路径，可用 `python` 直接统计。线上入口目前端到端提供其中 53 个：`GET /metrics` 返回 `404`，因为源只代理 `/v1/`，请使用 `/v1/metrics`。SOCKS5 与管理源保持私有，门户路由在本版本中未安装。',
             },
           },
           {
             kind: 'p',
             text: {
-              en: 'The remote-ingress credential store is a different, experimental thing and stays store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, and enabling it creates no proxy endpoint.',
-              zh: '远程入口凭据存储是另一回事，属于实验性且只做存储：`AJS_REMOTE_INGRESS=1` 加一个 32 字节 HMAC pepper 文件。没有任何 HTTP 路由、监听器或路由组件提供它，开启它也不会创建代理端点。',
+              en: 'The API hop is plaintext HTTP inside WireGuard: the VPS terminates TLS and proxies to the HMC’s WireGuard address (`10.99.0.2:80`). The HMC internal vhost proxies every `/v1/` path to the daemon, so the allowlist is an edge control, not an origin control. The gate hop uses a chisel forward (`13000-13010` to `15000-15010`); the SOCKS5 listener is never published.',
+              zh: 'API 这一跳是 WireGuard 内部的明文 HTTP：VPS 终止 TLS 后代理到 HMC 的 WireGuard 地址（`10.99.0.2:80`）。HMC 内部 vhost 会把所有 `/v1/` 路径代理到守护进程，因此白名单是入口控制，而不是源控制。网关这一跳使用 chisel 转发（`13000-13010` 到 `15000-15010`）；SOCKS5 监听从不对外发布。',
             },
           },
         ],

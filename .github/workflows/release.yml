@@ -6,16 +6,17 @@
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # Images (lowercased owner, as GHCR requires):
-#   ghcr.io/<owner>/ajs-accountd:<tag>   and :latest
-#   ghcr.io/<owner>/ajs-dashboard:<tag>  and :latest
+#   ghcr.io/<owner>/ajs-accountd:<tag>   (:latest only for final tags)
+#   ghcr.io/<owner>/ajs-dashboard:<tag>  (:latest only for final tags)
+# A pre-release tag (one containing "-") never moves :latest.
 #
 # Platform binaries and the dashboard bundle are built and attached by
 # package.yml on the same tag. This workflow attaches no release assets, so
 # that workflow's SHA256SUMS always describes the complete asset set.
 #
-# The `release` job needs the `verify` job (the reusable verify.yml: Go,
-# dashboard and SDK suites), so a red suite cannot push a tag image or move
-# :latest.
+# The `release` job needs the `verify` job (the reusable verify.yml full
+# gate: pins, notices, govulncheck, lockfile/audit, live build, production
+# kit), so a red suite cannot push a tag image or move :latest.
 
 name: release
 
@@ -45,14 +46,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Lowercase GHCR owner
         id: owner
         run: echo "lower=${GHCR_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -61,19 +62,20 @@ jobs:
       # daemon/go.mod replaces ajsproxy => ../emulator, so the accountd
       # build context is the repository root, not daemon/.
       - name: Build and push accountd image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: daemon/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}
-            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest
 
+      # The dashboard image also needs the root LICENSE/NOTICE files, so its
+      # build context is the repository root too.
       - name: Build and push dashboard image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: ./dashboard
+          context: .
           file: dashboard/Dockerfile
           push: true
           build-args: |
@@ -81,19 +83,42 @@ jobs:
             VITE_API_BASE=
           tags: |
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}
-            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest
+
+      # A pre-release tag (for example v0.1.0-pre) must not move :latest: the
+      # alias stays on the last stable image. Only a final tag promotes the
+      # immutable tag image to :latest, and it does so by adding an alias to
+      # the already-pushed manifest rather than rebuilding.
+      - name: Move accountd :latest (final releases only)
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest \
+            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}
+
+      - name: Move dashboard :latest (final releases only)
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest \
+            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}
 
       - name: Generate release notes
         id: notes
         run: |
+          case "${GITHUB_REF_NAME}" in
+            *-*) is_prerelease=1 ;;
+            *)   is_prerelease=0 ;;
+          esac
           {
             echo 'body<<RELEASE_NOTES_EOF'
             echo "## Images"
             echo ''
             echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}`'
-            echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest`'
             echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}`'
-            echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest`'
+            if [ "$is_prerelease" = 0 ]; then
+              echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest`'
+              echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest`'
+            fi
             echo ''
             echo '## Update on HMC'
             echo ''
@@ -102,6 +127,10 @@ jobs:
             echo '```'
             echo ''
             echo 'Roll back with `./update.sh --rollback`.'
+            if [ "$is_prerelease" = 1 ]; then
+              echo ''
+              echo 'Pre-release: the `:latest` image tags are unchanged.'
+            fi
             echo ''
             echo '## Platform artifacts'
             echo ''
@@ -112,8 +141,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           body: ${{ steps.notes.outputs.body }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

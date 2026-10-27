@@ -144,7 +144,7 @@ esac
 export SOURCE_DATE_EPOCH
 
 command -v go >/dev/null 2>&1 \
-  || die "go not found in PATH (Go 1.26 or newer is required by daemon/go.mod)"
+  || die "go not found in PATH (Go 1.26.10 or newer is required by daemon/go.mod)"
 command -v tar >/dev/null 2>&1 || die "tar not found in PATH"
 if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
   die "need sha256sum or shasum to write SHA256SUMS"
@@ -172,6 +172,20 @@ ARTIFACT_NAMES=(
 # files. It still gets a digest in MANIFEST.txt so the checksum chain covers
 # it transitively through SHA256SUMS.
 DEPLOY_KIT_NAME=deploy-kit.tar.gz
+
+# Redistribution notices that must travel with the dashboard archive, the
+# deploy kit and both container images (R2). Keep this list in one place: the
+# archive checks below fail closed when one is dropped.
+NOTICE_FILES=(
+  LICENSE
+  NOTICE
+  THIRD-PARTY-NOTICES.md
+)
+
+# MANIFEST records a stable logical description of the dashboard input, never
+# the mktemp staging path: two --build-dashboard runs in different temporary
+# directories must produce identical MANIFEST.txt and SHA256SUMS (R8).
+DASHBOARD_SOURCE='prebuilt live bundle (verified ajs-build.json)'
 
 # Keep the target table in one place: "GOOS GOARCH output-name".
 TARGETS=(
@@ -229,6 +243,19 @@ NODE
   fi
 }
 
+# Fail closed when an archive would ship without the required notices. Both
+# tars are created from a staging directory with `find . -type f`, so members
+# are exactly ./, ./<name>; -x makes the check unambiguous.
+assert_notice_members() {
+  _tar=$1
+  _label=$2
+  _members=$(tar -tzf "$_tar") || die "cannot list $_label: $_tar"
+  for _notice in "${NOTICE_FILES[@]}"; do
+    printf '%s\n' "$_members" | grep -qxF "./$_notice" \
+      || die "$_label is missing $_notice"
+  done
+}
+
 # Rewrite CRLF (and any stray CR) to LF for every text file under a staged
 # tree. Binary files are detected with grep -I and skipped, and file modes are
 # preserved so shell scripts stay executable. This is the archive-time
@@ -274,6 +301,7 @@ if [ "$BUILD_DASHBOARD" = 1 ]; then
   printf 'Building live dashboard bundle via deploy/production/build-bundles.sh\n'
   bash "$SCRIPT_DIR/production/build-bundles.sh" --out "$BUILD_TMP/bundles" >&2
   DASHBOARD_DIST="$BUILD_TMP/bundles/portal"
+  DASHBOARD_SOURCE='built by deploy/production/build-bundles.sh (live recipe)'
 fi
 
 if [ -z "$DASHBOARD_DIST" ]; then
@@ -291,6 +319,7 @@ if [ ! -f "$DASHBOARD_DIST/index.html" ]; then
     printf 'package.sh: %s has no index.html; building the live bundle\n' "$DASHBOARD_DIST" >&2
     bash "$SCRIPT_DIR/production/build-bundles.sh" --out "$BUILD_TMP/bundles" >&2
     DASHBOARD_DIST="$BUILD_TMP/bundles/portal"
+    DASHBOARD_SOURCE='built by deploy/production/build-bundles.sh (live recipe)'
   else
     die "no dashboard bundle at $DASHBOARD_DIST; run 'cd dashboard && npm ci && npm run build', pass --dashboard-dist, or use --build-dashboard"
   fi
@@ -342,6 +371,12 @@ printf 'Packaging dashboard bundle from %s\n' "$DASHBOARD_DIST"
 STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ajs-dashboard.XXXXXX") \
   || die "cannot create a temporary staging directory"
 cp -R "$DASHBOARD_DIST/." "$STAGE_DIR/"
+# The bundle directory is build output and does not contain the repository
+# notices; copy them in before the archive is created and assert below.
+for _notice in "${NOTICE_FILES[@]}"; do
+  [ -s "$ROOT/$_notice" ] || die "required notice file is missing or empty: $_notice"
+  cp -p "$ROOT/$_notice" "$STAGE_DIR/$_notice"
+done
 normalize_text_lf "$STAGE_DIR"
 # Normalize mtimes so the archive does not depend on when the dashboard was
 # built. 1970-01-01 is the SOURCE_DATE_EPOCH convention; tar readers only care
@@ -364,6 +399,7 @@ esac
   fi
 )
 [ -s "$OUT_DIR/dashboard-dist.tar.gz" ] || die "dashboard tar is empty"
+assert_notice_members "$OUT_DIR/dashboard-dist.tar.gz" "dashboard-dist.tar.gz"
 rm -rf "$STAGE_DIR"
 STAGE_DIR=""
 
@@ -403,8 +439,14 @@ else
       -print0)
 fi
 [ -n "$(find "$KIT_DIR" -type f -print -quit)" ] || die "deploy kit is empty"
-normalize_text_lf "$KIT_DIR"
-find "$KIT_DIR" -exec touch -t 197001010000.00 {} +
+# The kit archive carries the repository notices next to deploy/, so the
+# extracted tree is self-describing (R2).
+for _notice in "${NOTICE_FILES[@]}"; do
+  [ -s "$ROOT/$_notice" ] || die "required notice file is missing or empty: $_notice"
+  cp -p "$ROOT/$_notice" "$STAGE_DIR/$_notice"
+done
+normalize_text_lf "$STAGE_DIR"
+find "$STAGE_DIR" -exec touch -t 197001010000.00 {} +
 (
   cd "$STAGE_DIR"
   if [ ${#TAR_OPTS[@]} -gt 0 ]; then
@@ -414,6 +456,7 @@ find "$KIT_DIR" -exec touch -t 197001010000.00 {} +
   fi
 )
 [ -s "$OUT_DIR/$DEPLOY_KIT_NAME" ] || die "deploy kit tar is empty"
+assert_notice_members "$OUT_DIR/$DEPLOY_KIT_NAME" "$DEPLOY_KIT_NAME"
 rm -rf "$STAGE_DIR"
 STAGE_DIR=""
 
@@ -438,7 +481,8 @@ STAGE_DIR=""
     set -- $target
     printf '  %s: GOOS=%s GOARCH=%s CGO_ENABLED=0\n' "$3" "$1" "$2"
   done
-  printf 'dashboard_dist: %s\n' "$DASHBOARD_DIST"
+  printf 'dashboard_source: %s\n' "$DASHBOARD_SOURCE"
+  printf 'notices: %s\n' "${NOTICE_FILES[*]}"
   printf 'deploy_kit: %s %s bytes %s\n' \
     "$DEPLOY_KIT_NAME" "$(file_size "$OUT_DIR/$DEPLOY_KIT_NAME")" "$(hash_file "$OUT_DIR/$DEPLOY_KIT_NAME")"
   printf 'artifacts:\n'

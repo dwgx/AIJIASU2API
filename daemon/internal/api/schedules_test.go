@@ -361,6 +361,15 @@ func TestScheduleAPIManualRun(t *testing.T) {
 	resp, body = apiCall(t, ts, http.MethodPost, "/v1/schedules/"+created.ID+"/actions/run",
 		map[string]any{"dryRun": true})
 	requireStatus(t, resp, http.StatusOK)
+	// The documented contract is exactly 200 + {run: ScheduleRun}: no
+	// additional envelope fields, and no 202.
+	envelope := decodeBody[map[string]any](t, body)
+	if len(envelope) != 1 {
+		t.Fatalf("run envelope = %v, want only the run field", envelope)
+	}
+	if _, ok := envelope["run"]; !ok {
+		t.Fatalf("run envelope = %v, want a run field", envelope)
+	}
 	runEnvelope := decodeBody[struct {
 		Run model.ScheduleRun `json:"run"`
 	}](t, body)
@@ -375,6 +384,22 @@ func TestScheduleAPIManualRun(t *testing.T) {
 	requireStatus(t, resp, http.StatusOK)
 	if runs := decodeBody[[]model.ScheduleRun](t, body); len(runs) != 1 {
 		t.Fatalf("runs = %+v", runs)
+	}
+
+	// The body is optional: no body at all keeps the schedule guard (a dry
+	// run by default) and still answers the same 200 envelope.
+	resp, body = apiCall(t, ts, http.MethodPost, "/v1/schedules/"+created.ID+"/actions/run", nil)
+	requireStatus(t, resp, http.StatusOK)
+	runEnvelope = decodeBody[struct {
+		Run model.ScheduleRun `json:"run"`
+	}](t, body)
+	if runEnvelope.Run.Result != "dry_run" {
+		t.Fatalf("run without a body = %+v, want the guarded dry run", runEnvelope.Run)
+	}
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/schedules/"+created.ID+"/runs", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if runs := decodeBody[[]model.ScheduleRun](t, body); len(runs) != 2 {
+		t.Fatalf("runs after the bodyless run = %+v, want two", runs)
 	}
 
 	rotate := map[string]any{
@@ -422,6 +447,22 @@ func TestScheduleAPIDisabled(t *testing.T) {
 	resp, body = apiCall(t, ts, http.MethodPost, "/v1/schedules", map[string]any{})
 	requireStatus(t, resp, http.StatusServiceUnavailable)
 	requireErrorCode(t, body, CodeUpstreamUnavailable)
+
+	// Every scheduler mutation answers 503 while the engine is absent; the
+	// operations document that branch, so the handler test pins all four.
+	for _, call := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPatch, "/v1/schedules/sch-any", map[string]any{"name": "disabled"}},
+		{http.MethodDelete, "/v1/schedules/sch-any", nil},
+		{http.MethodPost, "/v1/schedules/sch-any/actions/run", map[string]any{"dryRun": true}},
+	} {
+		resp, body = apiCall(t, ts, call.method, call.path, call.body)
+		requireStatus(t, resp, http.StatusServiceUnavailable)
+		requireErrorCode(t, body, CodeUpstreamUnavailable)
+	}
 
 	query := url.Values{}
 	query.Set("kind", "interval")

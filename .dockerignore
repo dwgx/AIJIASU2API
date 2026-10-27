@@ -1,5 +1,6 @@
-# Build context for `docker build -f daemon/Dockerfile .` (the context is the
-# repository root, so everything below is inside it).
+# Build context for `docker build -f daemon/Dockerfile .` and
+# `docker build -f dashboard/Dockerfile .` (both use the repository root, so
+# each image can copy the root LICENSE/NOTICE/THIRD-PARTY-NOTICES.md files).
 #
 # S1: the documented dev run writes credential/PII files inside the tree —
 # daemon/data/state.json (account usernames, device identities, audit) and

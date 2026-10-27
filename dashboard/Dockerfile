@@ -1,15 +1,21 @@
 # syntax=docker/dockerfile:1
 
+# Build context is the repository root, not dashboard/: the runtime image must
+# carry the root LICENSE/NOTICE/THIRD-PARTY-NOTICES.md files, and a Docker
+# context cannot reach outside itself.
+#
+#   docker build -f dashboard/Dockerfile -t ajs-dashboard:local .
+
 FROM node:24-alpine AS build
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
-COPY public ./public
-COPY src ./src
-COPY tests ./tests
+COPY dashboard/tsconfig.json dashboard/tsconfig.app.json dashboard/tsconfig.node.json dashboard/vite.config.ts dashboard/index.html ./
+COPY dashboard/public ./public
+COPY dashboard/src ./src
+COPY dashboard/tests ./tests
 
 # This image is the production dashboard: it must be live and token-free.
 # Vite inlines every VITE_* value into public JavaScript, so VITE_PANEL_TOKEN
@@ -55,6 +61,10 @@ RUN printf '%s\n' \
   '}' > /etc/nginx/conf.d/default.conf
 
 COPY --from=build /app/dist /usr/share/nginx/html
+
+# Redistribution obligations: the MIT project license plus the third-party
+# notices (fonts OFL, Lucide ISC, D3 BSD) travel inside the image.
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/licenses/ajs-dashboard/
 
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \

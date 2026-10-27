@@ -49,7 +49,8 @@ services:
 
   dashboard:
     build:
-      context: ../dashboard
+      context: ..
+      dockerfile: dashboard/Dockerfile
       args:
         # Baked into the bundle: rebuild the image after changing these.
         # The image refuses VITE_USE_MOCK=true; the mock console is `npm run dev`.

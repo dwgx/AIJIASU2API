@@ -590,6 +590,79 @@ func specContainsString(values []string, want string) bool {
 	return false
 }
 
+// TestOpenAPIDocumentsRunAndUnavailableBranches pins the R4 contract against the
+// handlers: the schedule run operation answers the synchronous 200 envelope with
+// an optional body, the waited select-node timeout carries the standard error
+// envelope, and every scheduler/catalog mutation documents the 503 the handlers
+// emit when the engine or controller is absent.
+func TestOpenAPIDocumentsRunAndUnavailableBranches(t *testing.T) {
+	var doc map[string]any
+	if err := json.Unmarshal(embeddedOpenAPISpec, &doc); err != nil {
+		t.Fatalf("decode embedded spec: %v", err)
+	}
+
+	run := specMap(t, specDig(t, doc, "paths", "/v1/schedules/{id}/actions/run", "post"), "runSchedule")
+	responses := specMap(t, run["responses"], "runSchedule.responses")
+	if _, ok := responses["202"]; ok {
+		t.Error("POST /v1/schedules/{id}/actions/run documents 202; the handler runs synchronously and answers 200")
+	}
+	ok := specMap(t, responses["200"], "runSchedule.200")
+	media := specMap(t, specDig(t, ok, "content", "application/json", "schema"), "runSchedule.200.schema")
+	if media["$ref"] != "#/components/schemas/ScheduleRunResponse" {
+		t.Errorf("run 200 schema = %v, want ScheduleRunResponse", media["$ref"])
+	}
+	body := specMap(t, run["requestBody"], "runSchedule.requestBody")
+	if body["required"] == true {
+		t.Error("the run body is optional; the handler accepts an empty body")
+	}
+
+	// The envelope names the run row the handler marshals, and that row's
+	// required fields are the always-present ones.
+	envelope := specMap(t, specDig(t, doc, "components", "schemas", "ScheduleRunResponse"), "ScheduleRunResponse")
+	runRef := specMap(t, specDig(t, envelope, "properties", "run"), "ScheduleRunResponse.run")
+	if runRef["$ref"] != "#/components/schemas/ScheduleRun" {
+		t.Errorf("ScheduleRunResponse.run = %v, want ScheduleRun", runRef["$ref"])
+	}
+	runSchema := specMap(t, specDig(t, doc, "components", "schemas", "ScheduleRun"), "ScheduleRun")
+	required := specStrings(t, runSchema["required"], "ScheduleRun.required")
+	if want := []string{"id", "scheduleId", "trigger", "startedAt", "state"}; !reflect.DeepEqual(required, want) {
+		t.Errorf("ScheduleRun.required = %v, want %v", required, want)
+	}
+	properties := specMap(t, runSchema["properties"], "ScheduleRun.properties")
+	for _, name := range []string{"state", "result", "trigger", "fireKey", "finishedAt"} {
+		if _, ok := properties[name]; !ok {
+			t.Errorf("ScheduleRun does not document %s, which the daemon marshals", name)
+		}
+	}
+
+	// The waited select-node timeout is the standard {"error":{...}} envelope.
+	selectNode := specMap(t, specDig(t, doc, "paths", "/v1/accounts/{id}/actions/select-node", "post"), "selectNode")
+	selectResponses := specMap(t, selectNode["responses"], "selectNode.responses")
+	timeout := specMap(t, selectResponses["504"], "selectNode.504")
+	timeoutSchema := specMap(t, specDig(t, timeout, "content", "application/json", "schema"), "selectNode.504.schema")
+	if timeoutSchema["$ref"] != "#/components/schemas/ErrorResponse" {
+		t.Errorf("select-node 504 schema = %v, want ErrorResponse", timeoutSchema["$ref"])
+	}
+
+	// Every mutation that maps a stopped engine/controller documents 503.
+	for _, route := range [][2]string{
+		{"/v1/schedules", "post"},
+		{"/v1/schedules/{id}", "patch"},
+		{"/v1/schedules/{id}", "delete"},
+		{"/v1/schedules/{id}/actions/run", "post"},
+		{"/v1/accounts/{id}/actions/connect", "post"},
+		{"/v1/accounts/{id}/actions/disconnect", "post"},
+		{"/v1/accounts/{id}/actions/reconnect", "post"},
+	} {
+		operation := specMap(t, specDig(t, doc, "paths", route[0], route[1]), route[1]+" "+route[0])
+		operationResponses := specMap(t, operation["responses"], route[0]+".responses")
+		unavailable, ok := operationResponses["503"].(map[string]any)
+		if !ok || unavailable["$ref"] != "#/components/responses/ServiceUnavailable" {
+			t.Errorf("%s %s does not document the 503 branch", route[1], route[0])
+		}
+	}
+}
+
 // TestOpenAPIJourneyExamples proves the worked examples exist and are valid
 // against the schemas they illustrate, so a generator can copy them.
 func TestOpenAPIJourneyExamples(t *testing.T) {
@@ -657,10 +730,10 @@ func TestOpenAPIJourneyExamples(t *testing.T) {
 		}
 	}
 
-	// Both scoped-key denial reasons are worked examples on the shared response.
+	// Every scoped-key denial reason is a worked example on the shared response.
 	forbidden := specMap(t, specDig(t, doc, "components", "responses", "ScopedKeyForbidden",
 		"content", "application/json", "examples"), "ScopedKeyForbidden examples")
-	if len(forbidden) != 2 {
+	if len(forbidden) != 3 {
 		t.Fatalf("ScopedKeyForbidden has %d examples, want one per reason", len(forbidden))
 	}
 	reasons := map[string]bool{}
@@ -670,7 +743,7 @@ func TestOpenAPIJourneyExamples(t *testing.T) {
 		reason, _ := errorDetail["reason"].(string)
 		reasons[reason] = true
 	}
-	for _, reason := range []string{ReasonScopeRequired, ReasonScopedKeyRestricted} {
+	for _, reason := range []string{ReasonScopeRequired, ReasonScopedKeyRestricted, ReasonAdminRequired} {
 		if !reasons[reason] {
 			t.Errorf("ScopedKeyForbidden has no %s example", reason)
 		}

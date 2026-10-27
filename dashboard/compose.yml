@@ -1,7 +1,8 @@
 services:
   dashboard:
     build:
-      context: .
+      context: ..
+      dockerfile: dashboard/Dockerfile
       args:
         # Local demo image only. Release builds must keep AJS_ALLOW_MOCK_BUILD
         # unset and VITE_USE_MOCK=false; deploy/package.sh refuses mock bundles.

@@ -137,14 +137,14 @@ route documents).
 | `leases:write` | Create/rotate/revoke the key user's leases | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
 | `proxy:connect` | Authenticate at a gate and connect through the key user's lease | `SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT <api-host>:<port>` |
 | `requests:read` | Read the request log | `GET /v1/requests` |
-| `audit:read` | Read and export the audit log | `GET /v1/audit`, `GET /v1/audit/export.csv` |
+| `audit:read` | Name the audit routes; reading them still needs the `admin` grant (operator-global) | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics | `GET /metrics`, `GET /v1/metrics` |
 | `settings:read` | Read settings and schedules | `GET /v1/settings`, `GET /v1/schedules` |
 | `settings:write` | Patch settings and schedules | `PATCH /v1/settings`, `POST /v1/schedules` |
 | `usage:read` | Usage aggregation | `GET /v1/usage` |
 | `renewal:read` | Renewal plan table and per-account expiry | `GET /v1/renewal/plans`, `GET /v1/renewal/accounts/{id}` |
 | `health:read` | Loopback gate health | `GET /v1/health/nodes` |
-| `events:read` | Event replay and SSE stream | `GET /v1/events`, `GET /v1/events/stream` |
+| `events:read` | Name the event routes; reading them still needs the `admin` grant (operator-global) | `GET /v1/events`, `GET /v1/events/stream` |
 | `admin` | Every route, including admin-only surfaces | all |
 
 Admin-only even with a scoped key: account export/import/bulk-delete, device pool, users, API
@@ -156,6 +156,16 @@ still discloses credentials, a filtered bulk-delete is destructive with partial 
 telemetry names other tenants' accounts, users, targets and gate ports and its egress check spends
 a real vendor flow, and a customer key has no business enumerating the daemon's outbound receivers
 or sealed files.
+
+**The event stream and the audit log are operator-global.** `GET /v1/events`,
+`GET /v1/events/stream`, `GET /v1/audit` and `GET /v1/audit/export.csv` are served to the admin
+token and to keys carrying the `admin` scope only. The event ring mixes every tenant's order, lease
+and schedule metadata, and an audit row names every tenant's actor, target and free text, so
+neither surface can be partitioned by account or by user. A customer key is refused `403 FORBIDDEN`
+with `reason: "admin_required"` on both surfaces even when it carries `events:read` or `audit:read`
+and no `accountIds`/`regions`; the route scopes still exist, so a key without them answers the
+narrower `scope_required`. `/metrics` keeps its own rule: a global, unattributed read that is
+refused only to an account-restricted key (`reason: "scoped_key_restricted"`).
 
 ## Key subject and grants
 
@@ -183,7 +193,10 @@ A scoped key has two boundaries: the user it belongs to (`userId`) and the accou
 entry; `POST /v1/scoped-keys` answers `400 INVALID_ARGUMENT` otherwise. A key whose scopes are all
 global (`usage:read`, `requests:read`, `metrics:read`, `events:read`, `settings:*`, `audit:read`,
 `renewal:read`, `health:read`) may omit both lists, which then means "not narrowed by
-account".
+account". `events:read` and `audit:read` are in that list because the surfaces they name are
+global, not because they are customer-readable: those two routes are operator-global and need the
+`admin` grant as well, so a key holding only them can authenticate but is refused with `403
+admin_required`.
 A key carrying the `admin` scope ignores both lists. A key minted before this rule with an
 account/catalog/lease scope and no grant fails closed with `403` on every non-admin route until it
 is reissued.
@@ -217,9 +230,11 @@ Both lists narrow **reads and writes**; for an account-bound key at least one of
   aggregation or pagination. A query naming another `userId` answers `403`, and a scoped
   `account=` usage filter answers `400 INVALID_ARGUMENT` because the log stores a recyclable
   label, not a stable account id.
-- Global, unattributed surfaces are still refused to a restricted key rather than guessed:
-  `GET /v1/audit`, `GET /metrics` and the event stream. `/v1/topology` is projected to the key's
-  visible nodes, and `/v1/health/nodes` is filtered.
+- Global, unattributed surfaces are refused rather than guessed. `GET /metrics` is refused to an
+  account-restricted key with `reason: "scoped_key_restricted"`; `GET /v1/audit`,
+  `GET /v1/audit/export.csv` and the event stream are operator-global and refused to **every**
+  non-admin scoped key with `reason: "admin_required"`, restricted or not. `/v1/topology` is
+  projected to the key's visible nodes, and `/v1/health/nodes` is filtered.
 - Admin tokens and keys carrying the `admin` scope ignore both lists: the grant already covers
   every account.
 - `POST /v1/accounts` (create) is not narrowed by the lists: the new id cannot be in the key's
@@ -558,7 +573,7 @@ Status mapping and stable reasons:
 |---|---|---|
 | 400 | `INVALID_ARGUMENT` | `invalid_argument`, `INVALID_ARGUMENT` (bad body, missing `confirm`, bad `limit`/window) |
 | 401 | `UNAUTHORIZED` | missing/invalid bearer, revoked key |
-| 403 | `FORBIDDEN` | `scope_required` (key lacks the route scope), `scoped_key_restricted` (accountIds/regions exclude the target, a lease or `user_id` belongs to another user, or the key predates the account-grant rule) |
+| 403 | `FORBIDDEN` | `scope_required` (key lacks the route scope), `scoped_key_restricted` (accountIds/regions exclude the target, a lease or `user_id` belongs to another user, or the key predates the account-grant rule), `admin_required` (the surface is operator-global: audit and the event stream, whatever the key's scopes or grant) |
 | 404 | `NOT_FOUND` | `unknown_server`, `no_target`, unknown account/user/lease/operation; a lease owned by another user answers as unknown |
 | 409 | `CONFLICT` / `CONFIRMATION_REQUIRED` | `login_disabled`, `login_required`, `account_state`, `snapshot_changed`, `server_ineligible`, `switch_in_progress`, `slot_multiple_sessions`, `port_unavailable`, `ALREADY_CURRENT`, `SERVER_UNAVAILABLE`, `NO_ALTERNATE_SERVER`, `lease_publish_failed`; `confirmation_required` when a destructive schedule needs `confirm:"ARM"`/`"RUN"` |
 | 410 | `CURSOR_EXPIRED` / `INVITE_EXPIRED` | the event cursor fell out of the ring (restart from `oldestCursor`), or an invitation expired before it was redeemed |

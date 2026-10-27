@@ -228,10 +228,21 @@ func (s *Server) handleHTTP(client net.Conn) {
 	}
 	s.accepted.Add(1)
 
+	// Same entitlement watch as the SOCKS5 listener: the CONNECT 200 is the
+	// admission, and a key or lease revoked afterwards closes the tunnel.
+	stopWatch := s.watchEntitlement(principal, func() {
+		_ = client.Close()
+		_ = remote.Close()
+	})
+	defer stopWatch()
+
 	// The relay reads through the same buffered reader: a client that
 	// pipelined its first tunnel bytes behind the head must not lose them.
 	tunnel := &bufferedClient{Conn: client, r: reader}
 	in, out, quotaStopped := relay(tunnel, remote, &s.ingress, &s.egress, s.meterProgress(principal.UserID))
+	// Same rule as the SOCKS5 listener: the watcher ends with the relay, and
+	// the deferred stop is the idempotent safety net.
+	stopWatch()
 	record := FlowRecord{
 		StartedAt:  started,
 		UserID:     principal.UserID,

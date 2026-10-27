@@ -61,19 +61,16 @@ func (s *Server) eventsRing(w http.ResponseWriter) (*events.Ring, bool) {
 	return s.cfg.EventRing, true
 }
 
-// eventsKeyAllowed refuses a scoped key restricted by accountIds/regions. The
-// ring is global and an event is not attributed to exactly one account (an
-// audit row or a schedule run can span accounts), so a per-account filter would
-// be guesswork; the honest answer is 403. Admin tokens and unrestricted keys
-// pass.
+// eventsKeyAllowed refuses every scoped key that is not an admin principal.
+// The ring is global: an event is not attributed to exactly one account (an
+// audit row or a schedule run can span accounts) and the stream carries every
+// tenant's order, lease and schedule metadata, so a per-account filter would be
+// guesswork and a per-user one would still leak operator telemetry. The stream
+// is therefore operator-global: the admin token and keys carrying the admin
+// scope pass, and every other scoped key answers 403 admin_required whatever
+// its events:read or account grant says.
 func (s *Server) eventsKeyAllowed(w http.ResponseWriter, r *http.Request) bool {
-	key, ok := scopedKeyFromRequest(r)
-	if !ok || (len(key.AccountIDs) == 0 && len(key.Regions) == 0) {
-		return true
-	}
-	writeError(w, http.StatusForbidden, CodeForbidden,
-		"scoped key is restricted to specific accounts and cannot read the global event stream")
-	return false
+	return !s.denyOperatorOnly(w, r, "the event stream")
 }
 
 // handleListEvents serves GET /v1/events?since=&limit=&wait=.

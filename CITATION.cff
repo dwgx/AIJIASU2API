@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software or its research corpus, cite it as below."
+title: "AIJIASU2API"
+abstract: >-
+  An educational and research protocol corpus and reference implementation for
+  interoperability study of the AJiaSu / 爱加速 client protocol. It is not
+  affiliated with, authorised by, or endorsed by the vendor, and it ships no
+  vendor binaries or credentials. This citation refers to the v0.1.0-pre
+  pre-release.
+authors:
+  - family-names: "dwgx"
+    alias: "dwgx"
+    website: "https://github.com/dwgx"
+version: "0.1.0-pre"
+date-released: "2026-10-28"
+license: MIT
+url: "https://ajs.dwgx.top:2055/docs"
+keywords:
+  - reverse engineering
+  - protocol research
+  - interoperability
+  - proxy
+  - AJiaSu
+  - AJiaSu2API
+type: software

@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -93,6 +95,7 @@ func TestProbeTableRejectsPrivateAndMetadataHosts(t *testing.T) {
 		{"unresolvable name is allowed", "unresolvable.example", false, false},
 		{"loopback with lab opt-in", "127.0.0.1", true, false},
 		{"private with lab opt-in", "10.0.0.5", true, false},
+		{"localhost", "localhost", false, true},
 		{"localhost with lab opt-in", "localhost", true, false},
 	}
 	for _, probe := range probes {
@@ -108,6 +111,23 @@ func TestProbeTableRejectsPrivateAndMetadataHosts(t *testing.T) {
 				t.Fatalf("host %q allowPrivate=%t rejected: %v", probe.host, probe.allowPrivate, err)
 			}
 		})
+	}
+}
+
+// TestValidateDestinationHostRejectsLoopbackWithoutDNS proves the loopback
+// decision does not depend on resolution: the dial guard refuses loopback
+// whenever private access is off, so validation refuses the name even when the
+// resolver answers nothing, instead of admitting the endpoint and failing at
+// delivery time.
+func TestValidateDestinationHostRejectsLoopbackWithoutDNS(t *testing.T) {
+	stubLookup(t, func(string) ([]net.IP, error) {
+		return nil, &net.DNSError{Err: "temporary failure", IsTemporary: true}
+	})
+	if err := validateDestinationHost("localhost", false); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Fatalf("localhost without DNS = %v, want ErrInvalidEndpoint", err)
+	}
+	if err := validateDestinationHost("localhost", true); err != nil {
+		t.Fatalf("localhost with lab opt-in = %v, want nil", err)
 	}
 }
 
@@ -171,6 +191,63 @@ func TestSecureTransportEnforcesDialGuard(t *testing.T) {
 		t.Fatalf("lab opt-in dial: %v", err)
 	}
 	_ = resp.Body.Close()
+}
+
+// TestSecureTransportIgnoresProxyEnvironment proves webhook delivery cannot be
+// routed through an HTTP proxy. With HTTP_PROXY/HTTPS_PROXY pointing at a
+// fixture, the dispatcher transport must not consult them and no request may
+// arrive at the fixture. The fixture is first exercised through an explicitly
+// proxied transport, so a zero count below means "went direct" rather than
+// "the fixture was never observable".
+func TestSecureTransportIgnoresProxyEnvironment(t *testing.T) {
+	var hits int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fixture.Close()
+
+	t.Setenv("HTTP_PROXY", fixture.URL)
+	t.Setenv("HTTPS_PROXY", fixture.URL)
+	t.Setenv("http_proxy", fixture.URL)
+	t.Setenv("https_proxy", fixture.URL)
+	// A NO_PROXY entry would let the loopback receiver bypass the proxy and
+	// hide the regression this test exists for.
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	transport := secureTransport(false)
+	if transport.Proxy != nil {
+		t.Fatal("webhook transport consults the environment proxy")
+	}
+
+	proxyURL, err := url.Parse(fixture.URL)
+	if err != nil {
+		t.Fatalf("parse fixture URL: %v", err)
+	}
+	proxied := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   2 * time.Second,
+	}
+	resp, err := proxied.Get("http://127.0.0.1:9/hook")
+	if err != nil {
+		t.Fatalf("explicitly proxied request: %v", err)
+	}
+	resp.Body.Close()
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("fixture proxy hits = %d, want 1: the fixture is not observable", got)
+	}
+	atomic.StoreInt32(&hits, 0)
+
+	// The dispatcher transport goes direct: the dial guard refuses the loopback
+	// receiver and the fixture proxy sees nothing.
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	if _, err := client.Get("http://127.0.0.1:9/hook"); err == nil {
+		t.Fatal("webhook transport reached a loopback receiver")
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("webhook delivery sent %d request(s) through the environment proxy", got)
+	}
 }
 
 // TestAllowPrivateEnvironmentOptIn pins the environment escape hatch at

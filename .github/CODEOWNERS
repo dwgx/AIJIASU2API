@@ -1,0 +1,15 @@
+# Default owner. The handle must match the publishing account; GitHub silently
+# ignores a CODEOWNERS file whose owners cannot be resolved.
+*                       @dwgx
+
+# A green CI run is not review for these paths.
+/.github/workflows/     @dwgx
+/daemon/internal/api/   @dwgx
+/daemon/internal/gate/  @dwgx
+/daemon/internal/runtime/ @dwgx
+/daemon/internal/store/ @dwgx
+/deploy/production/     @dwgx
+/SECURITY.md            @dwgx
+/GOVERNANCE.md          @dwgx
+/CODE_OF_CONDUCT.md     @dwgx
+/.github/CODEOWNERS     @dwgx

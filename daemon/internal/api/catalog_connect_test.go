@@ -288,3 +288,40 @@ func TestCatalogConnectEndpoints(t *testing.T) {
 		t.Fatalf("reason = %q, want login_disabled", payload.Error.Reason)
 	}
 }
+
+// TestCatalogActionsReportStoppedController pins the 503 branch the contract
+// documents: a stopped node controller answers UPSTREAM_UNAVAILABLE for
+// connect, disconnect and reconnect alike.
+func TestCatalogActionsReportStoppedController(t *testing.T) {
+	connector := &fakeCatalog{}
+	ts, _ := newCatalogTestServer(t, connector)
+
+	cases := []struct {
+		name string
+		path string
+		body map[string]any
+		set  func()
+	}{
+		{"connect", "/v1/accounts/acc-01/actions/connect",
+			map[string]any{"serverId": "srv-a", "confirm": true},
+			func() { connector.connectErr = runtime.ErrControllerStopped }},
+		{"disconnect", "/v1/accounts/acc-01/actions/disconnect",
+			map[string]any{"confirm": true},
+			func() { connector.disconnectErr = runtime.ErrControllerStopped }},
+		{"reconnect", "/v1/accounts/acc-01/actions/reconnect",
+			map[string]any{"confirm": true},
+			func() { connector.reconnectErr = runtime.ErrControllerStopped }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connector.connectErr, connector.disconnectErr, connector.reconnectErr = nil, nil, nil
+			tc.set()
+			resp, body := apiCall(t, ts, http.MethodPost, tc.path, tc.body)
+			requireStatus(t, resp, http.StatusServiceUnavailable)
+			payload := decodeCatalogError(t, body)
+			if payload.Error.Code != CodeUpstreamUnavailable {
+				t.Fatalf("code = %q, want %q", payload.Error.Code, CodeUpstreamUnavailable)
+			}
+		})
+	}
+}

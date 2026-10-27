@@ -1,23 +1,36 @@
 # ARCHIVE — AJiaSu → API
 
-**Archived 2026-10-27** at HEAD `47b4699` (`47b46999e4ef58cf3a7350b3c3cae6ffd89df39b`,
-*feat(dashboard): add portal payment channel picker*), branch `panel-design`, no git remote.
-This document is the archive map: what the retained product is, what stays experimental, how to
-run and test it, and which gaps are still open. It changes no code.
+> **Historical snapshot.** This page describes commit `47b4699`
+> (`47b46999e4ef58cf3a7350b3c3cae6ffd89df39b`, *feat(dashboard): add portal payment channel
+> picker*, 2026-10-27). The tree has moved on: current HEAD is `901c75b`, **29 commits later**
+> (`git rev-list --count 47b4699..HEAD`), and the release surface is defined by
+> [`docs/releases/v0.1.0-pre.md`](docs/releases/v0.1.0-pre.md) and
+> [`docs/RELEASE.md`](docs/RELEASE.md). The narrative and file list describe the 2026-10-27
+> snapshot; every **count** on this page was re-derived at HEAD `901c75b` on 2026-10-28, with
+> the command shown where the number appears, so the page cannot carry a stale count. Do not
+> treat this page as current status.
 
-The paid-tenant and remote-ingress direction is closed. The product kept by this archive is the
+**Archived 2026-10-27** at `47b4699`, branch `panel-design`. There is **no git remote** and
+**eight local milestone tags** (`v0.1.0-archive` … `v0.7.0-live`; `git tag --list 'v*' | wc -l`);
+none of them is a public release and nothing has been pushed. This document is the archive map:
+what the retained product is, what stays experimental, how to run and test it, and which gaps
+were still open at that commit. It changes no code.
+
+The paid-tenant direction is closed for this release. The product kept by this archive is the
 core **AJiaSu → API** path: an operator-run control plane that turns an authorized AJiaSu account
 into a scoped, lease-based proxy API — API key plus least-privilege scopes, in the shape of a
-Webshare-style proxy API. The tenant portal, orders, payment adapters and the remote ingress
-credential store remain in the tree as offline-tested, opt-in code and evidence; they are not a
-shipping offer.
+Webshare-style proxy API. The tenant portal, orders and payment adapters remain in the tree as
+offline-tested, opt-in code; they are disabled in `v0.1.0-pre` and are not a shipping offer
+(see [`docs/EPAY-STATUS.md`](docs/EPAY-STATUS.md)). Two experimental subsystems from earlier
+milestones — a credential store and an unused node-controller seam — no longer exist in the
+tree (removed in `e9e546e`); ignore any older text that describes them as available.
 
 ## What the core product is
 
 | Area | What is served | Where |
 |---|---|---|
 | Accounts | Create, read, patch, delete, login, logout; export/import/bulk-delete are admin-only | `/v1/accounts*` |
-| Catalog | Retained vendor server catalog, paged and filtered (`q`, `region`, `status`, `province`, `city`, `selected`, `sort`, `offset`, `limit`); 2,814 rows for the live `acc-07` account | `GET /v1/accounts/{id}/servers` |
+| Catalog | Retained vendor server catalog, paged and filtered (`q`, `region`, `status`, `province`, `city`, `selected`, `sort`, `offset`, `limit`); 2,814 rows for the live `acc-07` account at the 2026-10-24 audit | `GET /v1/accounts/{id}/servers` |
 | Connect / switch | Guarded connect, disconnect, reconnect and the async `select-node` wrapper; one session per account, per-account cooldown, `snapshotId` guard | `/v1/accounts/{id}/actions/*`, `/v1/operations*` |
 | Leases | Create, list, rotate and revoke; one active lease per user and platform; `Idempotency-Key` replay; admission counts live, listener-bound slots | `/v1/leases*` |
 | Nodes | List, drain, undrain, probe | `/v1/nodes*` |
@@ -26,8 +39,11 @@ shipping offer.
 | Topology / health | Resin topology projection and loopback gate health (30 s probes, 120 samples per node) | `/v1/topology`, `/v1/health/nodes` |
 | SDKs | Dependency-free Go and TypeScript clients: accounts, select-node operations, leases, usage, events | `sdk/go`, `sdk/ts`, `sdk/README.md` |
 
-The dashboard (`dashboard/`) is the operator console over the same API: 17 pages, 500 Vitest tests
-in 56 files at archive time. The daemon (`daemon/`, Go 1.26, `ajs-accountd`) binds
+The dashboard (`dashboard/`) is the operator console over the same API: **15 admin routes**
+(`sed -n '/<Route element={<AdminLayout/,/^              <\/Route>/p' dashboard/src/App.tsx | grep -c '<Route path="/'`)
+and **54 Vitest test files** (`cd dashboard && find tests -name '*.test.ts*' | wc -l`). The
+current Vitest 5 tree lists 475 cases (`npx vitest list | wc -l`) and the full serial suite
+passes 475/475; the file count is stable. The daemon (`daemon/`, Go 1.26, `ajs-accountd`) binds
 `127.0.0.1:2261` by default and persists a versioned JSON snapshot; the offline `emulator/`
 implements the Tier-2 `FV` protocol without vendor binaries.
 
@@ -42,13 +58,13 @@ a port.
 
 | Surface | State in this archive | Switch / requirement | Evidence |
 |---|---|---|---|
-| Customer tenant portal | Experimental, opt-in | `AJS_TENANT_PORTAL=1` plus an exact `AJS_TENANT_ORIGIN`; `AJS_TRUSTED_PROXIES` decides whose `X-Forwarded-For` is believed | Served and covered by `httptest`; no browser signup, session or approval outside tests |
-| Orders and 易支付 (epay) | Experimental, opt-in adapter | Admin plan catalogue and order routes are registered; epay needs `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID`, `AJS_EPAY_KEY` | Offline only; no real order or payment event; no route charges a card |
+| Customer tenant portal | Experimental, **off in `v0.1.0-pre`** | `AJS_TENANT_PORTAL=0` in the shipped env example; enabling needs `=1` plus an exact `AJS_TENANT_ORIGIN`, and `AJS_TRUSTED_PROXIES` decides whose `X-Forwarded-For` is believed | Served and covered by `httptest`; no browser signup, session or approval outside tests; routes are unregistered (404) when off |
+| Orders and 易支付 (epay) | Experimental, **off in `v0.1.0-pre`** | Admin plan catalogue and order routes register only under `AJS_TENANT_PORTAL=1`; epay needs `AJS_EPAY_GATEWAY`, `AJS_EPAY_PID`, `AJS_EPAY_KEY` | Offline only; no real order or payment event; no route charges a card. See [`docs/EPAY-STATUS.md`](docs/EPAY-STATUS.md) |
 | Stripe-compatible callback | Disabled unless configured | `AJS_STRIPE_WEBHOOK_SECRET` unset makes `POST /v1/payments/stripe` answer 503 | No real Stripe event has reached it |
-| Remote ingress credential store | Experimental, store only | `AJS_REMOTE_INGRESS=1` plus `AJS_INGRESS_PEPPER_FILE` (32-byte HMAC pepper); startup fails without the pepper | `daemon/internal/store/lease_credentials.go`; no HTTP route, listener or router serves it |
+| Credential-store experiment | **Removed from the tree** | — | Deleted in `e9e546e`; no route, listener, store file or setting exists in `v0.1.0-pre` |
 | Multi-slot (`UseCount > 1`) | Not enabled in practice | Vendor entitlement (`useCount`), display cap `AJS_ACCOUNT_SLOTS` | Live account has `useCount=1`, `effectiveSlots=1`; per-slot runtime is offline-tested, two-slot coexistence is unproven, and a lease on an account whose display capacity is above one carries `multi_session_unimplemented` |
 | State journal | Opt-in | `AJS_JOURNAL=1`; default is the JSON snapshot (`AJS_STATE_FILE`, every 30 s + shutdown) | Journal recovery/append tests are offline; the snapshot remains the default |
-| Release / update pipeline | Unverified | `deploy/update.sh`, `deploy/compose.release.yml`, GHCR workflows | No remote and no tags, so no image was pushed and `update.sh --tag` has nothing to pull |
+| Release / update pipeline | Unverified | `deploy/update.sh`, `deploy/compose.release.yml`, GHCR workflows | **No git remote** and eight local milestone tags; nothing was pushed, no image exists, and `update.sh --tag` has nothing to pull |
 
 ## How to run and test
 
@@ -56,17 +72,17 @@ All suites are offline; none needs a vendor account, a Resin process or network 
 
 ```bash
 # Daemon (needs ../emulator as a sibling; go.mod replaces ajsproxy => ../emulator)
-cd daemon && go test ./...                  # 1347 test functions in 168 files at archive time
+cd daemon && go test ./...                  # 1346 test functions in 166 files
 
 # Tier-2 emulator
 cd emulator && go test ./...                # 46 test functions in 14 files
 
 # Operator console
-cd dashboard && npm ci && npm test          # 500 tests in 56 files
+cd dashboard && npm ci && npm test          # 54 test files (475 cases under Vitest 5)
 
 # SDKs
-cd sdk/go && go test ./...                  # 31 tests
-cd sdk/ts && npx tsc --noEmit && npm test   # 20 tests
+cd sdk/go && go test ./...                  # 38 tests
+cd sdk/ts && npx tsc --noEmit && npm test   # 24 tests
 
 # Production deploy-kit self-check, development mode (production mode requires root,
 # nginx, openssl, systemd-analyze and a Chromium-family browser)
@@ -98,10 +114,11 @@ The compose stack builds both images from this tree:
 cd deploy && cp .env.example .env && docker compose up -d --build   # dashboard 127.0.0.1:18081
 ```
 
-HMC reference: mock dashboard `18081`; live pair `http://192.168.11.4:18082` against the daemon at
-`http://192.168.11.4:2261` (bearer required; insecure mode is refused off loopback); Resin on
-`2260` when running; gate listeners from `GET /v1/lab/gates`. The compose stack reuses `18081`,
-so run either it or the standalone dashboard compose, not both.
+HMC reference: mock dashboard `18081`; the live dashboard is served at
+`http://192.168.11.4:18082`. Since 2026-10-28 the live daemon binds `127.0.0.1:2261`, so it is
+not reachable directly from the LAN; use a loopback session or the HMC origin. Resin on `2260`
+when running; gate listeners from `GET /v1/lab/gates`. The compose stack reuses `18081`, so run
+either it or the standalone dashboard compose, not both.
 
 ## Security notes
 
@@ -138,15 +155,15 @@ so run either it or the standalone dashboard compose, not both.
 
 ## Known gaps
 
-1. **No public SOCKS5 ingress.** The SOCKS5 gate still binds `127.0.0.1` only. The
-   `AJS_REMOTE_INGRESS` credential store remains experimental and unwired; there is no public
-   SOCKS5 listener, tunnel or router, and gates, Resin, the daemon and the dashboard otherwise stay
-   on loopback or a private LAN.
+1. **No public SOCKS5 ingress.** The SOCKS5 gate still binds `127.0.0.1` only; nothing
+   publishes it. The HTTPS CONNECT listener is the only published data-plane port
+   (`gate.dwgx.top:13000-13010`). Gates, Resin, the daemon and the dashboard otherwise stay on
+   loopback or a private LAN.
 2. **No real payment drill.** No customer has created an order, no administrator has attested an
    offline receipt, and no real Stripe or 易支付 event has reached the daemon outside `httptest`.
    Manual settlement is an attestation of funds received elsewhere; the daemon never charges a
    card, stores no card data and sends no payment request. Refund and chargeback record evidence
-   and revoke the grant; they transfer nothing.
+   and revoke the grant; they transfer nothing. Payments are disabled in `v0.1.0-pre`.
 3. **No `UseCount=2`.** The only live account has `useCount=1`, so `effectiveSlots=1` and exactly
    one lease can be admitted. Per-slot runtime code exists and is offline-tested, but live
    two-slot coexistence has not been proven; a lease above one slot still carries the
@@ -155,13 +172,14 @@ so run either it or the standalone dashboard compose, not both.
 Also unverified at archive time: B2 request signing, multi-account coexistence on one daemon,
 Resin live publish, hot update (dynamic API host refresh), the SQLite schema in `docs/PANEL.md`
 (the daemon uses a JSON snapshot), the packaged service wrappers and the GHCR release pipeline.
-The `supervisor` package exists but is not called by the node controller.
 
 ## Pointers
 
 - [`README.md`](README.md) — current status, layout, quick start, FV confidentiality, use boundary
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current topology and trust boundaries
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — current install, health, backup, rotation
 - [`docs/API-GUIDE.md`](docs/API-GUIDE.md) — Webshare-style quickstart for the retained API
-- [`docs/openapi.json`](docs/openapi.json) — OpenAPI 3.1 contract (120 paths, 147 operations, 195 schemas)
+- [`docs/openapi.json`](docs/openapi.json) — OpenAPI 3.1 contract (120 paths, 148 operations, 200 schemas; `python -c` count in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#numbers))
 - [`docs/PANEL.md`](docs/PANEL.md) — control-plane design baseline
 - [`docs/RBAC.md`](docs/RBAC.md) — operator roles and the strict-mode cutover
 - [`sdk/README.md`](sdk/README.md) — Go and TypeScript client coverage and retry rules

@@ -1,0 +1,108 @@
+name: Bug report
+description: Report a reproducible defect in the code, the docs, or the deployment kit.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report a security vulnerability here.** Use the repository's
+        **Security → Report a vulnerability** channel, or the owner profile
+        named in GOVERNANCE.md. Do not paste a live key, account password,
+        session cookie, or a hash of one. See SECURITY.md.
+
+        Before filing, check whether the surface is enabled in this release:
+        the tenant portal, orders, epay/Stripe, and remote ingress are disabled
+        or experimental, and there is no public SOCKS5.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is affected?
+      description: This is the first fork in triage; the code paths barely overlap.
+      options:
+        - Public API (https://ajs.dwgx.top:2055)
+        - Public HTTPS CONNECT gate (gate.dwgx.top:13000-13010)
+        - Loopback admin API (127.0.0.1:2261)
+        - Dashboard (build or browser)
+        - Go SDK (sdk/go)
+        - TypeScript SDK (sdk/ts)
+        - Build, test, or packaging
+        - Documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Authentication shape
+      description: Which credential was in play when the failure happened?
+      options:
+        - Admin bearer token (AJS_ADMIN_TOKEN)
+        - Scoped key (ajs_sk_)
+        - Gate userpass (panel user id + scoped key)
+        - Unauthenticated / no credential
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release tag
+      description: Output of `git rev-parse HEAD`, or the tag you built or ran.
+      placeholder: "901c75b / v0.1.0-pre"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Go version, Node version, and whether this is a local build, compose, or the operator-run demo.
+      placeholder: "Windows 11, Go 1.26.10, Node 24, local daemon"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The observed behaviour, including the exact status code and error envelope when there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest sequence of commands that reproduces the problem. Redact every credential.
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Redacted only. Do not include tokens, cookies, account names, or hashes.
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed every credential, token, cookie, account name, and hash from this report.
+          required: true
+        - label: This is not a security vulnerability; I will report those privately.
+          required: true
+        - label: I checked that the surface is enabled in this release (no tenant portal, orders, epay/Stripe, remote ingress, or public SOCKS5).
+          required: true

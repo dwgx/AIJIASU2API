@@ -259,6 +259,41 @@ func TestScopedKeyRevokeIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestScopedKeySuspendedUserFailsClosed pins the kill switch: suspending the
+// owning user invalidates every scoped key of that user on the next
+// authentication, without revoking the rows, and resume restores them with the
+// same secret. A deleted user already revokes; suspension is the reversible
+// half of the same authority.
+func TestScopedKeySuspendedUserFailsClosed(t *testing.T) {
+	st := New()
+	key, secret, err := st.CreateScopedKey(scopedKeyInput(""))
+	if err != nil {
+		t.Fatalf("CreateScopedKey: %v", err)
+	}
+	if _, ok := st.AuthenticateScopedKey(secret); !ok {
+		t.Fatal("active user's scoped key does not authenticate")
+	}
+
+	if _, err := st.SetUserEnabled(key.UserID, false); err != nil {
+		t.Fatalf("SetUserEnabled(false): %v", err)
+	}
+	if _, ok := st.AuthenticateScopedKey(secret); ok {
+		t.Fatal("suspended user's scoped key still authenticates")
+	}
+	// Suspension is not revocation: the row keeps its identity and the key is
+	// usable again once the user is resumed.
+	if got, _ := st.ScopedKey(key.ID); got.RevokedAt != nil {
+		t.Fatalf("suspension revoked the key row: %+v", got)
+	}
+
+	if _, err := st.SetUserEnabled(key.UserID, true); err != nil {
+		t.Fatalf("SetUserEnabled(true): %v", err)
+	}
+	if _, ok := st.AuthenticateScopedKey(secret); !ok {
+		t.Fatal("resumed user's scoped key does not authenticate")
+	}
+}
+
 func TestScopedKeyExpiryUsesStoreClock(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	st := newWithClock(func() time.Time { return now }, nil)

@@ -175,7 +175,10 @@ var (
 // deployments that opt in through AJS_WEBHOOK_ALLOW_HTTP. The host is
 // resolved and rejected when it is loopback, private, link-local or the cloud
 // metadata service; allowPrivate (AJS_WEBHOOK_ALLOW_PRIVATE=1) opts a lab out
-// of the address-class checks.
+// of the address-class checks. A loopback receiver therefore needs both
+// opt-ins: the scheme rule names loopback, but the dial guard refuses to
+// connect there unless private access is on, and validation agrees with the
+// guard instead of admitting an endpoint delivery could never reach.
 func validateEndpoint(ep Endpoint, allowHTTP, allowPrivate bool) error {
 	if ep.ID == "" {
 		return fmt.Errorf("%w: id is required", ErrInvalidEndpoint)

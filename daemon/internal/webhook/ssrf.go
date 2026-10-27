@@ -52,6 +52,15 @@ func validateDestinationHost(host string, allowPrivate bool) error {
 	if ip := net.ParseIP(name); ip != nil {
 		return checkDestinationIP(host, ip, allowPrivate)
 	}
+	// The dial guard refuses loopback whenever private access is off, so a
+	// loopback name is refused here on the name alone. Waiting for DNS would
+	// admit `http://localhost` on a resolver failure and then fail at delivery
+	// time with a guard error, which is the same decision reported later and
+	// less clearly.
+	if !allowPrivate && isLoopbackHost(name) {
+		return fmt.Errorf("%w: host %q is loopback; set %s=1 to allow a private receiver",
+			ErrInvalidEndpoint, host, AllowPrivateEnv)
+	}
 	ips, err := lookupIP(name)
 	if err != nil {
 		return nil
@@ -97,10 +106,18 @@ func blockedDestination(ip net.IP) bool {
 // two moments cannot reach a private address. A caller-supplied transport is
 // not wrapped; its dial path is the caller's responsibility, while
 // validateEndpoint still rejects the endpoint up front.
+//
+// Proxy is nil on purpose: with an environment proxy the guard would inspect
+// the proxy address instead of the receiver, and the proxy would resolve the
+// attacker-controlled name itself, so a rebind to a private address would be
+// reached through a connection the guard approved. Delivery therefore goes
+// direct even when HTTP_PROXY/HTTPS_PROXY are set for the rest of the process.
 func secureTransport(allowPrivate bool) *http.Transport {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	transport := &http.Transport{}
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
+		// Clone copies DefaultTransport's ProxyFromEnvironment; clear it.
+		transport.Proxy = nil
 	}
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,

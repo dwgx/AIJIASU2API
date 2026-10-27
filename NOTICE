@@ -136,7 +136,7 @@ the font files.
 6. Build and test tooling (not distributed)
 --------------------------------------------
 
-Vite 6 (MIT), TypeScript 5.8 (Apache-2.0), Vitest 3 (MIT), jsdom 26 (MIT),
+Vite 6 (MIT), TypeScript 5.8 (Apache-2.0), Vitest 5 (MIT), jsdom 26 (MIT),
 Testing Library (MIT) and `@vitejs/plugin-react` (MIT) are development
 dependencies. They are not part of the served dashboard bundle; their license
 texts ship with the npm packages.

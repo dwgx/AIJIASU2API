@@ -472,9 +472,12 @@ func TestEventsRoutesRequireConfiguredRing(t *testing.T) {
 	}
 }
 
-// TestScopedEventsScopeMatrix pins events:read: it reaches exactly the two
-// event routes, every other scope is refused, a restricted key cannot read the
-// global stream, and admin routes stay closed to it.
+// TestScopedEventsScopeMatrix pins the operator-global event stream: the admin
+// token and a key carrying the admin scope read the replay and the SSE stream,
+// and every other scoped key answers 403 admin_required whatever its scopes or
+// account grant say. events:read still gates the route, so a key without it is
+// refused with the more specific scope_required, and admin-only routes stay
+// closed to an events:read key.
 func TestScopedEventsScopeMatrix(t *testing.T) {
 	ts, ring := newEventsServer(t, 8)
 	ring.Publish(events.Event{Type: "account.login"})
@@ -484,22 +487,20 @@ func TestScopedEventsScopeMatrix(t *testing.T) {
 		"label":  "event reader",
 		"scopes": []string{string(model.ScopeEventsRead)},
 	})
-	resp, body := scopedCall(t, ts, reader.Secret, http.MethodGet, "/v1/events", nil)
-	requireStatus(t, resp, http.StatusOK)
-	if got := len(decodeBody[eventsPage](t, body).Events); got != 1 {
-		t.Fatalf("scoped replay returned %d events, want 1", got)
+	// An unrestricted events:read customer key no longer reads other tenants'
+	// events: the ring is operator-global.
+	for _, path := range []string{"/v1/events", "/v1/events/stream"} {
+		resp, body := scopedCall(t, ts, reader.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
+		if strings.Contains(string(body), "account.login") || strings.Contains(string(body), "evt-000001") {
+			t.Fatalf("%s leaked an event to a customer key: %s", path, body)
+		}
 	}
 
-	stream := openEventsStream(t, ts, "/v1/events/stream", reader.Secret, nil)
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("scoped stream status = %d, want 200", stream.StatusCode)
-	}
-	if got := decodeFrameEvent(t, readSSEFrame(t, bufio.NewReader(stream.Body))); got.ID != "evt-000001" {
-		t.Fatalf("scoped stream first frame = %q", got.ID)
-	}
-	stream.Body.Close()
-
-	// Another read scope must not reach the ring.
+	// Another read scope must not reach the ring: the router refuses it before
+	// the admin gate and names the missing grant.
 	other, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId":     "u-01",
 		"label":      "account reader",
@@ -510,9 +511,11 @@ func TestScopedEventsScopeMatrix(t *testing.T) {
 		resp, body := scopedCall(t, ts, other.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)
 		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonScopeRequired)
 	}
 
-	// A key restricted to specific accounts cannot read the global ring.
+	// A key restricted to specific accounts is refused for the same reason as
+	// an unrestricted one: the grant no longer decides this surface.
 	restricted, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId":     "u-01",
 		"label":      "restricted event reader",
@@ -523,18 +526,30 @@ func TestScopedEventsScopeMatrix(t *testing.T) {
 		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)
 		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
 	}
 
-	// The admin token and an admin-scoped key bypass the table.
-	resp, _ = apiCall(t, ts, http.MethodGet, "/v1/events", nil)
-	requireStatus(t, resp, http.StatusOK)
+	// The admin token and an admin-scoped key bypass the table and the gate.
 	admin, _ := mustCreateScopedKey(t, ts, map[string]any{
 		"userId": "u-01",
 		"label":  "admin key",
 		"scopes": []string{"admin"},
 	})
-	resp, _ = scopedCall(t, ts, admin.Secret, http.MethodGet, "/v1/events", nil)
+	resp, body := scopedCall(t, ts, admin.Secret, http.MethodGet, "/v1/events", nil)
 	requireStatus(t, resp, http.StatusOK)
+	if got := len(decodeBody[eventsPage](t, body).Events); got != 1 {
+		t.Fatalf("admin replay returned %d events, want 1", got)
+	}
+	resp, _ = apiCall(t, ts, http.MethodGet, "/v1/events", nil)
+	requireStatus(t, resp, http.StatusOK)
+	stream := openEventsStream(t, ts, "/v1/events/stream", admin.Secret, nil)
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("admin stream status = %d, want 200", stream.StatusCode)
+	}
+	if got := decodeFrameEvent(t, readSSEFrame(t, bufio.NewReader(stream.Body))); got.ID != "evt-000001" {
+		t.Fatalf("admin stream first frame = %q", got.ID)
+	}
+	stream.Body.Close()
 
 	// Admin-only routes stay closed to events:read.
 	resp, body = scopedCall(t, ts, reader.Secret, http.MethodGet, "/v1/webhooks", nil)

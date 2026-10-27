@@ -1,616 +1,266 @@
-# LovePlusSpeedToProxy
+# AIJIASU2API
 
-Reverse-engineering research repository for the **AJiaSu / 爱加速** client, with the goal of
-reimplementing its protocol so the service can be driven as a **proxy API with a selectable
-egress IP**.
+> **Disclaimer — read before use**
+>
+> - **Educational and research only.** This is a protocol corpus and a reference implementation
+>   for interoperability study, not a proxy service or a product.
+> - **No affiliation.** This project is not affiliated with, authorised by, or endorsed by
+>   爱加速 / AJiaSu or any vendor. Vendor marks belong to their owners.
+> - **No vendor material.** No vendor binaries, installers, drivers, captures, dumps, or
+>   credentials are committed here.
+> - **Authorised accounts only.** Use only accounts you own or are explicitly authorised to use.
+>   You are responsible for the vendor's terms of service and for local law.
+> - **Invite-only demo.** The live instance is operator-run. Keys are admin-issued `ajs_sk_`
+>   scoped keys; there is no signup, no SLA, and no resale. The demo may be withdrawn at any time.
+> - **Experimental payments.** The epay/Stripe/orders/tenant-portal paths are experimental,
+>   AI-generated research code. They are disabled and are not part of the public edge in
+>   `v0.1.0-pre`; this is not a payment service, with no charges and no support.
+> - **MIT, no warranty.** The licence covers this repository's code only — not any vendor's
+>   software, service, data, or marks.
+> - **Private security reports.** Do not open a public issue; see [SECURITY.md](SECURITY.md).
+> - **No public SOCKS5.** The public edge is HTTPS CONNECT only.
+>
+> The full text is [DISCLAIMER.md](DISCLAIMER.md).
 
-## What this repository is
+AIJIASU2API is a research corpus plus the artefacts built on it: an operator console
+(`dashboard/`), a Go control plane (`daemon/`), Go and TypeScript SDKs (`sdk/`), a compose
+deployment (`deploy/`), and an offline protocol emulator (`emulator/`). The retained capability is
+the **AJiaSu → API** path: an authorised AJiaSu account becomes a scoped proxy API with a
+selectable egress IP.
 
-A research corpus plus the artefacts built on it: an operator console (`dashboard/`), a
-control-plane daemon skeleton (`daemon/`), and a compose deployment for the pair (`deploy/`). It
-records what is known about the AJiaSu client — its installer payload, its Windows and Linux
-binaries, its `FV*` protocol stack, its login/node-selection flow — and implements the parts that
-do not require a vendor account.
+## Release status
 
-It is **not** a client, not an anonymous public proxy service (it is an operator console and an
-authorized tenant gateway), and not a distribution of vendor software. No vendor binaries,
-drivers, installers, live packet captures, or memory dumps are committed here (the lab captures
-under `research/60-dynamic/captures/` are redacted/synthetic); `.gitignore` blocks them at the
-repository root. Live vendor contact has happened on two days only
-(2026-10-23, two logins; 2026-10-24, one login after the rebuild — all on one Owner-supplied
-account; the 2026-10-23 run is in
-[`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md)), and no vendor
-artifact or credential from those runs is committed.
+`v0.1.0-pre` is a **pre-release**: usable for evaluation and research, not production-stable. What
+changed and what is intentionally absent is in [CHANGELOG.md](CHANGELOG.md); the near-term plan is
+in [ROADMAP.md](ROADMAP.md).
 
-## API-first (AJiaSu → API)
+The public demonstration edge is live:
 
-The retained product is the core **AJiaSu → API** path: an authorized AJiaSu account becomes a
-scoped proxy API. An admin bearer token or an `ajs_sk_` scoped key calls the control plane at
-`http://127.0.0.1:2261`; accounts, catalog, guarded connect/switch, leases, nodes, requests and
-usage, topology and gate health are JSON over that API, with Go and TypeScript clients in `sdk/`.
-Start with [`docs/API-GUIDE.md`](docs/API-GUIDE.md) for the Webshare-style quickstart, scope table
-and curl examples; [`ARCHIVE.md`](ARCHIVE.md) is the archive map — what is kept, what is
-experimental, and the known gaps.
+- API and rendered documentation: `https://ajs.dwgx.top:2055` and
+  `https://ajs.dwgx.top:2055/docs`
+- HTTPS CONNECT proxy: `gate.dwgx.top`, live map `13000-13010`
 
-Experimental or **not enabled** in this archive: the customer tenant portal
-(`AJS_TENANT_PORTAL=1`), orders and the 易支付 (epay) / Stripe payment adapters (offline-tested
-only; no daemon route charges a card), and the remote-ingress credential store
-(`AJS_REMOTE_INGRESS=1`, unwired). The public scoped-key API and docs are live at
-`https://ajs.dwgx.top:2055`, and the TLS-terminated HTTPS CONNECT proxy edge is live at
-`gate.dwgx.top:13000-13010`; the SOCKS5 gate, the admin origin and the portal routes stay private,
-and there is no public SOCKS5 ingress. The paid-tenant direction is closed. This does not change
-the [Use boundary](#use-boundary): commercial resale or automation still requires separate written
-vendor authorization covering the accounts, service and jurisdictions involved.
+It is operator-run and invite-only, requires an `ajs_sk_` key issued by the operator, and may be
+withdrawn without notice. There is no self-service signup and no SLA. The public API edge applies
+120 requests/min with burst 60 per IP, 20 connections/IP, 400 total and a 2 MB body cap;
+`/metrics` and `/v1/metrics` require a `metrics:read` key.
 
-## Current status
+## What is implemented
 
-**Offline emulator, dashboard and daemon, plus a control-plane compose stack in `deploy/`; the
-Resin M1 integration spike is PASS. Live vendor runs on 2026-10-23 and 2026-10-24 (three logins,
-one account): original app and daemon egress parity through one node, device identity stable
-across logins; the `2261` deployment now runs login-enabled with that account active and is
-demo-free (one account, one node; gate port read from `/v1/lab/gates`). The platform wave — scoped
-keys (including customer-scoped read scopes), lease creation and revocation with idempotency keys,
-SOCKS5 gate user authentication (`AJS_GATE_AUTH`), the device-pool HTTP API and its console page,
-renewal, flow-metered usage, webhooks with an SSRF policy and persisted delivery history, loopback
-gate health and passphrase-encrypted panel backup/restore — is served by the daemon and covered
-offline, but not yet exercised against the vendor. The access wave — a per-node HTTP CONNECT
-listener beside the SOCKS5 gate (`AJS_GATE_HTTP`, offset `AJS_GATE_HTTP_OFFSET`, Basic proxy
-credentials, one shared admission pipeline and metered `protocol:"http"` rows), an opt-in HTTPS
-admin listener (`AJS_TLS_CERT`/`AJS_TLS_KEY`/`AJS_TLS_LISTEN`, HSTS on every response, TLS 1.2
-floor), a continuous Resin reconciler (`AJS_RESIN_RECONCILE=1`: hash-gated publish, `1m→15m`
-backoff, transition-only audits) and listener/operator attribution columns on the console's
-Requests table — is served and covered offline only. The tenant wave — an opt-in customer portal
-(`AJS_TENANT_PORTAL=1` plus `AJS_TENANT_ORIGIN`) with email/password signup into a pending tenant,
-`__Host-` cookie sessions with CSRF and per-IP/address/tenant rate limits, admin approval that
-binds exactly one panel user, and own-data leases/usage/keys, plus a through-gate egress probe
-(`AJS_EGRESS_PROBE=1`, `AJS_EGRESS_INTERVAL`, `AJS_EGRESS_TARGET`) folded into each
-`/v1/health/nodes` row, `lease.created`/`lease.revoked`/`lease.expired` webhook events, and
-durable monthly quota counters that survive request-log eviction and a restart — is served and
-covered offline only. The order wave — an admin plan catalogue, customer orders, offline
-settlement attestation, idempotent entitlement activation, a Stripe-compatible webhook and a
-易支付 (epay) hosted checkout + signed form notify + 60-second query reconciler — is served and
-covered offline only: an order is never evidence of payment, no card data is stored and no daemon
-route charges a card.
-Startup recovery demotes a persisted `LIVE`/`DRAINING` node to `STALE` when
-no in-process gate serves it, and the opt-in `AJS_AUTO_LOGIN=1` reopens eligible sessions once per
-boot. Panel state survives a restart only as a versioned JSON snapshot, not SQLite.**
+Counts below were measured at this tag. Re-run the commands in [Evidence](#evidence) if you need
+today's number.
 
-The FV carrier is obfuscation, not encryption; the two-time-pad properties and their consequences
-are described in [FV carrier confidentiality](#fv-carrier-confidentiality).
+| Capability | State in `v0.1.0-pre` | Authority |
+|---|---|---|
+| Scoped keys (`ajs_sk_`) | Served; per-route scopes, account/region grants, per-key rate limits. 54 operations carry `x-required-scope`. | [docs/API-GUIDE.md](docs/API-GUIDE.md), [docs/openapi.json](docs/openapi.json) |
+| Leases | Served; create/revoke, idempotency keys, quota, concurrency, and capacity refusals. | [docs/API-GUIDE.md](docs/API-GUIDE.md) |
+| Gate | Served; loopback SOCKS5 plus HTTP CONNECT admission, key/lease checks, and flow metering. The TLS-terminated CONNECT edge is live. | [docs/API-GUIDE.md](docs/API-GUIDE.md) |
+| Operator dashboard | React 19 / Vite 6 / TypeScript console with mock and live build modes; the public docs site ships in the same static bundle at `/docs`. | [dashboard/README.md](dashboard/README.md) |
+| Go and TypeScript SDKs | In-tree clients with typed errors and retry/backoff. | [sdk/README.md](sdk/README.md) |
+| OpenAPI 3.1 contract | 120 paths, 148 operations and 200 schemas. | [docs/openapi.json](docs/openapi.json) |
+| Test suites | The daemon, emulator, dashboard, and SDK suites run offline. The dashboard is 54 files / 475 cases, passing 475/475 under Vitest 5; the Go SDK has 38 test functions; the TypeScript SDK has 24 tests. | commands below |
 
-As of 2026-10-26:
+The live smoke recorded in [docs/releases/v0.1.0-pre.md](docs/releases/v0.1.0-pre.md) exercised
+one scoped-key read, one lease create, `/docs`, and one HTTPS CONNECT. Everything else in the
+table is covered offline.
 
-- `emulator/` — offline Tier-2 `FV` emulator: control API, FV crypto/frame, SOCKS5/HTTP front ends
-  and the captured proxy carrier. It builds and passes its offline conformance tests; it makes no
-  live calls and holds no credentials.
-- `sdk/` — dependency-free Go and TypeScript clients for the admin API (accounts, select-node
-  operations, leases, usage, events) with typed errors and retry/backoff; see
-  [`sdk/README.md`](sdk/README.md).
-- `dashboard/` — **APC** (AJiaSu Proxy Console, powered by dwgx), the operator console: React 19,
-  Vite 6, TypeScript, 15 pages (Overview, Usage, Accounts, Nodes, Operations, Leases, Device Pool,
-  Users, Requests, Logs, Debug, Schedules, Settings, Backup, Lab) in a graphite-and-mint design
-  system with accent themes (Mint/Indigo/Violet/Orange), a table/cards switch for Accounts, and
-  command-palette search for accounts and nodes. The sidebar
-  collapses to a 56 px icon rail (`localStorage["ajs.sidebar"]`); Accounts' **Add account** flow
-  is a centered modal (concurrency fixed at 1); Nodes is the real vendor catalog grouped by region:
-  2,814 servers for the live `acc-07` account, server-paged, filtered and sorted through
-  `/v1/accounts/{id}/servers` (`q`, `region`, `status`, `province`, `city`, `sort`, `offset`,
-  `limit`; 50 rows by default, 500 max) with region names localised (`cn` → China / 中国) and the
-  raw vendor code kept as secondary text. The Catalog also draws an offline China map — 31
-  provinces from committed DataV GeoAtlas-derived assets, so no map or tile service is contacted
-  at runtime — and a province click filters the table. Province and city counts arrive in the same
-  catalog response (`geo`, resolved by the daemon's exact-match city index), so the map needs no
-  full-catalog download; a daemon without it falls back to paging the retained catalog in the
-  browser. A row carries the account's target and running state, so the operator can pin a target
-  (starts no session), then connect, reconnect or disconnect under a confirm; the switch keeps one
-  session per account and rejects a stale `snapshotId` or a repeat inside the 5 s cooldown. It
-  merges each account's login-retained catalog with the running node marked current; Requests is
-  the real gate-flow table fed by
-  `/v1/lab/flows?limit=200` (host-only targets, 5 s poll) next to the mutation-lab history, with
-  a user column, a `socks5`/`http` protocol badge, matching filters and the same fields in the
-  row drawer (`protocol`, `userId` and `userName` are optional on the wire, so a row from a
-  daemon that reports neither renders `—`). Requests, Logs and the Lab tables share a pagination
-  footer. Overview draws no synthetic
-  traffic curve — when the daemon reports `telemetryAvailable:false` it shows a no-telemetry empty
-  state beside the real counts. Mock data is the default; a live mode against `ajs-accountd` is
-  opt-in at build time.
-  Form controls are one custom combobox (`dashboard/src/components/Select.tsx`, no native
-  `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
-  localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
-  stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 475 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
-  in the sidebar footer and the Language section in Settings switch every page, default to the browser
-  language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
-  Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
-  identity, 设备池 for device pool, 流量额度 for quota), and account labels, server names, IPs and API
-  values are data and are never translated. Settings is a
-  nine-section shell (General, Appearance, Language, Connection, Leases, Updates, Integrations,
-  Access, Audit) with a sticky rail, dirty save/reset and honest **Stored only** / **Coming later**
-  states for controls the daemon does not read yet; Integrations now carries the live webhook
-  registry (one-time signing secret, enable/disable, per-endpoint delivery history) and Access the
-  scoped-key manager. HMC serves the mock build on `18081` and the live build on `18082`, the
-  latter published on the LAN at
-  `http://192.168.11.4:18082` against the daemon API at `http://192.168.11.4:2261`, where the
-  bearer token is required (insecure mode is refused off loopback).
-  The **Lab** page (`/lab`) is an instrument with eight tabs — Overview, Gates & sessions, Egress,
-  Servers, Protocol, Device, Logs, Diagnostics — fed by `/v1/lab/*` plus the per-account
-  servers/device reads. Every GET is read-only and makes no vendor call; the only non-GET action is
-  the guarded egress check (`POST /v1/lab/egress-check`) through the selected node's own loopback
-  gate — a real SOCKS5 dial plus HTTPS echo, rate-limited by a 5 s per-node cooldown, answering 409
-  when no gate is running and 429 on a repeat within the cooldown. The verified result is merged
-  into that node's claimed-vs-verified row and kept per node, so a GET poll, a manual refresh or a
-  node switch does not erase it; a full page reload starts from claims again. A disabled mode
-  answers `enabled:false` with the switch that is off. The build-time token is optional: on a live
-  401 the runtime token gate asks for the admin token and keeps it in `sessionStorage` for that tab
-  only.
-  The platform wave adds a `/usage` page (7/30/90/366-day window over `/v1/usage` with
-  previous-window deltas, a zero-filled per-day chart, per-account and per-user tables with
-  budget and quota meters, top targets, and a retention note built from `rowsRetained`/
-  `retentionDays`), a `/schedules` page (cron/interval/once schedules with a pure
-  next-run preview, `ARM`/`RUN` confirmations, an `If-Match` revision retry, run history and the
-  read-only renewal-sweep card), a gate-health panel on Overview (compact) and Nodes → Connected
-  (full) fed by the daemon's loopback sampler, and a live webhook registry in Settings →
-  Integrations (one-time signing secret, enable/disable, per-endpoint delivery history).
-  Leases gains a **Create lease** dialog (user, platform, optional account pin, TTL) that sends a
-  per-dialog `Idempotency-Key` and shows the daemon's refusal reason, and a **Device pool** page
-  (`/device-pool`) lists hash-only identities with count chips, state/platform filters, a debounced
-  search, generate/export/import dialogs and typed-token release/retire/quarantine/purge actions.
-  Accounts exports the selected, filtered or all accounts as an encrypted `.ajsx` envelope
-  (passphrase-derived key, device identity optional), imports JSON, CSV or encrypted files with a
-  dry-run preview and an atomic or partial apply, and bulk-deletes up to 100 accounts with per-row
-  results.
-  Plaintext export stays behind `AJS_ALLOW_PLAINTEXT_EXPORT=1` and an `EXPORT` confirmation, and
-  an encrypted export is always available. A read-only renewal drawer shows the vendor's public
-  price snapshot, its official purchase link and a countdown; no payment is automated and no token
-  rides the link. Theme, language, sidebar-collapse and node-state glyphs morph with a spring
-  (an MIT-attributed adapted morphicons core, instant swap under `prefers-reduced-motion`).
-  The public docs site ships inside that same static bundle at `/docs`: no admin token, no admin
-  shell, no `/v1/` proxy — just the files the build emitted. It carries six curated pages
-  (overview, authentication, scopes, errors, SDKs, limits) and an API reference generated from
-  `docs/openapi.json` that lists the 56 customer-callable operations and counts the 92
-  operator-only ones by tag (the 41 under closed product lines only as an omitted total).
-  `cd dashboard && npm run docs:gen` regenerates `src/docs/reference.generated.ts`,
-  `public/docs/*.md` and `public/llms.txt`; CI runs the same generator with `--check`, so a
-  contract change without a regenerated mirror fails the build.
-- `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
-  store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
-  (local subscription render, platform create/update, lease rotate through platform filter
-  exclusion, node drain/undrain, probe-config patch), an AES-256-GCM sealed secret file that
-  `DELETE /v1/accounts/{id}` prunes from both the snapshot map and `secrets.json` before the
-  in-memory cascade (a sealer failure answers 503 and leaves the account and its secret in place),
-  a Prometheus `/metrics` endpoint, a Lab telemetry view (`/v1/lab/*`: overview, flags, gates,
-  sessions, egress, profiles, bounded redacted log ring, diagnostics, plus per-account
-  servers/device; the GETs are read-only and one POST (`/v1/lab/egress-check`) runs an explicit
-  egress probe that stores nothing), and the account control, FV session factory, node controller,
-  SOCKS5 + HTTP CONNECT gate and process-group kill with `WaitDelay` supervisor seams. The P1
-  control surface is served too: account export/import/bulk-delete, catalog selection with guarded
-  connect/reconnect/disconnect (one session per account, per-account cooldown, `snapshotId`
-  guard), and a cron/interval/once scheduler behind `AJS_SCHEDULES=1` whose fire journal makes a
-  missed run `unknown` rather than replaying it. The device pool seals each account's vendor
-  identity in a separate file under an HKDF-derived key, restores a retired identity when the same
-  account returns, and converts the v1 plaintext map at startup. The same process serves the
-  platform wave: `/v1/leases` (create a lease for a user and platform with an optional account pin
-  and TTL; an `Idempotency-Key` replays the original lease, a second active lease for the same user
-  and platform is a 409, and quota/concurrency/capacity refusals are 429 — revoke needs
-  `confirm:true` and, with a Resin panel, deletes the panel lease before the store row). Each
-  account reports the vendor's 同时连接数 (`useCount`) and a display capacity `effectiveSlots =
-  min(useCount, AJS_ACCOUNT_SLOTS, 8)`. Lease admission counts verified, listener-bound serving
-  slots (one per live gate), so a second lease is admitted only when a second slot is actually
-  live; otherwise it is 429 `account_slots_exhausted`. The live account has `useCount=1`, so
-  `effectiveSlots=1` and only one lease can be admitted. The per-slot runtime is implemented and
-  offline-tested, but two-slot coexistence has not been proven against the vendor (0/2 authorized
-  coexisting flows), so a lease on a display capacity above 1 still carries
-  `warning: multi_session_unimplemented` for API compatibility.
-  `/v1/device-pool` (list, generate, assign/release/retire/quarantine/purge with
-  confirm tokens, passphrase export/import), `/v1/scoped-keys` (`ajs_sk_` least-privilege keys
-  with a per-route scope table, account/region read restrictions and `usage:read`/`renewal:read`/
-  `health:read` for customer-scoped reads), `/v1/renewal/*` (cached public plan table and
-  per-account expiry, with no payment call and redirects refused), `/v1/usage` (request-log
-  aggregation with `rowsRetained`/`retentionDays`, fed by gate flows unless `AJS_FLOW_METER=0`),
-  `/v1/health/nodes` (loopback gate sampler: 30 s probes, 120 samples per node,
-  `AJS_HEALTH_MAX_NODES` rings with eviction healing), `/v1/webhooks*` (HMAC-SHA256 delivery with
-  five attempts, a 200-attempt in-memory ring and a persisted delivery history — 50 rows per
-  endpoint, 500 total, merged newest first behind `?limit`; a dead-lettered delivery writes one
-  warning `webhook.dead_letter` audit row; a receiver must not resolve to a private address unless
-  `AJS_WEBHOOK_ALLOW_PRIVATE=1`) and `/v1/backup*` (passphrase-encrypted panel backup, inspect and
-  a dry-run-first restore).
-  The tenant wave adds the opt-in customer portal (`/v1/portal/*` and `/v1/admin/tenants*` behind
-  `AJS_TENANT_PORTAL=1` and an exact `AJS_TENANT_ORIGIN`, with `AJS_TRUSTED_PROXIES` deciding whose
-  `X-Forwarded-For` is believed): signup stores a pending tenant only, login issues a
-  `__Host-ajs_portal` cookie (Secure, HttpOnly, SameSite=Strict, 8 h absolute/30 min idle) plus a
-  CSRF token that every unsafe method must replay, approval binds exactly one panel user, and the
-  portal reads only the linked user's leases, usage and keys. Every unsafe admin request also
-  requires the non-simple `X-AJS-CSRF: 1` header and, when `Origin` is present, an exact match
-  against `AJS_ADMIN_ORIGINS`; CLI and SDK clients omit `Origin` but must send the header.
-  It also adds a through-gate egress
-  probe (`AJS_EGRESS_PROBE=1`, `AJS_EGRESS_INTERVAL` ≥ 10 s, `AJS_EGRESS_TARGET`) that folds a
-  real sample into each `/v1/health/nodes` row, `lease.created`/`lease.revoked`/`lease.expired`
-  webhook events, and durable monthly usage counters (`usageMonth`/`monthlyUsage`/`accountUsage`)
-  that outlive request-log eviction and a restart.
-  The order wave serves `/v1/admin/plans*` (validated plan catalogue, soft-deactivate),
-  `/v1/portal/plans` and `/v1/portal/orders*` (own orders only; create is idempotent on
-  `Idempotency-Key` and allows one open order per user), `/v1/portal/orders/{id}/checkout`
-  (易支付 `{payUrl}`), `/v1/admin/orders*` (filter, get, settle, refund, chargeback, cancel),
-  the unauthenticated `/v1/payments/stripe` route behind `AJS_STRIPE_WEBHOOK_SECRET`
-  (HMAC-SHA256 over the raw body with a five-minute tolerance; unset leaves it answering 503)
-  and the unauthenticated `GET`/`POST /v1/payments/epay/notify` callback (MD5 query/form signature; disabled
-  without `AJS_EPAY_GATEWAY`/`AJS_EPAY_PID`/`AJS_EPAY_KEY`, with optional
-  `AJS_EPAY_SIGN_TYPE`/`AJS_EPAY_NOTIFY_URL`/`AJS_EPAY_RETURN_URL`). A 60-second, ±10%-jittered
-  reconciler queries `api.php?act=order` for pending epay orders and settles `status=1` /
-  `TRADE_SUCCESS` rows, bounded to 50 orders per pass. Manual settlement is an admin attestation of offline
-  funds; an epay notify or reconciliation records the gateway-confirmed payment through the same
-  store path. Activation is a separate idempotent grant keyed by order id, and a refund or
-  chargeback revokes that grant and restores the previous quota. The state machine is
-  `awaiting_payment → paid → active`, with
-  terminal `cancelled`, `refunded` and `charged_back`. No daemon route charges a card or transfers
-  money; the epay route only returns the gateway's hosted `payUrl`.
-  After a successful login the node controller starts one loopback gate per usable server and
-  reconciles the Resin subscription; it is wired only when `AJS_ACCOUNT_LOGIN=1` and was
-  live-verified on 2026-10-23 (one account, one node, egress parity with the original app, plus
-  a second login on the same account) and again on 2026-10-24 after the rebuild. Every gate binds
-  `127.0.0.1` and requires RFC 1929 by default (`AJS_GATE_AUTH` unset = `userpass`): the username
-  is a panel user id and the password an active API-key secret, and the gate enforces that user's
-  allowlist and monthly quota before admitting a flow (it requires `AJS_FLOW_METER`).
-  `AJS_GATE_AUTH=loopback` is the explicit no-auth compatibility opt-in; a deployment with no key
-  fails closed.
-  `AJS_GATE_HTTP=1` adds an HTTP CONNECT listener on the gate port plus `AJS_GATE_HTTP_OFFSET`
-  (default 1000) with Basic proxy credentials and the same admission pipeline, answering `200`,
-  `407` (challenge), `403` (policy), `429` (quota, with `Retry-After`) or `405` (non-CONNECT);
-  `AJS_TLS_CERT`/`AJS_TLS_KEY` add an opt-in HTTPS admin listener (HSTS on every response, TLS 1.2
-  floor) beside the plaintext one; and `AJS_RESIN_RECONCILE=1` keeps the Resin view converged with
-  a hash-gated publish, `1m→15m` backoff and transition-only audits.
-  Startup recovery closes the restart gap: before the panel reconcile and the listener, every
-  persisted `LIVE`/`DRAINING` node with no in-process gate is demoted to `STALE` (gate port and
-  egress cleared, leases closed, one `node.recovered_stale` warning audit row; a repeat boot is a
-  no-op), and `AJS_AUTO_LOGIN=1` (requires `AJS_ACCOUNT_LOGIN=1`, off by default) reopens eligible
-  accounts once per process, pausing a jittered 60 s after a failed login. 1385 `func Test`
-  functions — 1339 in `daemon/`, 46 in `emulator/` — mostly `httptest` fakes; the tests use no
-  Resin process, no vendor account and no network. The Linux 4.2.3.0 request shape (B1), stable
-  per-account device identity (B5), binary-carrier mapping (C3) and the live response shapes are
-  covered by offline conformance tests; B1/B3/B4/B5 carry live confirmation, and B5 is confirmed
-  for **one account only** — B2 signing, multi-account coexistence and Resin live publish remain
-  `[UNVERIFIED]`.
-- `deploy/` — Docker Compose control plane: `ajs-accountd` on host loopback `2261`, the dashboard
-  on `127.0.0.1:18081`, and Resin v1.3.0 behind the optional `resin` profile. Both images build
-  from this tree; the stack includes no node supervision and has not run the live login path.
-  The HTTPS admin listener is a compose switch, not a new service: put `fullchain.pem` and
-  `privkey.pem` in `deploy/certs/` (mounted read-only at `/certs`, `*.pem` gitignored) and set
-  `AJS_TLS_CERT=/certs/fullchain.pem`, `AJS_TLS_KEY=/certs/privkey.pem` and optionally
-  `AJS_TLS_LISTEN` (default `127.0.0.1:2262`) in `.env`; a partial pair aborts startup. The
-  continuous reconciler is switched on with `AJS_RESIN_RECONCILE=1` and
-  `AJS_RESIN_RECONCILE_INTERVAL` (default `5m`).
-  A GHCR release pipeline and a one-command `update.sh` exist in the tree but are
-  **`[UNVERIFIED]`**: this repository has no git remote and no tags, so the `v*` release
-  workflow cannot fire and there is no registry image to pull. The AJS LAN ingress block is owned
-  as `deploy/nftables/ajs-panel.nft` (opens `2261` and `18082` to `192.168.11.0/24` only; gate
-  ports stay loopback) and `deploy/check-nftables-drift.sh` is its read-only drift check against
-  the live `/etc/nftables.conf`. See
-  [`deploy/README.md`](deploy/README.md).
-- Resin M1 — **PASS** on HMC against `ghcr.io/resinat/resin:1.3.0`
-  (`sha256:9aa94af706bfa7bc80c8fd78ed562f9a00d4e35e8323728cd17f06af43e665bf`): loopback SOCKS5 dial,
-  IP-anchored sticky `(Platform, Account)` leases, rotation through platform filter exclusion,
-  automatic re-selection after a node kill (3 failed requests over 6.0 s, first successful
-  re-route at 12.6 s), and full state across a Resin restart. Measurements and caveats:
-  [`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
-
-**Not verified or not implemented — the status above must not be read as more than it is:**
-
-- **Live AJiaSu login and smoke test — three logins, 2026-10-23 and 2026-10-24, one account.**
-  With `AJS_ACCOUNT_LOGIN=1`, the original Linux app and the daemon both logged in and egressed
-  the identical `222.186.57.63` through the same vendor node `vvn-2076-264` (镇江 #1); the
-  daemon's gate was `127.0.0.1:13012`. The control hosts present a self-signed `CN=localhost`
-  certificate, so `AJS_CONTROL_CERT_SHA256` (the pinned fingerprint) is required. The vendor
-  allows one active FV data session per account, so `AJS_NODE_LIMIT` defaults to `1`. A **second
-  login on the same account** returned HTTP 200 with identical node/gate state and byte-identical
-  device identity, so B5 (stable device identity) is confirmed — **for that one account**. A
-  **third login on 2026-10-24**, from the rebuilt `2261`, again produced the same node, gate
-  `13012` and egress `222.186.57.63`. Redacted report:
-  [`research/82-live-20261023/REPORT.md`](research/82-live-20261023/REPORT.md).
-- **New client samples are static triage only.** [`research/84-ajs-496/`](research/84-ajs-496/)
-  inventories the Windows 4.9.6.0, macOS 4.9.6.0, Linux 4.3.0.1 and Android 4.12.2.0 builds
-  (six artefacts, SHA-256 per sample, packer/signature/endpoint/version diff). Nothing in that
-  slice was executed — no installer, driver, tunnel or login, and no vendor host was contacted —
-  so the live evidence above still rests on the Linux 4.2.3.0 profile and **one account**. The
-  newer request shape and signing (`X-Sig` in 4.3.0.1, `_v=4.12.2.0` on Android) remain
-  `[UNVERIFIED]` against the vendor.
-- **The `supervisor` package is not used by the controller.** `NodeController`
-  (`daemon/internal/runtime/nodes.go`) now wires login → session factory → per-node gate,
-  with drain/undrain/delete/logout hooks, so the gate is production-wired. The separate
-  `daemon/internal/supervisor` (per-node child start, readiness, events, stop) is still a
-  seam the controller does not call — no `ajsproxy` child is started or supervised.
-- **Still unverified after the 2026-10-23 and 2026-10-24 runs.** Multi-account coexistence on
-  one daemon, Resin + gate live publish, B2 signed requests, B5 beyond one account, and hot
-  update (dynamic API host refresh) are `[UNVERIFIED]`.
-- **Release and update pipeline is `[UNVERIFIED]`.** `deploy/compose.release.yml`,
-  `deploy/update.sh`, `.github/workflows/release.yml` (which builds and pushes GHCR images on a
-  `v*` tag) and `.github/workflows/package.yml` (which builds the three platform binaries and
-  the dashboard bundle on the same tag) are written but never exercised: this repository has
-  **no git remote and no tags**, so neither workflow has fired, no image has been pushed, and
-  `./update.sh --tag` has nothing to pull. Treat `ghcr.io/<owner>/ajs-*:<tag>` as a placeholder
-  until a remote exists.
-- **SQLite / the full schema.** The daemon persists a versioned JSON snapshot (`AJS_STATE_FILE`,
-  every 30s + shutdown) including sealed secrets, but it is not the SQLite schema in
-  `docs/PANEL.md`; the snapshot is a v0.1 stopgap.
-- **Packaged deployment beyond the control plane.** `deploy/compose.yml` builds and runs
-  `ajs-accountd` + the dashboard (Resin optional), but the supervisor node lifecycle is still
-  absent and the stack has not run the live login path, so it proxies no traffic. `deploy/package.sh`
-  produces standalone `linux-amd64`, `windows-amd64` and `darwin-arm64` binaries plus the
-  dashboard bundle, but there is no Windows service, launchd unit or systemd unit.
-- **Continuous reconciler is off by default.** With `AJS_RESIN_RECONCILE=1` the daemon keeps the
-  Resin view converged: each tick hashes the desired state and publishes only on a change, a failed
-  publish backs off `1m→2m→4m→8m→15m`, and only transitions are audited
-  (`resin.reconcile_failed` / `resin.reconcile_recovered`). Unset, Resin drift is corrected only by
-  an explicit `POST /v1/reconcile`. Neither path has been run against a live Resin in this wave;
-  probes are bookkeeping canaries, not network probes.
-- **The P1 surfaces are offline-tested only.** Catalog selection/connect, account export/import
-  and bulk delete, lease creation/revocation, SOCKS5 gate user authentication (`userpass`,
-  allowlists, per-user quota), the device pool and the scheduler have unit and `httptest` coverage
-  but have never been exercised against the live vendor account. The scheduler is off unless
-  `AJS_SCHEDULES=1`; the device pool needs `AJS_MASTER_KEY` (and is off under
-  `AJS_DEVICE_POOL=0`).
-- **The platform wave is offline-tested only.** Scoped keys (including the three read scopes), the
-  device-pool HTTP API, renewal plans/status, flow-metered usage, the health sampler, webhook
-  delivery with its SSRF policy, and panel backup/restore have unit and `httptest` coverage but
-  have never run against the live vendor account, a real webhook receiver or a real restore.
-  Renewal returns the vendor's public price snapshot and its official purchase page — nothing
-  posts to a payment endpoint and no account id or token rides the link. The health probe dials
-  `127.0.0.1` only, so it reports gate reachability on the daemon host, not vendor reachability;
-  it keeps one hour of samples (120 at 30 s) for at most `AJS_HEALTH_MAX_NODES` nodes (default 16)
-  and re-arms an evicted watched ring within a reconcile tick. The flow meter records one row per
-  completed gate flow and never a rejected one, and `/v1/usage` reports the 10 000-row cap with
-  the day span it actually covers. Webhook retries and the live 200-attempt ring live in memory,
-  so a restart drops queued retries and the live window; the persisted delivery history (50 rows
-  per endpoint, 500 total) and a dead-lettered delivery's warning audit row survive in the
-  snapshot, and the signing secret survives a restart only with `AJS_MASTER_KEY`. A backup
-  envelope carries sealed credentials; restore writes the panel files only on an explicit apply
-  and the daemon must then be restarted.
-- **The access wave is offline-tested only.** HTTP CONNECT has relayed real TLS bytes only to a
-  local echo server in `http_test.go`; no HTTP CONNECT client has reached a vendor node. The HTTPS
-  admin listener has served in-process tests only — no browser or operator has used it. The
-  continuous reconciler has never published to a live Resin. The HTTP listener is loopback-only,
-  like the SOCKS5 gate, and the TLS listener changes the transport, not the authentication: a
-  bearer token is only as safe as the network it crosses.
-- **The tenant wave is offline-tested only.** No browser has signed up, held a portal session or
-  been approved outside `httptest`, and no tenant has consumed a key. The portal cookie is
-  `Secure`, so a plain-HTTP deployment cannot use it; `AJS_TENANT_ORIGIN` must name the exact
-  origin, and forwarded client IPs are believed only from `AJS_TRUSTED_PROXIES`. The egress probe
-  has measured only loopback gates and a local target — no sample has crossed a vendor node, and
-  each sample would spend one real vendor flow, which is why it is off by default. No webhook
-  receiver has consumed a `lease.*` event, and the durable quota counters have been exercised only
-  by store tests, never by a full month of live traffic.
-- **The order wave is offline-tested only.** No customer has created an order and no administrator
-  has attested an offline receipt outside `httptest`, and no real Stripe or 易支付 event has
-  reached `/v1/payments/stripe` or `/v1/payments/epay/notify` — both adapters stay disabled until
-  their secrets are configured.
-  Manual settlement records money an operator attests was received offline; an epay notify or
-  reconciliation records a gateway-confirmed payment. In every case the daemon never charges a
-  card, stores no card data and sends no payment request. Refund and chargeback record evidence
-  and revoke the entitlement; they transfer nothing. Plan activation, the single grant per order and
-  the review quarantine have store and HTTP coverage only; the console no longer ships an order or
-  tenant surface, and no browser has driven one against a live order.
-
-The remaining product layer — live multi-account coexistence on one daemon — is designed but not
-proven; per-account multi-slot is implemented and offline-tested, and the live account still has
-one slot. Lease allocation (`POST /v1/leases`, one active lease per user and platform) and
-per-user gate access (`AJS_GATE_AUTH=userpass` with an allowlist and monthly quota) are served and
-offline-tested but have never run against the live vendor. See [`docs/PANEL.md`](docs/PANEL.md)
-for the build sheet and [`research/70-panel/REPORT.md`](research/70-panel/REPORT.md) for the
-candidate analysis behind it.
-
-[`docs/openapi.json`](docs/openapi.json) is the OpenAPI 3.1 contract for the daemon's HTTP
-surface (120 paths, 147 operations, 195 schemas at the last sync): every route registered in
-`daemon/internal/api/server.go` — accounts and account IO, device pool, catalog selection/connect,
-schedules, scoped keys, the platform views (renewal, usage, health, webhooks), plans and orders,
-the Stripe-compatible and 易支付 payment callbacks, the customer tenant portal and tenant
-administration,
-panel backup and the Lab. The `P1` interfaces (account IO, catalog selection/connect, schedules)
-are registered in this build too; the scheduler engine stays off unless `AJS_SCHEDULES=1`.
-Scoped API keys (`ajs_sk_`, least privilege with per-route scopes and account/region restrictions)
-are served as P0. Each operation carries
-`x-implementation-phase` (`P0` is served today, `P1` marks the interfaces added after P0).
-`dashboard/tests/openapi.test.ts` fails when the document stops parsing, a `$ref` dangles, an
-`operationId` repeats, or the route table and the contract drift apart.
-
-## Scope and tiers
-
-- **Tier 1** — orchestrate the official Linux client as a black box and expose its egress as a
-  proxy. Fast, low protocol risk, prior art exists.
-- **Tier 2** — native reimplementation of the `FV` protocol (login, node list, tunnel), running
-  without any vendor binary. This is the north star.
-
-The Windows kernel component shipped with the client is the stock OpenVPN TAP-Windows driver
-(`tap0901`); it is the system-wide TUN path only, and a SOCKS5/HTTP proxy API does not need it.
+The daemon, emulator, dashboard, and SDK suites run offline: no vendor account, vendor network
+call, or Resin process is required.
 
 ## Quick start
 
-```bash
-# 1. Mock dashboard — deterministic in-browser data, no backend, no network
-cd dashboard && npm ci && npm run dev          # http://127.0.0.1:5173
+### Prerequisites
 
-# 2. Daemon, loopback only (from daemon/). go.mod replaces ajsproxy => ../emulator,
-#    so the two trees must be sibling directories in the same checkout.
-#    A local run needs no token: AJS_ALLOW_INSECURE=1 disables auth and startup
-#    refuses it on any non-loopback bind. For a real token, export one first:
-#      export AJS_ADMIN_TOKEN=$(openssl rand -hex 32)
+- **Go 1.26.10 or newer.** The module files declare `go 1.26.10`.
+- **Node.js 24** and npm.
+- Git, and a POSIX shell for `deploy/package.sh`.
+
+Building and testing need no vendor account and no network access to the vendor.
+
+### Build and test
+
+```bash
+# Daemon and emulator. daemon/go.mod replaces ajsproxy => ../emulator,
+# so keep the two trees as siblings in the same checkout.
+cd daemon && go vet ./... && go test -race -count=1 ./...
+cd ../emulator && go vet ./... && go test -race -count=1 ./...
+
+# Dashboard
+cd ../dashboard && npm ci && npm run verify:lockfile
+npm test -- --pool=forks --maxWorkers=1
+VITE_USE_MOCK=false VITE_API_BASE= npm run build
+
+# SDKs
+cd ../sdk/go && go test -race -count=1 ./...
+cd ../sdk/ts && npm ci && npm test && npm run typecheck
+```
+
+### Run locally
+
+```bash
+# Terminal 1 — control plane on loopback only
 cd daemon
 AJS_LISTEN=127.0.0.1:2261 AJS_ALLOW_INSECURE=1 go run ./cmd/ajs-accountd
 
-# 3. Live dashboard build and static serve (from dashboard/, in a second shell)
-#    With no VITE_PANEL_TOKEN the bundle sends no Authorization header, which
-#    the insecure daemon ignores. VITE_PANEL_TOKEN is refused at build time;
-#    production terminates auth in a BFF or reverse proxy.
+# Terminal 2 — dashboard against the loopback daemon
+cd dashboard
 VITE_USE_MOCK=false VITE_API_BASE=http://127.0.0.1:2261 npm run build
-npx vite preview --host 127.0.0.1 --port 18082   # http://127.0.0.1:18082
-
-# 4. Control-plane compose stack: accountd + dashboard (Resin optional)
-cd deploy && cp .env.example .env                 # from the repo root; fill in the placeholders
-docker compose up -d --build                      # dashboard: http://127.0.0.1:18081
+npx vite preview --host 127.0.0.1 --port 18082
 ```
 
-The compose stack builds both images from this tree and runs `accountd` on host loopback `2261`.
-Its dashboard publishes the same `18081` as the standalone `dashboard/compose.yml`, so stop one
-before starting the other. Prerequisites, the live/mock build switch, the optional `--profile
-resin`, health checks, backup/restore and the honest limitations are in
-[`deploy/README.md`](deploy/README.md).
+`AJS_ALLOW_INSECURE=1` is a loopback-only lab switch; startup refuses it on a non-loopback bind.
+For a real deployment, set `AJS_ADMIN_TOKEN` to at least 32 random characters (for example
+`openssl rand -hex 32`) and terminate authentication in a BFF or reverse proxy. Never bake a token
+into a `VITE_*` variable: every `VITE_*` value is readable in the built bundle.
 
-`AJS_ALLOW_INSECURE=1` is a loopback-only lab switch: startup refuses it unless `AJS_LISTEN` is
-loopback, and the daemon then accepts `/v1/*` without a bearer token. For a real deployment,
-generate a token with `openssl rand -hex 32` — startup refuses the documented placeholders and
-anything shorter than 32 characters — and set it only as `AJS_ADMIN_TOKEN` on the daemon.
-`VITE_PANEL_TOKEN` is refused at build time because every `VITE_*` value is baked into `dist/`
-and readable by anyone who can fetch it. Keep `ajs-accountd` bound to `127.0.0.1` and terminate
-real authentication in a BFF or reverse proxy, or serve a token-free bundle and let the runtime
-token gate collect the token per browser tab.
+### Issue an operator key
 
-The HMC build host serves the mock dashboard on loopback `18081`
-(`docker compose up -d` in `dashboard/`) and the live pair on the LAN:
-`http://192.168.11.4:18082` (live `vite preview` build) against `http://192.168.11.4:2261`
-(`ajs-accountd`, rebuilt from HEAD on 2026-10-24 with login enabled). The LAN daemon runs with
-bearer auth — `AJS_ALLOW_INSECURE` is not set, so every `/v1/*` call needs the token and a
-token-less request answers 401 — and the LAN build bakes no `VITE_PANEL_TOKEN`, so the
-dashboard's runtime token gate prompts on the first 401 and keeps the value in `sessionStorage`
-for that tab. The live store is demo-free: a one-shot `AJS_DROP_DEMO=1` run on 2026-10-24
-(`demo_purged accounts=6 nodes=12 leases=8 users=4 keys=6 requests=40 audit=20`) removed the mock
-accounts, nodes, leases, users, keys, requests and seed audit rows from the snapshot, and the
-switch was then unset. What remains is exactly one account, `acc-07` (`live-ajs-01`, `active`), and
-one node, `acc-07:vvn-2076-264` (`LIVE`); `GET /healthz` reports one active account. The retained
-login result is a 2,814-server vendor catalog, all in region `cn` (rendered as one *China* group),
-so the Nodes catalog totals 2,814 rows, paged 50 at a time, with that one node marked current and
-no demo names. Gate listeners are allocated per node from `127.0.0.1:13000` upward, so read the
-current listener and state from `GET /v1/lab/gates` rather than assuming a fixed port (the purge
-deployment reported `13000`).
-SOCKS5 through that gate egresses `222.186.57.63`, the same address as the original app; the
-vendor's claimed egress is a per-session RFC1918 value — `10.98.206.1` on the current session,
-`10.78.248.1` on the purge run — so the Lab egress check renders `match:false` (verified vs
-claimed) by design. The `18082` dashboard was rebuilt against `2261` with the APC
-slice. `/v1/system/update` answers 200 with `enabled:false` because `AJS_UPDATE_REPO` is empty. The
-separate lab `ajs-accountd` on `2262` is stopped.
-Resin listens on `2260` when running. `deploy/` packages the same pair
-as one stack and reuses `18081`, so run either it or the standalone dashboard compose,
-not both. The LAN URL is reachable directly from Windows; the tunnels below still work for the
-loopback-only mock build and for hosts that cannot route to `192.168.11.4`:
+Scoped keys are **admin-issued**; there is no self-service key issuance. Create one in the
+dashboard under **Settings → Access**, or with the admin token:
 
 ```bash
-ssh -N -L 18081:127.0.0.1:18081 hmc
-ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
+curl -sS -X POST http://127.0.0.1:2261/v1/scoped-keys \
+  -H "Authorization: Bearer $AJS_ADMIN_TOKEN" \
+  -H "X-AJS-CSRF: 1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "u-10",
+    "label": "demo",
+    "scopes": ["catalog:read", "leases:read", "leases:write", "proxy:connect", "usage:read"],
+    "accountIds": ["<accountId>"],
+    "rateLimitPerMin": 60
+  }'
 ```
 
-Tests: `cd dashboard && npm test` (475 tests in 54 files), `cd daemon && go test ./...`
-(1339 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
-All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
-the M1 spike; see the evidence sections of
-[`dashboard/README.md`](dashboard/README.md), [`daemon/README.md`](daemon/README.md) and
-[`research/77-m1-spike/REPORT.md`](research/77-m1-spike/REPORT.md).
+The response contains `"secret": "ajs_sk_..."`, shown exactly once; only its hash is persisted.
+The key is bound to its `userId` and narrowed to the accounts or regions it names.
 
-## Packaging (Windows, macOS, Linux)
-
-`deploy/package.sh` builds the release artifacts without Docker and without CGO:
+### Use the public edge
 
 ```bash
-bash deploy/package.sh --version 0.1.0 --out dist
-(cd dist && sha256sum -c SHA256SUMS)
+# Read the guide and the generated reference (no token required)
+# https://ajs.dwgx.top:2055/docs
+
+# Scoped API
+curl -sS https://ajs.dwgx.top:2055/v1/leases \
+  -H "Authorization: Bearer $SCOPED_KEY"
+
+# HTTPS CONNECT through the lease's port. The port comes from the lease
+# (connection.port) and is in the live map 13000-13010.
+curl -x "https://u-10:$SCOPED_KEY@gate.dwgx.top:<leasePort>" https://example.com/
 ```
 
-It writes `ajs-accountd-linux-amd64`, `ajs-accountd-windows-amd64.exe`,
-`ajs-accountd-darwin-arm64`, `dashboard-dist.tar.gz`, `MANIFEST.txt` and `SHA256SUMS` into
-`dist/`. The three binaries are built with `CGO_ENABLED=0` (the Linux output is statically
-linked) and `-trimpath -buildvcs=false -mod=readonly -ldflags="-s -w -buildid="`;
-`MANIFEST.txt` records the version, commit, Go toolchain, per-target flags and artifact hashes.
-`dashboard/dist` must be a live, token-free bundle, or use `--build-dashboard` to run the single
-live recipe in `deploy/production/build-bundles.sh`. A mock `dashboard/dist` is refused; a build
-with `VITE_PANEL_TOKEN` set fails in `vite.config.ts`.
+The username is the lease owner's panel user id; the password is a scoped key carrying
+`proxy:connect` and granting the lease's account. The SOCKS5 gate stays loopback: there is no
+public SOCKS5 ingress. The demo's availability is best effort and may be withdrawn.
 
-The same script runs in [`.github/workflows/package.yml`](.github/workflows/package.yml) on a
-`v*` tag and attaches the six files to the GitHub Release. The image workflow
-([`release.yml`](.github/workflows/release.yml)) attaches no assets, so the checksum file always
-describes the complete set. The artifacts are standalone binaries and a static bundle, not
-service wrappers: there is no Windows service, launchd unit or systemd unit in the tree. Build
-flags, checksum verification, the `MANIFEST.txt` fields, and daemon plus dashboard startup from
-an unpacked artifact (state directory, token, TLS, CORS) are documented in
-[`deploy/packaging.md`](deploy/packaging.md).
+## Documentation
 
-## Layout
+| Document | Purpose |
+|---|---|
+| [DISCLAIMER.md](DISCLAIMER.md) | affiliation, authorised use, demo limits, warranty |
+| [SECURITY.md](SECURITY.md) | private vulnerability reporting and scope |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | one concern per PR, tests, evidence, no AI attribution |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
+| [GOVERNANCE.md](GOVERNANCE.md) | single-maintainer / BDFL model |
+| [PROTOCOL.md](PROTOCOL.md) | how changes and releases move (not the wire protocol) |
+| [CHANGELOG.md](CHANGELOG.md) | release index, including `v0.1.0-pre` |
+| [ROADMAP.md](ROADMAP.md) | honest near-term work and explicitly closed directions |
+| [CITATION.cff](CITATION.cff) | how to cite this release |
+| [docs/API-GUIDE.md](docs/API-GUIDE.md) | scoped-key API quickstart, scopes, curl examples |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, ports, trust boundaries, live topology |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | install, upgrade, health, backup, rollback |
+| [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | what is enforced, where, and what is not protected |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | stored data, retention, and operator responsibilities |
+| [docs/EPAY-STATUS.md](docs/EPAY-STATUS.md) | why the payment and tenant surfaces are off |
+| [docs/RELEASE.md](docs/RELEASE.md) | version scheme, release gates, artifacts, rollback |
+| [docs/releases/v0.1.0-pre.md](docs/releases/v0.1.0-pre.md) | full release notes and known limitations |
+| [docs/RBAC.md](docs/RBAC.md) | operator RBAC contract |
+| [docs/PANEL.md](docs/PANEL.md) | historical control-plane design baseline |
+| [docs/openapi.json](docs/openapi.json) | OpenAPI 3.1 contract (source of truth) |
+| [sdk/README.md](sdk/README.md) | Go and TypeScript clients |
+| [deploy/README.md](deploy/README.md) | compose deployment |
+| [deploy/packaging.md](deploy/packaging.md) | artifact build, manifest, checksums |
+| [dashboard/README.md](dashboard/README.md) | console manual |
+| [daemon/README.md](daemon/README.md) | daemon and operator manual |
+| [emulator/README.md](emulator/README.md) | offline Tier-2 FV emulator |
+| [ARCHIVE.md](ARCHIVE.md) | archive map: retained, experimental, gaps |
+| [NOTICE](NOTICE) | third-party software, icon, and map-data attribution |
+| [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | notices shipped with the release artifacts |
 
+The wire-protocol research record is [research/40-protocol/PROTOCOL.md](research/40-protocol/PROTOCOL.md);
+the root [PROTOCOL.md](PROTOCOL.md) is the project collaboration and release protocol.
+
+## Experimental and disabled surfaces
+
+The tenant portal (`AJS_TENANT_PORTAL`), orders, and the 易支付 (epay) / Stripe adapters are
+experimental, AI-generated research paths. In `v0.1.0-pre` they are disabled and are **not routed
+by the public edge**. They are not a payment service: no card is charged, no money is transferred,
+and no support is offered. The code exists in the tree behind flags; do not deploy it as a payment
+system. See [docs/EPAY-STATUS.md](docs/EPAY-STATUS.md) for what exists, what is configured, and
+what is deliberately off.
+
+The remote-ingress credential store described by older documents was removed from the code; there
+is no `AJS_REMOTE_INGRESS` surface in this release. SOCKS5 gates bind loopback, and the public
+data-plane listener is HTTPS CONNECT only.
+
+## Security
+
+Report vulnerabilities privately — never in a public issue. Use the repository's **Security →
+Report a vulnerability** channel (GitHub Security Advisories), or contact the owner profile named
+in [GOVERNANCE.md](GOVERNANCE.md). First response is a best effort within 72 hours. Do not run
+automated scans or exploitation against the operator-run demo without written permission; use a
+local instance.
+
+The 2026-10-24 audit at [research/83-audit-bench/SECURITY.md](research/83-audit-bench/SECURITY.md)
+is a research record, not this policy.
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. In short: one concern per
+PR, tests for behaviour, every claim cites a path or command (or is marked `[UNVERIFIED]`), no
+credentials or vendor artifacts, and no AI attribution in commits. Security reports go through
+[SECURITY.md](SECURITY.md), not the issue tracker. Participation is covered by
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## Use boundary
+
+This project is for operators driving accounts they own or are explicitly authorised to use.
+Commercial resale or automation is permitted only under a separate written authorisation from the
+vendor that covers the operator's accounts, the service being resold, and the jurisdictions
+involved; keep that authorisation on file. Without it, the project is single-operator self-use
+only: no resale, no sharing of access, no published endpoints, no bypassing vendor account limits,
+and no use to hide the origin of abusive traffic. The operator is responsible for the vendor's
+terms of service and for local law.
+
+## Evidence
+
+```bash
+# OpenAPI counts
+python - <<'PY'
+import json
+d = json.load(open("docs/openapi.json", encoding="utf-8"))
+print(len(d["paths"]), sum(1 for p in d["paths"].values() for m in p
+      if m in {"get","post","put","patch","delete","head","options"}))
+PY
+# -> 120 148
+
+# Test functions / tests (counts are not pinned here; measure them)
+grep -r '^func Test' daemon --include='*_test.go' | wc -l
+grep -r '^func Test' emulator --include='*_test.go' | wc -l
+grep -r '^func Test' sdk/go --include='*_test.go' | wc -l
+find dashboard/tests -name '*.test.ts*' | wc -l
 ```
-README.md                  this file
-PLAN.md                    campaign plan, slices, acceptance criteria, risks
-LICENSE                    MIT
-NOTICE                     third-party software, icon and map-data attribution
-docs/PANEL.md              control-plane design: ports, API, data model, phases
-docs/openapi.json          OpenAPI 3.1 contract (P0 served; P1 marks interfaces added after P0,
-                           registered in this build, scheduler gated by AJS_SCHEDULES=1)
-dashboard/                 operator console (React/Vite/TypeScript); see dashboard/README.md
-daemon/                    ajs-accountd control-plane skeleton (Go 1.26); see daemon/README.md
-deploy/                    Docker Compose control plane (accountd + dashboard, Resin profile); see deploy/README.md
-deploy/nftables/           AJS LAN ingress block (fragment) + deploy/check-nftables-drift.sh
-emulator/                  offline Tier-2 FV emulator (Go)
-scripts/m1/                M1 spike harness: loopback SOCKS5 nodes (dummy-socks)
-research/00-plan/          question tree, master index, ledger
-research/10-* .. 90-*      per-slice research output (later waves)
-research/70-panel/         panel research: candidate matrix, sources, validation script
-research/77-m1-spike/      Resin v1.3.0 M1 spike report (PASS) and measurements
-research/82-live-20261023/  first live-account run: original app vs daemon egress parity (redacted)
-research/84-ajs-496/       static triage of the 4.9.6.0 / 4.3.0.1 / 4.12.2.0 samples (not executed)
-```
-
-## FV carrier confidentiality
-
-The FV carrier is **obfuscation, not encryption**. The outer 16-byte key travels in the clear in every request, and AES-128-CTR is reused inside a session: the data channel encrypts both directions with `AES-128-CTR(sessionKey, IV=div)`. That data-channel reuse is confirmed against the live vendor (`research/82-live-20261023/REPORT.md` F4): an observer who can read the TCP stream can XOR the two directions of a flow and crib-drag the leading bytes. The auth body and the auth map share `AES-128-CTR(sessionKey, IV=n)` from offset 0 **in the emulator's implementation only**: this is confirmed against the mock capture (`captures/fvmock-1.log`) and is the emulator's assumption for the vendor, because a server that continues the body stream at offset `l=` would also decode and the live run does not distinguish them (`r=ok` also arrives in the response text). Under that assumption an observer can also XOR the auth body with the auth map over their shared `min(len(body), len(map))` prefix to recover `sid`, `sip`, `cip`, `dns` and `au`. With the Android field set (`DefaultAuthConfig`) and no body pad the `p=<password>` line starts at offset 136; production prepends the `_=` pad (`RandomPad`, 0..199 bytes, sorted first), so the offset is 136..335, and overlap with the mock's 187-byte map exposes a short password only when the pad is 50 bytes or shorter. The captured Linux body puts `p=` at offset 328, outside that map. The observer cannot derive the session key (RSA-OAEP, fresh per session), cannot recover relayed payload past the shared prefix, and cannot break TLS carried inside the tunnel. This is inherited from the vendor protocol and is **not fixed here on purpose**: changing the IV derivation breaks the shipping client. Treat the daemon-to-vendor hop as public; terminate TLS in the client or carry the hop over a tunnel you control.
-
-## Legal and terms-of-service caution
-
-This work is reverse engineering for interoperability research. Before any use of the findings:
-
-- The vendor's terms of service, and the terms of any account used for testing, govern what is
-  permitted. Automated or programmatic use of the service may violate them.
-- Do not use this research to bypass account limits, resell access without vendor authorization,
-  or hide the identity of abusive traffic. The egress-IP selection described here is a technical
-  capability, not a licence to misuse the service.
-- Reverse engineering is restricted by law in some jurisdictions. Check your own.
-- Any published code must carry a licence compatible with the obligations above.
-
-## No-credentials rule
-
-**Never commit credentials.** No accounts, passwords, e-mail addresses, tokens, TOTP secrets,
-session cookies, or hashes of any of them belong in this repository — not in reports, not in
-test fixtures, not in commit messages. `.env`, `*.key` and `*.pem` are ignored by default.
-
-Live testing, when it happens, is performed with an Owner-supplied throwaway account and the
-results are recorded as observations only; the credential itself is never written to disk in
-this tree.
-
-The commands above either run with auth disabled on loopback or use a token generated at run time
-and kept in the shell; no credential is written to the tree. The live dashboard token is a
-build-time value, and the daemon, the dashboard and Resin all stay bound to `127.0.0.1`.
-
-## Reports
-
-All research reports are written in English and cite a path, URL, or command for every claim.
-Claims that were not directly observed are marked `[INFERENCE]` or `[UNKNOWN]`.
 
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 dwgx.
 
-Third-party components and data keep their own terms and are attributed in
-[NOTICE](NOTICE): the Morphicons-derived icon-morph core (MIT, © 2026 Guillermo),
-Lucide and Feather icon data (ISC/MIT), the DataV GeoAtlas-derived map assets
-(AMAP/DataV terms, not MIT) and the Go module dependencies. The panel design
-uses [Resin](https://github.com/Resinat/Resin) unmodified under its MIT
-license; it is not redistributed here. No AGPL-licensed or unlicensed code is
-copied into this repository.
+Third-party components and data keep their own terms and are attributed in [NOTICE](NOTICE): the
+Morphicons-derived icon-morph core (MIT, © 2026 Guillermo), Lucide and Feather icon data
+(ISC/MIT), the DataV GeoAtlas-derived map assets (AMAP/DataV terms, not MIT), and the Go module
+dependencies. The panel design uses [Resin](https://github.com/Resinat/Resin) unmodified under its
+MIT licence; it is not redistributed here.
 
-Use of the AJiaSu service remains subject to the vendor's terms of service;
-the MIT license on this repository grants no rights to the vendor's software,
-service, data or marks.
-
-## Use boundary
-
-This project is for operators driving accounts they own or are explicitly authorized to use.
-Commercial resale or automation is permitted only under a separate written authorization from the
-vendor that covers the operator's accounts, the service being resold, and the jurisdictions
-involved; keep that authorization on file. Without it, the project is single-operator self-use
-only: no resale, no sharing of access, no published endpoints, no bypassing vendor account limits,
-and no use to hide the origin of abusive traffic. The operator is responsible for the vendor's
-terms of service and for local law. The same boundary is restated in `PLAN.md` and
-`docs/PANEL.md`.
+Use of the AJiaSu service remains subject to the vendor's terms of service. The MIT licence grants
+no rights to the vendor's software, service, data, or marks.

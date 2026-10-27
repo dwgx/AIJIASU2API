@@ -5,7 +5,10 @@
 #
 #   docker build -f daemon/Dockerfile -t ajs-accountd:local .
 
-FROM golang:1.26-alpine AS build
+# The tag and the multi-arch manifest-list digest are pinned together: the tag
+# documents the intended release, the digest makes the actual base image
+# immutable even if the tag is moved.
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
 
 ENV GOTOOLCHAIN=local
 WORKDIR /src
@@ -32,6 +35,10 @@ RUN apk add --no-cache ca-certificates \
  && chown ajs:ajs /data
 
 COPY --from=build /out/ajs-accountd /usr/local/bin/ajs-accountd
+
+# Redistribution obligations: the MIT project license plus the third-party
+# notices (Go/x-crypto BSD text, dashboard assets) travel inside the image.
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/licenses/ajs-accountd/
 
 # Loopback by default: the plaintext listener has no TLS and a bearer token
 # baked into the dashboard bundle, so it must not listen on a routable address.

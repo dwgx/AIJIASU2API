@@ -6,22 +6,22 @@ English mirror of this page; the console page carries the Chinese translation.
 
 ## SOCKS5 loopback, HTTPS CONNECT public
 
-The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. Only that HTTP listener is published, through nginx `stream` with TLS on 13000-13010 at `gate.dwgx.top`.
+The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. Only that HTTP listener is published, through nginx `stream` with TLS on 13000-13010 at `gate.dwgx.top`. The reviewed kit forwards straight to `14000-14010`; the live VPS forwards `13000-13010` to chisel-local `15000-15010`, and the tunnel delivers to the HMC’s `14000-14010`. The public port is the lease port either way; the backend port is not.
 
 The public gate edge has four preconditions:
 
 - `AJS_GATE_HTTP=1` on the daemon; with `0` or unset the public ports complete the TLS handshake and then close, because nothing listens on the backend.
-- `AJS_GATE_HTTP_OFFSET=1000`; the stream map hard-codes the backend at lease port + 1000 (14000-14010).
+- `AJS_GATE_HTTP_OFFSET=1000`; the daemon backend is lease port + 1000 (14000-14010). The live VPS reaches it through a chisel forward on 15000-15010, so do not assume the public port equals the backend port.
 - The TLS certificate covers the name customers dial: `gate.dwgx.top`.
 - TCP 13000-13010 are open to the internet; the daemon’s own SOCKS5 and HTTP `CONNECT` listeners stay on `127.0.0.1`.
 
-> **No public SOCKS5** — SOCKS5 remains loopback and tunnel-only: nothing publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the map (`13011+`) has no public edge at all. The HTTPS CONNECT edge is live at `gate.dwgx.top:13000-13010`.
+> **No public SOCKS5** — SOCKS5 remains loopback and tunnel-only: nothing publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the map (`13011+`) has no public edge at all. The HTTPS CONNECT stream map is live on `gate.dwgx.top:13000-13010`, one TLS port per running gate; a port whose node is not live completes TLS and then closes.
 
 ## Public edges live on ajs.dwgx.top and gate.dwgx.top
 
-Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). SOCKS5, the admin origin and the portal routes stay private.
+Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge currently serves 53 of the 54 end-to-end: `GET /metrics` answers `404` because the origin proxies only `/v1/`, so use `/v1/metrics`. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.
 
-The remote-ingress credential store is a different, experimental thing and stays store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, and enabling it creates no proxy endpoint.
+The API hop is plaintext HTTP inside WireGuard: the VPS terminates TLS and proxies to the HMC’s WireGuard address (`10.99.0.2:80`). The HMC internal vhost proxies every `/v1/` path to the daemon, so the allowlist is an edge control, not an origin control. The gate hop uses a chisel forward (`13000-13010` to `15000-15010`); the SOCKS5 listener is never published.
 
 ## One active lease per user and platform
 

@@ -21,30 +21,37 @@ func requireErrorReason(t *testing.T, body []byte, want string) {
 	}
 }
 
-// TestScopedKeyForbiddenReasons pins AJS-440: every refused global read
-// carries error.reason=scoped_key_restricted, a key missing the route scope
-// carries error.reason=scope_required, the human-readable message is
-// unchanged, and admin/unrestricted callers still get 200. Usage and the
-// request log are per-user reads (AJS-451), so they are served rather than
-// refused; a scoped account= usage filter is the handler's 400.
+// TestScopedKeyForbiddenReasons pins the machine-readable reasons of a
+// scoped-key 403. The metrics exposition is a global, unattributed read, so an
+// account-restricted key is refused with scoped_key_restricted. The audit log
+// is operator-global, so every non-admin scoped key is refused with
+// admin_required whatever its grant. A key missing the route scope carries
+// scope_required. Usage and the request log are per-user reads (AJS-451), so
+// they are served rather than refused; a scoped account= usage filter is the
+// handler's 400.
 func TestScopedKeyForbiddenReasons(t *testing.T) {
 	ts, _ := newPlatformServer(t, Config{Usage: usageAggregator()})
 
-	globalReads := []string{
-		"/v1/audit",
-		"/v1/audit/export.csv",
-		"/metrics",
-	}
+	operatorReads := []string{"/v1/audit", "/v1/audit/export.csv"}
 
 	restricted := mustIssueScopedKey(t, ts,
 		[]string{"usage:read", "audit:read", "requests:read", "metrics:read"},
 		[]string{"acc-01"}, nil)
-	for _, path := range globalReads {
+	resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusForbidden)
+	requireErrorCode(t, body, CodeForbidden)
+	requireErrorReason(t, body, ReasonScopedKeyRestricted)
+	if !strings.Contains(string(body), "scoped key is restricted to named accounts") {
+		t.Fatalf("/metrics message changed: %s", body)
+	}
+	// The audit refusal is about the operator boundary, not the account list:
+	// the same key with no accountIds answers the same reason.
+	for _, path := range operatorReads {
 		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)
 		requireErrorCode(t, body, CodeForbidden)
-		requireErrorReason(t, body, ReasonScopedKeyRestricted)
-		if !strings.Contains(string(body), "scoped key is restricted to named accounts") {
+		requireErrorReason(t, body, ReasonAdminRequired)
+		if !strings.Contains(string(body), "operator-global") {
 			t.Fatalf("%s message changed: %s", path, body)
 		}
 	}
@@ -60,7 +67,7 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 
 	// A scoped account= usage filter is INVALID_ARGUMENT: the log has no
 	// stable account id, so the handler refuses the filter instead of guessing.
-	resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, "/v1/usage?account=acc-02", nil)
+	resp, body = scopedCall(t, ts, restricted.Secret, http.MethodGet, "/v1/usage?account=acc-02", nil)
 	requireStatus(t, resp, http.StatusBadRequest)
 	requireErrorCode(t, body, CodeInvalidArgument)
 	if !strings.Contains(string(body), "account filtering is not available to a scoped key") {
@@ -75,7 +82,7 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 	// A key with the wrong scope is refused by the router before the handler
 	// runs, and the reason names the missing grant.
 	scopeless := mustIssueScopedKey(t, ts, []string{"accounts:read"}, []string{"acc-01"}, nil)
-	for _, path := range globalReads {
+	for _, path := range append([]string{"/metrics"}, operatorReads...) {
 		resp, body := scopedCall(t, ts, scopeless.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)
 		requireErrorCode(t, body, CodeForbidden)
@@ -85,11 +92,22 @@ func TestScopedKeyForbiddenReasons(t *testing.T) {
 		}
 	}
 
-	// Admin tokens and unrestricted scoped keys keep their 200 contract.
+	// An unrestricted customer key keeps the metrics exposition and not the
+	// audit log: no account grant turns audit into a customer surface.
 	open := mustIssueScopedKey(t, ts,
 		[]string{"usage:read", "audit:read", "requests:read", "metrics:read"}, nil, nil)
-	for _, path := range globalReads {
-		resp, _ := scopedCall(t, ts, open.Secret, http.MethodGet, path, nil)
+	for _, path := range operatorReads {
+		resp, body := scopedCall(t, ts, open.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
+	}
+	resp, _ = scopedCall(t, ts, open.Secret, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	// Admin tokens and admin-scoped keys keep their 200 contract.
+	adminKey := mustIssueScopedKey(t, ts, []string{"admin"}, nil, nil)
+	for _, path := range append([]string{"/metrics"}, operatorReads...) {
+		resp, _ := scopedCall(t, ts, adminKey.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusOK)
 		resp, _ = apiCall(t, ts, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusOK)

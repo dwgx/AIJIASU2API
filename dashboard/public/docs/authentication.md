@@ -54,7 +54,7 @@ A refusal is `429 RATE_LIMITED` with `Retry-After`. A guarded-switch cooldown an
 
 ## Authentication failures
 
-A missing or invalid bearer answers `401 UNAUTHORIZED` with the JSON error envelope. A key that lacks the route scope answers `403 FORBIDDEN` with `reason: "scope_required"`; a key whose grants exclude the target answers `403` with `reason: "scoped_key_restricted"`. Clients branch on `reason`, not on the human-readable message.
+A missing or invalid bearer answers `401 UNAUTHORIZED` with the JSON error envelope. A key that lacks the route scope answers `403 FORBIDDEN` with `reason: "scope_required"`; a key whose grants exclude the target answers `403` with `reason: "scoped_key_restricted"`; a key calling an operator-global surface (the audit log or the event stream) without the `admin` scope answers `403` with `reason: "admin_required"`. A suspended user’s key is refused `401` until the user is resumed. Clients branch on `reason`, not on the human-readable message.
 
 **401 envelope**
 

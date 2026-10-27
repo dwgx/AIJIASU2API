@@ -154,9 +154,16 @@ func TestEndpointValidation(t *testing.T) {
 		{"https loopback", Endpoint{ID: "ep", URL: "https://127.0.0.1:8080/hook", Secret: "s"}, false, false, false},
 		{"https private", Endpoint{ID: "ep", URL: "https://10.0.0.5/hook", Secret: "s"}, false, false, false},
 		{"http loopback", Endpoint{ID: "ep", URL: "http://127.0.0.1:8080/hook", Secret: "s"}, false, false, false},
+		// The dial guard refuses loopback unless private access is enabled, so
+		// validation refuses it too, including the localhost name that the
+		// scheme rule alone would admit and even with the HTTP opt-in.
+		{"https localhost", Endpoint{ID: "ep", URL: "https://localhost:8443/hook", Secret: "s"}, false, false, false},
+		{"http localhost", Endpoint{ID: "ep", URL: "http://localhost:8080/hook", Secret: "s"}, false, false, false},
+		{"http localhost scheme opt-in", Endpoint{ID: "ep", URL: "http://localhost:8080/hook", Secret: "s"}, true, false, false},
 		{"http loopback lab", Endpoint{ID: "ep", URL: "http://127.0.0.1:8080/hook", Secret: "s"}, false, true, true},
 		{"http ipv6 loopback lab", Endpoint{ID: "ep", URL: "http://[::1]:8080/hook", Secret: "s"}, false, true, true},
 		{"http localhost lab", Endpoint{ID: "ep", URL: "http://localhost:8080/hook", Secret: "s"}, false, true, true},
+		{"https localhost lab", Endpoint{ID: "ep", URL: "https://localhost:8443/hook", Secret: "s"}, false, true, true},
 		{"metadata with lab opt-in", Endpoint{ID: "ep", URL: "https://metadata.google.internal/hook", Secret: "s"}, false, true, false},
 		{"ftp", Endpoint{ID: "ep", URL: "ftp://93.184.216.34", Secret: "s"}, false, false, false},
 		{"userinfo", Endpoint{ID: "ep", URL: "https://user:pass@93.184.216.34", Secret: "s"}, false, false, false},

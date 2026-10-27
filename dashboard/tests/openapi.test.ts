@@ -948,10 +948,14 @@ describe('docs/openapi.json', () => {
     expect(value?.result).toBeNull()
     expect(value?.error).toBeNull()
 
-    // Both scoped-key denial reasons are worked examples on the shared response.
+    // Every scoped-key denial reason is a worked example on the shared response.
     const forbidden = doc.components.responses.ScopedKeyForbidden
       ?.content?.['application/json']?.examples ?? {}
-    expect(Object.keys(forbidden).sort()).toEqual(['account-restricted', 'scope-required'])
+    expect(Object.keys(forbidden).sort()).toEqual([
+      'account-restricted',
+      'operator-only',
+      'scope-required',
+    ])
   })
 
   it('documents the platform surfaces as P0 with one-time webhook secrets', () => {

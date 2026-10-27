@@ -67,10 +67,10 @@ func neutralizeAuditCSVField(field string) string {
 // retained audit history by an inclusive RFC 3339 window and an optional
 // severity, then streams the matching rows oldest-first.
 func (s *Server) handleAuditExportCSV(w http.ResponseWriter, r *http.Request) {
-	// The export reads the same global, unattributed audit rows as /v1/audit,
-	// so a restricted key is refused before the retention window is read and
-	// before any row is selected.
-	if s.denyGlobalRead(w, r, "the audit log") {
+	// The export reads the same operator-global audit rows as /v1/audit, so it
+	// is admin-only for scoped keys and refused before the retention window is
+	// read and before any row is selected.
+	if s.denyOperatorOnly(w, r, "the audit log") {
 		return
 	}
 	from, to, ok := auditExportWindow(w, r)

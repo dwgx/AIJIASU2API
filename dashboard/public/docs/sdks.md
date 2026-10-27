@@ -6,7 +6,7 @@ English mirror of this page; the console page carries the Chinese translation.
 
 ## Go: module ajssdk
 
-The Go client lives in `sdk/go` (module `ajssdk`). It is hand-written against `docs/openapi.json`, dependency-free, and covers accounts, catalog, select-node operations, leases, usage and events. It sends `Authorization: Bearer` and `X-AJS-CSRF: 1` on unsafe methods, omits `Origin`, retries transport errors plus `429`/`500`/`502`/`503`/`504` with backoff, honours `Retry-After`, polls a `202` to a terminal operation, and generates an `Idempotency-Key` for `CreateLease`.
+The Go client lives in `sdk/go` (module `ajssdk`). It is hand-written against `docs/openapi.json`, dependency-free, and covers accounts, catalog and nodes, select-node operations, leases, requests, usage and events. It sends `Authorization: Bearer` and `X-AJS-CSRF: 1` on unsafe methods, omits `Origin`, retries transport errors plus `429`/`500`/`502`/`503`/`504` with backoff, honours `Retry-After`, polls a `202` to a terminal operation, and generates an `Idempotency-Key` for `CreateLease`.
 
 **Accounts, select-node, lease**
 
@@ -19,11 +19,11 @@ result, err := client.SelectNode(ctx, accounts[0].ID, ajs.SelectNodeRequest{
 lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "u-01", Platform: ajs.PlatformIOS})
 ```
 
-Exported methods: `ListAccounts`, `CreateAccount`, `GetAccount`, `PatchAccount`, `DeleteAccount`, `LoginAccount`, `LogoutAccount`, `ListAccountServers`, `SelectNode`, `WaitOperation`, `ListOperations`, `GetOperation`, `CancelOperation`, `ListLeases`, `CreateLease`, `RotateLease`, `ReleaseLease`, `GetUsage`, `ListEvents`, `StreamEvents`, `FollowEvents`.
+Exported methods: `ListAccounts`, `CreateAccount`, `GetAccount`, `PatchAccount`, `DeleteAccount`, `LoginAccount`, `LogoutAccount`, `ListAccountServers`, `SelectNode`, `WaitOperation`, `ListOperations`, `GetOperation`, `CancelOperation`, `ListNodes`, `ListLeases`, `CreateLease`, `RotateLease`, `ReleaseLease`, `GetLease`, `ListRequests`, `GetUsage`, `ListEvents`, `StreamEvents`, `FollowEvents`.
 
 ## TypeScript: @ajs/sdk
 
-The TypeScript client lives in `sdk/ts` (package `@ajs/sdk`). It exposes the same methods in camelCase, plus `ApiError`, `OperationFailure` and `streamEvents()` as an async generator. It retries every `5xx`; the rest of the policy matches the Go client.
+The TypeScript client lives in `sdk/ts` (package `@ajs/sdk`). It exposes the same methods in camelCase — including `listNodes`, `getLease` and `listRequests` — plus `ApiError`, `OperationFailure` and `streamEvents()` as an async generator. It retries every `5xx`; the rest of the policy matches the Go client.
 
 **Accounts, select-node, lease**
 

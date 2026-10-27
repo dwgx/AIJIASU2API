@@ -1,0 +1,79 @@
+name: Feature or change proposal
+description: Propose a behaviour, API, or documentation change before writing code.
+title: "[proposal] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open this before writing a non-trivial change. The direction may be
+        declined, and a proposal is cheaper than a rejected pull request.
+
+        Hard constraints for anything accepted here:
+
+        - **No vendor binaries, installers, captures, dumps, or credentials** in
+          the tree. Samples are described and hashed, never attached.
+        - **No expansion into a payment service, resale, or public SOCKS5.** The
+          epay/Stripe/orders/portal paths are experimental, disabled, and
+          unsupported; the public data plane is HTTPS CONNECT only.
+        - **Claims must be measurable.** "The vendor supports X" is not evidence;
+          a redacted capture, a test, or a cited code path is.
+        - **One concern per proposal.** Split independent changes.
+
+        Read ROADMAP.md and CONTRIBUTING.md before filing.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - API contract or daemon behaviour
+        - Gate admission or proxy data plane
+        - Scoped keys, leases, or RBAC
+        - Dashboard or public docs bundle
+        - Go SDK
+        - TypeScript SDK
+        - Deployment kit or packaging
+        - Documentation or repository process
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing today, and who hits it? Cite paths, commands, or observations.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: The smallest change that solves the problem, including the API or config surface it adds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and non-goals
+      description: What else was considered, and what this proposal deliberately does not do.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or prior art
+      description: Code paths, tests, upstream documentation, or a local experiment. Mark anything you did not run as [UNVERIFIED].
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I read DISCLAIMER.md and the use boundary, and this proposal stays inside them.
+          required: true
+        - label: I searched existing issues and the roadmap for this proposal.
+          required: true
+        - label: I did not include a credential or a vendor artifact.
+          required: true

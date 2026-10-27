@@ -31,7 +31,7 @@ Every failure uses one JSON shape. `code` is stable; `reason` is optional and ma
 | --- | --- | --- |
 | 400 | `INVALID_ARGUMENT` | Bad body, missing `confirm`, bad `limit` or window. |
 | 401 | `UNAUTHORIZED` | Missing or invalid bearer; revoked key. |
-| 403 | `FORBIDDEN` | `scope_required`, `scoped_key_restricted`. |
+| 403 | `FORBIDDEN` | `scope_required`, `scoped_key_restricted`, `admin_required` (operator-global surface: audit and the event stream). |
 | 404 | `NOT_FOUND` | `unknown_server`, `no_target`, unknown account/user/lease/operation; another user’s lease answers as unknown. |
 | 409 | `CONFLICT` / `CONFIRMATION_REQUIRED` | `snapshot_changed`, `switch_in_progress`, `ALREADY_CURRENT`, `SERVER_UNAVAILABLE`, `NO_ALTERNATE_SERVER`, `lease_publish_failed`; `confirmation_required` when a destructive schedule needs `confirm: "ARM"` or `"RUN"`. |
 | 410 | `CURSOR_EXPIRED` / `INVITE_EXPIRED` | The event cursor fell out of the ring (restart from `oldestCursor`), or an invitation expired before redemption. |

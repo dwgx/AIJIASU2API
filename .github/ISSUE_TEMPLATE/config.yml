@@ -1,0 +1,20 @@
+# Issue intake.
+#
+# Every URL in this file is absolute. GitHub resolves relative links in this
+# directory against /issues/, so `../README.md` would 404. Verify each URL
+# before changing it.
+#
+# `blank_issues_enabled: true` is deliberate: a reporter with a build failure
+# should not be forced into a form that does not fit. The links below answer
+# the questions that most often arrive as issues.
+blank_issues_enabled: true
+contact_links:
+  - name: Read the documentation first
+    url: https://ajs.dwgx.top:2055/docs
+    about: Scoped-key quickstart, scopes, errors, SDKs, and limits. Also in the tree at docs/API-GUIDE.md.
+  - name: What is enabled in v0.1.0-pre?
+    url: https://ajs.dwgx.top:2055/docs/limits.md
+    about: The tenant portal, orders, epay/Stripe, and remote ingress are disabled or experimental. There is no public SOCKS5.
+  - name: Security vulnerability — report privately
+    url: https://github.com/dwgx
+    about: Do not open a public issue. Use the repository's Security tab (Report a vulnerability) or the owner profile. See SECURITY.md.

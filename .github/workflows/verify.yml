@@ -1,14 +1,20 @@
-# Reusable verification workflow: the Go, dashboard and SDK suites that must
-# pass before any release asset or container image is produced.
+# Reusable verification workflow: the single full gate that must pass before
+# any release asset or container image is produced.
 #
-# package.yml and release.yml call this as their `verify` job and gate the
-# packaging / publish job on it with `needs: verify`. Keeping the commands in
-# one place means a tag run executes the same suites as a pull request, and a
-# suite cannot be dropped by editing only one of the two release workflows.
+# ci.yml, package.yml and release.yml all call this workflow, so a tag run
+# executes exactly the checks a pull request executes. A suite cannot be
+# dropped by editing one caller, and "same suites" is structural rather than
+# a comment that can drift.
 #
-# ci.yml keeps its own go/web/sdk jobs because it also runs the root
-# production gate on every push; its go, web and sdk commands are the same as
-# the ones here.
+# The gate includes:
+#   lint    — third-party action pins (R6) and required notice files (R2)
+#   go      — vet/test daemon + emulator, plus govulncheck (R1). Every Go
+#             module declares `go 1.26.10`, so setup-go installs that patched
+#             toolchain from the module file rather than a floating major tag.
+#   web     — lockfile provenance + negative control, runtime npm audit,
+#             generated-doc check, serial tests, live production build (R5)
+#   sdk     — Go and TypeScript SDK checks
+#   prod-kit — real root production-kit gate on Ubuntu (R5)
 #
 # setup-go caching stays off: daemon/go.sum exists but the emulator and
 # sdk/go modules have no dependency file, and the action's default cache
@@ -23,15 +29,40 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Release hygiene (action pins + notices)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Verify third-party action pins (R6)
+        run: bash scripts/check-workflow-pins.sh
+
+      - name: Verify third-party notice files (R2)
+        # package.sh asserts the actual tar members while packaging; this
+        # static half fails earlier when a file or a packaging reference is
+        # dropped, so a release cannot ship without the notices.
+        run: |
+          for f in LICENSE NOTICE THIRD-PARTY-NOTICES.md; do
+            if [ ! -s "$f" ]; then
+              echo "missing or empty notice file: $f" >&2
+              exit 1
+            fi
+          done
+          grep -q 'THIRD-PARTY-NOTICES.md' deploy/package.sh
+          grep -q 'THIRD-PARTY-NOTICES.md' daemon/Dockerfile
+          grep -q 'THIRD-PARTY-NOTICES.md' dashboard/Dockerfile
+
   go:
     name: Go tests (daemon + emulator)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache: false
@@ -43,6 +74,12 @@ jobs:
       - name: Test daemon
         working-directory: daemon
         run: go test -race -count=1 ./...
+
+      - name: Govulncheck (release gate)
+        # Pinned tool version: the scanner is part of the supply chain too.
+        # It exits non-zero when the code is affected by a known vulnerability.
+        working-directory: daemon
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Vet emulator
         working-directory: emulator
@@ -60,10 +97,10 @@ jobs:
         working-directory: dashboard
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
@@ -72,9 +109,31 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Verify lockfile metadata
+        run: npm run verify:lockfile
+
+      - name: Negative control (empty lockfile is rejected)
+        # A verifier that passes an empty package map is decoration; prove the
+        # red path here so the guard cannot regress silently.
+        run: |
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/scripts"
+          cp scripts/verify-lockfile.mjs "$tmp/scripts/"
+          printf '{"lockfileVersion":3,"packages":{}}' > "$tmp/package-lock.json"
+          if node "$tmp/scripts/verify-lockfile.mjs"; then
+            echo 'negative control failed: an empty lockfile was accepted'
+            exit 1
+          fi
+
+      - name: Audit runtime dependencies
+        # Runtime-only audit: dev test tooling is not shipped to a browser.
+        run: npm audit --omit=dev
+
       - name: Verify generated docs are current
-        # Same gate as ci.yml: the docs artifacts are generated, so a changed
-        # contract or a hand-edited mirror must fail here instead of shipping.
+        # The docs UI ships generated artifacts (src/docs/reference.generated.ts,
+        # public/docs/*.md, public/llms.txt). --check compares what is on disk
+        # and exits 1 on drift instead of rewriting it, so a stale or
+        # hand-edited mirror cannot reach the portal edge.
         run: npm run docs:gen -- --check
 
       # The serial flags are load-bearing: without them findBy* assertions
@@ -82,15 +141,18 @@ jobs:
       - name: Test (serial, as CI)
         run: npm test -- --pool=forks --maxWorkers=1
 
+      - name: Build (live mode)
+        run: VITE_USE_MOCK=false VITE_API_BASE= npm run build
+
   sdk:
     name: SDK tests (Go + TypeScript)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: sdk/go/go.mod
           cache: false
@@ -104,7 +166,7 @@ jobs:
         run: go test -race -count=1 ./...
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
@@ -121,3 +183,61 @@ jobs:
       - name: Test TypeScript SDK
         working-directory: sdk/ts
         run: npm test
+
+  prod-kit:
+    name: Production deploy kit (real nginx -t)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install gate tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nginx nftables python3-yaml
+          sudo systemctl stop nginx || true
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+
+      - name: Build daemon for the /readyz proof
+        working-directory: daemon
+        run: go build -o ajs-accountd ./cmd/ajs-accountd
+
+      - name: Create the daemon identity for the renderer proof
+        # deploy/production/README.md installs this user in step 1; the
+        # AJS-412 proof reads the hash file as the unit's User=/Group=.
+        run: |
+          sudo groupadd --system ajs
+          sudo useradd --system --gid ajs --no-create-home --shell /usr/sbin/nologin ajs
+
+      - name: Run production gate (intentional root for ownership checks)
+        # The AJS-412 renderer proof creates root-owned 0640/0600 artifacts,
+        # proves the nginx worker can read them, and proves the daemon identity
+        # (User=/Group= from the unit) can read the hash file. Run the whole
+        # gate as root so the CI result is a real production PASS, never a
+        # non-root false PASS.
+        run: sudo -E bash deploy/production/check.sh
+
+      - name: Negative control (broken temp dir cannot yield a PASS)
+        # The systemd unit check must fail closed. With mktemp broken the gate
+        # must print the setup FAIL and exit non-zero, never omit the check and
+        # still print PASS.
+        run: |
+          stub=$(mktemp -d)
+          printf '#!/bin/sh\nexit 1\n' > "$stub/mktemp"
+          chmod 0755 "$stub/mktemp"
+          set +e
+          sudo env PATH="$stub:$PATH" bash deploy/production/check.sh > /tmp/ajs-negative.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/ajs-negative.log
+          test "$rc" -ne 0
+          grep -qF 'FAIL  cannot create a temporary directory for systemd-analyze verify' /tmp/ajs-negative.log
+          if grep -qF 'check: PASS' /tmp/ajs-negative.log; then
+            echo 'negative control failed: the gate printed PASS without a temp dir'
+            exit 1
+          fi

@@ -1402,6 +1402,28 @@ func ParseExportCSV(data []byte) (AccountExport, []WarningCode, error) {
 	return doc, warnings, nil
 }
 
+// exportFormulaPrefix lists the leading bytes a spreadsheet treats as the
+// start of a formula. A cell beginning with one is prefixed with an apostrophe
+// so Excel and LibreOffice render it as text instead of evaluating it; the
+// audit CSV export applies the same rule. Import does not strip the prefix, so
+// a value that legitimately begins with one of these characters exports in its
+// inert form: this is the plaintext export an operator opens in a spreadsheet,
+// while the JSON and encrypted exports keep the exact value. Region tags still
+// fail the export when they contain the separator or a line break, because that
+// is a structural loss rather than a presentation one.
+const exportFormulaPrefix = "=+-@\t\r"
+
+// neutralizeExportCSVField makes one CSV cell inert for a spreadsheet.
+func neutralizeExportCSVField(field string) string {
+	if field == "" {
+		return field
+	}
+	if strings.IndexByte(exportFormulaPrefix, field[0]) >= 0 {
+		return "'" + field
+	}
+	return field
+}
+
 // BuildExportCSV encodes the exact header and RFC 4180 quoting. Region tags
 // containing a vertical bar or a line break cannot round-trip, so the export
 // fails instead of silently changing them.
@@ -1435,6 +1457,12 @@ func BuildExportCSV(doc AccountExport) ([]byte, error) {
 			strings.Join(row.Regions, "|"),
 			string(row.State),
 			row.ExpiresAt,
+		}
+		// Every cell goes through the neutralizer, including the enum and date
+		// columns: the rule is a property of the format, not of a field list a
+		// future column could be added to without remembering it.
+		for i := range record {
+			record[i] = neutralizeExportCSVField(record[i])
 		}
 		if err := writer.Write(record); err != nil {
 			return nil, fmt.Errorf("encode CSV row: %w", err)

@@ -18,7 +18,7 @@ The script writes six release files into `--out`:
 | `ajs-accountd-linux-amd64` | `GOOS=linux GOARCH=amd64` | `CGO_ENABLED=0`; statically linked |
 | `ajs-accountd-windows-amd64.exe` | `GOOS=windows GOARCH=amd64` | `CGO_ENABLED=0`; no C runtime; no service wrapper |
 | `ajs-accountd-darwin-arm64` | `GOOS=darwin GOARCH=arm64` | `CGO_ENABLED=0`; links system `libSystem` only; unsigned/not notarized |
-| `dashboard-dist.tar.gz` | live static Vite bundle | extracted `index.html` + `assets/` + `ajs-build.json` |
+| `dashboard-dist.tar.gz` | live static Vite bundle | extracted `index.html` + `assets/` + `ajs-build.json` + `LICENSE`, `NOTICE`, `THIRD-PARTY-NOTICES.md` |
 | `MANIFEST.txt` | — | version, commit, toolchain, flags, artifact sizes/hashes |
 | `SHA256SUMS` | — | `sha256sum -c` format covering the other five files |
 
@@ -27,15 +27,18 @@ not run `npm ci` or contact the network. It refuses any bundle that has no `ajs-
 whose manifest is not a live, token-free build (`mode: live`, `mock: false`,
 `panelToken: false`). Build the live bundle first with
 `bash deploy/production/build-bundles.sh`, or pass `--build-dashboard` to run that exact recipe;
-`--dashboard-dist <dir>` packages a prebuilt live bundle elsewhere.
+`--dashboard-dist <dir>` packages a prebuilt live bundle elsewhere. The three repository notices
+(`LICENSE`, `NOTICE`, `THIRD-PARTY-NOTICES.md`) are copied into the archive root, and the script
+lists the finished tar and fails if any is missing.
 
 In addition to the six release files, the script writes `deploy-kit.tar.gz`: an LF-normalized
 copy of the `deploy/` tree under a top-level `deploy/` directory. It contains the nginx
 configuration, systemd unit, nftables tables, compose files, update/check scripts and the
 `deploy/production` kit, so extracting it and running `sudo -E bash deploy/production/check.sh`
-(root is required) works the same way as in a checkout. The deploy kit is an operator
-convenience, not one of the six release assets; its size and SHA-256 are recorded in
-`MANIFEST.txt`, which `SHA256SUMS` covers in turn.
+(root is required) works the same way as in a checkout. The archive root also carries
+`LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.md`, and packaging fails if they are absent. The
+deploy kit is an operator convenience, not one of the six release assets; its size and SHA-256
+are recorded in `MANIFEST.txt`, which `SHA256SUMS` covers in turn.
 
 The output directory is build output: use a path outside the tree (for example
 `--out /tmp/ajs-pkg`) or keep it untracked. Only the script, the doc and the workflow belong in
@@ -44,7 +47,7 @@ version control; the binaries, `dashboard-dist.tar.gz`, `deploy-kit.tar.gz`, `MA
 
 ## Prerequisites
 
-- Go 1.26 or newer in `PATH` (`daemon/go.mod` requires `go 1.26.0`). The script sets
+- Go 1.26.10 or newer in `PATH` (`daemon/go.mod` requires `go 1.26.10`). The script sets
   `GOTOOLCHAIN=local`, so it never downloads a toolchain.
 - A warm Go module cache, or network access once: `daemon/go.sum` is committed and pins
   `golang.org/x/crypto` (plus `golang.org/x/sys` indirect), and every build runs with
@@ -116,6 +119,8 @@ CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> GOTOOLCHAIN=local \
 - `SOURCE_DATE_EPOCH` — defaults to the HEAD commit time (or the current time outside Git). It
   is recorded as `source_date_epoch`/`built_utc` and used as the normalized mtime for every file
   in `dashboard-dist.tar.gz` and `deploy-kit.tar.gz`.
+- `MANIFEST.txt` records a logical dashboard source, not the `mktemp` staging directory, so two
+  `--build-dashboard` runs in different temp directories produce identical manifests.
 
 Both tar archives are built from staged copies with all mtimes set to the epoch, a
 `LC_ALL=C`-sorted file list, and (on GNU tar) `--owner=0 --group=0 --numeric-owner --format=ustar`.
@@ -206,7 +211,8 @@ dashboard_mode       live (package.sh refuses a mock bundle)
 dashboard_manifest   ajs-build.json size and SHA-256
 build_flags          the common flags, including -ldflags
 targets              artifact -> GOOS/GOARCH/CGO for the three binaries
-dashboard_dist       the bundle directory that was tarred
+dashboard_source     stable logical input ("prebuilt live bundle ..." or "built by ..."), never a temp path
+notices              LICENSE NOTICE THIRD-PARTY-NOTICES.md shipped in both archives
 deploy_kit           name, byte size and SHA-256 of the auxiliary deploy-kit.tar.gz
 artifacts            name, byte size and SHA-256 for the four built payload files
 ```
@@ -350,8 +356,9 @@ workflow artifact, and attaches them to the GitHub Release for the tag. `deploy-
 produced alongside them for local operator use but is not part of that six-file release set. It
 does not build or push container images; that is
 [`release.yml`](../.github/workflows/release.yml)'s job, which calls the same `verify` job before
-it logs in to GHCR, so a red suite cannot push a tag image or move `:latest`. `release.yml`
-attaches no release assets, so `SHA256SUMS` always describes the complete asset set.
+it logs in to GHCR, so a red suite cannot push a tag image or move `:latest`. A pre-release tag
+(one containing `-`) pushes only `:<tag>`; only a final tag promotes that image to `:latest`.
+`release.yml` attaches no release assets, so `SHA256SUMS` always describes the complete asset set.
 
 Run the same suites locally before tagging:
 

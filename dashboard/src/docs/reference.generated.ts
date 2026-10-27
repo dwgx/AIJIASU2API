@@ -118,7 +118,7 @@ export const reference: DocsReference = {
     },
     {
       "name": "Audit",
-      "description": "Audit trail.",
+      "description": "Operator-global audit trail; the admin token or a key carrying the admin scope only.",
       "counts": {
         "public": 0,
         "scoped": 2,
@@ -199,7 +199,7 @@ export const reference: DocsReference = {
     },
     {
       "name": "Events",
-      "description": "Customer-visible event replay and the server-sent event stream.",
+      "description": "Operator-global event replay and the server-sent event stream; the admin token or a key carrying the admin scope only.",
       "counts": {
         "public": 0,
         "scoped": 2,
@@ -311,7 +311,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -346,7 +346,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -393,7 +393,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -461,7 +461,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -517,7 +517,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "409",
@@ -565,7 +565,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -633,7 +633,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -696,7 +696,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -759,7 +759,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -827,7 +827,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -875,7 +875,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -952,6 +952,7 @@ export const reference: DocsReference = {
       "path": "/v1/accounts/export",
       "operationId": "exportAccounts",
       "summary": "Build an encrypted, JSON or CSV account export.",
+      "description": "CSV is the plaintext interchange format and is neutralized for spreadsheets: a cell whose first byte is =, +, -, @, a tab or a carriage return is written with a leading apostrophe, so a spreadsheet renders it instead of evaluating it. Import does not strip that apostrophe, so such a value does not round-trip through CSV unchanged; use the JSON or encrypted format when the exact value must survive.",
       "scope": null,
       "access": "admin",
       "params": [
@@ -1076,7 +1077,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -1139,7 +1140,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1164,6 +1165,11 @@ export const reference: DocsReference = {
         {
           "status": "502",
           "description": "UPSTREAM_UNAVAILABLE: the gate or vendor session could not be opened.",
+          "code": "UPSTREAM_UNAVAILABLE"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
           "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
@@ -1217,7 +1223,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1242,6 +1248,11 @@ export const reference: DocsReference = {
         {
           "status": "502",
           "description": "UPSTREAM_UNAVAILABLE: the gate or vendor session could not be opened.",
+          "code": "UPSTREAM_UNAVAILABLE"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
           "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
@@ -1295,7 +1306,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1320,6 +1331,11 @@ export const reference: DocsReference = {
         {
           "status": "502",
           "description": "UPSTREAM_UNAVAILABLE: the gate or vendor session could not be opened.",
+          "code": "UPSTREAM_UNAVAILABLE"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
           "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
@@ -1377,7 +1393,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1411,7 +1427,8 @@ export const reference: DocsReference = {
         },
         {
           "status": "504",
-          "description": "wait:true exceeded timeoutSeconds; details.operationId names the durable record."
+          "description": "OPERATION_TIMEOUT: wait:true exceeded timeoutSeconds; details.operationId names the durable record.",
+          "code": "OPERATION_TIMEOUT"
         }
       ]
     },
@@ -1444,7 +1461,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1512,7 +1529,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1575,7 +1592,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -1698,7 +1715,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2190,7 +2207,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -2248,7 +2265,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2321,7 +2338,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2384,7 +2401,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2462,7 +2479,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -2525,7 +2542,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2584,7 +2601,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2653,7 +2670,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -2722,7 +2739,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -3327,7 +3344,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3399,6 +3416,7 @@ export const reference: DocsReference = {
       "path": "/v1/audit",
       "operationId": "listAuditEvents",
       "summary": "Newest audit events, capped at 500.",
+      "description": "Operator-global: audit rows name every tenant's actor, target, email and free text, so only the admin token or a key carrying the admin scope reads them. Every other scoped key answers 403 FORBIDDEN with error.reason=admin_required, whether or not it carries audit:read and whatever its accountIds/regions say; a key without audit:read is refused earlier with scope_required.",
       "scope": "audit:read",
       "access": "scoped",
       "params": [
@@ -3427,7 +3445,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3447,7 +3465,7 @@ export const reference: DocsReference = {
       "path": "/v1/audit/export.csv",
       "operationId": "exportAuditCSV",
       "summary": "Stream the retained audit history as CSV.",
-      "description": "Columns are ts,severity,actor,action,target,detail,meta. Bounds are RFC 3339 and inclusive; the default window is the last seven days and the maximum is 366 days. At most 50000 rows are returned; when older matches are dropped the response carries X-Truncated: true. Audit rows are sanitized before they are stored, and credential-looking assignments are scrubbed again before export.",
+      "description": "Columns are ts,severity,actor,action,target,detail,meta. Bounds are RFC 3339 and inclusive; the default window is the last seven days and the maximum is 366 days. At most 50000 rows are returned; when older matches are dropped the response carries X-Truncated: true. Audit rows are sanitized before they are stored, and credential-looking assignments are scrubbed again before export. The export is operator-global like the audit list: only the admin token or a key carrying the admin scope streams it, and every other scoped key answers 403 FORBIDDEN with error.reason=admin_required before the window is parsed or a row is selected.",
       "scope": "audit:read",
       "access": "scoped",
       "params": [
@@ -3495,7 +3513,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3530,7 +3548,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3586,7 +3604,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3621,7 +3639,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3798,7 +3816,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -3854,7 +3872,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "409",
@@ -3870,6 +3888,11 @@ export const reference: DocsReference = {
           "status": "500",
           "description": "INTERNAL: unexpected server failure; details stay in the daemon log.",
           "code": "INTERNAL"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
+          "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
     },
@@ -3982,7 +4005,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -4038,7 +4061,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -4081,7 +4104,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4149,7 +4172,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4175,6 +4198,11 @@ export const reference: DocsReference = {
           "status": "500",
           "description": "INTERNAL: unexpected server failure; details stay in the daemon log.",
           "code": "INTERNAL"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
+          "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
     },
@@ -4217,7 +4245,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4238,6 +4266,11 @@ export const reference: DocsReference = {
           "status": "500",
           "description": "INTERNAL: unexpected server failure; details stay in the daemon log.",
           "code": "INTERNAL"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
+          "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
     },
@@ -4247,7 +4280,7 @@ export const reference: DocsReference = {
       "path": "/v1/schedules/{id}/actions/run",
       "operationId": "runSchedule",
       "summary": "Run a schedule now; destructive actions require confirm.",
-      "description": "Returns 202 with the operation id. P1 runs safe actions; account.switch, account.rotate and account.reconnect are P2 per DESIGN-SCHEDULE.",
+      "description": "Runs the schedule synchronously and returns the finished run. The body is optional: dryRun overrides the schedule guard, confirm:\"RUN\" is required for a manual run of a destructive action, and force bypasses the daily run cap. P1 runs safe actions; account.switch, account.rotate and account.reconnect are P2 per DESIGN-SCHEDULE.",
       "scope": "settings:write",
       "access": "scoped",
       "params": [
@@ -4270,14 +4303,14 @@ export const reference: DocsReference = {
         }
       ],
       "body": {
-        "required": true,
+        "required": false,
         "schema": "ScheduleRunRequest",
-        "summary": "Required JSON body: ScheduleRunRequest"
+        "summary": "Optional JSON body: ScheduleRunRequest"
       },
       "responses": [
         {
-          "status": "202",
-          "description": "Run accepted."
+          "status": "200",
+          "description": "Run finished. A manual run executes synchronously and returns the finished run row."
         },
         {
           "status": "400",
@@ -4291,7 +4324,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4312,6 +4345,11 @@ export const reference: DocsReference = {
           "status": "500",
           "description": "INTERNAL: unexpected server failure; details stay in the daemon log.",
           "code": "INTERNAL"
+        },
+        {
+          "status": "503",
+          "description": "UPSTREAM_UNAVAILABLE: a required dependency (Resin, login service, sealed secret store) is unavailable.",
+          "code": "UPSTREAM_UNAVAILABLE"
         }
       ]
     },
@@ -4363,7 +4401,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4634,7 +4672,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -4680,7 +4718,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -4755,7 +4793,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -5037,7 +5075,7 @@ export const reference: DocsReference = {
       "path": "/v1/events",
       "operationId": "listEvents",
       "summary": "Replay the retained event ring from a cursor.",
-      "description": "Returns up to limit retained events published after since, oldest first. An empty since starts at the oldest retained event. When the cursor is current and wait is set, the request is held until the next event arrives or the wait budget expires, then answers a page (possibly empty) whose nextCursor is the resume point. A malformed cursor is 400 INVALID_ARGUMENT; a cursor whose event was evicted is 410 CURSOR_EXPIRED and details.oldestCursor names the restart point. A scoped key restricted by accountIds/regions is refused 403 because the ring is global.",
+      "description": "Returns up to limit retained events published after since, oldest first. An empty since starts at the oldest retained event. When the cursor is current and wait is set, the request is held until the next event arrives or the wait budget expires, then answers a page (possibly empty) whose nextCursor is the resume point. A malformed cursor is 400 INVALID_ARGUMENT; a cursor whose event was evicted is 410 CURSOR_EXPIRED and details.oldestCursor names the restart point. The ring is operator-global: it mixes every tenant's order, lease and schedule metadata, so only the admin token or a key carrying the admin scope reads it. Every other scoped key answers 403 FORBIDDEN with error.reason=admin_required, whether or not it carries events:read or an account grant; a key without events:read is refused earlier with scope_required.",
       "scope": "events:read",
       "access": "scoped",
       "params": [
@@ -5080,7 +5118,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "410",
@@ -5110,7 +5148,7 @@ export const reference: DocsReference = {
       "path": "/v1/events/stream",
       "operationId": "streamEvents",
       "summary": "Stream retained and live events as server-sent events.",
-      "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every event is one id:/event:/data: frame whose data is the Event JSON object. Retained events after the cursor are replayed first, then live events follow; a duplicate that appears in both windows is sent once. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. A malformed cursor is 400 INVALID_ARGUMENT; an evicted one is 410 CURSOR_EXPIRED with details.oldestCursor, both as JSON before the stream starts. The stream closes when the client disconnects or the daemon shuts down.",
+      "description": "text/event-stream. The cursor comes from Last-Event-ID (sent by a browser on reconnect) or since; the header wins. Every event is one id:/event:/data: frame whose data is the Event JSON object. Retained events after the cursor are replayed first, then live events follow; a duplicate that appears in both windows is sent once. A ': keepalive' comment every 15 s keeps proxies from closing an idle stream. A malformed cursor is 400 INVALID_ARGUMENT; an evicted one is 410 CURSOR_EXPIRED with details.oldestCursor, both as JSON before the stream starts. The stream is operator-global like the replay: only the admin token or a key carrying the admin scope reads it, and every other scoped key answers 403 FORBIDDEN with error.reason=admin_required. The stream closes when the client disconnects or the daemon shuts down.",
       "scope": "events:read",
       "access": "scoped",
       "params": [
@@ -5146,7 +5184,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "410",
@@ -5214,7 +5252,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -5270,7 +5308,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -5353,7 +5391,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "429",
@@ -5391,7 +5429,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",
@@ -5444,7 +5482,7 @@ export const reference: DocsReference = {
         },
         {
           "status": "403",
-          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, or scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these two values; an operator token whose role cannot perform the action is refused without a reason."
+          "description": "FORBIDDEN with a stable error.reason: scope_required when the scoped key does not carry the route's scope, scoped_key_restricted when its accountIds/regions exclude the targeted account or global surface, or admin_required when the surface is operator-global (the audit log and its CSV export, the event replay and SSE stream) and the caller is any scoped key without the admin scope. A refused write mutates nothing, and a write that names an unresolvable account, lease, node or operation answers the same 403 as a foreign one. The message stays human-readable and is not part of the contract; clients branch on reason. A scoped-key denial is one of these three values; an operator token whose role cannot perform the action is refused without a reason."
         },
         {
           "status": "404",

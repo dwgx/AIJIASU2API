@@ -1750,10 +1750,13 @@ func (c *NodeController) startGateLocked(key model.SlotKey, srv serverRef, sessi
 	if c.gateAuth == gate.AuthUserPass && c.identity != nil {
 		// The identity is bound to this gate's account: a credential alone
 		// never admits a flow, the user's single active lease on this account
-		// does.
+		// does. The same wrapper revalidates that entitlement while a flow
+		// relays, so a revoke or expiry closes an established tunnel; the
+		// gate applies its own default interval.
 		bound := c.identity.ForAccount(key.AccountID)
 		cfg.Authenticator = bound
 		cfg.UserPolicy = bound
+		cfg.EntitlementCheck = bound.EntitlementValid
 	}
 	var lastErr error
 	for range 2 {
@@ -2235,7 +2238,12 @@ func (g *GateIdentity) Authenticate(user, pass string) (gate.Principal, bool) {
 	if !ok {
 		return gate.Principal{}, false
 	}
-	return gate.Principal{UserID: panelUser.ID, UserName: panelUser.Name}, true
+	return gate.Principal{
+		UserID:   panelUser.ID,
+		UserName: panelUser.Name,
+		KeyID:    key.ID,
+		KeyKind:  gate.KeyKindAPIKey,
+	}, true
 }
 
 // keyForDigest resolves a secret digest to its key id. A miss rebuilds the
@@ -2419,7 +2427,8 @@ func (g *GateIdentity) overQuota(userID string) bool {
 // A zero or ambiguous (more than one active) lease fails closed. Admission
 // re-reads the lease before opening a flow, so a revoke or expiry between the
 // handshake and CONNECT refuses the flow instead of relaying on a dead
-// entitlement.
+// entitlement. EntitlementValid is the third stage: the gate calls it while a
+// flow relays, so a revoke or expiry after CONNECT closes the tunnel too.
 type GateAccountIdentity struct {
 	identity  *GateIdentity
 	accountID string
@@ -2491,6 +2500,58 @@ func (a *GateAccountIdentity) leaseAdmits(principal gate.Principal) bool {
 	return lease.UserID == principal.UserID && lease.AccountID == a.accountID
 }
 
+// EntitlementValid re-checks the entitlement behind one established flow. The
+// gate calls it while a tunnel relays, so a key revoked or expired, a lease
+// revoked or expired, or a suspended user closes the flow instead of leaving it
+// relaying until the client reconnects.
+//
+// It reads the durable rows on every call: no cached policy, key index or
+// principal field is trusted for the decision. The three stages mirror
+// admission — user, credential, lease — and any missing row fails closed.
+func (a *GateAccountIdentity) EntitlementValid(principal gate.Principal) bool {
+	if a == nil || a.identity == nil || a.identity.store == nil || a.accountID == "" {
+		return false
+	}
+	if principal.UserID == "" {
+		return false
+	}
+	panelUser, ok := a.identity.store.User(principal.UserID)
+	if !ok || !panelUser.Enabled {
+		return false
+	}
+	if !a.keyLive(principal) {
+		return false
+	}
+	return a.leaseAdmits(principal)
+}
+
+// keyLive reports whether the credential principal authenticated with still
+// exists, belongs to that user and was neither revoked nor (for a scoped key)
+// expired. The recorded kind selects the row: a legacy panel key and a scoped
+// key live in separate collections, so an unknown or empty kind fails closed
+// rather than guessing.
+func (a *GateAccountIdentity) keyLive(principal gate.Principal) bool {
+	if principal.KeyID == "" {
+		return false
+	}
+	switch principal.KeyKind {
+	case gate.KeyKindAPIKey:
+		key, ok := a.identity.store.Key(principal.KeyID)
+		return ok && key.UserID == principal.UserID && key.RevokedAt == nil
+	case gate.KeyKindScopedKey:
+		key, ok := a.identity.store.ScopedKey(principal.KeyID)
+		if !ok || key.UserID != principal.UserID || key.RevokedAt != nil {
+			return false
+		}
+		if key.ExpiresAt == nil {
+			return true
+		}
+		expires, err := time.Parse(time.RFC3339, *key.ExpiresAt)
+		return err == nil && a.identity.now().Before(expires)
+	}
+	return false
+}
+
 // scopedKeyPrincipal resolves one scoped-key secret to the key's panel user.
 // The key must be active, owned by the username and carry proxy:connect; the
 // gate account must pass the same grant predicate the API uses, so a key
@@ -2522,7 +2583,12 @@ func (g *GateIdentity) scopedKeyPrincipal(user, pass, accountID string) (gate.Pr
 	if !ok {
 		return gate.Principal{}, false
 	}
-	return gate.Principal{UserID: panelUser.ID, UserName: panelUser.Name}, true
+	return gate.Principal{
+		UserID:   panelUser.ID,
+		UserName: panelUser.Name,
+		KeyID:    key.ID,
+		KeyKind:  gate.KeyKindScopedKey,
+	}, true
 }
 
 // activeLease returns the single active lease of (userID, accountID). The

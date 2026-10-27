@@ -551,10 +551,13 @@ func TestScopedKeyRestrictedPanelTopology(t *testing.T) {
 	}
 }
 
-// TestScopedKeyRestrictedGlobalReadsAreForbidden covers the surfaces that
-// cannot be partitioned honestly: audit (free-text attribution), the audit CSV
-// export, and the Prometheus exposition.
-func TestScopedKeyRestrictedGlobalReadsAreForbidden(t *testing.T) {
+// TestScopedKeyGlobalReadsAreOperatorOnly covers the surfaces that cannot be
+// partitioned honestly: the audit log and its CSV export are operator-global,
+// so every scoped key that is not an admin principal is refused with
+// admin_required whether or not it carries accountIds/regions; the Prometheus
+// exposition keeps the narrower rule, where only an account-restricted key is
+// refused.
+func TestScopedKeyGlobalReadsAreOperatorOnly(t *testing.T) {
 	ts, _ := newTestServer(t)
 	restricted := mustIssueScopedKey(t, ts, []string{"audit:read", "metrics:read"}, []string{"acc-01"}, nil)
 	for _, path := range []string{"/v1/audit", "/v1/audit/export.csv", "/metrics"} {
@@ -563,12 +566,55 @@ func TestScopedKeyRestrictedGlobalReadsAreForbidden(t *testing.T) {
 		requireErrorCode(t, body, CodeForbidden)
 	}
 
-	// Unrestricted scoped keys keep the existing 200 contract.
+	// An unrestricted customer key reads the metrics exposition but not the
+	// audit log: no account grant makes audit a customer surface.
 	open := mustIssueScopedKey(t, ts, []string{"audit:read", "metrics:read"}, nil, nil)
+	for _, path := range []string{"/v1/audit", "/v1/audit/export.csv"} {
+		resp, body := scopedCall(t, ts, open.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
+	}
+	resp, _ := scopedCall(t, ts, open.Secret, http.MethodGet, "/metrics", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	// The admin grant keeps the operator view.
+	admin := mustIssueScopedKey(t, ts, []string{"admin"}, nil, nil)
 	for _, path := range []string{"/v1/audit", "/v1/audit/export.csv", "/metrics"} {
-		resp, _ := scopedCall(t, ts, open.Secret, http.MethodGet, path, nil)
+		resp, _ := scopedCall(t, ts, admin.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusOK)
 	}
+}
+
+// TestScopedKeySuspendedUserRefused pins AJS-482 D6 on the HTTP surface: the
+// user kill switch invalidates every scoped key of that user, so a route the
+// key is otherwise allowed answers 401 while suspended and serves again after
+// resume, with the same secret and an unrevoked key row.
+func TestScopedKeySuspendedUserRefused(t *testing.T) {
+	ts, _ := newTestServer(t)
+	key := mustIssueScopedKey(t, ts, []string{"leases:read"}, []string{"acc-01"}, nil)
+
+	resp, _ := scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	resp, body := apiCall(t, ts, http.MethodPost, "/v1/users/u-01/suspend", nil)
+	requireStatus(t, resp, http.StatusOK)
+
+	resp, body = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases", nil)
+	requireStatus(t, resp, http.StatusUnauthorized)
+	requireErrorCode(t, body, CodeUnauthorized)
+
+	// Suspension is not revocation: the row is intact and the same secret
+	// works again once the user is resumed.
+	resp, body = apiCall(t, ts, http.MethodGet, "/v1/scoped-keys/"+key.Key.ID, nil)
+	requireStatus(t, resp, http.StatusOK)
+	if revoked := decodeBody[model.ScopedKey](t, body); revoked.RevokedAt != nil {
+		t.Fatalf("suspension revoked the key row: %+v", revoked)
+	}
+
+	resp, body = apiCall(t, ts, http.MethodPost, "/v1/users/u-01/resume", nil)
+	requireStatus(t, resp, http.StatusOK)
+	resp, _ = scopedCall(t, ts, key.Secret, http.MethodGet, "/v1/leases", nil)
+	requireStatus(t, resp, http.StatusOK)
 }
 
 // TestScopedKeyRestrictedAccountExportIsForbidden covers every body shape of

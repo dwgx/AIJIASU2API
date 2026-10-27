@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -754,6 +755,60 @@ func TestHTTPConnectNeverLogsCredentials(t *testing.T) {
 				t.Fatalf("log line leaked %q: %s", leaked, line.String())
 			}
 		}
+	}
+}
+
+// TestHTTPConnectEntitlementRevocationClosesTunnel proves the HTTP listener
+// installs the same entitlement watch as the SOCKS5 one: a CONNECT admitted
+// while the callback held is closed as soon as it refuses, and the watcher
+// stops with the relay instead of polling a dead flow.
+func TestHTTPConnectEntitlementRevocationClosesTunnel(t *testing.T) {
+	policy := &fakePolicy{allowlist: CompileAllowlist([]string{"example.com"})}
+	session := &fakeSession{}
+	var checks atomic.Int64
+	var revoked atomic.Bool
+	srv := startHTTPGate(t, Config{
+		AuthMode:            AuthUserPass,
+		Authenticator:       fakeAuthenticator{users: map[string]string{"u-01": "s3cret"}},
+		UserPolicy:          policy,
+		EntitlementInterval: 5 * time.Millisecond,
+		EntitlementCheck: func(Principal) bool {
+			checks.Add(1)
+			return !revoked.Load()
+		},
+	}, session)
+
+	conn, reader := dialHTTPGate(t, srv)
+	writeConnect(t, conn, "example.com:443", basicAuthHeader("u-01", "s3cret"))
+	if status, _ := readHTTPHead(t, reader); status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if _, err := conn.Write([]byte("entitled")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	echo := make([]byte, len("entitled"))
+	if _, err := io.ReadFull(reader, echo); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+
+	revoked.Store(true)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	if n, err := reader.Read(one[:]); err == nil || n != 0 {
+		t.Fatalf("tunnel kept relaying after the entitlement refusal: read %d byte(s), err %v", n, err)
+	}
+
+	// The watcher is stopped with the relay: the counter stops moving.
+	settled := checks.Load()
+	time.Sleep(20 * time.Millisecond)
+	if later := checks.Load(); later != settled {
+		t.Fatalf("entitlement checks kept running after the relay ended: %d -> %d", settled, later)
+	}
+	if settled == 0 {
+		t.Fatal("the entitlement callback never ran")
+	}
+	if opens := session.recorded(); len(opens) != 1 {
+		t.Fatalf("OpenFlow targets = %v, want one", opens)
 	}
 }
 

@@ -273,10 +273,12 @@ func (s *Server) handleCreateMutation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	// Audit rows are global and carry free text, not a reliable account id, so
-	// a restricted key is refused before the store is read. Inferring ownership
-	// from the detail or target would be a guess presented as a filter.
-	if s.denyGlobalRead(w, r, "the audit log") {
+	// Audit rows are operator-global: they name every tenant's actor, target,
+	// email and free text, not a reliable account id, so no scoped key is
+	// served this surface. The admin token and keys carrying the admin scope
+	// keep it; every other key is refused with admin_required before the store
+	// is read.
+	if s.denyOperatorOnly(w, r, "the audit log") {
 		return
 	}
 	limit := 20

@@ -147,6 +147,13 @@ func (s *Store) RevokeScopedKey(id string, actor ...string) error {
 // AuthenticateScopedKey resolves a plaintext secret to an active key. The
 // secret is hashed, so a revoked, expired or unknown key answers false without
 // exposing which condition failed.
+//
+// The owning panel user is part of the credential's authority: a key whose
+// user was suspended, or whose user row no longer exists, fails closed on the
+// next request instead of waiting for an explicit revocation. Suspension is the
+// kill switch, so the key must not outlive it on the control plane or at a
+// gate. The user slice is read under the same read lock the key came from, so
+// no second lock is taken.
 func (s *Store) AuthenticateScopedKey(secret string) (model.ScopedKey, bool) {
 	sum := sha256.Sum256([]byte(secret))
 	hash := hex.EncodeToString(sum[:])
@@ -177,6 +184,14 @@ func (s *Store) AuthenticateScopedKey(secret string) (model.ScopedKey, bool) {
 		if err != nil || !s.now().Before(expires) {
 			return model.ScopedKey{}, false
 		}
+	}
+	// Suspension is checked on every authentication, not only at issue time:
+	// the kill switch must take effect on the next request without a second
+	// revocation step. The same lookup covers a key whose user was deleted by
+	// a path that did not revoke it.
+	userIdx := s.userIndexLocked(key.UserID)
+	if userIdx < 0 || !s.users[userIdx].Enabled {
+		return model.ScopedKey{}, false
 	}
 	return cloneScopedKey(key), true
 }

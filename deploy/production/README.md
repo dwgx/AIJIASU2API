@@ -2,20 +2,41 @@
 
 This directory is the engineering half of release gate 2: a production-like
 deployment of `ajs-accountd` and the dashboard **without Docker**. It provides
-nginx TLS termination, a token-free customer portal bundle, an admin origin
-whose bearer never reaches a browser, a public TLS-terminated HTTP CONNECT
-edge for the loopback gate, a hardened systemd unit, a firewall table that
-matches `deploy/nftables/`, and `check.sh` as the gate.
+nginx TLS termination, an admin origin whose bearer never reaches a browser, a
+public TLS-terminated HTTP CONNECT edge for the loopback gate, a hardened
+systemd unit, a firewall table that matches `deploy/nftables/`, and `check.sh`
+as the gate. The customer portal bundle and the payment callbacks are present as
+**templates only** and are disabled in `v0.1.0-pre`; see the release status below.
 
 Nothing here is a credential. There are no certificates, private keys, tokens
 or filled-in environment files in this tree — only paths, placeholders and the
 template from which the host renders its admin bearer.
 
-Run the gate as root:
+## Release status (v0.1.0-pre)
+
+- **Portal and payments are off.** The shipped env example sets `AJS_TENANT_PORTAL=0`, and
+  `nginx/sites-available/ajs-portal.conf` is a **non-product template**: do not install it on a
+  `v0.1.0-pre` host. With the portal off the daemon registers none of `/v1/portal/*`,
+  `/v1/admin/tenants*`, `/v1/admin/orders*` or `/v1/admin/plans*`; they answer `404` even if a
+  vhost proxies them. See [`docs/EPAY-STATUS.md`](../../docs/EPAY-STATUS.md).
+- **The gate result below is stale.** The last recorded root `PASS` is **2026-10-26** and
+  predates AJS-421, which added three assertions. It must be re-run on the release host and the
+  result recorded here before `v0.1.0-pre` is tagged. Do not quote the old `PASS` as current.
+- **The live host does not run this kit.** It runs an ad-hoc root unit from a scratch directory
+  and a hand-written VPS vhost; see [Live deployment](#live-deployment-2026-10-27),
+  [Live hardening (2026-10-28)](#live-hardening-2026-10-28) and
+  [Live host divergence](#live-host-divergence). Some edge controls now match the kit because
+  they were applied to the live host on 2026-10-28; the unit, RBAC mode, vhost, stream map and
+  file layout still do not. The kit remains the target state, not the as-built.
+- Runbook, security model and release procedure: [`docs/OPERATIONS.md`](../../docs/OPERATIONS.md),
+  [`docs/SECURITY-MODEL.md`](../../docs/SECURITY-MODEL.md), [`docs/RELEASE.md`](../../docs/RELEASE.md).
+
+Run the gate as root (required for the AJS-412 renderer proof):
 
 ```bash
 sudo -E bash deploy/production/check.sh
-# check: PASS (all checks, 0 skipped)
+# last recorded (2026-10-26, pre-AJS-421): check: PASS (all checks, 0 skipped)
+# current status: RE-RUN REQUIRED before tagging; see "Recorded verification" below
 ```
 
 The default mode is the production gate. It must run as root because the
@@ -56,7 +77,7 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 |---|---|
 | `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the site configs |
 | `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
-| `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, CSP, portal-only routes |
+| `nginx/sites-available/ajs-portal.conf` | **non-product template in this release** — public customer origin, TLS, HSTS, CSP, portal-only routes; not installed while `AJS_TENANT_PORTAL=0` |
 | `nginx/sites-available/ajs-api.conf` | public API origin: TLS, deny-by-default allowlist of the 54 scoped operations, no edge credential |
 | `nginx/streams-available/ajs-gate.conf` | public gate data plane: 11 TLS stream servers, 13000-13010 -> loopback HTTP CONNECT 14000-14010, no SOCKS5 |
 | `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, per-operator Basic auth, proxy-injected bearer |
@@ -231,8 +252,8 @@ root-owned `0600`. systemd reads it as root before dropping to `User=ajs`.
 | `AJS_RBAC_STRICT` | yes | `1` | disables shared bearer and anonymous insecure admin access |
 | `AJS_ADMIN_OPERATORS_FILE` | yes | `/etc/ajs/admin-operators.hashes` | root:ajs 0640 hash-only operator/role file; restart to reload |
 | `AJS_MASTER_KEY` | recommended | 64 hex chars | seals account passwords; empty disables at-rest sealing |
-| `AJS_TENANT_PORTAL` | yes | `1` | registers `/v1/portal/*`, `/v1/admin/tenants*`, `/v1/admin/orders*`, `/v1/admin/plans*` |
-| `AJS_TENANT_ORIGIN` | yes | `https://panel.example.com` | exact browser origin allowed on portal signup/login and every unsafe portal request |
+| `AJS_TENANT_PORTAL` | no | `0` | **off in `v0.1.0-pre`.** `1` would register `/v1/portal/*`, `/v1/admin/tenants*`, `/v1/admin/orders*`, `/v1/admin/plans*`; the release does not ship that product. See [`docs/EPAY-STATUS.md`](../../docs/EPAY-STATUS.md) |
+| `AJS_TENANT_ORIGIN` | only with portal | unset | exact browser origin allowed on portal signup/login; required only when `AJS_TENANT_PORTAL=1` |
 | `AJS_TRUSTED_PROXIES` | yes | `127.0.0.1,::1` | only nginx's loopback peers may supply `X-Forwarded-For`; never a public CIDR or `0.0.0.0/0` |
 | `AJS_CORS_ORIGINS` | optional | empty | both bundles are same-origin through nginx; set only for a separate browser client |
 | `AJS_ADMIN_ORIGINS` | yes | `https://admin.example.com:8443` | exact browser origin allowed on every unsafe admin request; the admin SPA is served from this origin and nginx injects the bearer. Requests without `Origin` (CLI/SDK) must send `X-AJS-CSRF: 1` |
@@ -254,13 +275,13 @@ their feature is used:
 | `AJS_SNAPSHOT_INTERVAL` | `30s` | shorter means more fsyncs; longer means more loss on crash |
 | `AJS_RESIN_URL` | `http://127.0.0.1:2260` | only when Resin runs on the same host |
 | `AJS_RESIN_ADMIN_TOKEN` | empty | empty disables the Resin integration |
-| `AJS_EPAY_GATEWAY` | empty | 易支付 base URL, must be https (or loopback for a lab) |
-| `AJS_EPAY_PID` | empty | merchant id; required with gateway + key |
-| `AJS_EPAY_KEY` | empty | signing key; never logged or persisted |
-| `AJS_EPAY_SIGN_TYPE` | `MD5` | only MD5 is accepted when epay is configured |
-| `AJS_EPAY_NOTIFY_URL` | derived | set to `https://panel.example.com/v1/payments/epay/notify` if the gateway needs an absolute URL |
-| `AJS_EPAY_RETURN_URL` | derived | set to `https://panel.example.com/portal` if the gateway needs it |
-| `AJS_STRIPE_WEBHOOK_SECRET` | empty | empty leaves `POST /v1/payments/stripe` at 503 |
+| `AJS_EPAY_GATEWAY` | empty | **experimental, off.** 易支付 base URL, must be https (or loopback for a lab); no order surface exists while `AJS_TENANT_PORTAL=0` |
+| `AJS_EPAY_PID` | empty | merchant id; required with gateway + key; experimental |
+| `AJS_EPAY_KEY` | empty | signing key; never logged or persisted; experimental |
+| `AJS_EPAY_SIGN_TYPE` | `MD5` | only MD5 is accepted when epay is configured; experimental |
+| `AJS_EPAY_NOTIFY_URL` | derived | `https://panel.example.com/v1/payments/epay/notify` if the gateway needs an absolute URL; the route is unregistered while the portal is off |
+| `AJS_EPAY_RETURN_URL` | derived | `https://panel.example.com/portal` if the gateway needs it; the route is unregistered while the portal is off |
+| `AJS_STRIPE_WEBHOOK_SECRET` | empty | empty leaves `POST /v1/payments/stripe` at 503; experimental |
 | `AJS_GATE_AUTH` | RFC 1929 | leave unset; `loopback` is a compatibility wire only |
 | `AJS_GATE_HTTP` | `1` | starts the per-node loopback HTTP CONNECT listener that `streams-enabled/ajs-gate.conf` publishes; `0`/unset leaves the public ports completing TLS and then closing |
 | `AJS_GATE_HTTP_OFFSET` | `1000` | must stay 1000: the stream map hard-codes the backend at lease port + 1000 (14000-14010) |
@@ -310,7 +331,13 @@ sudo apt-get install -y nginx libnginx-mod-stream
 sudo cp deploy/production/nginx/nginx.conf /etc/nginx/nginx.conf
 sudo cp deploy/production/nginx/ajs-mime.types /etc/nginx/ajs-mime.types
 sudo cp deploy/production/nginx/snippets/*.conf /etc/nginx/snippets/
-sudo cp deploy/production/nginx/sites-available/ajs-*.conf /etc/nginx/sites-enabled/
+# Install the API, admin and default vhosts. ajs-portal.conf is a NON-PRODUCT
+# template for this release: the portal/payment product is off
+# (AJS_TENANT_PORTAL=0), so installing its vhost would only publish 404s.
+sudo cp deploy/production/nginx/sites-available/ajs-api.conf \
+        deploy/production/nginx/sites-available/ajs-admin.conf \
+        deploy/production/nginx/sites-available/ajs-default.conf \
+        /etc/nginx/sites-enabled/
 sudo install -d -m 0755 /etc/nginx/streams-enabled
 # Replace 203.0.113.10 with this host's public address first (Owner inputs).
 sudo cp deploy/production/nginx/streams-available/ajs-gate.conf /etc/nginx/streams-enabled/
@@ -364,14 +391,18 @@ public edge and stays loopback-only too.
 
 ## Routing model
 
+The portal/payment rows below are shown for completeness but are **not installed** in
+`v0.1.0-pre` (`AJS_TENANT_PORTAL=0`; `ajs-portal.conf` is a non-product template). The API,
+admin and gate rows are the release surface.
+
 ```text
-browser ── HTTPS ──> nginx :443 (panel.example.com)
+browser ── HTTPS ──> nginx :443 (panel.example.com)            [NOT INSTALLED in v0.1.0-pre]
                      ├── /portal*        -> /var/lib/ajs/production/portal (SPA)
                      ├── /assets/*       -> static bundle
                      ├── /docs, /docs/*  -> docs UI + generated Markdown mirrors
                      ├── /llms.txt       -> generated docs index (text/plain)
-                     ├── /v1/portal/*    -> 127.0.0.1:2261 (cookie + CSRF)
-                     └── /v1/payments/{epay/notify,stripe} -> 127.0.0.1:2261
+                     ├── /v1/portal/*    -> 127.0.0.1:2261 (cookie + CSRF)  [unregistered: 404]
+                     └── /v1/payments/{epay/notify,stripe} -> 127.0.0.1:2261 [unregistered: 404]
 
 customer SDK/CLI ── HTTPS ──> nginx :443 (api.example.com)
                      ├── 41 allowlisted paths -> 127.0.0.1:2261 (scoped key, no edge credential)
@@ -435,8 +466,8 @@ a scanner and `/v1/backup`, `/v1/users` and `/v1/lab/*`.
 
 | Surface | Public | Loopback/VPN | Credential |
 |---|---|---|---|
-| `panel.example.com` `/portal*`, `/docs*`, `/llms.txt` | yes | — | portal cookie (HttpOnly) |
-| `panel.example.com` `/v1/portal/*`, payment callbacks | yes | — | portal cookie / provider signature |
+| `panel.example.com` `/portal*`, `/docs*`, `/llms.txt` | not installed in `v0.1.0-pre` | — | portal cookie (HttpOnly) — template only |
+| `panel.example.com` `/v1/portal/*`, payment callbacks | not installed in `v0.1.0-pre` | — | portal cookie / provider signature — routes unregistered (404) |
 | `api.example.com` 41 allowlisted paths | yes | — | scoped key `ajs_sk_…` + `X-AJS-CSRF` on writes |
 | `api.example.com` everything else | yes (404) | — | none issued |
 | `admin.example.com` SPA + `/v1/*` | **no** | `127.0.0.1:8443` or VPN | HTTP Basic + mapped operator bearer |
@@ -588,6 +619,12 @@ the client closes. The firewall rule may stay after a rollback — the ports
 then refuse connections because nothing listens — or be removed with the edge.
 
 ### Customer origin: token-free and portal-only
+
+> **Template only in `v0.1.0-pre`.** This section describes how the portal bundle
+> and vhost are built and tested; neither is installed in this release
+> (`AJS_TENANT_PORTAL=0`, `ajs-portal.conf` not enabled). The routes below answer
+> `404` at the daemon. Re-enabling requires the review in
+> [`docs/EPAY-STATUS.md`](../../docs/EPAY-STATUS.md).
 
 `build-bundles.sh` builds the dashboard with:
 
@@ -1202,38 +1239,62 @@ before the next release.
 The two public edges are live: `https://ajs.dwgx.top:2055` serves the
 scoped-key API and its `/docs`, and `gate.dwgx.top:13000-13010` serves
 TLS-terminated HTTP CONNECT. This section records the cutover that made them
-public — hosts, paths, ports and unit names as deployed. No token, key,
-password, hash or certificate material is written here.
+public — hosts, paths, ports and unit names as deployed — and the edge hardening
+applied on 2026-10-28. No token, key, password, hash or certificate material is
+written here. Byte-for-byte copies of the installed configs are kept in
+[`deploy/live/`](../live/README.md); they are a record, not a template, and no
+script in this repository applies them.
 
 ### Live topology
 
 ```text
 client --TLS--> vps-v9hw3m-6114 (152.175.35.40)
-                 nginx :2055 --> chisel tunnel --> HMC nginx ajs.dwgx.top:80
-                                               --> 127.0.0.1:2261 ajs-accountd
+                 nginx :2055 --> HTTP 10.99.0.2:80 over WireGuard
+                               --> HMC nginx ajs.dwgx.top:80
+                               --> 127.0.0.1:2261 ajs-accountd
 client --TLS--> vps-v9hw3m-6114 nginx stream 13000-13010
-                 --> chisel local 15000-15010 --> HMC 14000-14010 (HTTP CONNECT)
+                 --> chisel local 15000-15010 --> HMC 127.0.0.1:14000-14010 (HTTP CONNECT)
 ```
+
+The API hop is WireGuard, not chisel: the VPS vhost's upstream is `10.99.0.2:80` (the HMC's
+WireGuard address). The chisel client owns only the eleven gate forwards. Both hops are
+plaintext HTTP inside WireGuard; TLS terminates at the VPS.
 
 The chisel server runs on the HMC (`ajs-chisel`, `127.0.0.1:8080`) behind the
 HMC nginx `/tunnel` location; the client runs on the VPS
 (`ajs-chisel-client`) and owns both public listeners. The tunnel is dialed
-outbound from the VPS, so the HMC side adds no public port.
+outbound from the VPS, so the HMC side adds no public port. Since 2026-10-28 the
+server's authfile allows each account only the eleven anchored forwards
+`^127\.0\.0\.1:1400[0-9]$` and `^127\.0\.0\.1:14010$`, so the tunnel credential
+can request no destination other than the loopback gate.
 
 ### HMC
 
 - Daemon binary `ajs-accountd-61625b0`, built from commit `61625b0`, runs under
-  the systemd unit `ajs-accountd`.
+  the systemd unit `ajs-accountd`. The unit still has no `User=`/`Group=` (root)
+  and no `StateDirectory=`, but since 2026-10-28 it carries
+  `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full`, `ProtectHome=yes`
+  and a `ReadWritePaths` limited to the state directory.
 - Gate and access flags in the unit environment: `AJS_GATE_HTTP=1`,
   `AJS_GATE_HTTP_OFFSET=1000` (the stream map's `port + 1000` backend), and
-  `AJS_AUTO_LOGIN=1` (which requires `AJS_ACCOUNT_LOGIN=1`).
+  `AJS_AUTO_LOGIN=1` (which requires `AJS_ACCOUNT_LOGIN=1`). `AJS_LISTEN` is
+  `127.0.0.1:2261` since 2026-10-28, so the API is no longer reachable from the
+  LAN. `AJS_ADMIN_OPERATORS_FILE` is set; `AJS_RBAC_STRICT` is **not**, so the
+  daemon still runs in compatibility mode.
 - State directory: `/srv/dwgxhomecloud/scratch/ajs-multimodule/daemon/data`.
 - Pre-cutover binary and state backup:
-  `/srv/dwgxhomecloud/scratch/ajs-cutover-20261027-140730`.
-- HMC nginx serves the internal vhost `ajs.dwgx.top` on `:80`, proxying to
-  `127.0.0.1:2261`.
+  `/srv/dwgxhomecloud/scratch/ajs-cutover-20261027-140730`. Pre-hardening config
+  backups carry the stamp `20261028-033728` (see
+  [`deploy/live/README.md`](../live/README.md#backups)).
+- HMC nginx serves the internal vhost `ajs.dwgx.top` on `:80`. The listener is
+  still bound `0.0.0.0`, but the vhost allows only `10.99.0.1` (the VPS WireGuard
+  peer) and `127.0.0.1` and ends in `deny all;`, so a LAN client gets `403` on
+  `/v1/*`. It proxies `/v1/` and the exact `/metrics` path to `127.0.0.1:2261`,
+  serves `/healthz` statically and forwards `/tunnel` to the chisel server.
 - The HMC chisel server listens on `127.0.0.1:8080` only and is published by
-  the HMC nginx `/tunnel` location; it never binds a public interface.
+  the HMC nginx `/tunnel` location; it never binds a public interface. Its
+  authfile is restricted to the eleven anchored loopback gate forwards
+  (`deploy/live/hmc/chisel-filter.jq` is the filter that produced it).
 
 ### VPS
 
@@ -1241,10 +1302,22 @@ outbound from the VPS, so the HMC side adds no public port.
 
 | Surface | Listener | Backend |
 |---|---|---|
-| API + docs | nginx `:2055`, TLS | chisel tunnel -> HMC nginx `ajs.dwgx.top:80` -> `127.0.0.1:2261` |
+| API + docs | nginx `:2055`, TLS | WireGuard `10.99.0.2:80` -> HMC nginx `ajs.dwgx.top:80` -> `127.0.0.1:2261` |
 | Gate data plane | nginx stream `13000-13010`, TLS | chisel local `15000-15010` -> HMC `14000-14010` (daemon HTTP CONNECT) |
 
 - The systemd unit `ajs-chisel-client` keeps the tunnel up.
+- **Edge limits (applied 2026-10-28).** `http`-level zones in
+  `/etc/nginx/nginx.conf`: `ajs_public_api` at 120 r/min per IP, applied as
+  `limit_req … burst=60 nodelay`; `limit_conn ajs_public_conn 20` per IP and
+  `limit_conn ajs_public_total 400` per server name; `client_max_body_size 2m`;
+  both refusals answer `429`. `server_tokens off` is set globally. The daemon's
+  own 60/min per-key bucket stays the authority below this budget.
+- **Headers and TLS (applied 2026-10-28).** HSTS,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Permissions-Policy` and a CSP on every
+  response; TLS 1.2 restricted to ECDHE AEAD suites with
+  `ssl_prefer_server_ciphers off`, TLS 1.3 alongside. The live HSTS omits
+  `includeSubDomains`, which the kit sets.
 - Certificate: `/etc/letsencrypt/live/ajs.dwgx.top`, issued through the
   Cloudflare DNS-01 challenge. The SAN covers `ajs.dwgx.top` and
   `gate.dwgx.top`, so one certificate serves the API/docs vhost and all 11
@@ -1254,6 +1327,76 @@ outbound from the VPS, so the HMC side adds no public port.
 - DNS: `A` records for `ajs.dwgx.top` and `gate.dwgx.top` point at
   `152.175.35.40` and are **DNS-only** (unproxied), so the VPS certificate
   terminates TLS and no CDN sits in front of either edge.
+
+### Live hardening (2026-10-28)
+
+A hardening pass was applied to both live hosts after the cutover. These are
+**live properties of the deployment on 2026-10-28**, not properties of this kit;
+the files that were installed are copied verbatim into
+[`deploy/live/`](../live/README.md), and every change was preceded by an on-host
+backup stamped `20261028-033728`.
+
+| Change | Where | Applied value |
+|---|---|---|
+| Daemon bind | HMC daemon env | `AJS_LISTEN=127.0.0.1:2261` (was `0.0.0.0:2261`); restart logged `listening addr=127.0.0.1:2261` |
+| Unit sandbox | HMC `ajs-accountd.service` | `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full`, `ProtectHome=yes`, `ReadWritePaths` = state dir; still root, still `ProtectSystem=full` not `strict` |
+| HMC origin allowlist | HMC internal vhost | `allow 10.99.0.1; allow 127.0.0.1; deny all;` — LAN `/v1/whoami` `403`; it proxies `/v1/` and the exact `/metrics` path to the daemon, serves `/healthz` statically and forwards `/tunnel` to chisel |
+| chisel forwards | HMC chisel authfile | Each account restricted to anchored `^127\.0\.0\.1:1400[0-9]$` / `^127\.0\.0\.1:14010$`; tunnel reconnected; direct gate check `200` |
+| Edge limits | VPS `nginx.conf` + `:2055` vhost | `ajs_public_api` 120 r/m, `burst=60 nodelay`; 20 conn/IP; 400 conn per server name; `client_max_body_size 2m`; `429` on both refusals |
+| Edge headers | VPS `:2055` vhost | CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, HSTS, `X-Content-Type-Options: nosniff` on every response; `server_tokens off` in `http` |
+| Edge TLS | VPS `:2055` vhost | TLS 1.2 limited to ECDHE AEAD suites, `ssl_prefer_server_ciphers off`, TLS 1.3 alongside |
+| Payments | HMC daemon env | `AJS_EPAY_*` emptied; the daemon logs `epay_disabled` and `stripe_webhook_disabled`; `POST /v1/payments/stripe` stays `503` |
+
+Post-change probes (read-only, no credentials in the record):
+
+```text
+GET https://ajs.dwgx.top:2055/healthz        200
+GET https://ajs.dwgx.top:2055/docs           200
+GET https://ajs.dwgx.top:2055/metrics        401   (was 404 before the HMC /metrics route)
+GET https://ajs.dwgx.top:2055/v1/metrics     401
+GET https://ajs.dwgx.top:2055/readyz         404   (loopback-only by design)
+GET https://ajs.dwgx.top:2055/v1/nodes       401 unauth; 200 with a scoped key
+CONNECT https://gate.dwgx.top:13000          407 without auth; 200 with explicit Basic
+HMC LAN http://192.168.11.4/v1/whoami        403   (Host ajs.dwgx.top)
+HMC local http://127.0.0.1/v1/whoami         401
+VPS -> HMC http://10.99.0.2/v1/whoami        401
+```
+
+What did **not** change on 2026-10-28: the daemon is still root and still has no
+`AJS_RBAC_STRICT`; the live vhost is still the hand-written `:2055` file rather
+than `ajs-api.conf` on `:443`; the gate map is still chisel
+`13000-13010` → `15000-15010`; the HMC `:80` listener is still bound `0.0.0.0`
+(the allowlist, not the bind, is what excludes the LAN); and the dashboard stays
+LAN-reachable on `:18082`.
+
+### Live host divergence
+
+Read-only inspection on 2026-10-28, before and after the hardening pass above,
+found that the live host is **not** an instance of this kit. Treat the kit as the
+target state. The table records the live value, the kit's expectation and whether
+the row still diverges; "applied live 2026-10-28" means the control now exists on
+the host, not that the host has adopted the kit:
+
+| Item | Live value (2026-10-28) | Kit expectation | State |
+|---|---|---|---|
+| Daemon unit | ad-hoc system unit, `EnvironmentFile=/srv/dwgxhomecloud/scratch/ajs-deploy-20261024/daemon/.env`, `ExecStart=/srv/dwgxhomecloud/scratch/ajs-accountd-61625b0`, **no `User=`** (runs as root); sandbox directives applied 2026-10-28, `ProtectSystem=full` | `User=ajs`, `/etc/ajs/accountd.env`, `/usr/local/bin/ajs-accountd`, `ProtectSystem=strict` | **diverges** (root, scratch paths) |
+| Listener | `AJS_LISTEN=127.0.0.1:2261`, applied live 2026-10-28 | `127.0.0.1:2261` | matches |
+| RBAC | `AJS_ADMIN_OPERATORS_FILE` set, **no `AJS_RBAC_STRICT`**; compatibility mode still accepts the legacy shared bearer | `AJS_RBAC_STRICT=1`, no shared bearer | **diverges** |
+| API vhost | hand-written `/etc/nginx/sites-enabled/ajs-public.conf` on `:2055`, docs root `/var/www/ajs`; as-built copy under `deploy/live/vps/` (see [`deploy/live/README.md`](../live/README.md#host-paths)) | `ajs-api.conf` on `:443` | **diverges** |
+| Gate map | `13000-13010` → `127.0.0.1:15000-15010` (chisel); authfile anchored to `127.0.0.1:14000-14010`, applied live 2026-10-28 | `13000-13010` → `127.0.0.1:14000-14010` | **diverges** (chisel hop) |
+| Edge limits | `ajs_public_api` 120 r/m with `burst=60`, 20 conn/IP, 400 total, 2 MB body, applied live 2026-10-28 | `ajs_public_api` 120 r/m with `burst=30`, 20 conn/IP, 400 total, 2 MB body | applied live; burst 60 vs 30 |
+| Headers | full CSP/frame/referrer/permissions set, `server_tokens off`, ECDHE-AEAD TLS 1.2, applied live 2026-10-28; HSTS without `includeSubDomains` | same header set, ECDHE-AEAD TLS 1.2, HSTS with `includeSubDomains` | applied live; HSTS differs |
+| Readiness/metrics | `/metrics` `401` (was `404`), `/v1/metrics` `401`, `/readyz` `404` at `:2055`, applied live 2026-10-28 | `/readyz` on the portal origin only; `/metrics` proxied on the API origin | applied live; `/readyz` stays non-public |
+| HMC internal origin | `:80` bound `0.0.0.0`, allowlisted to `10.99.0.1` + `127.0.0.1`, proxies `/v1/` + `/metrics`, applied live 2026-10-28 | no such hop in the kit (no VPS, no chisel, no WireGuard) | live-only control |
+| chisel forwards | eleven anchored loopback gate targets, applied live 2026-10-28 | no chisel in the kit | live-only control |
+
+No row makes the live host an instance of this kit: the unit, RBAC mode, vhost,
+port (`:2055` vs `:443`), stream map and state layout all still differ, and
+`ajs-portal.conf` is not installed on either side. The public edge's 41-path
+allowlist itself was reproduced and tested (including encoded-slash and
+dot-segment variants); the divergence is in the host layout and the deployment
+mechanics, not in the allowlist shape. See
+[`docs/SECURITY-MODEL.md`](../../docs/SECURITY-MODEL.md#known-limitations).
 
 ### Public names
 
@@ -1285,6 +1428,15 @@ Recorded at cutover with a scoped key issued for user `u-10` (account
    `/srv/dwgxhomecloud/scratch/ajs-cutover-20261027-140730`, start the old
    daemon.
 3. DNS: delete the two `A` records (`ajs.dwgx.top`, `gate.dwgx.top`).
+
+To revert only the 2026-10-28 hardening, restore the on-host copies stamped
+`20261028-033728` (VPS `nginx.conf` + `ajs-public.conf`, HMC internal vhost,
+unit and chisel authfile), then `nginx -t` and reload on each host, run
+`systemctl daemon-reload` and restart `ajs-accountd` on the HMC, and reconnect
+the chisel client. Reverting the daemon env restores the pre-hardening
+`AJS_LISTEN=0.0.0.0:2261` and the emptied `AJS_EPAY_*` values, so revert
+deliberately. The exact file-to-host mapping is in
+[`deploy/live/README.md`](../live/README.md#host-paths).
 
 Rollback deletes no daemon data: the old state is restored from the backup and
 the new state tree is left in place for inspection.

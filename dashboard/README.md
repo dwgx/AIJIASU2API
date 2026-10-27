@@ -1513,8 +1513,9 @@ length, and a leftover collapses into a point with an opacity fade instead of du
 ## Docker
 
 ```bash
-docker build -t loveplus-dashboard:local .
-docker compose up -d          # http://127.0.0.1:18081
+# from the repository root: the image bundles the root license/notice files
+docker build -f dashboard/Dockerfile -t loveplus-dashboard:local .
+cd dashboard && docker compose up -d          # http://127.0.0.1:18081
 ```
 
 `Dockerfile` is a multi-stage Node 24 build → nginx 1.29. The nginx config is written inside the

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"os"
@@ -248,6 +249,72 @@ func TestAccountIOBuildCSVExactAndParse(t *testing.T) {
 	}
 	if len(parsed.Accounts[0].Regions) != 2 {
 		t.Fatalf("regions = %v", parsed.Accounts[0].Regions)
+	}
+}
+
+// TestAccountIOBuildCSVNeutralizesFormulas pins the spreadsheet-injection
+// defense on the plaintext export: a cell beginning with =, +, -, @, a tab or a
+// CR is emitted with a leading apostrophe so a spreadsheet renders it instead
+// of evaluating it. The apostrophe is part of the exported text, not stripped
+// on import.
+func TestAccountIOBuildCSVNeutralizesFormulas(t *testing.T) {
+	password := "=HYPERLINK(\"https://evil.example\")"
+	doc := store.AccountExport{
+		Format:  store.AccountExportFormat,
+		Version: 1,
+		Accounts: []store.AccountExportRow{
+			{
+				Label:       "=1+1",
+				Username:    "+user",
+				Password:    &password,
+				Platform:    model.PlatformLinux,
+				Concurrency: 1,
+				Regions:     []string{"-cn", "@hk"},
+				State:       model.AccountActive,
+				ExpiresAt:   "=now",
+			},
+			{
+				Label:       "\tlabel",
+				Username:    "\ruser",
+				Platform:    model.PlatformLinux,
+				Concurrency: 1,
+				State:       model.AccountPaused,
+				ExpiresAt:   "2026-11-22T16:35:33Z",
+			},
+		},
+	}
+	raw, err := store.BuildExportCSV(doc)
+	if err != nil {
+		t.Fatalf("BuildExportCSV: %v", err)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(raw)).ReadAll()
+	if err != nil {
+		t.Fatalf("parse exported CSV: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want header plus two accounts", len(rows))
+	}
+	want := [][]string{
+		{"'=1+1", "'+user", "'" + password, "linux", "1", "'-cn|@hk", "active", "'=now"},
+		{"'\tlabel", "'\ruser", "", "linux", "1", "", "paused", "2026-11-22T16:35:33Z"},
+	}
+	for i, expected := range want {
+		if got := rows[i+1]; strings.Join(got, "\x00") != strings.Join(expected, "\x00") {
+			t.Fatalf("row %d = %q, want %q", i+1, got, expected)
+		}
+	}
+	// A benign label is untouched, so the defense does not rewrite ordinary
+	// exports.
+	plain := store.AccountExport{Accounts: []store.AccountExportRow{{
+		Label: "Northwind Ops", Username: "user", Platform: model.PlatformLinux,
+		Concurrency: 1, State: model.AccountActive, ExpiresAt: "2026-11-22T16:35:33Z",
+	}}}
+	raw, err = store.BuildExportCSV(plain)
+	if err != nil {
+		t.Fatalf("BuildExportCSV plain: %v", err)
+	}
+	if !strings.Contains(string(raw), "\nNorthwind Ops,user,") {
+		t.Fatalf("benign row changed:\n%s", raw)
 	}
 }
 

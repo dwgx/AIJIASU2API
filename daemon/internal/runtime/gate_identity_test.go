@@ -45,20 +45,27 @@ func (s *identityEchoSession) recorded() []string {
 	return append([]string(nil), s.opens...)
 }
 
-// identityFixture is one store, one account, one user with an API key and a
-// real gate wired exactly as the daemon wires it: the FlowMeter owns both the
-// request-log observer and the identity service.
+// identityFixture is one store, one account with a live node, one user with an
+// API key and exactly one active lease, and a real gate wired exactly as the
+// daemon wires it: the FlowMeter owns the request-log observer, the
+// account-bound identity resolves the lease at authentication, and the same
+// wrapper revalidates the entitlement while a flow relays.
 type identityFixture struct {
 	store    *store.Store
 	account  model.Account
 	user     model.PanelUser
 	key      model.APIKey
 	secret   string
+	lease    model.Lease
 	identity *GateIdentity
 	meter    *FlowMeter
 	server   *gate.Server
 	session  *identityEchoSession
 }
+
+// identityEntitlementInterval keeps the revocation window short enough for a
+// test to observe a closed tunnel without waiting out the 10s default.
+const identityEntitlementInterval = 20 * time.Millisecond
 
 func newIdentityFixture(t *testing.T, allowlist []string, quota *int64) *identityFixture {
 	t.Helper()
@@ -73,6 +80,12 @@ func newIdentityFixture(t *testing.T, allowlist []string, quota *int64) *identit
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
+	if _, err := st.PutNode(model.ProxyNode{
+		ID: "node-identity", AccountID: account.ID, Label: "cn-zj-01", Region: "cn-zj",
+		State: model.NodeLive, EgressIP: "203.0.113.10", Protocol: model.ProtocolSOCKS5, GatePort: 13030,
+	}); err != nil {
+		t.Fatalf("PutNode: %v", err)
+	}
 	user, err := st.CreateUser(model.CreateUserInput{Name: "resin-loopback", Allowlist: allowlist, QuotaBytesMonth: quota})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -81,16 +94,25 @@ func newIdentityFixture(t *testing.T, allowlist []string, quota *int64) *identit
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
+	lease, _, err := st.CreateLease(model.CreateLeaseInput{
+		UserID: user.ID, Platform: model.PlatformLinux, AccountID: account.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
 	meter := NewFlowMeter(st)
 	identity := meter.Identity()
+	bound := identity.ForAccount(account.ID)
 	session := &identityEchoSession{}
 	built, err := meter.GateFactory()(gate.Config{
-		NodeID:        "node-identity",
-		AccountID:     account.ID,
-		Listen:        "127.0.0.1:0",
-		AuthMode:      gate.AuthUserPass,
-		Authenticator: identity,
-		UserPolicy:    identity,
+		NodeID:              "node-identity",
+		AccountID:           account.ID,
+		Listen:              "127.0.0.1:0",
+		AuthMode:            gate.AuthUserPass,
+		Authenticator:       bound,
+		UserPolicy:          bound,
+		EntitlementCheck:    bound.EntitlementValid,
+		EntitlementInterval: identityEntitlementInterval,
 	}, session)
 	if err != nil {
 		t.Fatalf("GateFactory: %v", err)
@@ -109,6 +131,7 @@ func newIdentityFixture(t *testing.T, allowlist []string, quota *int64) *identit
 		user:     user,
 		key:      key,
 		secret:   secret,
+		lease:    lease,
 		identity: identity,
 		meter:    meter,
 		server:   server,
@@ -370,6 +393,11 @@ func TestNodeControllerPassesGateAuthToGates(t *testing.T) {
 			if wired != tc.wantWiring {
 				t.Fatalf("gate identity wired = %v, want %v", wired, tc.wantWiring)
 			}
+			// The entitlement watch rides with the identity: without it an
+			// established tunnel outlives a revoked or expired key/lease.
+			if watching := capture.cfg.EntitlementCheck != nil; watching != tc.wantWiring {
+				t.Fatalf("gate entitlement watch = %v, want %v", watching, tc.wantWiring)
+			}
 			if tc.wantWiring {
 				// The controller must hand the gate the identity bound to that
 				// gate's account, never the bare *GateIdentity: only the
@@ -462,8 +490,8 @@ func TestGateIdentityRelaysAndMetersUser(t *testing.T) {
 }
 
 // TestGateIdentityRevokedKeyIsImmediate is acceptance row 6: revoking the key
-// fails the next handshake with 01 01 while the already admitted flow keeps
-// relaying under its authenticated identity.
+// fails the next handshake with 01 01, and the entitlement watch closes the
+// already admitted flow instead of letting it relay under a dead credential.
 func TestGateIdentityRevokedKeyIsImmediate(t *testing.T) {
 	f := newIdentityFixture(t, []string{"127.0.0.1/32"}, nil)
 
@@ -490,8 +518,17 @@ func TestGateIdentityRevokedKeyIsImmediate(t *testing.T) {
 		t.Fatalf("revoked handshake got %d byte(s), err %v; want a close", n, err)
 	}
 
-	// The admitted flow keeps its identity and keeps relaying.
-	echoBytes(t, conn, []byte("after-revoke"))
+	// The established tunnel must end on the next entitlement tick: a read
+	// reaches EOF, and a write is no longer echoed.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := conn.Read(one[:]); err == nil || n != 0 {
+		t.Fatalf("established flow kept relaying after revoke: read %d byte(s), err %v", n, err)
+	}
+	if _, err := conn.Write([]byte("after-revoke")); err == nil {
+		if n, err := conn.Read(one[:]); err == nil && n > 0 {
+			t.Fatalf("established flow echoed %d byte(s) after revoke", n)
+		}
+	}
 	_ = conn.Close()
 
 	rows := waitUserRows(t, f.store, 1)
@@ -500,6 +537,176 @@ func TestGateIdentityRevokedKeyIsImmediate(t *testing.T) {
 	}
 	if opens := f.session.recorded(); len(opens) != 1 {
 		t.Fatalf("OpenFlow calls = %v, want one", opens)
+	}
+}
+
+// TestGateEntitlementWatchClosesEstablishedFlow is the AZ-01 acceptance row:
+// a tunnel that was admitted while its entitlement was valid is closed as soon
+// as the key is revoked or expires, the lease is revoked or expires, or the
+// user is suspended. Every case rewrites the durable row the watch re-reads
+// rather than waiting out a real deadline, so the window is the gate's tick.
+func TestGateEntitlementWatchClosesEstablishedFlow(t *testing.T) {
+	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
+
+	cases := []struct {
+		name string
+		// revoke mutates the fixture's store after a tunnel is established.
+		revoke func(t *testing.T, f *scopedGateFixture)
+	}{
+		{
+			name: "revoked scoped key",
+			revoke: func(t *testing.T, f *scopedGateFixture) {
+				if err := f.store.RevokeScopedKey(f.scopedKey.ID); err != nil {
+					t.Fatalf("RevokeScopedKey: %v", err)
+				}
+			},
+		},
+		{
+			name: "expired scoped key",
+			revoke: func(t *testing.T, f *scopedGateFixture) {
+				rewriteSnapshot(t, f.store, func(doc map[string]any) {
+					record := snapshotRecord(t, doc, "scopedKeys", f.scopedKey.ID)
+					record["expiresAt"] = now()
+				})
+			},
+		},
+		{
+			name: "revoked lease",
+			revoke: func(t *testing.T, f *scopedGateFixture) {
+				if _, err := f.store.RevokeLease(f.lease.ID); err != nil {
+					t.Fatalf("RevokeLease: %v", err)
+				}
+			},
+		},
+		{
+			name: "expired lease",
+			revoke: func(t *testing.T, f *scopedGateFixture) {
+				rewriteSnapshot(t, f.store, func(doc map[string]any) {
+					record := snapshotRecord(t, doc, "leases", f.lease.ID)
+					record["expiresAt"] = now()
+				})
+			},
+		},
+		{
+			name: "disabled user",
+			revoke: func(t *testing.T, f *scopedGateFixture) {
+				if _, err := f.store.SetUserEnabled(f.user.ID, false); err != nil {
+					t.Fatalf("SetUserEnabled: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScopedGateFixture(t)
+			conn := f.dial(t)
+			if status := authenticate(t, conn, f.user.ID, f.secret); status != 0 {
+				t.Fatalf("auth status = %#x, want 0x00", status)
+			}
+			if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+				t.Fatalf("CONNECT reply = %#x, want success", rep)
+			}
+			echoBytes(t, conn, []byte("before-revoke"))
+
+			tc.revoke(t, f)
+
+			// The watcher closes both sides on its next tick; the read returns
+			// EOF instead of another echo.
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var one [1]byte
+			if n, err := conn.Read(one[:]); err == nil || n != 0 {
+				t.Fatalf("tunnel kept relaying after %s: read %d byte(s), err %v", tc.name, n, err)
+			}
+			if _, err := conn.Write([]byte("after")); err == nil {
+				if n, err := conn.Read(one[:]); err == nil && n > 0 {
+					t.Fatalf("tunnel echoed %d byte(s) after %s", n, tc.name)
+				}
+			}
+			_ = conn.Close()
+
+			// A new flow is refused for the same reason, so the closure is
+			// revocation and not a transport accident. A revoked key or lease
+			// fails the handshake; a suspended user fails admission instead,
+			// because authentication only resolves identity.
+			next := f.dial(t)
+			if status := authenticate(t, next, f.user.ID, f.secret); status == 0 {
+				if rep := connectIPv4(t, next, net.IPv4(127, 0, 0, 1), 443); rep == 0 {
+					t.Fatalf("a new flow was admitted after %s", tc.name)
+				}
+			}
+			_ = next.Close()
+			if opens := f.session.recorded(); len(opens) != 1 {
+				t.Fatalf("OpenFlow calls = %v, want only the established flow", opens)
+			}
+		})
+	}
+}
+
+// TestGateEntitlementWatchKeepsHealthyFlow proves the watch does not cut a flow
+// whose entitlement still holds: several ticks pass and the tunnel still echoes.
+func TestGateEntitlementWatchKeepsHealthyFlow(t *testing.T) {
+	f := newScopedGateFixture(t)
+	conn := f.dial(t)
+	if status := authenticate(t, conn, f.user.ID, f.secret); status != 0 {
+		t.Fatalf("auth status = %#x, want 0x00", status)
+	}
+	if rep := connectIPv4(t, conn, net.IPv4(127, 0, 0, 1), 443); rep != 0 {
+		t.Fatalf("CONNECT reply = %#x, want success", rep)
+	}
+	time.Sleep(10 * identityEntitlementInterval)
+	echoBytes(t, conn, []byte("still-entitled"))
+	_ = conn.Close()
+	if opens := f.session.recorded(); len(opens) != 1 {
+		t.Fatalf("OpenFlow calls = %v, want one", opens)
+	}
+}
+
+// TestGateAccountIdentityEntitlementValid pins the three stages of the
+// entitlement check directly: a valid principal passes, and each missing or
+// changed row fails closed on its own.
+func TestGateAccountIdentityEntitlementValid(t *testing.T) {
+	f := newScopedGateFixture(t)
+	bound := f.identity.ForAccount(f.account.ID)
+
+	scoped, ok := bound.Authenticate(f.user.ID, f.secret)
+	if !ok || scoped.KeyID != f.scopedKey.ID || scoped.KeyKind != gate.KeyKindScopedKey {
+		t.Fatalf("scoped principal = %+v/%v, want key %q of kind %q",
+			scoped, ok, f.scopedKey.ID, gate.KeyKindScopedKey)
+	}
+	panel, ok := bound.Authenticate(f.user.ID, f.panelSecret)
+	if !ok || panel.KeyID == "" || panel.KeyKind != gate.KeyKindAPIKey {
+		t.Fatalf("panel principal = %+v/%v, want an api_key identity", panel, ok)
+	}
+	for _, principal := range []gate.Principal{scoped, panel} {
+		if !bound.EntitlementValid(principal) {
+			t.Fatalf("valid principal %+v refused", principal)
+		}
+	}
+
+	// Unknown kind, missing key id and another user's key all fail closed.
+	for name, principal := range map[string]gate.Principal{
+		"unknown kind":  {UserID: f.user.ID, LeaseID: f.lease.ID, KeyID: f.scopedKey.ID, KeyKind: "bearer"},
+		"missing key":   {UserID: f.user.ID, LeaseID: f.lease.ID, KeyKind: gate.KeyKindScopedKey},
+		"missing lease": {UserID: f.user.ID, KeyID: f.scopedKey.ID, KeyKind: gate.KeyKindScopedKey},
+		"missing user":  {LeaseID: f.lease.ID, KeyID: f.scopedKey.ID, KeyKind: gate.KeyKindScopedKey},
+	} {
+		if bound.EntitlementValid(principal) {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+
+	// The key must belong to the principal's user: a key id resolved for
+	// someone else can never satisfy another user's flow.
+	other, err := f.store.CreateUser(model.CreateUserInput{
+		Name: "entitlement-other", Allowlist: []string{"127.0.0.1/32"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(other): %v", err)
+	}
+	if bound.EntitlementValid(gate.Principal{
+		UserID: other.ID, LeaseID: f.lease.ID, KeyID: f.scopedKey.ID, KeyKind: gate.KeyKindScopedKey,
+	}) {
+		t.Fatal("another user's key satisfied the entitlement")
 	}
 }
 
@@ -876,6 +1083,7 @@ type scopedGateFixture struct {
 	store       *store.Store
 	account     model.Account
 	user        model.PanelUser
+	scopedKey   model.ScopedKey
 	secret      string
 	panelSecret string
 	lease       model.Lease
@@ -910,7 +1118,7 @@ func newScopedGateFixture(t *testing.T) *scopedGateFixture {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, secret, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
+	scopedKey, secret, err := st.CreateScopedKey(model.ScopedKeyCreateRequest{
 		UserID:     user.ID,
 		Label:      "gate",
 		Scopes:     []model.Scope{model.ScopeProxyConnect},
@@ -930,12 +1138,19 @@ func newScopedGateFixture(t *testing.T) *scopedGateFixture {
 		t.Fatalf("CreateLease: %v", err)
 	}
 	meter := NewFlowMeter(st)
+	// NodeController.startGateLocked installs the entitlement watch in
+	// production; the fixture builds the gate directly, so it wires the same
+	// callback with a test-sized interval. The authenticator and policy stay
+	// nil on purpose: the factory's account-bound default is what runs.
+	bound := meter.Identity().ForAccount(account.ID)
 	session := &identityEchoSession{}
 	built, err := meter.GateFactory()(gate.Config{
-		NodeID:    "node-scoped",
-		AccountID: account.ID,
-		Listen:    "127.0.0.1:0",
-		AuthMode:  gate.AuthUserPass,
+		NodeID:              "node-scoped",
+		AccountID:           account.ID,
+		Listen:              "127.0.0.1:0",
+		AuthMode:            gate.AuthUserPass,
+		EntitlementCheck:    bound.EntitlementValid,
+		EntitlementInterval: identityEntitlementInterval,
 	}, session)
 	if err != nil {
 		t.Fatalf("GateFactory: %v", err)
@@ -952,6 +1167,7 @@ func newScopedGateFixture(t *testing.T) *scopedGateFixture {
 		store:       st,
 		account:     account,
 		user:        user,
+		scopedKey:   scopedKey,
 		secret:      secret,
 		panelSecret: panelSecret,
 		lease:       lease,
@@ -1037,6 +1253,52 @@ func expireLeases(t *testing.T, st *store.Store) *store.Store {
 		t.Fatalf("Restore: %v", err)
 	}
 	return restored
+}
+
+// rewriteSnapshot applies edit to the store's own snapshot and restores it into
+// the same store, so one durable deadline can be moved without waiting for wall
+// time. The gate holds this *store, so the entitlement watch observes the
+// rewrite on its next tick exactly as it observes a real deadline passing.
+func rewriteSnapshot(t *testing.T, st *store.Store, edit func(doc map[string]any)) {
+	t.Helper()
+	data, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	edit(doc)
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode snapshot: %v", err)
+	}
+	if err := st.Restore(edited); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+}
+
+// snapshotRecord returns the one record with id inside the snapshot collection
+// named collection ("leases", "scopedKeys", …). A missing collection or id
+// fails the test: the rewrite would otherwise prove nothing.
+func snapshotRecord(t *testing.T, doc map[string]any, collection, id string) map[string]any {
+	t.Helper()
+	records, ok := doc[collection].([]any)
+	if !ok {
+		t.Fatalf("snapshot has no %s collection", collection)
+	}
+	for _, raw := range records {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if record["id"] == id {
+			return record
+		}
+	}
+	t.Fatalf("snapshot %s has no record %q", collection, id)
+	return nil
 }
 
 // TestGateIdentityScopedKey is the gate half of AJS-450: a scoped key carrying

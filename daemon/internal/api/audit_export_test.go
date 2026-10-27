@@ -224,6 +224,10 @@ func TestAuditExportCSVRequiresAuth(t *testing.T) {
 	requireErrorCode(t, body, CodeUnauthorized)
 }
 
+// TestAuditExportCSVScopedKey pins the operator-global audit rule on the CSV
+// path: an unrestricted audit:read customer key is refused 403
+// admin_required, and the admin token plus an admin-scoped key keep the 200
+// CSV stream.
 func TestAuditExportCSVScopedKey(t *testing.T) {
 	ts, _ := newTestServer(t)
 	created, _ := mustCreateScopedKey(t, ts, map[string]any{
@@ -231,10 +235,30 @@ func TestAuditExportCSVScopedKey(t *testing.T) {
 		"label":  "audit export",
 		"scopes": []string{"audit:read"},
 	})
-	resp, _ := scopedCall(t, ts, created.Secret, http.MethodGet, "/v1/audit/export.csv", nil)
+	for _, path := range []string{"/v1/audit/export.csv", "/v1/audit"} {
+		resp, body := scopedCall(t, ts, created.Secret, http.MethodGet, path, nil)
+		requireStatus(t, resp, http.StatusForbidden)
+		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
+		if got := resp.Header.Get("Content-Type"); strings.HasPrefix(got, "text/csv") {
+			t.Fatalf("%s refused with a CSV stream: Content-Type %q", path, got)
+		}
+	}
+
+	admin, _ := mustCreateScopedKey(t, ts, map[string]any{
+		"userId": "u-01",
+		"label":  "operator",
+		"scopes": []string{"admin"},
+	})
+	resp, _ := scopedCall(t, ts, admin.Secret, http.MethodGet, "/v1/audit/export.csv", nil)
 	requireStatus(t, resp, http.StatusOK)
 	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/csv") {
-		t.Fatalf("Content-Type = %q", got)
+		t.Fatalf("admin Content-Type = %q", got)
+	}
+	resp, body := apiCall(t, ts, http.MethodGet, "/v1/audit/export.csv", nil)
+	requireStatus(t, resp, http.StatusOK)
+	if !strings.Contains(string(body), "ts,severity,actor,action,target,detail,meta") {
+		t.Fatalf("admin export body = %s", body)
 	}
 }
 
@@ -355,10 +379,11 @@ func TestAuditExportCSVNeutralizesFormulaCells(t *testing.T) {
 	}
 }
 
-// TestAuditExportCSVRestrictedKeyForbidden pins the global-audit rule on the
-// CSV path: a key restricted to named accounts is refused before the retention
-// window is read or a row is selected, so even a malformed window answers 403
-// rather than 400. An unrestricted audit:read key keeps its 200 stream.
+// TestAuditExportCSVRestrictedKeyForbidden pins the operator-global audit rule
+// on the CSV path: a key restricted to named accounts is refused before the
+// retention window is read or a row is selected, so even a malformed window
+// answers 403 rather than 400. It is refused for the same reason as an
+// unrestricted audit:read key: no customer key reads the audit log.
 func TestAuditExportCSVRestrictedKeyForbidden(t *testing.T) {
 	ts, _ := newTestServer(t)
 	restricted, _ := mustCreateScopedKey(t, ts, map[string]any{
@@ -371,6 +396,7 @@ func TestAuditExportCSVRestrictedKeyForbidden(t *testing.T) {
 		resp, body := scopedCall(t, ts, restricted.Secret, http.MethodGet, path, nil)
 		requireStatus(t, resp, http.StatusForbidden)
 		requireErrorCode(t, body, CodeForbidden)
+		requireErrorReason(t, body, ReasonAdminRequired)
 	}
 	resp, _ := scopedCall(t, ts, restricted.Secret, http.MethodGet, "/v1/audit/export.csv", nil)
 	if got := resp.Header.Get("Content-Type"); strings.HasPrefix(got, "text/csv") {
