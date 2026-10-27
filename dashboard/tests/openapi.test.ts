@@ -67,7 +67,7 @@ interface Operation {
 interface OpenAPIDocument {
   openapi: string
   info: { title: string; version: string }
-  servers: Array<{ url: string }>
+  servers: Array<{ url: string; description?: string }>
   security: Array<Record<string, string[]>>
   paths: Record<string, Record<string, Operation>>
   components: {
@@ -223,7 +223,11 @@ describe('docs/openapi.json', () => {
     expect(doc.openapi).toMatch(/^3\.1\.\d+$/)
     expect(doc.info.title).toBeTruthy()
     expect(doc.info.version).toBeTruthy()
-    expect(String(doc.servers[0]?.url)).toContain('127.0.0.1:2261')
+    expect(doc.servers.map((server) => server.url)).toEqual([
+      'https://api.example.com',
+      'http://127.0.0.1:2261',
+    ])
+    expect(doc.servers[0]?.description).toContain('placeholder')
   })
 
   it('documents every route registered in server.go and orders.go and invents no P0 route', () => {

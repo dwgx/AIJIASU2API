@@ -39,6 +39,44 @@ func TestEmbeddedOpenAPISpecMatchesDocs(t *testing.T) {
 	}
 }
 
+// TestOpenAPISpecServersDescribePublicEdge pins the advertised origins: the
+// public scoped-key edge first and the loopback admin API second. The public
+// URL is a placeholder, and the description must say so instead of claiming a
+// deployed host.
+func TestOpenAPISpecServersDescribePublicEdge(t *testing.T) {
+	var doc struct {
+		Info struct {
+			Description string `json:"description"`
+		} `json:"info"`
+		Servers []struct {
+			URL         string `json:"url"`
+			Description string `json:"description"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(embeddedOpenAPISpec, &doc); err != nil {
+		t.Fatalf("decode embedded spec: %v", err)
+	}
+	want := []string{"https://api.example.com", "http://127.0.0.1:2261"}
+	if len(doc.Servers) != len(want) {
+		t.Fatalf("servers = %d, want %d", len(doc.Servers), len(want))
+	}
+	for i, url := range want {
+		if doc.Servers[i].URL != url {
+			t.Errorf("servers[%d].url = %q, want %q", i, doc.Servers[i].URL, url)
+		}
+	}
+	if !strings.Contains(doc.Servers[0].Description, "placeholder") {
+		t.Error("public server description does not call api.example.com a deployment placeholder")
+	}
+	for _, want := range []string{
+		"public TLS edge", "13000-13010", "port+1000", "no public SOCKS5",
+	} {
+		if !strings.Contains(doc.Info.Description, want) {
+			t.Errorf("info.description does not mention %q", want)
+		}
+	}
+}
+
 func TestOpenAPISpecServesEmbeddedContract(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, body := apiCall(t, ts, http.MethodGet, "/v1/openapi.json", nil)
