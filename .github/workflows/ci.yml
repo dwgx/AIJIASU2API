@@ -96,6 +96,13 @@ jobs:
             exit 1
           fi
 
+      - name: Verify generated docs are current
+        # The docs UI ships generated artifacts (src/docs/reference.generated.ts,
+        # public/docs/*.md, public/llms.txt). --check compares what is on disk
+        # and exits 1 on drift instead of rewriting it, so a stale or
+        # hand-edited mirror cannot reach the portal edge.
+        run: npm run docs:gen -- --check
+
       - name: Test
         run: npm test -- --pool=forks --maxWorkers=1
 

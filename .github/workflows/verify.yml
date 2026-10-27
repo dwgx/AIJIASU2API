@@ -72,6 +72,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Verify generated docs are current
+        # Same gate as ci.yml: the docs artifacts are generated, so a changed
+        # contract or a hand-edited mirror must fail here instead of shipping.
+        run: npm run docs:gen -- --check
+
       # The serial flags are load-bearing: without them findBy* assertions
       # time out on a loaded host (7 of 500 fail on a 24-core machine).
       - name: Test (serial, as CI)

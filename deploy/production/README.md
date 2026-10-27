@@ -302,6 +302,8 @@ remain loopback-only and are not opened by either table.
 browser ── HTTPS ──> nginx :443 (panel.example.com)
                      ├── /portal*        -> /var/lib/ajs/production/portal (SPA)
                      ├── /assets/*       -> static bundle
+                     ├── /docs, /docs/*  -> docs UI + generated Markdown mirrors
+                     ├── /llms.txt       -> generated docs index (text/plain)
                      ├── /v1/portal/*    -> 127.0.0.1:2261 (cookie + CSRF)
                      └── /v1/payments/{epay/notify,stripe} -> 127.0.0.1:2261
 
@@ -334,13 +336,21 @@ A Vite `VITE_*` value is compiled into public JavaScript. Shipping
 devtools, so the customer bundle never has one. It authenticates with the
 daemon's `__Host-ajs_portal` HttpOnly cookie and CSRF token instead.
 
-The customer origin serves **only** `/portal`, `/portal/*`, `/assets/*` and
-the portal API/callback paths. `location / { return 404; }` is terminal: the
-admin SPA routes (`/accounts`, `/nodes`, `/settings`, …) and the admin API
-(`/v1/accounts`, `/v1/nodes`, …) are not routed on this origin. The same static
+The customer origin serves **only** `/portal`, `/portal/*`, `/assets/*`, the
+public docs (`/docs`, `/docs/*` and `/llms.txt`) and the portal API/callback
+paths. `location / { return 404; }` is terminal: the admin SPA routes
+(`/accounts`, `/nodes`, `/settings`, …) and the admin API (`/v1/accounts`,
+`/v1/nodes`, …) are not routed on this origin. The same static
 bundle is copied to both roots because the admin route code is lazy-loaded and
 dead on the portal origin; the deployment edge, not a source fork, is what
 makes the customer surface portal-only.
+
+The docs UI is the same bundle's `/docs` route. Its generated Markdown mirrors
+(`/docs/*.md`) and `/llms.txt` ship next to `index.html`; nginx serves them as
+files only (no proxy), typed `text/markdown` by the kit MIME map
+(`nginx/ajs-mime.types`, included by `nginx.conf`) rather than by a second
+regex location, and every docs response carries `Cache-Control: no-cache` plus
+the security-header snippet.
 
 ### Admin origin: per-operator Basic auth + mapped bearer + daemon RBAC
 
@@ -656,7 +666,10 @@ state directory.
    `0555` state directory and require `503` `not_ready` naming the `state`
    check while `/healthz` stays `200`;
 8. static nginx assertions: portal terminal 404, no generic `/v1/` proxy on
-   the portal origin, admin token include, allow/deny, default-deny `444`/`421`,
+   the portal origin, the public docs edge (`= /docs`, `/docs/` and
+   `= /llms.txt` are static, no-cache and CSP-covered, and precede the
+   terminal 404), `.md` typed `text/markdown` by the included kit MIME map,
+   admin token include, allow/deny, default-deny `444`/`421`,
    canonical redirect, `/readyz` proxy, HSTS, rate-limit zones,
    `X-Forwarded-For $remote_addr`, and the CSP set: exactly one CSP header
    directive anywhere in the kit (case-insensitive, including two directives on
@@ -669,7 +682,9 @@ state directory.
 9. the CSP runtime fixture: the shipped vhosts staged on `127.0.0.1` ephemeral
    ports with a disposable document root and an upstream pinned to a closed
    port, asserting exactly one CSP header with the exact policy on portal HTML,
-   portal assets, the portal SPA deep link, the portal `404`, admin HTML, the
+   portal assets, the portal SPA deep link, the portal `404`, the docs route
+   (`/docs`), the docs Markdown (`/docs/overview.md`, also `text/markdown`),
+   `/llms.txt` (also `text/plain`), admin HTML, the
    admin `401`, the admin `502` and the default-deny `421`, plus a closed
    connection for an unknown Host on the fixture's HTTP port; then a
    headless-browser boot of `https://panel.example.com:<port>/portal/login`
@@ -723,6 +738,19 @@ requirement.
   with the unknown-Host HTTP probe closed (`000`). Headless Chrome then
   rendered the fixture login form (`id="ajs-portal-login"`) with no CSP
   refusal.
+- **Linux development host, re-run after the AJS-465 docs edge (same day):**
+  `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS (134 checks, 1 skipped; not a production gate)`. This run
+  was the Linux shell, not the Windows host: host `nginx`, `openssl`, `curl`,
+  `systemd-analyze`, `nft`, `sudo` and `/usr/bin/google-chrome` were all
+  present, so nothing was skipped except the root-only AJS-412 proof. The
+  nginx and Chrome versions were not re-recorded for this run. The three new
+  static checks are the docs edge, the docs-before-terminal-404 ordering and
+  the `text/markdown` MIME mapping; the CSP walk now covers 28 locations. The
+  runtime fixture additionally observed `/docs` (`200`), `/docs/` (`200`, the
+  bundle index, not a directory `403`), `/docs/overview.md` (`200`,
+  `text/markdown`) and `/llms.txt` (`200`, `text/plain`), each with exactly one
+  exact policy.
 - **CSP helper controls (manual, not part of the gate):** an inline script
   under `script-src 'self'` exited `1` quoting Chrome's `Executing inline
   script violates the following Content Security Policy directive`; the same
@@ -739,6 +767,17 @@ requirement.
   every portal deep link (`/portal/login`, `/portal/signup`, ...) was broken
   even though the router and this README document them. The fallback is now
   the file test `try_files $uri /index.html =404;`.
+- **Public docs edge (AJS-465):** the portal vhost serves `/docs`, `/docs/`
+  and `/llms.txt` as static files with `Cache-Control: no-cache` and the
+  security-header snippet, ahead of the terminal `404`; `/v1/` is still never
+  proxied. `.md` is typed `text/markdown` by `nginx/ajs-mime.types` (the map
+  `nginx.conf` includes), not by a second regex location, and the runtime
+  fixture confirmed `text/markdown` and `text/plain` on the wire. Controls on
+  the new static assertion (manual, extracted block, not part of the gate):
+  deleting the `/llms.txt` block, adding a `proxy_pass` to `/docs/`, dropping
+  its `add_header Cache-Control`, moving the three blocks after the terminal
+  `404`, and removing the `text/markdown` mapping each produced the expected
+  `FAIL`; the unmodified vhost passed all three.
 - **Still required before release:** `sudo -E bash deploy/production/check.sh`
   on the release host with `AJS_CHROMIUM_BIN` (or chromium/chrome on `PATH`).
   Production mode treats a missing browser as a required `FAIL`; this

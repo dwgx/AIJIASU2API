@@ -632,6 +632,86 @@ if grep -qE '^[[:space:]]*location[[:space:]]+/v1/[[:space:]]*\{' "$kit/nginx/si
 else
     pass "portal vhost proxies only /v1/portal/ and payment callbacks"
 fi
+
+# Public docs edge (AJS-465). The docs UI ships in the same static bundle:
+# /docs is an SPA route, /docs/*.md and /llms.txt are generated files. Each
+# block must serve files (never proxy), carry the no-cache policy and include
+# the security-header snippet itself: an add_header in a location drops the
+# headers inherited from the server block.
+portal_conf="$kit/nginx/sites-available/ajs-portal.conf"
+docs_edge=$(awk '
+BEGIN {
+    req[1] = "location = /docs"
+    req[2] = "location /docs/"
+    req[3] = "location = /llms.txt"
+}
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function emit(name, body,   msg) {
+    found[name] = 1
+    msg = ""
+    if (body !~ /try_files[ \t]/) msg = msg " [no try_files]"
+    if (body !~ /add_header[ \t]+Cache-Control[ \t]+"no-cache"[ \t]+always;/) msg = msg " [no no-cache Cache-Control]"
+    if (body !~ /include[ \t]+[^;]*ajs-security-headers\.conf;/) msg = msg " [no security-header include]"
+    if (body ~ /proxy_pass[ \t]/) msg = msg " [proxies; the docs edge must be static]"
+    if (msg == "") printf "OK %s\n", name
+    else printf "BAD %s%s\n", name, msg
+}
+{
+    line = $0
+    sub(/#.*/, "", line)
+    if (!in_loc) {
+        if (line ~ /^[ \t]*location[ \t]/) {
+            hdr = line
+            sub(/[ \t]*\{.*/, "", hdr)
+            hdr = trim(hdr)
+            if (hdr == "location = /docs" || hdr == "location /docs/" || hdr == "location = /llms.txt") {
+                in_loc = 1
+                name = hdr
+                body = ""
+                if (line ~ /\}/) { emit(name, body); in_loc = 0 }
+            }
+        }
+        next
+    }
+    body = body "\n" line
+    if (line ~ /\}/) { emit(name, body); in_loc = 0 }
+}
+END {
+    for (i = 1; i <= 3; i++) if (!(req[i] in found)) printf "BAD %s [missing]\n", req[i]
+}' "$portal_conf" 2>/dev/null)
+docs_edge_bad=$(printf '%s\n' "$docs_edge" | grep -c '^BAD' 2>/dev/null || true)
+docs_edge_ok=$(printf '%s\n' "$docs_edge" | grep -c '^OK' 2>/dev/null || true)
+if [ "${docs_edge_bad:-0}" -eq 0 ] && [ "${docs_edge_ok:-0}" -eq 3 ]; then
+    pass "portal docs edge: = /docs, /docs/ and = /llms.txt are static, no-cache and CSP-covered"
+else
+    fail "portal docs edge incomplete (want 3 static no-cache CSP blocks): $(printf '%s\n' "$docs_edge" | grep '^BAD' | tr '\n' ';' | cut -c1-400)"
+fi
+
+# The docs edge must sit before the terminal default-deny location, so a later
+# edit cannot re-order the file and shadow /docs or /llms.txt with the 404.
+terminal_404_line=$(grep -nE '^[[:space:]]*location[[:space:]]+/[[:space:]]*\{' "$portal_conf" | tail -n1 | cut -d: -f1)
+docs_edge_lines=$(grep -nE '^[[:space:]]*location[[:space:]]+(=[[:space:]]+)?/(docs/?|llms\.txt)[[:space:]]*\{' "$portal_conf" | cut -d: -f1 | tr '\n' ' ')
+docs_edge_after=""
+for docs_line in $docs_edge_lines; do
+    if [ -z "$terminal_404_line" ] || [ "$docs_line" -ge "$terminal_404_line" ]; then
+        docs_edge_after="$docs_edge_after $docs_line"
+    fi
+done
+if [ -n "$terminal_404_line" ] && [ -n "$docs_edge_lines" ] && [ -z "$docs_edge_after" ]; then
+    pass "portal docs locations precede the terminal 404 (line $terminal_404_line)"
+else
+    fail "portal docs locations missing or after the terminal 404:${docs_edge_after:- none found}${terminal_404_line:+ (terminal 404 at line $terminal_404_line)}"
+fi
+
+# `.md` under /docs/ must be typed text/markdown by the kit MIME map, which is
+# the map nginx.conf actually includes. A regex location is deliberately absent:
+# one MIME table keeps the docs prefix block as the only response policy.
+if grep -qE '^[[:space:]]*text/markdown[[:space:]]+md;' "$kit/nginx/ajs-mime.types" && \
+   grep -qE 'include[[:space:]]+/etc/nginx/ajs-mime\.types;' "$kit/nginx/nginx.conf"; then
+    pass "docs Markdown is served as text/markdown by the included kit MIME map"
+else
+    fail "docs Markdown is not typed text/markdown (ajs-mime.types lacks it or nginx.conf does not include it)"
+fi
 if grep -q 'ajs-admin-operator-token.conf' "$kit/nginx/sites-available/ajs-admin.conf" && \
    grep -q 'ajs-admin-tokens.map' "$kit/nginx/nginx.conf" && \
    grep -qE 'proxy_set_header[[:space:]]+Authorization[[:space:]]+\$ajs_operator_authorization;' "$kit/nginx/snippets/ajs-admin-operator-token.conf"; then
@@ -868,12 +948,15 @@ done <<EOF
 $kit/nginx/sites-available/ajs-portal.conf|location = /portal
 $kit/nginx/sites-available/ajs-portal.conf|location /portal/
 $kit/nginx/sites-available/ajs-portal.conf|location /assets/
+$kit/nginx/sites-available/ajs-portal.conf|location = /docs
+$kit/nginx/sites-available/ajs-portal.conf|location /docs/
+$kit/nginx/sites-available/ajs-portal.conf|location = /llms.txt
 $kit/nginx/sites-available/ajs-admin.conf|location /
 $kit/nginx/sites-available/ajs-admin.conf|location /assets/
 $kit/nginx/sites-available/ajs-admin.conf|location /v1/
 EOF
 if [ -z "$csp_named_bad" ]; then
-    pass "CSP on the named response paths: portal HTML/assets and admin HTML/API"
+    pass "CSP on the named response paths: portal HTML/assets/docs/llms.txt and admin HTML/API"
 else
     fail "CSP missing from named response paths:$csp_named_bad"
 fi
@@ -1215,7 +1298,7 @@ else
             "$csp_tmp/certs/panel.example.com" "$csp_tmp/certs/admin.example.com" \
             "$csp_tmp/temp/client_body" "$csp_tmp/temp/proxy" "$csp_tmp/temp/fastcgi" \
             "$csp_tmp/temp/uwsgi" "$csp_tmp/temp/scgi" \
-            "$csp_tmp/www/portal/assets" "$csp_tmp/www/admin/assets"
+            "$csp_tmp/www/portal/assets" "$csp_tmp/www/portal/docs" "$csp_tmp/www/admin/assets"
         cp "$kit/nginx/nginx.conf" "$csp_tmp/nginx.conf"
         cp "$kit/nginx/ajs-mime.types" "$csp_tmp/ajs-mime.types"
         cp "$kit/nginx/snippets/"*.conf "$csp_tmp/snippets/"
@@ -1291,6 +1374,20 @@ HTML
 const root = document.getElementById('root');
 root.setAttribute('data-ajs-admin-root', 'rendered');
 JS
+
+        # Public docs fixtures: the generated Markdown mirror and the llms.txt
+        # index the bundle ships next to index.html. They exist so the docs
+        # locations are probed as real files, not as 404s.
+        cat > "$csp_tmp/www/portal/docs/overview.md" <<'MD'
+# Overview and quickstart
+
+Fixture Markdown mirror served from /docs/.
+MD
+        cat > "$csp_tmp/www/portal/llms.txt" <<'TXT'
+# AJS docs
+
+Fixture /llms.txt for the edge CSP and content-type checks.
+TXT
 
         # Rewrite the installed paths into the throwaway tree.
         for f in "$csp_tmp/nginx.conf" "$csp_tmp/sites-enabled/"*.conf; do
@@ -1412,6 +1509,19 @@ JS
                     pass "CSP on $label (HTTP $got_status, exact policy, always)"
                     return 0
                 }
+                csp_content_type() {
+                    # Prints the Content-Type value, or nothing when absent.
+                    awk '{
+                        line = $0
+                        sub(/\r$/, "", line)
+                        i = index(line, ":")
+                        if (i > 1 && tolower(substr(line, 1, i - 1)) == "content-type") {
+                            value = substr(line, i + 1)
+                            sub(/^[ \t]+/, "", value)
+                            print value
+                        }
+                    }' "$1"
+                }
 
                 csp_hdr="$csp_tmp/h.hdr"
                 csp_body="$csp_tmp/b.body"
@@ -1435,6 +1545,60 @@ JS
                     --resolve "panel.example.com:$csp_https_port:127.0.0.1" \
                     "https://panel.example.com:$csp_https_port/portal/login" 2>/dev/null || true
                 csp_expect "portal SPA deep link (/portal/login)" 200 "$csp_hdr"
+
+                # Public docs edge (AJS-465): /docs is the SPA route, while
+                # /docs/*.md and /llms.txt are generated files that ship next
+                # to index.html. Each must answer with the exact CSP and its
+                # own content type, not the generic terminal 404.
+                curl -sS -k --max-time 10 -D "$csp_hdr" -o "$csp_body" \
+                    --resolve "panel.example.com:$csp_https_port:127.0.0.1" \
+                    "https://panel.example.com:$csp_https_port/docs" 2>/dev/null || true
+                csp_expect "docs HTML (/docs)" 200 "$csp_hdr"
+                if grep -q 'id="root"' "$csp_body"; then
+                    pass "docs route (/docs) serves the bundle index from the staged document root"
+                else
+                    fail "docs route (/docs) did not serve the bundle index"
+                fi
+
+                curl -sS -k --max-time 10 -D "$csp_hdr" -o "$csp_body" \
+                    --resolve "panel.example.com:$csp_https_port:127.0.0.1" \
+                    "https://panel.example.com:$csp_https_port/docs/" 2>/dev/null || true
+                csp_expect "docs trailing slash (/docs/)" 200 "$csp_hdr"
+                if grep -q 'id="root"' "$csp_body"; then
+                    pass "docs trailing slash (/docs/) serves the bundle index, not a directory 403"
+                else
+                    fail "docs trailing slash (/docs/) did not serve the bundle index"
+                fi
+
+                curl -sS -k --max-time 10 -D "$csp_hdr" -o "$csp_body" \
+                    --resolve "panel.example.com:$csp_https_port:127.0.0.1" \
+                    "https://panel.example.com:$csp_https_port/docs/overview.md" 2>/dev/null || true
+                csp_expect "docs Markdown (/docs/overview.md)" 200 "$csp_hdr"
+                csp_docs_md_type=$(csp_content_type "$csp_hdr")
+                case $csp_docs_md_type in
+                    text/markdown*) pass "docs Markdown is served as text/markdown (${csp_docs_md_type})" ;;
+                    *) fail "docs Markdown is not served as text/markdown: ${csp_docs_md_type:-<missing>}" ;;
+                esac
+                if grep -q 'Fixture Markdown mirror' "$csp_body"; then
+                    pass "docs Markdown fixture served from the staged document root"
+                else
+                    fail "docs Markdown fixture body is missing"
+                fi
+
+                curl -sS -k --max-time 10 -D "$csp_hdr" -o "$csp_body" \
+                    --resolve "panel.example.com:$csp_https_port:127.0.0.1" \
+                    "https://panel.example.com:$csp_https_port/llms.txt" 2>/dev/null || true
+                csp_expect "llms.txt (/llms.txt)" 200 "$csp_hdr"
+                csp_llms_type=$(csp_content_type "$csp_hdr")
+                case $csp_llms_type in
+                    text/plain*) pass "llms.txt is served as text/plain (${csp_llms_type})" ;;
+                    *) fail "llms.txt is not served as text/plain: ${csp_llms_type:-<missing>}" ;;
+                esac
+                if grep -q 'Fixture /llms.txt' "$csp_body"; then
+                    pass "llms.txt fixture served from the staged document root"
+                else
+                    fail "llms.txt fixture body is missing"
+                fi
 
                 curl -sS -k --max-time 10 -D "$csp_hdr" -o "$csp_body" \
                     --resolve "panel.example.com:$csp_https_port:127.0.0.1" \

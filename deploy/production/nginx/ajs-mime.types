@@ -13,6 +13,7 @@ types {
     font/woff                            woff;
     font/woff2                           woff2;
     text/plain                           txt;
+    text/markdown                        md;
     application/wasm                     wasm;
     application/manifest+json            webmanifest;
 }
