@@ -640,10 +640,17 @@ func TestOutboxRestoreIsIdempotent(t *testing.T) {
 // cap is trimmed on restore, so the configured bound holds from the first
 // attempt.
 func TestOutboxRestoreHonoursSmallerLimit(t *testing.T) {
+	// The restored entry must not be delivered before the assertions below: a
+	// fast 204 would drain the outbox and OutboxLen would race the assertion.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
+	defer unblock()
 
 	outbox := newMemoryOutbox()
 	clock := newFakeClock()
@@ -679,6 +686,10 @@ func TestOutboxRestoreHonoursSmallerLimit(t *testing.T) {
 	if entries := outbox.Outbox(); len(entries) != 1 || entries[0].ID != "evt-2" {
 		t.Fatalf("persisted outbox = %+v, want the newest evt-2", entries)
 	}
+	unblock()
+	waitFor(t, "the restored delivery to finish", func() bool {
+		return dispatcher.Pending() == 0 && outbox.len() == 0
+	})
 	if err := dispatcher.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
