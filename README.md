@@ -116,7 +116,7 @@ As of 2026-10-26:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 454 Vitest tests in 52 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 474 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -162,6 +162,14 @@ As of 2026-10-26:
   price snapshot, its official purchase link and a countdown; no payment is automated and no token
   rides the link. Theme, language, sidebar-collapse and node-state glyphs morph with a spring
   (an MIT-attributed adapted morphicons core, instant swap under `prefers-reduced-motion`).
+  The public docs site ships inside that same static bundle at `/docs`: no admin token, no admin
+  shell, no `/v1/` proxy — just the files the build emitted. It carries six curated pages
+  (overview, authentication, scopes, errors, SDKs, limits) and an API reference generated from
+  `docs/openapi.json` that lists the 56 customer-callable operations and counts the 92
+  operator-only ones by tag (the 41 under closed product lines only as an omitted total).
+  `cd dashboard && npm run docs:gen` regenerates `src/docs/reference.generated.ts`,
+  `public/docs/*.md` and `public/llms.txt`; CI runs the same generator with `--check`, so a
+  contract change without a regenerated mirror fails the build.
 - `daemon/` — Go 1.26 `ajs-accountd` skeleton: the dashboard's JSON contract over an in-memory
   store persisted as a JSON snapshot, a Resin v1.3.0 admin client, publisher and runtime wiring
   (local subscription render, platform create/update, lease rotate through platform filter
@@ -485,7 +493,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (454 tests in 52 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (474 tests in 54 files), `cd daemon && go test ./...`
 (1339 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of

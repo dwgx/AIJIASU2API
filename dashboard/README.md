@@ -10,7 +10,7 @@ closed instead of emitting the demo (see [Modes](#modes) and [Live mode](#live-m
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 454 tests in 52 files.
+- Tests: Vitest + React Testing Library + jsdom, 474 tests in 54 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -81,7 +81,7 @@ npm run dev        # http://127.0.0.1:5173 (mock data)
 npm run build:mock # tsc -b && vite build --mode mock → dist/ demo console
 VITE_USE_MOCK=false npm run build   # tsc -b && vite build → dist/ live bundle
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 454 tests in 52 files
+npm test           # Vitest, 474 tests in 54 files
 npm run typecheck  # tsc -b
 ```
 
@@ -127,6 +127,40 @@ bundle build with `VITE_PANEL_TOKEN` set: every `VITE_*` value is readable in th
 so production must terminate auth in a BFF or reverse proxy and keep `ajs-accountd` bound to
 `127.0.0.1`. The LAN build below takes the other route: it bakes no token and collects one per tab
 through the runtime token gate.
+
+## Public docs
+
+The console also serves the public API documentation, and it is the only unauthenticated surface in
+the bundle. `/docs` renders without `AppShell`, without `TokenGate` and without a single request to
+`/v1/...`, so a reader needs no admin token and the static host needs no API proxy — the routes
+serve the files the build emitted.
+
+| Route | Page |
+|---|---|
+| `/docs` | Overview and quickstart |
+| `/docs/:slug` | Curated page: `overview`, `authentication`, `scopes`, `errors`, `sdks`, `limits` |
+| `/docs/reference` | API reference grouped by tag, from `docs/openapi.json` |
+| `/docs/reference/:tag` | The same reference anchored on one tag |
+
+Content is data, not JSX. `src/docs/content.ts` holds the six curated pages, so the app and the
+generated Markdown mirror render one source, and `src/docs/reference.generated.ts` is generated from
+`docs/openapi.json` at the repo root. `npm run docs:gen` rewrites that file plus `public/docs/*.md`
+and `public/llms.txt`; `npm run docs:gen -- --check` compares the files on disk and exits non-zero on
+drift, which is what CI and `tests/docs-spec-drift.test.ts` run. The generator is deterministic (no
+timestamps, no locale-dependent sorting, one fixed key order per object) and classifies each
+operation as public (`GET /healthz`, `GET /readyz`), scoped (`x-required-scope` other than `admin`)
+or admin. The reference lists the 56 customer-callable operations, counts the 92 operator-only ones
+by tag — the 41 under closed product lines appear only as an omitted total, never by name — and
+`tests/docs.test.tsx` pins the callable count.
+
+The design is Keyline: one grammar, two grounds. Docs render on warm paper — light is the default,
+`data-docs-theme="dark"` is the opt-in and is stored in `localStorage["ajs.docs.theme"]` — while the
+console stays cool ink. Every separation is a square 1 px rule or a value step; no shadows, no
+radius, and the mint accent is the only hue. The tokens live in `src/styles/docs.css`.
+
+`VITE_CONSOLE_URL` is the only docs env gate. Set it at build time and the docs header renders a
+**Console** link to that URL; leave it unset (or blank) and no link is rendered. The docs read no
+daemon URL and no token.
 
 ## Lab page
 
@@ -904,7 +938,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 454 Vitest tests in 52 files (65 at the 2026-10-23 record; see
+- 474 Vitest tests in 54 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a

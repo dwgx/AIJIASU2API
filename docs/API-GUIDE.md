@@ -5,6 +5,11 @@ leases, nodes, requests/usage, topology and health, authenticated by an admin be
 `ajs_sk_` scoped key. The full contract is [`docs/openapi.json`](openapi.json); this page is the
 short path.
 
+> **Rendered copy.** The same material is served at `/docs` as a public static bundle — no admin
+> token, no proxy to `/v1/...` — and its API reference is generated from `docs/openapi.json` by
+> `dashboard/scripts/gen-docs.mjs`; `cd dashboard && npm run docs:gen -- --check` fails on drift.
+> This guide remains the long form.
+
 The archive map is [`ARCHIVE.md`](../ARCHIVE.md). The gates this API drives bind loopback, and
 remote proxy ingress is **not enabled** in this archive — see
 [Proxy data plane](#proxy-data-plane-loopback-only).
