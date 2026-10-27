@@ -120,10 +120,8 @@ is worse than none.
 
 Known packaging limitations for this release:
 
-- `MANIFEST.txt` embeds the absolute dashboard staging path when `--build-dashboard` is used,
-  so two builds in different temp directories produce different manifests and a different
-  `SHA256SUMS` entry (release audit R8). Same-host reproducibility with a prebuilt bundle was
-  verified; cross-path reproducibility was not.
+- Release audit R8 is fixed: `MANIFEST.txt` records a stable `dashboard_source` (never a temp
+  path), so two `--build-dashboard` runs are byte-identical (verified 2026-10-28).
 - Redistribution notices: at this commit `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.md` are
   enforced inside `dashboard-dist.tar.gz` and `deploy-kit.tar.gz` and listed in `MANIFEST.txt`;
   the three bare binaries ship without adjacent notice files. Verify the built set before
