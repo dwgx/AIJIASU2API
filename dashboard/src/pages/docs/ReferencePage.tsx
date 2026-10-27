@@ -8,6 +8,13 @@ import { useI18n } from '../../lib/i18n'
 
 const SAFE_METHODS: Record<string, true> = { GET: true, HEAD: true, OPTIONS: true }
 
+/**
+ * The appendix is a count sheet for operator routes, not a callable index.
+ * Closed product lines must not be named on the public surface, so only the
+ * open admin tags are listed; the omitted total is reported as a note.
+ */
+const openAdminTagCounts = reference.adminTagCounts.filter((row) => !row.closed)
+
 function placeholderFor(name: string): string {
   return `$${name
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -243,22 +250,19 @@ export default function ReferencePage() {
               </tr>
             </thead>
             <tbody>
-              {reference.adminTagCounts.map((row) => (
+              {openAdminTagCounts.map((row) => (
                 <tr key={row.tag}>
                   <td>{row.tag}</td>
                   <td className="docs-num">{row.operations}</td>
                   <td>
-                    <span
-                      className={clsx('docs-state', row.closed ? 'docs-state--closed' : 'docs-state--open')}
-                    >
-                      {row.closed ? t('docs.closed') : t('docs.open')}
-                    </span>
+                    <span className="docs-state docs-state--open">{t('docs.open')}</span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <p>{t('docs.adminClosedNote', { count: reference.counts.closed })}</p>
       </section>
     </article>
   )

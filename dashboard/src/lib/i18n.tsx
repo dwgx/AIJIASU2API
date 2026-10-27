@@ -155,10 +155,10 @@ const EN = {
   'docs.adminAppendix': 'Operator-only operations',
   'docs.adminAppendixNote':
     'These tags are reachable only with the operator token. They are listed as counts, not as callable endpoints, and no scoped key can call them.',
+  'docs.adminClosedNote': '{count} operations from closed product lines are omitted.',
   'docs.adminTag': 'Tag',
   'docs.adminOperations': 'Operations',
   'docs.adminState': 'State',
-  'docs.closed': 'closed',
   'docs.open': 'open',
   'docs.scopePublic': 'PUBLIC',
   'docs.scopeScoped': 'SCOPED',
@@ -2671,10 +2671,10 @@ const ZH: Record<string, string> = {
   'docs.adminAppendix': '仅运维可用的操作',
   'docs.adminAppendixNote':
     '这些标签只能由运维令牌访问。此处只列出数量，不列出可调用端点；受限密钥无法调用。',
+  'docs.adminClosedNote': '已关闭产品线的 {count} 个操作未列出。',
   'docs.adminTag': '标签',
   'docs.adminOperations': '操作数',
   'docs.adminState': '状态',
-  'docs.closed': '已关闭',
   'docs.open': '开放',
   'docs.scopePublic': 'PUBLIC',
   'docs.scopeScoped': 'SCOPED',

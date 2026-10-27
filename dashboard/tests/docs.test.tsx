@@ -54,6 +54,20 @@ describe('public docs surface', () => {
     expect(screen.getByText('41 closed omitted')).toBeInTheDocument()
   })
 
+  it('does not name closed product lines in the public reference', async () => {
+    window.history.pushState({}, '', '/docs/reference')
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'API reference', level: 1 })
+    const text = document.body.textContent ?? ''
+    for (const name of ['Portal', 'Order Admin', 'Tenant Admin', 'Payments']) {
+      expect(text).not.toContain(name)
+    }
+    expect(
+      screen.getByText('41 operations from closed product lines are omitted.'),
+    ).toBeInTheDocument()
+  })
+
   it('opens search with Ctrl+K and finds a lease endpoint', async () => {
     const user = userEvent.setup()
     render(<App />)
