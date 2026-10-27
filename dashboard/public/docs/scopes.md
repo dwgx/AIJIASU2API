@@ -8,7 +8,7 @@ English mirror of this page; the console page carries the Chinese translation.
 
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the table, and the admin token bypasses it by definition. Every operation a scoped key can reach declares its grant in the spec as `x-required-scope`, together with the `403` and `429` responses and the `X-RateLimit-*` headers; an operation without that extension is not reachable with a scoped key.
 
-`proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the production kit’s public HTTPS CONNECT edge. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.
+`proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the live public HTTPS CONNECT edge at `gate.dwgx.top`. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.
 
 ## Scope catalogue
 
@@ -20,7 +20,7 @@ A scoped key needs the exact scope of the matched route. A key carrying `admin` 
 | `catalog:write` | Selection and guarded switch; node drain/probe; operation cancel. | `PUT /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/connect`, `POST /v1/nodes/{id}/actions/drain` |
 | `leases:read` | List and read the key user’s leases. | `GET /v1/leases`, `GET /v1/leases/{id}` |
 | `leases:write` | Create, rotate and revoke the key user’s leases. | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
-| `proxy:connect` | Authenticate at a gate and connect through the key user’s lease. | `SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT api.example.com:<port>` |
+| `proxy:connect` | Authenticate at a gate and connect through the key user’s lease. | `SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT gate.dwgx.top:<port>` |
 | `requests:read` | Read the request log. | `GET /v1/requests` |
 | `audit:read` | Read and export the audit log. | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics. | `GET /metrics`, `GET /v1/metrics` |

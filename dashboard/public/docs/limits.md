@@ -6,20 +6,20 @@ English mirror of this page; the console page carries the Chinese translation.
 
 ## SOCKS5 loopback, HTTPS CONNECT public
 
-The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. The production kit publishes only that HTTP listener, through nginx `stream` with TLS on 13000-13010 at the deployment’s API host — `api.example.com` in the templates, a placeholder to replace.
+The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. Only that HTTP listener is published, through nginx `stream` with TLS on 13000-13010 at `gate.dwgx.top`.
 
 The public gate edge has four preconditions:
 
 - `AJS_GATE_HTTP=1` on the daemon; with `0` or unset the public ports complete the TLS handshake and then close, because nothing listens on the backend.
 - `AJS_GATE_HTTP_OFFSET=1000`; the stream map hard-codes the backend at lease port + 1000 (14000-14010).
-- The TLS certificate covers the name customers dial (`api.example.com` in the templates, a deployment placeholder).
+- The TLS certificate covers the name customers dial: `gate.dwgx.top`.
 - TCP 13000-13010 are open to the internet; the daemon’s own SOCKS5 and HTTP `CONNECT` listeners stay on `127.0.0.1`.
 
-> **No public SOCKS5** — SOCKS5 remains loopback and tunnel-only: nothing in the kit publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the static map (`13011+`) has no public edge at all. The HTTPS CONNECT edge ships in the kit but has not been deployed live.
+> **No public SOCKS5** — SOCKS5 remains loopback and tunnel-only: nothing publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the map (`13011+`) has no public edge at all. The HTTPS CONNECT edge is live at `gate.dwgx.top:13000-13010`.
 
-## Public edges ship, not deployed live
+## Public edges live on ajs.dwgx.top and gate.dwgx.top
 
-The production kit ships two public edges: the scoped-key API vhost (`https://api.example.com`, an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map (13000-13010). Neither has been deployed live in this archive, and `api.example.com` is a placeholder that must be replaced.
+Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). SOCKS5, the admin origin and the portal routes stay private.
 
 The remote-ingress credential store is a different, experimental thing and stays store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, and enabling it creates no proxy endpoint.
 

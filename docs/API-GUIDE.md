@@ -5,15 +5,16 @@ leases, nodes, requests/usage, topology and health, authenticated by an admin be
 `ajs_sk_` scoped key. The full contract is [`docs/openapi.json`](openapi.json); this page is the
 short path.
 
-> **Rendered copy.** The same material is served at `/docs` as a public static bundle — no admin
-> token, no proxy to `/v1/...` — and its API reference is generated from `docs/openapi.json` by
-> `dashboard/scripts/gen-docs.mjs`; `cd dashboard && npm run docs:gen -- --check` fails on drift.
-> This guide remains the long form.
+> **Rendered copy.** The same material is served at `https://ajs.dwgx.top:2055/docs` as a public
+> static bundle — no admin token, no proxy to `/v1/...` — and its API reference is generated from
+> `docs/openapi.json` by `dashboard/scripts/gen-docs.mjs`; `cd dashboard && npm run docs:gen --
+> --check` fails on drift. This guide remains the long form.
 
-The archive map is [`ARCHIVE.md`](../ARCHIVE.md). SOCKS5 gates bind loopback; the production kit
-adds a public scoped-key API edge and a TLS-terminated HTTPS CONNECT proxy edge — see
+The archive map is [`ARCHIVE.md`](../ARCHIVE.md). SOCKS5 gates bind loopback; the public scoped-key
+API and this guide are live at `https://ajs.dwgx.top:2055`, and a TLS-terminated HTTPS CONNECT
+proxy is live at `gate.dwgx.top:13000-13010` — see
 [Public API edge](#public-api-edge) and
-[Public HTTPS CONNECT proxy](#public-https-connect-proxy). Neither edge has been deployed live.
+[Public HTTPS CONNECT proxy](#public-https-connect-proxy).
 
 ## Base URL
 
@@ -23,28 +24,27 @@ Loopback, for an operator or a same-host client:
 http://127.0.0.1:2261
 ```
 
-Public scoped-key edge, from the production kit:
+Public scoped-key API and rendered documentation, live:
 
 ```
-https://api.example.com
+https://ajs.dwgx.top:2055
+https://ajs.dwgx.top:2055/docs
 ```
 
-`api.example.com` is a **deployment placeholder**, not a host this archive deployed: replace it
-with the deployment's own API origin. `AJS_LISTEN` defaults to `127.0.0.1:2261`. `GET /healthz` and
-`GET /readyz` are unauthenticated. The payment callbacks are authenticated by provider signature,
-and the opt-in customer portal chain (`/v1/portal/*`) by its own `__Host-ajs_portal` cookie. Every
-other route, including `/metrics`, needs a bearer. The public edge serves only the scoped-key
-allowlist described in [Public API edge](#public-api-edge); the loopback URL is the full contract.
+`AJS_LISTEN` defaults to `127.0.0.1:2261`. `GET /healthz` and `GET /readyz` are unauthenticated.
+The payment callbacks are authenticated by provider signature, and the opt-in customer portal
+chain (`/v1/portal/*`) by its own `__Host-ajs_portal` cookie. Every other route, including
+`/metrics`, needs a bearer. The public edge serves only the scoped-key allowlist described in
+[Public API edge](#public-api-edge); the loopback URL is the full contract.
 
 ## Public API edge
 
-The production kit publishes a second TLS origin for customer scoped keys. In the templates it is
-`https://api.example.com` — a **deployment placeholder**, not a live host. It terminates TLS and
-proxies only the allowlisted scoped routes: the 41 paths (54 operations) that carry an
-`x-required-scope` in [`docs/openapi.json`](openapi.json). Admin-only operations, `/v1/portal/*`,
-the payment callbacks, `/v1/openapi.json` and `/v1/whoami` are not routed; they answer `404` at the
-edge and never reach the daemon. `/healthz` is a static `200 "ok"`, and `/readyz` stays on the
-portal origin.
+The public edge is live at `https://ajs.dwgx.top:2055` and serves this guide at `/docs`. It
+terminates TLS and proxies only the allowlisted scoped routes: the 41 paths (54 operations) that
+carry an `x-required-scope` in [`docs/openapi.json`](openapi.json). Admin-only operations,
+`/v1/portal/*`, the payment callbacks, `/v1/openapi.json` and `/v1/whoami` are not routed; they
+answer `404` at the edge and never reach the daemon. `/healthz` is a static `200 "ok"`, and
+`/readyz` stays on the portal origin.
 
 - **Credential.** The caller's own `Authorization: Bearer ajs_sk_...` is the only credential; the
   edge injects no admin token and adds no Basic auth. Enabling the vhost requires
@@ -121,11 +121,11 @@ create answers `400 INVALID_ARGUMENT`. See [Key subject and grants](#key-subject
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the
 table, and the admin token bypasses it by definition. Routes absent from the table are admin-only.
 `proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5
-listener and, in the production kit, the public HTTPS CONNECT edge. Every
-operation a scoped key can reach declares its grant in the spec as `x-required-scope`, together
-with the `403` and `429` responses and the `X-RateLimit-*` headers; an operation without the
-extension is not reachable with a scoped key (it needs the admin token, a provider signature or
-the portal cookie, as that route documents).
+listener and the live public HTTPS CONNECT edge at `gate.dwgx.top`. Every operation a scoped key
+can reach declares its grant in the spec as `x-required-scope`, together with the `403` and `429`
+responses and the `X-RateLimit-*` headers; an operation without the extension is not reachable
+with a scoped key (it needs the admin token, a provider signature or the portal cookie, as that
+route documents).
 
 | Scope | Grants | Representative routes |
 |---|---|---|
@@ -333,11 +333,11 @@ curl -sS -X DELETE "$BASE/v1/leases/$LEASE_ID" \
 Detail answers `200 {"lease": {...}, "connection": {"host": "127.0.0.1", "port": 13003,
 "protocol": "socks5", "username": "u-01", "credentialKind": "ajs_sk"}}`. `port` is the gate the
 lease currently points at, so a switch that rebinds the lease also moves it. On the daemon host it
-is the loopback SOCKS5 port; in the production kit's static map (13000-13010) the same number is
-the public HTTPS proxy port. A port above that map (`13011+`) has no public edge. The secret is
-never returned: `credentialKind` names the shape, and the password is the caller's own `ajs_sk_`
-key carrying `proxy:connect`. A missing id and another user's lease are both `404` for a non-admin
-scoped key; a lease on an account outside its grant is `403`.
+is the loopback SOCKS5 port; on the live public edge at `gate.dwgx.top` (13000-13010) the same
+number is the public HTTPS proxy port. A port above that map (`13011+`) has no public edge. The
+secret is never returned: `credentialKind` names the shape, and the password is the caller's own
+`ajs_sk_` key carrying `proxy:connect`. A missing id and another user's lease are both `404` for
+a non-admin scoped key; a lease on an account outside its grant is `403`.
 
 Create answers `201 {"lease": {...}, "warning"?: "...", "replayed"?: true}`. `accountId` is an
 optional pin for an operator caller (must be active and match the platform); a non-admin scoped
@@ -485,34 +485,33 @@ offset 1000) with the same admission pipeline and Basic credentials:
 curl -x http://127.0.0.1:14003 -U "u-01:$SCOPED_KEY_SECRET" https://example.com/
 ```
 
-That loopback listener is the backend the production kit's public edge forwards to; see
+That loopback listener is the backend the live public edge forwards to; see
 [Public HTTPS CONNECT proxy](#public-https-connect-proxy).
 
 **The SOCKS5 gate binds `127.0.0.1`.** There is no public SOCKS5 listener, tunnel or router in
-this archive. The one public data-plane listener is the production kit's TLS-terminated HTTPS
-CONNECT edge on ports 13000-13010 (see
+this archive. The one public data-plane listener is the live TLS-terminated HTTPS CONNECT edge at
+`gate.dwgx.top:13000-13010` (see
 [Public HTTPS CONNECT proxy](#public-https-connect-proxy)); it forwards to the loopback HTTP
-CONNECT listener, and a gate port above the static map (`13011+`) has no public edge. A remote
+CONNECT listener, and a gate port above the map (`13011+`) has no public edge. A remote
 client that cannot use that edge still needs an operator-provided tunnel or ingress; do not assume
 the loopback base URL is reachable off the daemon host. The admin API itself may be widened with
 `AJS_LISTEN` plus a bearer, or served through the production kit's private admin vhost.
 
 ## Public HTTPS CONNECT proxy
 
-The production kit publishes the HTTP CONNECT listener through nginx `stream`: one TLS listener per
-node on ports 13000-13010, each forwarding to `127.0.0.1:<port+1000>` (14000-14010). It requires
-`AJS_GATE_HTTP=1` on the daemon. The host is the deployment's API origin — `api.example.com` in the
-templates, a **deployment placeholder**, not a live host — and its certificate must match the name
-customers dial.
+The public edge publishes the HTTP CONNECT listener through nginx `stream`: one TLS listener per
+node on ports 13000-13010 at `gate.dwgx.top`, each forwarding to `127.0.0.1:<port+1000>`
+(14000-14010). It requires `AJS_GATE_HTTP=1` on the daemon. The certificate covers
+`gate.dwgx.top`, the name customers dial.
 
 - **Port** is the lease's `port` from `GET /v1/leases/{id}` (also `gatePort` on the lease), in the
-  static map 13000-13010. A switch that rebinds the lease moves the port with it. A port above
+  live map 13000-13010. A switch that rebinds the lease moves the port with it. A port above
   13010 has no public edge.
 - **User** is the lease owner's panel user id (`userId`, for example `u-01`).
 - **Password** is a scoped key secret (`ajs_sk_...`) carrying `proxy:connect` and granting the
   lease's account.
-- **Transport** is TLS. The client dials `https://<api-host>:<port>` and speaks HTTP CONNECT; the
-  edge terminates TLS and relays bytes without parsing or rewriting the CONNECT request.
+- **Transport** is TLS. The client dials `https://gate.dwgx.top:<port>` and speaks HTTP CONNECT;
+  the edge terminates TLS and relays bytes without parsing or rewriting the CONNECT request.
 - **No public SOCKS5.** The SOCKS5 gate on `127.0.0.1:13000-13010` stays loopback.
 
 The key used to read the lease needs `leases:read`; the proxy credential needs `proxy:connect`.
@@ -521,7 +520,7 @@ They may be the same key.
 ```bash
 PORT=$(curl -sS "$BASE/v1/leases/$LEASE_ID" \
   -H "Authorization: Bearer $SCOPED_KEY_SECRET" | jq -r '.connection.port')
-curl -x "https://api.example.com:$PORT" -U "u-01:$SCOPED_KEY_SECRET" https://example.com/
+curl -x "https://gate.dwgx.top:$PORT" -U "u-01:$SCOPED_KEY_SECRET" https://example.com/
 ```
 
 Admission is the same pipeline as the loopback gate: the key must be active, belong to that user,
@@ -618,6 +617,6 @@ this archive: neither SDK has been run against a live daemon outside `httptest`/
   reachability; the live evidence is one account, one node, one egress address.
 - `egressIp` on a node or lease is the vendor's claim. `/v1/health/nodes` measures the loopback
   gate unless the opt-in through-gate egress probe is enabled.
-- The public API and HTTPS CONNECT edges ship in the production kit but have not been deployed
-  live; there is still no public SOCKS5 ingress. Also absent: a real payment drill and a
-  `UseCount=2` account. See [`ARCHIVE.md`](../ARCHIVE.md#known-gaps).
+- The public API/docs and HTTPS CONNECT edges are live at `https://ajs.dwgx.top:2055` and
+  `gate.dwgx.top:13000-13010`; there is still no public SOCKS5 ingress. Also absent: a real payment
+  drill and a `UseCount=2` account. See [`ARCHIVE.md`](../ARCHIVE.md#known-gaps).

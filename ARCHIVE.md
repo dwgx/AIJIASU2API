@@ -128,30 +128,26 @@ so run either it or the standalone dashboard compose, not both.
   (`AJS_GATE_AUTH` unset = `userpass`): the username is a panel user id and the password an active
   API-key secret. `AJS_GATE_AUTH=loopback` is the explicit no-auth compatibility opt-in, and a
   deployment with no key fails closed. `AJS_GATE_HTTP=1` adds an HTTP CONNECT listener beside
-  SOCKS5; the production kit may publish that listener through the TLS edge on 13000-13010, while
-  SOCKS5 is never published. `AJS_TLS_CERT`/`AJS_TLS_KEY` only change the admin transport.
+  SOCKS5; the public TLS edge at `gate.dwgx.top:13000-13010` publishes that listener, while
+  SOCKS5 is never published. The public scoped-key API and docs are live at
+  `https://ajs.dwgx.top:2055`; the admin origin and the portal routes stay private.
+  `AJS_TLS_CERT`/`AJS_TLS_KEY` only change the admin transport.
 - **`accountIds`/`regions` narrow reads, not writes.** The restriction filters account-scoped GETs
   and is enforced before handlers; a write scope (`catalog:write`, `leases:write`) applies to every
   account. Issue write scopes deliberately, and prefer read-only keys for monitoring.
 
 ## Known gaps
 
-1. **Public edges shipped in the kit, not deployed.** The production kit now contains the
-   scoped-key API edge (`nginx/sites-available/ajs-api.conf`) and the TLS-terminated HTTPS CONNECT
-   edge (`nginx/streams-available/ajs-gate.conf`, ports 13000-13010 forwarding to the loopback HTTP
-   CONNECT listener at port+1000). No host has been deployed with them: the kit is validated by
-   `deploy/production/check.sh`, and `api.example.com` is a deployment placeholder. A live
-   customer run is pending.
-2. **No public SOCKS5 ingress.** The SOCKS5 gate still binds `127.0.0.1` only. The
+1. **No public SOCKS5 ingress.** The SOCKS5 gate still binds `127.0.0.1` only. The
    `AJS_REMOTE_INGRESS` credential store remains experimental and unwired; there is no public
    SOCKS5 listener, tunnel or router, and gates, Resin, the daemon and the dashboard otherwise stay
    on loopback or a private LAN.
-3. **No real payment drill.** No customer has created an order, no administrator has attested an
+2. **No real payment drill.** No customer has created an order, no administrator has attested an
    offline receipt, and no real Stripe or 易支付 event has reached the daemon outside `httptest`.
    Manual settlement is an attestation of funds received elsewhere; the daemon never charges a
    card, stores no card data and sends no payment request. Refund and chargeback record evidence
    and revoke the grant; they transfer nothing.
-4. **No `UseCount=2`.** The only live account has `useCount=1`, so `effectiveSlots=1` and exactly
+3. **No `UseCount=2`.** The only live account has `useCount=1`, so `effectiveSlots=1` and exactly
    one lease can be admitted. Per-slot runtime code exists and is offline-tested, but live
    two-slot coexistence has not been proven; a lease above one slot still carries the
    `multi_session_unimplemented` warning.

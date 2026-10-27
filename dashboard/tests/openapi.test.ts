@@ -66,7 +66,7 @@ interface Operation {
 
 interface OpenAPIDocument {
   openapi: string
-  info: { title: string; version: string }
+  info: { title: string; version: string; description?: string }
   servers: Array<{ url: string; description?: string }>
   security: Array<Record<string, string[]>>
   paths: Record<string, Record<string, Operation>>
@@ -224,10 +224,12 @@ describe('docs/openapi.json', () => {
     expect(doc.info.title).toBeTruthy()
     expect(doc.info.version).toBeTruthy()
     expect(doc.servers.map((server) => server.url)).toEqual([
-      'https://api.example.com',
+      'https://ajs.dwgx.top:2055',
       'http://127.0.0.1:2261',
     ])
-    expect(doc.servers[0]?.description).toContain('placeholder')
+    expect(doc.servers[0]?.description).toContain('Live public scoped-key API')
+    expect(doc.info.description).toContain('gate.dwgx.top')
+    expect(doc.info.description).not.toContain('placeholder')
   })
 
   it('documents every route registered in server.go and orders.go and invents no P0 route', () => {

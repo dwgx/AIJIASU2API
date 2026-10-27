@@ -35,11 +35,11 @@ experimental, and the known gaps.
 Experimental or **not enabled** in this archive: the customer tenant portal
 (`AJS_TENANT_PORTAL=1`), orders and the 易支付 (epay) / Stripe payment adapters (offline-tested
 only; no daemon route charges a card), and the remote-ingress credential store
-(`AJS_REMOTE_INGRESS=1`, unwired). The production kit publishes the scoped-key API origin and a
-TLS-terminated HTTPS CONNECT proxy edge on ports 13000-13010; the SOCKS5 gate, the admin origin and
-the portal routes stay private, and there is no public SOCKS5 ingress. The paid-tenant direction is
-closed. This does not change the
-[Use boundary](#use-boundary): commercial resale or automation still requires separate written
+(`AJS_REMOTE_INGRESS=1`, unwired). The public scoped-key API and docs are live at
+`https://ajs.dwgx.top:2055`, and the TLS-terminated HTTPS CONNECT proxy edge is live at
+`gate.dwgx.top:13000-13010`; the SOCKS5 gate, the admin origin and the portal routes stay private,
+and there is no public SOCKS5 ingress. The paid-tenant direction is closed. This does not change
+the [Use boundary](#use-boundary): commercial resale or automation still requires separate written
 vendor authorization covering the accounts, service and jurisdictions involved.
 
 ## Current status

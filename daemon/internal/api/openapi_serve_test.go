@@ -40,9 +40,8 @@ func TestEmbeddedOpenAPISpecMatchesDocs(t *testing.T) {
 }
 
 // TestOpenAPISpecServersDescribePublicEdge pins the advertised origins: the
-// public scoped-key edge first and the loopback admin API second. The public
-// URL is a placeholder, and the description must say so instead of claiming a
-// deployed host.
+// live public scoped-key API first and the loopback admin API second. The
+// description must state the live hosts instead of a deployment placeholder.
 func TestOpenAPISpecServersDescribePublicEdge(t *testing.T) {
 	var doc struct {
 		Info struct {
@@ -56,7 +55,7 @@ func TestOpenAPISpecServersDescribePublicEdge(t *testing.T) {
 	if err := json.Unmarshal(embeddedOpenAPISpec, &doc); err != nil {
 		t.Fatalf("decode embedded spec: %v", err)
 	}
-	want := []string{"https://api.example.com", "http://127.0.0.1:2261"}
+	want := []string{"https://ajs.dwgx.top:2055", "http://127.0.0.1:2261"}
 	if len(doc.Servers) != len(want) {
 		t.Fatalf("servers = %d, want %d", len(doc.Servers), len(want))
 	}
@@ -65,15 +64,18 @@ func TestOpenAPISpecServersDescribePublicEdge(t *testing.T) {
 			t.Errorf("servers[%d].url = %q, want %q", i, doc.Servers[i].URL, url)
 		}
 	}
-	if !strings.Contains(doc.Servers[0].Description, "placeholder") {
-		t.Error("public server description does not call api.example.com a deployment placeholder")
+	if !strings.Contains(doc.Servers[0].Description, "Live public scoped-key API") {
+		t.Error("public server description does not name the live public scoped-key API")
 	}
 	for _, want := range []string{
-		"public TLS edge", "13000-13010", "port+1000", "no public SOCKS5",
+		"live at https://ajs.dwgx.top:2055", "gate.dwgx.top", "13000-13010", "port+1000", "no public SOCKS5",
 	} {
 		if !strings.Contains(doc.Info.Description, want) {
 			t.Errorf("info.description does not mention %q", want)
 		}
+	}
+	if strings.Contains(doc.Info.Description, "placeholder") {
+		t.Error("info.description still calls the public edge a deployment placeholder")
 	}
 }
 
