@@ -1,5 +1,6 @@
 import clsx from 'clsx'
-import { useNavigate } from 'react-router-dom'
+import { BookOpen } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
 import { isMockMode } from '../lib/api'
 import { useI18n } from '../lib/i18n'
 import { useRefreshActivity } from '../lib/useAsync'
@@ -66,6 +67,10 @@ export function Topbar({
       </div>
 
       <div className="topbar__right">
+        <Link to="/docs" className="btn btn--ghost topbar__docs">
+          <BookOpen size={15} aria-hidden="true" />
+          <span>{t('shell.docs')}</span>
+        </Link>
         <button
           type="button"
           id="topbar-search-trigger"

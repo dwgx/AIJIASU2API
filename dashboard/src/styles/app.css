@@ -1,56 +1,80 @@
 /* ==========================================================================
-   APC design tokens — neutral graphite + mint accent
-   Dark-first. Light mirrors every role, so components never read a raw hex.
-   Derived from the OpenAI Platform (layered surfaces, white-alpha borders,
-   five-step text ramp) and X Developer Console (geometry, status hues) slices.
+   APC design tokens — Keyline: cool ink console, warm paper docs, one accent.
+   Dark-first (`:root`); `[data-theme="light"]` mirrors every role, so
+   components never read a raw hex. The docs surface re-declares the same roles
+   locally in docs.css and never mutates this theme.
    ========================================================================== */
 :root {
-  /* Surfaces — canvas → surface → raised → overlay. Pages are two layers;
-     floating panels always sit above content, never on the canvas. */
-  --canvas: #0a0d0c;
-  --surface: #101413;
-  --raised: #161c1a;
-  --overlay: #1c2421;
-  --sunken: #070a09;
-  --sidebar: #0c1110;
-  --active: #212b27;
+  /* Surfaces — cool ink desk → paper → raised → overlay (Keyline, dark). */
+  --canvas: #0d1113;
+  --surface: #12181b;
+  --raised: #182024;
+  --overlay: #1c252a;
+  --sunken: #080b0d;
+  --sidebar: #0f1518;
+  --active: #203039;
 
   /* Legacy aliases: the contrast suite and older rules read these names. */
-  --bg: #0a0d0c;
-  --elevated: #161c1a;
-  --bg-sunken: #070a09;
+  --bg: #0d1113;
+  --elevated: #182024;
+  --bg-sunken: #080b0d;
 
   /* Text ramp — four AA steps plus a disabled-only fifth. */
-  --text: #f2f7f5;
-  --text-2: #c3d2cb;
-  --muted: #98aaa2;
-  --text-tertiary: #7e928a;
-  --text-disabled: #5c6d66;
+  --text: #e9eef0;
+  --text-2: #c3cdd3;
+  --muted: #96a5ad;
+  --text-tertiary: #7c8b93;
+  --text-disabled: #58656c;
 
-  /* Borders are white alpha so they survive any surface swap. */
-  --border-faint: rgba(255, 255, 255, 0.05);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --border-input: rgba(255, 255, 255, 0.2);
+  /* Rules — one width per element class. */
+  --border-faint: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-input: rgba(255, 255, 255, 0.28);
+  --rule-w: 1px;
+  --rule-w-strong: 2px;
+  --rule-w-active: 3px;
 
-  /* Accent — the only chromatic brand surface. */
+  /* Accent — the only chromatic brand surface; values unchanged. */
   --mint: #5eead4;
   --mint-strong: #2dd4bf;
   --on-mint: #04211c;
+  --accent: var(--mint);
+  --accent-strong: var(--mint-strong);
+  --on-accent: var(--on-mint);
+  --accent-wash: rgba(94, 234, 212, 0.1);
 
-  /* Status hues: ok / info / warn / error / unavailable. */
-  --success: #34d399;
-  --warning: #fbbf24;
-  --danger: #fb7185;
-  --info: #60a5fa;
-  --unavailable: #8a9a93;
+  /* Status hues: declared layer, never decorative. */
+  --success: #6fd3a6;
+  --warning: #e8b15c;
+  --danger: #f08a80;
+  --info: var(--mint);
+  --unavailable: #7c8b93;
   --status-ok: var(--success);
   --status-info: var(--info);
   --status-warn: var(--warning);
   --status-error: var(--danger);
   --status-unavailable: var(--unavailable);
 
-  /* Geometry — 248 rail / 64 topbar / 32 control / 16 card / 24 modal. */
+  /* Code — three tones plus weight, no rainbow. */
+  --code-bg: #0f1518;
+  --code-rule: var(--border);
+  --code-ink: #e9eef0;
+  --code-comment: #7c8b93;
+  --code-string: #5eead4;
+  --code-punct: #96a5ad;
+  --code-keyword: #e9eef0;
+  --code-selection: #1e3340;
+  --code-gutter: #58656c;
+  --code-line-h: 1.55;
+
+  /* Ink plate — the one dark object on a light page; own accent pair. */
+  --ink-plate: #12181b;
+  --on-ink: #e9eef0;
+  --ink-rule: rgba(255, 255, 255, 0.14);
+  --ink-accent: #5eead4;
+
+  /* Geometry — console skeleton is unchanged; radii are square. */
   --sidebar-w: 248px;
   --sidebar-w-collapsed: 56px;
   --topbar-h: 64px;
@@ -59,26 +83,53 @@
   --table-head-h: 40px;
   --row-h: 56px;
   --row-h-comfy: 60px;
-  --radius-control: 8px;
-  --radius-menu: 12px;
-  --radius-card: 16px;
-  --radius-modal: 24px;
+  --radius-control: 0;
+  --radius-menu: 0;
+  --radius-card: 0;
+  --radius-modal: 0;
+  --radius-track: 999px;
+  --doc-rail: 264px;
+  --doc-measure: 720px;
+  --doc-toc: 232px;
+  --doc-gap: 48px;
 
-  /* Motion — 120ms colour/hover, 180ms geometry and entrances. */
+  /* Motion — no overshoot, one action per beat. */
   --dur-fast: 120ms;
   --dur-base: 180ms;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-mech: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: var(--ease-mech);
 
   --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Type scale — Inter/JBM only, no weight above 600. */
+  --fs-micro: 12px;
+  --fs-mono: 13px;
+  --fs-ui: 14px;
+  --fs-body: 16px;
+  --fs-h3: 19px;
+  --fs-h2: 23px;
+  --fs-h1: 28px;
+  --fs-display: 33px;
+  --fs-hero: 40px;
+  --lh-body: 1.6;
+  --lh-code: 1.55;
+  --lh-head: 1.15;
+  --track-head: -0.02em;
+  --track-display: -0.03em;
+  --track-label: 0.08em;
+  --measure: 68ch;
+  --code-measure: 86ch;
 
   --scrim: rgba(3, 6, 5, 0.62);
   --scrim-nav: rgba(3, 6, 5, 0.52);
   --wash: rgba(255, 255, 255, 0.04);
 
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.22);
-  --shadow-pop: 0 24px 64px rgba(0, 0, 0, 0.55);
-  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.18);
+  /* Elevation — UI uses rules; only stickers and popovers get a shadow. */
+  --shadow-card: none;
+  --shadow-control: none;
+  --shadow-sticker: 0 1px 0 rgba(255, 255, 255, 0.04), 0 6px 16px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.55);
 
   /* Map choropleth ramp — fixed bins, so filtered counts stay comparable.
      Bin 1 clears 3:1 against --surface in both themes; the ramp darkens as
@@ -99,52 +150,65 @@
 }
 
 [data-theme="light"] {
-  --canvas: #f3f6f4;
-  --surface: #ffffff;
+  --canvas: #eef1f2;
+  --surface: #fbfaf6;
   --raised: #ffffff;
   --overlay: #ffffff;
-  --sunken: #f7faf8;
-  --sidebar: #e9eeeb;
-  --active: #dceae3;
+  --sunken: #e3e8ea;
+  --sidebar: #e7ebed;
+  --active: #d9e4ea;
 
-  --bg: #f3f6f4;
+  --bg: #eef1f2;
   --elevated: #ffffff;
-  --bg-sunken: #f7faf8;
+  --bg-sunken: #e3e8ea;
 
-  --text: #10201a;
-  --text-2: #35473e;
-  --muted: #4b6057;
-  --text-tertiary: #566b61;
-  --text-disabled: #8a9a92;
+  --text: #15191b;
+  --text-2: #333c41;
+  --muted: #5a666d;
+  --text-tertiary: #5f6a71;
+  --text-disabled: #9aa5ab;
 
-  --border-faint: rgba(16, 32, 26, 0.06);
-  --border: rgba(16, 32, 26, 0.1);
-  --border-strong: rgba(16, 32, 26, 0.18);
-  --border-input: rgba(16, 32, 26, 0.26);
+  --border-faint: rgba(21, 25, 27, 0.06);
+  --border: rgba(21, 25, 27, 0.12);
+  --border-strong: rgba(21, 25, 27, 0.24);
+  --border-input: rgba(21, 25, 27, 0.32);
 
   --mint: #0f766e;
   --mint-strong: #115e59;
-  --success: #047857;
-  --warning: #a04a08;
-  --danger: #be123c;
-  --info: #1d4ed8;
-  --unavailable: #5c6b63;
+  --success: #2c6b4a;
+  --warning: #8a5a12;
+  --danger: #a02e2e;
+  --info: var(--mint);
+  --unavailable: #8a959b;
   --on-mint: #ffffff;
+  --accent-wash: rgba(15, 118, 110, 0.07);
 
-  --map-fill-0: #f3f6f4;
+  /* Code — warm paper plate with the ink three-tone ramp. */
+  --code-bg: var(--surface);
+  --code-rule: var(--border);
+  --code-ink: #1a1e20;
+  --code-comment: #5f6a71;
+  --code-string: #0f766e;
+  --code-punct: #5a666d;
+  --code-keyword: #15191b;
+  --code-selection: #d8e6ef;
+  --code-gutter: #5f6a71;
+
+  --map-fill-0: #eef1f2;
   --map-fill-1: #0d9488;
   --map-fill-2: #0f766e;
   --map-fill-3: #115e59;
   --map-fill-4: #134e4a;
   --map-fill-5: #083d38;
 
-  --scrim: rgba(16, 32, 26, 0.38);
-  --scrim-nav: rgba(16, 32, 26, 0.32);
-  --wash: rgba(16, 32, 26, 0.04);
+  --scrim: rgba(18, 23, 26, 0.55);
+  --scrim-nav: rgba(18, 23, 26, 0.45);
+  --wash: rgba(21, 25, 27, 0.04);
 
-  --shadow-card: 0 1px 2px rgba(16, 32, 26, 0.05), 0 10px 26px rgba(16, 32, 26, 0.06);
-  --shadow-pop: 0 24px 64px rgba(16, 32, 26, 0.18);
-  --shadow-control: 0 1px 2px rgba(16, 32, 26, 0.12);
+  --shadow-card: none;
+  --shadow-control: none;
+  --shadow-sticker: 0 1px 0 rgba(21, 25, 27, 0.04), 0 6px 16px rgba(21, 25, 27, 0.06);
+  --shadow-pop: 0 18px 48px rgba(21, 25, 27, 0.14);
 }
 
 /* ==========================================================================
@@ -270,7 +334,7 @@ svg {
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--muted) 35%, transparent);
   border: 3px solid transparent;
-  border-radius: 999px;
+  border-radius: 0;
   background-clip: padding-box;
 }
 
@@ -340,7 +404,7 @@ svg {
   top: -48px;
   z-index: 100;
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--mint);
   color: var(--on-mint);
   font-weight: 600;
@@ -535,7 +599,7 @@ svg {
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--bg);
 }
 
@@ -544,7 +608,7 @@ svg {
   height: 20px;
   padding: 0 4px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font-size: 10px;
@@ -608,7 +672,7 @@ svg {
 .topbar__env {
   padding: 1px 6px;
   border: 1px solid color-mix(in srgb, var(--mint) 26%, transparent);
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--mint) 8%, transparent);
   color: var(--mint);
   font-family: var(--font-mono);
@@ -690,7 +754,7 @@ svg {
   align-items: center;
   padding: 0 5px;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: 0;
   background: var(--bg);
   color: var(--muted);
   font-family: var(--font-mono);
@@ -926,7 +990,7 @@ svg {
   width: 26px;
   height: 26px;
   place-items: center;
-  border-radius: 6px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--metric-tone) 12%, transparent);
   color: var(--metric-tone);
 }
@@ -1057,7 +1121,7 @@ svg {
 .btn--sm {
   height: var(--control-h-sm);
   padding: 0 9px;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: 11px;
 }
 
@@ -1098,7 +1162,7 @@ svg {
 .icon-btn--sm {
   width: var(--control-h-sm);
   height: var(--control-h-sm);
-  border-radius: 6px;
+  border-radius: 0;
 }
 
 .copy-btn.is-copied {
@@ -1213,7 +1277,7 @@ svg {
   flex: none;
   place-items: center;
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--mint) 16%, transparent);
   color: var(--mint);
   font-family: var(--font-mono);
@@ -1237,7 +1301,7 @@ svg {
   min-width: 126px;
   height: var(--control-h-sm);
   padding: 0 8px 0 10px;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--raised);
 }
 
@@ -1358,7 +1422,7 @@ svg {
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font-size: 14px;
@@ -1397,7 +1461,7 @@ svg {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
 }
 
@@ -1448,7 +1512,7 @@ svg {
   flex: none;
   place-items: center;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: 0;
   color: var(--on-mint);
 }
 
@@ -1608,7 +1672,7 @@ svg {
   flex: none;
   place-items: center;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: 0;
   background: var(--bg);
   color: var(--on-mint);
   transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
@@ -1696,7 +1760,7 @@ svg {
   gap: 4px;
   padding: 0 7px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.03em;
@@ -1749,7 +1813,7 @@ svg {
   gap: 5px;
   padding: 0 8px 0 6px;
   border: 1px solid color-mix(in srgb, var(--status-hue, var(--muted)) 30%, transparent);
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--status-hue, var(--muted)) 11%, transparent);
   color: var(--status-hue, var(--text-2));
   font-size: 10px;
@@ -1833,7 +1897,7 @@ svg {
   min-width: 48px;
   height: 4px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2028,7 +2092,7 @@ svg {
   overflow: hidden;
   padding: 2px 8px;
   border: 1px solid color-mix(in srgb, var(--mint) 35%, var(--border));
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--mint) 8%, transparent);
   color: var(--mint);
   font-family: var(--font-mono);
@@ -2201,7 +2265,7 @@ svg {
   min-height: 26px;
   padding: 3px 8px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: var(--text-2);
   font: inherit;
@@ -2758,7 +2822,7 @@ svg {
   align-items: center;
   gap: 10px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
 }
 
@@ -2869,7 +2933,7 @@ svg {
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
 }
@@ -2944,7 +3008,7 @@ svg {
 .card__subtitle code {
   padding: 1px 4px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 0;
   background: var(--bg);
   color: var(--text-2);
   font-family: var(--font-mono);
@@ -3379,7 +3443,7 @@ svg {
   margin-top: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--elevated);
   flex-wrap: wrap;
 }
@@ -3492,7 +3556,7 @@ svg {
 
 .skeleton {
   display: block;
-  border-radius: 4px;
+  border-radius: 0;
   background: linear-gradient(
     90deg,
     var(--active) 25%,
@@ -3521,7 +3585,7 @@ svg {
   gap: 5px;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font-size: 11px;
@@ -3574,7 +3638,7 @@ svg {
   gap: 6px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--bg);
   color: var(--muted);
   font-size: 11px;
@@ -3883,7 +3947,7 @@ svg {
   align-items: center;
   padding: 0 7px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--elevated);
   color: var(--text-2);
   font-family: var(--font-mono);
@@ -3946,7 +4010,7 @@ svg {
   width: 100%;
   height: 3px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -4325,6 +4389,10 @@ svg {
 
   .search-trigger__text,
   .search-trigger .kbd {
+    display: none;
+  }
+
+  .topbar__docs span {
     display: none;
   }
 

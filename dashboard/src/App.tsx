@@ -8,6 +8,9 @@ import { ThemeProvider } from './lib/theme'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
 const Backup = lazy(() => import('./pages/Backup'))
+const DocsLayout = lazy(() => import('./pages/docs/DocsLayout'))
+const DocsPageView = lazy(() => import('./pages/docs/DocsPageView'))
+const ReferencePage = lazy(() => import('./pages/docs/ReferencePage'))
 const Debug = lazy(() => import('./pages/Debug'))
 const DevicePool = lazy(() => import('./pages/DevicePool'))
 const Lab = lazy(() => import('./pages/Lab'))
@@ -43,6 +46,28 @@ function AdminLayout() {
   )
 }
 
+/**
+ * Public documentation: no `AppShell`, no `TokenGate`, no admin request.
+ * Only the docs shell loads eagerly once the route is entered; every page is
+ * a lazy chunk behind the layout's own Suspense boundary.
+ */
+function DocsRoot() {
+  return (
+    <Suspense fallback={<DocsFallback />}>
+      <DocsLayout />
+    </Suspense>
+  )
+}
+
+function DocsFallback() {
+  const { t } = useI18n()
+  return (
+    <div className="docs-root docs-boot" aria-busy="true" aria-label={t('shell.loadingPage')}>
+      <span className="docs-boot__rule" />
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <LanguageProvider>
@@ -50,6 +75,13 @@ export default function App() {
         <ToastProvider>
           <BrowserRouter>
             <Routes>
+              <Route path="/docs" element={<DocsRoot />}>
+                <Route index element={<DocsPageView />} />
+                <Route path="reference" element={<ReferencePage />} />
+                <Route path="reference/:tag" element={<ReferencePage />} />
+                <Route path=":slug" element={<DocsPageView />} />
+                <Route path="*" element={<Navigate to="/docs" replace />} />
+              </Route>
               <Route element={<AdminLayout />}>
                 <Route path="/" element={<Overview />} />
                 <Route path="/usage" element={<Usage />} />

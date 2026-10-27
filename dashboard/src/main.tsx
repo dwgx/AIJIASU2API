@@ -7,6 +7,7 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/600.css'
 import App from './App'
 import './styles/app.css'
+import './styles/docs.css'
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Root element #root was not found')
