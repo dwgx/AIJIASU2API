@@ -118,7 +118,7 @@ As of 2026-10-26:
   `<select>`) with filter, form, settings, log and region variants; the Nodes drawer leads with the
   localised region, renders an unmeasured success rate as *Not measured*, flags a far-future probe
   stamp as clock skew, labels the egress IP as a vendor claim and offers a guarded
-  **Verify egress** check. 474 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
+  **Verify egress** check. 475 Vitest tests in 54 files. The UI is bilingual: a `中` / `EN` switch
   in the sidebar footer and the Language section in Settings switch every page, default to the browser
   language, persist in `localStorage["ajs.lang"]` and set `<html lang>` (`zh-CN` / `en`); the
   Chinese dictionary is natural mainland-product copy, not a literal translation (账号 for login
@@ -495,7 +495,7 @@ ssh -N -L 18081:127.0.0.1:18081 hmc
 ssh -N -L 18082:127.0.0.1:18082 -L 2261:127.0.0.1:2261 hmc
 ```
 
-Tests: `cd dashboard && npm test` (474 tests in 54 files), `cd daemon && go test ./...`
+Tests: `cd dashboard && npm test` (475 tests in 54 files), `cd daemon && go test ./...`
 (1339 test functions, needs `../emulator`), `cd emulator && go test ./...` (46 test functions).
 All three suites run offline. The last recorded dashboard and daemon runs are on HMC, alongside
 the M1 spike; see the evidence sections of

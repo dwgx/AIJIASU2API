@@ -10,7 +10,7 @@ closed instead of emitting the demo (see [Modes](#modes) and [Live mode](#live-m
 
 - Stack: Vite 6, React 19, TypeScript, React Router, `lucide-react`, `recharts`, `clsx`.
 - Styling: plain CSS variables, no Tailwind, no component library.
-- Tests: Vitest + React Testing Library + jsdom, 474 tests in 54 files.
+- Tests: Vitest + React Testing Library + jsdom, 475 tests in 54 files.
 - Language: Chinese/English UI with a `中` / `EN` sidebar switch and a Settings Language section.
 - Package manager: npm.
 - Status: `v0.1.0` implementation slice. Local git commits only (not pushed), no credentials, and
@@ -81,7 +81,7 @@ npm run dev        # http://127.0.0.1:5173 (mock data)
 npm run build:mock # tsc -b && vite build --mode mock → dist/ demo console
 VITE_USE_MOCK=false npm run build   # tsc -b && vite build → dist/ live bundle
 npm run preview    # http://127.0.0.1:4173, serves dist/
-npm test           # Vitest, 474 tests in 54 files
+npm test           # Vitest, 475 tests in 54 files
 npm run typecheck  # tsc -b
 ```
 
@@ -938,7 +938,7 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
 
 ## Tests and QA
 
-- 474 Vitest tests in 54 files (65 at the 2026-10-23 record; see
+- 475 Vitest tests in 54 files (65 at the 2026-10-23 record; see
   [Verification](#verification-recorded-2026-10-23)).
   `tests/i18n.test.tsx` covers the bilingual UI: dictionary parity and non-empty strings,
   interpolation plus English/key fallback, switching to Chinese with `document.lang`, restoring a

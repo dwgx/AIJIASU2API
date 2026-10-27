@@ -1064,6 +1064,13 @@ requirement.
   and one explicit public listen address. The CSP fixture strips the stream
   block because it serves only the HTTP vhosts. This is a dev result; the
   production gate (`sudo -E`) is still required on the release host.
+- **HMC build host, nginx 1.26.3:** `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS (171 checks, 5 skipped; not a production gate)`. This nginx
+  build ships without the stream module, so the staged `nginx -t` covers the
+  four HTTP vhosts only and the gate TLS probe is skipped (two of the five
+  skips); the static gate-map assertions still pass. The WSL2 run above
+  (`176 checks, 1 skipped`) remains the only run that proved the TLS
+  handshake, so HMC did not prove the stream TLS probe.
 - **Public API edge (AJS-468), WSL2 Ubuntu 24.04, nginx 1.24.0 (Ubuntu):**
   `bash deploy/production/check.sh --dev` →
   `check: DEV-PASS (159 checks, 1 skipped; not a production gate)`. The single
