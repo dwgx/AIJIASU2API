@@ -156,6 +156,7 @@ nginx/snippets/ajs-admin-operator-token.conf
 nginx/snippets/ajs-admin-operator.conf
 nginx/sites-available/ajs-portal.conf
 nginx/sites-available/ajs-admin.conf
+nginx/sites-available/ajs-api.conf
 nginx/sites-available/ajs-default.conf
 systemd/ajs-accountd.service
 systemd/ajs-accountd.env.example
@@ -383,6 +384,7 @@ if [ -n "$nginx_mode" ]; then
         if [ -n "$nginx_tmp" ]; then
             mkdir -p "$nginx_tmp/sites-enabled" "$nginx_tmp/snippets" "$nginx_tmp/logs" \
                 "$nginx_tmp/certs/panel.example.com" "$nginx_tmp/certs/admin.example.com" \
+                "$nginx_tmp/certs/api.example.com" \
                 "$nginx_tmp/temp/client_body" "$nginx_tmp/temp/proxy" \
                 "$nginx_tmp/temp/fastcgi" "$nginx_tmp/temp/uwsgi" "$nginx_tmp/temp/scgi"
             cp "$kit/nginx/nginx.conf" "$nginx_tmp/nginx.conf"
@@ -390,6 +392,7 @@ if [ -n "$nginx_mode" ]; then
             cp "$kit/nginx/snippets/"*.conf "$nginx_tmp/snippets/" 2>/dev/null || true
             cp "$kit/nginx/sites-available/ajs-portal.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-admin.conf" "$nginx_tmp/sites-enabled/"
+            cp "$kit/nginx/sites-available/ajs-api.conf" "$nginx_tmp/sites-enabled/"
             cp "$kit/nginx/sites-available/ajs-default.conf" "$nginx_tmp/sites-enabled/"
 
             # nginx resolves auth_basic_user_file at config load. Stage a
@@ -413,6 +416,14 @@ if [ -n "$nginx_mode" ]; then
                 -subj "/CN=admin.example.com" \
                 -keyout "$nginx_tmp/certs/admin.example.com/privkey.pem" \
                 -out "$nginx_tmp/certs/admin.example.com/fullchain.pem" >/dev/null 2>&1
+            # The api name is a SAN on the panel certificate in production; the
+            # throwaway certificate carries the same SAN shape so the staged
+            # TLS listener proves a certificate that is valid for api.<domain>.
+            openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+                -subj "/CN=api.example.com" \
+                -addext "subjectAltName=DNS:panel.example.com,DNS:api.example.com" \
+                -keyout "$nginx_tmp/certs/api.example.com/privkey.pem" \
+                -out "$nginx_tmp/certs/api.example.com/fullchain.pem" >/dev/null 2>&1
 
             # Config-visible root differs in Docker mode because the staged
             # tree is bind-mounted at /work.
@@ -502,7 +513,7 @@ if [ -n "$nginx_mode" ]; then
                 else
                     nginx_label="nginx:1.29-alpine"
                 fi
-                pass "nginx -t: portal and admin vhosts ($nginx_label; $nginx_via)"
+                pass "nginx -t: portal, admin, api and default vhosts ($nginx_label; $nginx_via)"
             else
                 fail "nginx -t failed: $(printf '%s' "$nginx_output" | tr '\n' ' ' | cut -c1-500)"
             fi
@@ -514,6 +525,8 @@ if [ -n "$nginx_mode" ]; then
             if [ "$nginx_rc" -eq 0 ] && [ "$nginx_mode" = host ]; then
                 panel_host=$(awk '$1 == "server_name" {gsub(/;/, "", $2); print $2; exit}' "$kit/nginx/sites-available/ajs-portal.conf")
                 [ -n "$panel_host" ] || panel_host=panel.example.com
+                api_host=$(awk '$1 == "server_name" {gsub(/;/, "", $2); print $2; exit}' "$kit/nginx/sites-available/ajs-api.conf")
+                [ -n "$api_host" ] || api_host=api.example.com
                 cat > "$nginx_tmp/probe.sh" <<'AJS_NGINX_PROBE'
 #!/bin/sh
 set -u
@@ -522,6 +535,7 @@ config=$2
 nginx_bin=$3
 ip_bin=${4:-}
 panel_host=${5:-panel.example.com}
+api_host=${6:-api.example.com}
 if [ -n "$ip_bin" ]; then "$ip_bin" link set lo up 2>/dev/null || true; fi
 "$nginx_bin" -p "$root/" -c "$config" >/dev/null 2>&1 || { echo "nginx_start_failed"; exit 1; }
 cleanup() { "$nginx_bin" -p "$root/" -c "$config" -s stop >/dev/null 2>&1 || true; }
@@ -539,11 +553,39 @@ https_unknown=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 --resolv
 https_ip=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 https://127.0.0.1/ 2>/dev/null || true)
 canonical=$(curl -sS -o /dev/null -D - --max-time 3 -H "Host: $panel_host" http://127.0.0.1/some/path 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{code=$2} /^Location:/{sub(/\r$/,""); loc=$2} END{print code "|" loc}')
 portal_health=$(curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 --resolve "$panel_host:443:127.0.0.1" "https://$panel_host/healthz" 2>/dev/null || true)
+
+# Public API edge. The upstream is 127.0.0.1:2261: closed inside the probe
+# namespace, so a proxied path answers 502 while a refused path answers 404.
+api() { curl -sS -k -o /dev/null -w '%{http_code}' --max-time 3 --resolve "$api_host:443:127.0.0.1" "$@" 2>/dev/null || true; }
+api_health_body=$(curl -sS -k --max-time 3 --resolve "$api_host:443:127.0.0.1" "https://$api_host/healthz" 2>/dev/null | tr -d '\r\n' || true)
+api_health=$(api "https://$api_host/healthz")
+api_allow=$(api "https://$api_host/v1/leases")
+api_allow_post=$(api -X POST "https://$api_host/v1/leases")
+api_users=$(api "https://$api_host/v1/users")
+api_backup=$(api -X POST "https://$api_host/v1/backup")
+api_export=$(api -X POST "https://$api_host/v1/accounts/export")
+api_portal=$(api "https://$api_host/v1/portal/session")
+api_whoami=$(api "https://$api_host/v1/whoami")
+api_method=$(api -X PATCH "https://$api_host/v1/leases")
+api_unknown=$(api --resolve attacker.invalid:443:127.0.0.1 "https://attacker.invalid/v1/leases")
+api_http=$(curl -sS -o /dev/null -D - --max-time 3 -H "Host: $api_host" http://127.0.0.1/v1/leases 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{code=$2} /^Location:/{sub(/\r$/,""); loc=$2} END{print code "|" loc}')
 printf 'http_unknown=%s\n' "$http_unknown"
 printf 'https_unknown=%s\n' "$https_unknown"
 printf 'https_ip=%s\n' "$https_ip"
 printf 'canonical=%s\n' "$canonical"
 printf 'portal_health=%s\n' "$portal_health"
+printf 'api_health=%s\n' "$api_health"
+printf 'api_health_body=%s\n' "$api_health_body"
+printf 'api_allow=%s\n' "$api_allow"
+printf 'api_allow_post=%s\n' "$api_allow_post"
+printf 'api_users=%s\n' "$api_users"
+printf 'api_backup=%s\n' "$api_backup"
+printf 'api_export=%s\n' "$api_export"
+printf 'api_portal=%s\n' "$api_portal"
+printf 'api_whoami=%s\n' "$api_whoami"
+printf 'api_method=%s\n' "$api_method"
+printf 'api_unknown=%s\n' "$api_unknown"
+printf 'api_http=%s\n' "$api_http"
 AJS_NGINX_PROBE
                 probe_config="$nginx_tmp/nginx.conf"
                 probe_out=""
@@ -554,13 +596,13 @@ AJS_NGINX_PROBE
                     # :80/:443 listeners, which may already belong to a running
                     # nginx. As real root, nginx can still setuid to the
                     # configured worker user, so keep the config unchanged.
-                    probe_out=$(unshare -n sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip)" "$panel_host" 2>&1)
+                    probe_out=$(unshare -n sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                     if [ "$probe_rc" -ne 0 ]; then
                         # Namespace unavailable/blocked: fall back to the real
                         # listeners, which is valid only when they are free.
-                        probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
+                        probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$nginx_tmp/nginx.conf" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" 2>&1)
                         probe_rc=$?
                     fi
                 elif command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
@@ -570,11 +612,11 @@ AJS_NGINX_PROBE
                     sed -i.bak -E 's|^[[:space:]]*user[[:space:]]+[^;]+;|user root;|' "$nginx_tmp/nginx.probe.conf"
                     rm -f "$nginx_tmp/nginx.probe.conf.bak"
                     probe_config="$nginx_tmp/nginx.probe.conf"
-                    probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" 2>&1)
+                    probe_out=$(unshare -Urn sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip)" "$panel_host" "$api_host" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                 elif [ "$(id -u)" -eq 0 ]; then
-                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" 2>&1)
+                    probe_out=$(sh "$nginx_tmp/probe.sh" "$nginx_root" "$probe_config" "$nginx_bin" "$(command -v ip 2>/dev/null || true)" "$panel_host" "$api_host" 2>&1)
                     probe_rc=$?
                     probe_ran=1
                 else
@@ -610,6 +652,79 @@ AJS_NGINX_PROBE
                         pass "canonical portal Host still reaches /healthz (200)"
                     else
                         fail "canonical portal /healthz status=${portal_health:-<none>}"
+                    fi
+
+                    # --- public API edge (AJS-468) -------------------------
+                    # The probe runs with 127.0.0.1:2261 closed (namespace) or
+                    # possibly live (host fallback). A proxied path therefore
+                    # answers 502 with a dead upstream, or a daemon status when
+                    # one is listening; 404 always means "not proxied".
+                    api_health=$(printf '%s\n' "$probe_out" | sed -n 's/^api_health=//p')
+                    api_health_body=$(printf '%s\n' "$probe_out" | sed -n 's/^api_health_body=//p')
+                    api_allow=$(printf '%s\n' "$probe_out" | sed -n 's/^api_allow=//p')
+                    api_allow_post=$(printf '%s\n' "$probe_out" | sed -n 's/^api_allow_post=//p')
+                    api_users=$(printf '%s\n' "$probe_out" | sed -n 's/^api_users=//p')
+                    api_backup=$(printf '%s\n' "$probe_out" | sed -n 's/^api_backup=//p')
+                    api_export=$(printf '%s\n' "$probe_out" | sed -n 's/^api_export=//p')
+                    api_portal=$(printf '%s\n' "$probe_out" | sed -n 's/^api_portal=//p')
+                    api_whoami=$(printf '%s\n' "$probe_out" | sed -n 's/^api_whoami=//p')
+                    api_method=$(printf '%s\n' "$probe_out" | sed -n 's/^api_method=//p')
+                    api_unknown=$(printf '%s\n' "$probe_out" | sed -n 's/^api_unknown=//p')
+                    api_http=$(printf '%s\n' "$probe_out" | sed -n 's/^api_http=//p')
+                    if [ "$api_health" = "200" ] && [ "$api_health_body" = "ok" ]; then
+                        pass "api /healthz is a static 200 \"ok\" (daemon healthz not proxied)"
+                    else
+                        fail "api /healthz status=${api_health:-<none>} body=${api_health_body:-<none>}"
+                    fi
+                    case $api_allow in
+                        502) pass "api GET /v1/leases is proxied (502: upstream refused, path routed)" ;;
+                        401|403|200) pass "api GET /v1/leases is proxied (upstream answered $api_allow)" ;;
+                        *) fail "api GET /v1/leases is not proxied: status=${api_allow:-<none>}" ;;
+                    esac
+                    case $api_allow_post in
+                        502) pass "api POST /v1/leases is proxied (502: upstream refused)" ;;
+                        401|403|200|201|409) pass "api POST /v1/leases is proxied (upstream answered $api_allow_post)" ;;
+                        *) fail "api POST /v1/leases is not proxied: status=${api_allow_post:-<none>}" ;;
+                    esac
+                    if [ "$api_users" = "404" ]; then
+                        pass "api admin namespace /v1/users is 404 at the edge"
+                    else
+                        fail "api /v1/users was not refused with 404: status=${api_users:-<none>}"
+                    fi
+                    if [ "$api_backup" = "404" ]; then
+                        pass "api admin namespace POST /v1/backup is 404 at the edge"
+                    else
+                        fail "api POST /v1/backup was not refused with 404: status=${api_backup:-<none>}"
+                    fi
+                    if [ "$api_export" = "404" ]; then
+                        pass "api admin-only POST /v1/accounts/export is 404 (explicit deny)"
+                    else
+                        fail "api POST /v1/accounts/export was not refused with 404: status=${api_export:-<none>}"
+                    fi
+                    if [ "$api_portal" = "404" ]; then
+                        pass "api portal path /v1/portal/session is 404 (portal is a different origin)"
+                    else
+                        fail "api /v1/portal/session was not refused with 404: status=${api_portal:-<none>}"
+                    fi
+                    if [ "$api_whoami" = "404" ]; then
+                        pass "api /v1/whoami is 404 at the edge"
+                    else
+                        fail "api /v1/whoami was not refused with 404: status=${api_whoami:-<none>}"
+                    fi
+                    if [ "$api_method" = "403" ]; then
+                        pass "api PATCH /v1/leases is refused by limit_except (403, never proxied)"
+                    else
+                        fail "api PATCH /v1/leases was not refused with 403: status=${api_method:-<none>}"
+                    fi
+                    if [ "$api_unknown" = "421" ]; then
+                        pass "api name does not widen the Host boundary (unknown Host still 421)"
+                    else
+                        fail "unknown Host with an API path was not refused: status=${api_unknown:-<none>}"
+                    fi
+                    if [ "$api_http" = "301|https://$api_host/v1/leases" ]; then
+                        pass "api HTTP listener redirects to the fixed canonical origin (301)"
+                    else
+                        fail "api HTTP redirect wrong: ${api_http:-<none>}"
                     fi
                 elif [ "$probe_ran" -eq 1 ] && [ "$probe_rc" -ne 0 ]; then
                     fail "nginx runtime probe failed: $(printf '%s' "$probe_out" | tr '\n' ' ' | cut -c1-300)"
@@ -788,7 +903,7 @@ fi
 
 # --- Content-Security-Policy (F50) -----------------------------------------
 csp_snippet="$kit/nginx/snippets/ajs-security-headers.conf"
-csp_vhosts="$kit/nginx/sites-available/ajs-portal.conf $kit/nginx/sites-available/ajs-admin.conf $kit/nginx/sites-available/ajs-default.conf"
+csp_vhosts="$kit/nginx/sites-available/ajs-portal.conf $kit/nginx/sites-available/ajs-admin.conf $kit/nginx/sites-available/ajs-api.conf $kit/nginx/sites-available/ajs-default.conf"
 
 # The snippet is the only place a CSP header may exist: two CSP headers
 # intersect, so a stale duplicate silently breaks the bundle. The scan splits
@@ -872,7 +987,7 @@ esac
 # Structural coverage: nginx drops the inherited add_header set as soon as a
 # location declares one of its own, so every location must either include the
 # snippet itself or inherit a server-level include, and no block may include it
-# twice. This walks all three shipped vhosts and reports every location or
+# twice. This walks all four shipped vhosts and reports every location or
 # server that would answer without the policy (or with it twice).
 csp_coverage=$(awk '
 function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
@@ -933,7 +1048,7 @@ function report(kind, line, name, msg) {
 csp_bad=$(printf '%s\n' "$csp_coverage" | grep -c '^BAD' 2>/dev/null || true)
 csp_ok=$(printf '%s\n' "$csp_coverage" | grep -c '^OK' 2>/dev/null || true)
 if [ "${csp_bad:-0}" -eq 0 ] && [ "${csp_ok:-0}" -gt 0 ]; then
-    pass "CSP reaches every server and location in all three vhosts ($csp_ok locations: local include or inherited)"
+    pass "CSP reaches every server and location in all four vhosts ($csp_ok locations: local include or inherited)"
 else
     fail "CSP coverage gaps: $(printf '%s\n' "$csp_coverage" | grep '^BAD' | tr '\n' ';' | cut -c1-500)"
 fi
@@ -954,9 +1069,13 @@ $kit/nginx/sites-available/ajs-portal.conf|location = /llms.txt
 $kit/nginx/sites-available/ajs-admin.conf|location /
 $kit/nginx/sites-available/ajs-admin.conf|location /assets/
 $kit/nginx/sites-available/ajs-admin.conf|location /v1/
+$kit/nginx/sites-available/ajs-api.conf|location = /healthz
+$kit/nginx/sites-available/ajs-api.conf|location = /v1/leases
+$kit/nginx/sites-available/ajs-api.conf|location = /v1/events/stream
+$kit/nginx/sites-available/ajs-api.conf|location /
 EOF
 if [ -z "$csp_named_bad" ]; then
-    pass "CSP on the named response paths: portal HTML/assets/docs/llms.txt and admin HTML/API"
+    pass "CSP on the named response paths: portal HTML/assets/docs/llms.txt, admin HTML/API and the API edge"
 else
     fail "CSP missing from named response paths:$csp_named_bad"
 fi
@@ -992,6 +1111,275 @@ if grep -q 'X-Forwarded-For[[:space:]]*\$remote_addr' "$kit/nginx/snippets/ajs-p
     pass "X-Forwarded-For is overwritten with the socket peer"
 else
     fail "X-Forwarded-For is not overwritten with \$remote_addr"
+fi
+
+# ---------------------------------------------------------------------------
+section "public API edge (AJS-468)"
+# The public API origin is an additive, deny-by-default allowlist. These
+# assertions are static: they read the shipped vhost, not a staged copy. The
+# runtime probes above already proved the routing (allow path proxied, admin and
+# portal paths 404, static /healthz, unknown Host 421, HTTP 301).
+api_conf="$kit/nginx/sites-available/ajs-api.conf"
+
+# No credential at the edge. The admin origin injects a mapped bearer and asks
+# for HTTP Basic; this origin must do neither, or a scoped key would be
+# irrelevant and the admin credential would be published.
+api_forbidden=$(grep -nE '^[[:space:]]*(auth_basic|auth_basic_user_file)[[:space:]]|proxy_set_header[[:space:]]+Authorization|proxy_set_header[[:space:]]+X-AJS-Operator|ajs-admin-operator|ajs-admin-token' "$api_conf" 2>/dev/null || true)
+if [ -z "$api_forbidden" ]; then
+    pass "api vhost injects no credential: no auth_basic, no Authorization header, no X-AJS-Operator"
+else
+    fail "api vhost carries an edge credential: $(printf '%s' "$api_forbidden" | tr '\n' ';' | cut -c1-300)"
+fi
+
+# Admin/portal/payment namespaces are never named, so no future edit can route
+# them here even by accident.
+api_admin_paths="/v1/admin/ /v1/users /v1/apikeys /v1/scoped-keys /v1/webhooks /v1/backup /v1/lab/ /v1/device-pool/ /v1/system/update /v1/reconcile /v1/openapi.json /v1/whoami /v1/portal /v1/payments"
+api_admin_hits=""
+api_public_scan=$(grep -vE '^[[:space:]]*#' "$api_conf")
+for api_path in $api_admin_paths; do
+    if printf '%s\n' "$api_public_scan" | grep -qF -- "$api_path"; then
+        api_admin_hits="$api_admin_hits $api_path"
+    fi
+done
+if [ -z "$api_admin_hits" ]; then
+    pass "api vhost names no admin, portal or payment path"
+else
+    fail "api vhost mentions a non-public path:$api_admin_hits"
+fi
+
+# Deny by default: the last location in the file is the terminal 404, and it
+# proxies nothing.
+api_last_location=$(grep -nE '^[[:space:]]*location[[:space:]]' "$api_conf" | tail -n1 | sed -e 's/^[0-9]*:[[:space:]]*//' -e 's/[[:space:]]*{[[:space:]]*$//')
+api_terminal_line=$(grep -nE '^[[:space:]]*location / \{' "$api_conf" | tail -n1 | cut -d: -f1)
+api_terminal_block=""
+[ -n "$api_terminal_line" ] && api_terminal_block=$(sed -n "${api_terminal_line},/^[[:space:]]*}\$/p" "$api_conf")
+if [ "$api_last_location" = "location /" ] \
+    && printf '%s\n' "$api_terminal_block" | grep -q 'return 404;' \
+    && ! printf '%s\n' "$api_terminal_block" | grep -q 'proxy_pass'; then
+    pass "api vhost ends in the terminal deny-by-default location / { return 404; }"
+else
+    fail "api vhost has no terminal deny-by-default location (last location: ${api_last_location:-<none>})"
+fi
+
+# Static liveness: the daemon's /healthz reports global account counts and must
+# never be proxied here.
+api_health_block=$(sed -n '/^[[:space:]]*location = \/healthz {/,/^[[:space:]]*}$/p' "$api_conf")
+if printf '%s\n' "$api_health_block" | grep -q 'return 200 "ok\\n";' \
+    && ! printf '%s\n' "$api_health_block" | grep -q 'proxy_pass'; then
+    pass "api /healthz is a static 200 \"ok\" with no upstream"
+else
+    fail "api /healthz is not a static edge response"
+fi
+
+# SSE must not be buffered or cut at the normal read timeout, and the normal
+# API locations must outlast the daemon's 120s select-node window.
+api_sse_block=$(sed -n '/^[[:space:]]*location = \/v1\/events\/stream {/,/^[[:space:]]*}$/p' "$api_conf")
+if printf '%s\n' "$api_sse_block" | grep -q 'proxy_buffering off;' \
+    && printf '%s\n' "$api_sse_block" | grep -q 'proxy_read_timeout 1h;'; then
+    pass "api SSE location disables buffering and holds the stream for 1h"
+else
+    fail "api SSE location is missing proxy_buffering off / proxy_read_timeout 1h"
+fi
+if grep -qE '^[[:space:]]*proxy_read_timeout[[:space:]]+150s;' "$api_conf"; then
+    pass "api proxy_read_timeout 150s outlasts the 120s select-node timeout"
+else
+    fail "api vhost does not set proxy_read_timeout 150s"
+fi
+
+# The three admin-only account subpaths are denied explicitly, and no generic
+# /v1/ prefix may exist: that single edit publishes the admin namespace.
+api_missing_deny=""
+for api_deny in /v1/accounts/export /v1/accounts/import /v1/accounts/bulk-delete; do
+    if ! grep -qE "^[[:space:]]*location = ${api_deny//./\\.}[[:space:]]*\{[[:space:]]*return 404;[[:space:]]*\}" "$api_conf"; then
+        api_missing_deny="$api_missing_deny $api_deny"
+    fi
+done
+if [ -z "$api_missing_deny" ]; then
+    pass "api vhost denies the three admin-only account subpaths explicitly"
+else
+    fail "api vhost is missing an explicit 404 for:$api_missing_deny"
+fi
+if grep -qE '^[[:space:]]*location[[:space:]]+(=|~|\^~)?[[:space:]]*/v1/[[:space:]]*\{' "$api_conf"; then
+    fail "api vhost has a generic /v1/ location; the admin namespace would be published"
+else
+    pass "api vhost has no generic /v1/ location (allowlist is per operation)"
+fi
+
+# Zone wiring: the vhost can only use zones nginx.conf declares.
+api_zone_bad=""
+for api_zone in ajs_public_api ajs_public_conn ajs_public_total; do
+    if ! grep -qE "(limit_req_zone|limit_conn_zone).*zone=${api_zone}:" "$kit/nginx/nginx.conf"; then
+        api_zone_bad="$api_zone_bad $api_zone"
+    fi
+done
+if [ -z "$api_zone_bad" ] \
+    && grep -q 'zone=ajs_public_api burst=30 nodelay;' "$api_conf" \
+    && grep -q 'limit_conn ajs_public_conn  20;' "$api_conf" \
+    && grep -q 'limit_conn ajs_public_total 400;' "$api_conf" \
+    && grep -qE 'log_format[[:space:]]+ajs_api' "$kit/nginx/nginx.conf" \
+    && grep -q 'ajs_api;' "$api_conf"; then
+    pass "api edge uses ajs_public_api/conn/total zones and the ajs_api access log"
+else
+    fail "api edge zone or log wiring is incomplete:${api_zone_bad:- zone declared but limits/log not applied}"
+fi
+if grep -q '\$http_authorization' "$kit/nginx/nginx.conf" "$api_conf"; then
+    fail "the access-log/zone configuration references \$http_authorization"
+else
+    pass "no log format or zone copies the customer Authorization header"
+fi
+
+# Drift, both directions: every scoped operation in docs/openapi.json has a
+# location that allows exactly its methods, and every proxying location maps
+# back to a scoped operation. A new scoped route missing from the vhost is a
+# FAIL here (fail-closed at the edge, but visible); an extra location is a FAIL
+# too, because it would mean the edge is wider than the daemon's table.
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "public API allowlist drift assertion needs python3"
+else
+    api_drift=$(python3 - "$api_conf" "$repo_root/docs/openapi.json" <<'PY' 2>&1
+import json
+import re
+import sys
+
+vhost_path, spec_path = sys.argv[1], sys.argv[2]
+with open(spec_path, encoding="utf-8") as fh:
+    spec = json.load(fh)
+
+scoped = {}
+for path, item in spec.get("paths", {}).items():
+    methods = {m.upper() for m, op in item.items()
+               if isinstance(op, dict) and "x-required-scope" in op}
+    if methods:
+        scoped[path] = methods
+
+
+def lit(part):
+    """Escape regex metacharacters only: the vhost patterns are hand-written
+    and must compare byte-for-byte, so `-`, space and `&` stay literal."""
+    return "".join("\\" + ch if ch in ".^$*+?{}[]|()\\" else ch for ch in part)
+
+
+def expected(path):
+    if "{" not in path:
+        return ("exact", path)
+    parts = re.split(r"(\{[^}]+\})", path)
+    pattern = "^" + "".join(
+        "([^/]+)" if part.startswith("{") else lit(part) for part in parts
+    ) + "$"
+    return ("regex", pattern)
+
+
+with open(vhost_path, encoding="utf-8") as fh:
+    raw = fh.read()
+lines = [re.sub(r"#.*", "", line) for line in raw.splitlines()]
+
+locations = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    match = re.match(r"\s*location\s+(.*?)\s*\{", line)
+    if not match:
+        i += 1
+        continue
+    header = match.group(1).strip()
+    depth = line.count("{") - line.count("}")
+    body = [line]
+    j = i + 1
+    while depth > 0 and j < len(lines):
+        body.append(lines[j])
+        depth += lines[j].count("{") - lines[j].count("}")
+        j += 1
+    text = "\n".join(body)
+    methods = set()
+    for found in re.finditer(r"limit_except\s+([A-Z]+(?:\s+[A-Z]+)*)\s*\{", text):
+        methods |= set(found.group(1).split())
+    returned = re.search(r"\breturn\s+(\d{3})\b", text)
+    if header.startswith("^~"):
+        kind, pattern = "prefix", header[2:].strip()
+    elif header.startswith("="):
+        kind, pattern = "exact", header[1:].strip()
+    elif header.startswith("~"):
+        kind, pattern = "regex", header[1:].strip()
+    else:
+        kind, pattern = "prefix", header
+    locations.append((kind, pattern, methods, "proxy_pass" in text,
+                      returned.group(1) if returned else None))
+    i = j
+
+problems = []
+seen = set()
+exact_proxy = {}
+regex_proxy = []
+denies = []
+for kind, pattern, methods, has_proxy, returned in locations:
+    # The two server blocks each carry a `location /` (the HTTP redirect and
+    # the terminal 404), so prefix duplicates are not drift; the allowlist
+    # itself is exact + regex and must be unique.
+    if kind != "prefix":
+        if (kind, pattern) in seen:
+            problems.append("duplicate location %s %s" % (kind, pattern))
+        seen.add((kind, pattern))
+    if has_proxy:
+        if not methods:
+            problems.append("proxying location without limit_except: %s" % pattern)
+        if kind == "exact":
+            exact_proxy[pattern] = methods
+        elif kind == "regex":
+            regex_proxy.append((pattern, methods))
+        else:
+            problems.append("prefix location proxies; the allowlist must be per operation: %s" % pattern)
+    elif returned == "404" and kind == "exact":
+        # A prefix 404 is the terminal deny-by-default location, asserted
+        # separately in the shell; only named denies are checked against the
+        # admin-only set here.
+        denies.append((kind, pattern))
+
+by_expected = {expected(path): path for path in scoped}
+
+for path in sorted(scoped):
+    methods = scoped[path]
+    kind, pattern = expected(path)
+    if kind == "exact":
+        got = exact_proxy.get(pattern)
+        if got is None:
+            problems.append("missing location for %s (%s)" % (path, ",".join(sorted(methods))))
+        elif got != methods:
+            problems.append("%s allows %s, scoped methods are %s"
+                            % (path, ",".join(sorted(got)), ",".join(sorted(methods))))
+    else:
+        got = [m for pat, m in regex_proxy if pat == pattern]
+        if not got:
+            problems.append("missing regex location for %s (%s)" % (path, pattern))
+        elif got[0] != methods:
+            problems.append("%s allows %s, scoped methods are %s"
+                            % (path, ",".join(sorted(got[0])), ",".join(sorted(methods))))
+
+for path in sorted(exact_proxy):
+    if ("exact", path) not in by_expected:
+        problems.append("extra proxying location %s is not a scoped operation" % path)
+for pattern, _ in regex_proxy:
+    if ("regex", pattern) not in by_expected:
+        problems.append("extra regex location %s is not a scoped operation" % pattern)
+
+admin_only = {path for path in spec.get("paths", {}) if path not in scoped}
+for kind, pattern in denies:
+    if kind != "exact" or pattern not in admin_only:
+        problems.append("deny location %s %s is not an admin-only operation" % (kind, pattern))
+
+for problem in problems:
+    print("BAD %s" % problem)
+print("COUNT paths=%d operations=%d proxying_locations=%d"
+      % (len(scoped), sum(len(m) for m in scoped.values()),
+         len(exact_proxy) + len(regex_proxy)))
+PY
+)
+    api_drift_bad=$(printf '%s\n' "$api_drift" | grep -c '^BAD' 2>/dev/null || true)
+    api_drift_count=$(printf '%s\n' "$api_drift" | sed -n 's/^COUNT //p')
+    if [ "${api_drift_bad:-0}" -eq 0 ] && [ -n "$api_drift_count" ]; then
+        pass "api allowlist matches docs/openapi.json in both directions ($api_drift_count)"
+    else
+        fail "api allowlist drift: $(printf '%s\n' "$api_drift" | grep -E '^(BAD|COUNT)' | tr '\n' ';' | cut -c1-500)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2046,7 +2434,7 @@ fi
 
 # ---------------------------------------------------------------------------
 section "README inputs"
-for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_RBAC_STRICT AJS_ADMIN_OPERATORS_FILE AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd render-admin-operators admin-operators DNS TLS; do
+for token in AJS_TENANT_PORTAL AJS_TENANT_ORIGIN AJS_ADMIN_ORIGINS AJS_TRUSTED_PROXIES AJS_ADMIN_TOKEN AJS_RBAC_STRICT AJS_ADMIN_OPERATORS_FILE AJS_MASTER_KEY X-AJS-Operator render-admin-htpasswd render-admin-operators admin-operators DNS TLS api.example.com rollback; do
     if grep -q "$token" "$kit/README.md"; then
         pass "README documents: $token"
     else

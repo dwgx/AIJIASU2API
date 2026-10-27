@@ -36,15 +36,17 @@ bash deploy/production/check.sh --dev
 ```
 
 `check.sh` is read-only. It stages nginx configs in a throwaway directory with
-a generated self-signed certificate and a dummy token, pins the nginx PID and
+generated self-signed certificates and a dummy token, pins the nginx PID and
 all temp paths inside that directory, runs a real `nginx -t` as the invoking
-user, starts that staged config to prove unknown Hosts are refused on :80/:443
-and the portal redirect is canonical, asserts the Content-Security-Policy on
-the staged responses and boots `/portal/login` in headless Chromium against a
-loopback fixture of the same vhosts, validates the YAML inventory, scans the
-kit for committed secrets, starts a daemon binary to prove `/readyz` fails on
-an unwritable state directory, verifies the systemd unit, and compares the
-production firewall rule with `deploy/nftables/ajs-panel.nft`.
+user, starts that staged config to prove unknown Hosts are refused on :80/:443,
+the portal redirect is canonical and the public API allowlist routes (proxied
+path, admin/portal `404`, static `/healthz`, `403` on a disallowed method),
+asserts the Content-Security-Policy on the staged responses and boots
+`/portal/login` in headless Chromium against a loopback fixture of the same
+vhosts, validates the YAML inventory, scans the kit for committed secrets,
+starts a daemon binary to prove `/readyz` fails on an unwritable state
+directory, verifies the systemd unit, and compares the production firewall rule
+with `deploy/nftables/ajs-panel.nft`.
 
 ## What the kit contains
 
@@ -53,6 +55,7 @@ production firewall rule with `deploy/nftables/ajs-panel.nft`.
 | `nginx/nginx.conf` | master config: MIME map, rate-limit zones, upstream, TLS defaults, includes the site configs |
 | `nginx/sites-available/ajs-default.conf` | default-deny listeners: HTTP 444 / HTTPS 421 for unknown Host |
 | `nginx/sites-available/ajs-portal.conf` | public customer origin, TLS, HSTS, CSP, portal-only routes |
+| `nginx/sites-available/ajs-api.conf` | public API origin: TLS, deny-by-default allowlist of the 54 scoped operations, no edge credential |
 | `nginx/sites-available/ajs-admin.conf` | private admin origin, loopback/VPN allowlist, per-operator Basic auth, proxy-injected bearer |
 | `nginx/snippets/ajs-tls.conf` | shared TLS 1.2+/1.3 policy |
 | `nginx/snippets/ajs-proxy-common.conf` | `X-Forwarded-For` overwrite + trusted-proxy note |
@@ -81,10 +84,12 @@ tree or generated on the host.
 | Name | Record | Exposure |
 |---|---|---|
 | `panel.example.com` | `A` (and `AAAA` if the host has IPv6) to the host's public address | public internet |
+| `api.example.com` | `A` (and `AAAA` if the host has IPv6) to the host's public address | public internet — the scoped-key API only; the gate data plane stays loopback |
 | `admin.example.com` | private DNS, split-horizon, or `/etc/hosts` to `127.0.0.1` | loopback or VPN only — do **not** create a public record |
 
-Replace `panel.example.com` and `admin.example.com` in:
+Replace `panel.example.com`, `api.example.com` and `admin.example.com` in:
 - `nginx/sites-available/ajs-portal.conf` (`server_name`, certificate paths)
+- `nginx/sites-available/ajs-api.conf` (`server_name`, HTTP redirect, certificate paths)
 - `nginx/sites-available/ajs-admin.conf` (`server_name`, certificate paths)
 - `nginx/sites-available/ajs-default.conf` (the HTTPS default listener uses the portal certificate)
 - `systemd/ajs-accountd.env.example` (`AJS_TENANT_ORIGIN`, `AJS_ADMIN_ORIGINS`)
@@ -114,6 +119,8 @@ Layout expected by the kit:
 ```text
 /etc/ajs/tls/panel.example.com/fullchain.pem
 /etc/ajs/tls/panel.example.com/privkey.pem
+/etc/ajs/tls/api.example.com/fullchain.pem      # normally a symlink target
+/etc/ajs/tls/api.example.com/privkey.pem        # (see the SAN note below)
 /etc/ajs/tls/admin.example.com/fullchain.pem
 /etc/ajs/tls/admin.example.com/privkey.pem
 ```
@@ -121,11 +128,16 @@ Layout expected by the kit:
 Supply them by one of:
 
 ```bash
-# Let's Encrypt (HTTP-01 needs port 80 reachable)
-sudo certbot certonly --standalone -d panel.example.com
+# Let's Encrypt (HTTP-01 needs port 80 reachable). The api name is a SAN on the
+# panel certificate: one issuance, two names.
+sudo certbot certonly --standalone \
+  -d panel.example.com -d api.example.com
 sudo install -d -m 0750 /etc/ajs/tls/panel.example.com /etc/ajs/tls/admin.example.com
 sudo install -m 0640 /etc/letsencrypt/live/panel.example.com/fullchain.pem /etc/ajs/tls/panel.example.com/
 sudo install -m 0640 /etc/letsencrypt/live/panel.example.com/privkey.pem  /etc/ajs/tls/panel.example.com/
+# ajs-api.conf reads /etc/ajs/tls/api.example.com; point it at the panel pair
+# so a renewal only has to update one directory.
+sudo ln -sfn panel.example.com /etc/ajs/tls/api.example.com
 
 # Admin name is private; a self-signed cert is acceptable inside the VPN:
 sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
@@ -134,6 +146,24 @@ sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
   -subj "/CN=admin.example.com" \
   -addext "subjectAltName=DNS:admin.example.com,IP:127.0.0.1"
 ```
+
+**The api name is a SAN on the panel certificate, never a second issuance.**
+The only ACME HTTP-01 challenge location in this kit belongs to the portal
+vhost (`ajs-portal.conf`); `ajs-default.conf` closes unknown Hosts on `:80`
+with `444`, and `ajs-api.conf` deliberately has no challenge block. Issuing
+`api.example.com` separately would therefore stall at the challenge step — or
+someone would disable the default-deny listener to make it work, which is
+worse. Extend the existing certificate instead, and verify the SAN before
+enabling DNS:
+
+```bash
+openssl x509 -in /etc/ajs/tls/panel.example.com/fullchain.pem -noout -text \
+  | grep -A1 'Subject Alternative Name'      # must list panel AND api
+```
+
+`api.example.com` is a *sibling* of `panel.example.com`, so the portal's HSTS
+`includeSubDomains` does not cover it; `ajs-api.conf` therefore includes the
+same `ajs-security-headers.conf` and sends its own HSTS.
 
 The nginx master reads the pair at startup. Renewals require
 `systemctl reload nginx`; certbot's deploy hook can do that. Keys must be
@@ -307,11 +337,121 @@ browser ── HTTPS ──> nginx :443 (panel.example.com)
                      ├── /v1/portal/*    -> 127.0.0.1:2261 (cookie + CSRF)
                      └── /v1/payments/{epay/notify,stripe} -> 127.0.0.1:2261
 
+customer SDK/CLI ── HTTPS ──> nginx :443 (api.example.com)
+                     ├── 41 allowlisted paths -> 127.0.0.1:2261 (scoped key, no edge credential)
+                     ├── /healthz       -> static "ok" (edge liveness)
+                     └── everything else -> 404 (admin namespace, portal, payments)
+
 operator ── SSH tunnel/VPN ──> nginx 127.0.0.1:8443 (admin.example.com)
                      ├── /               -> /var/lib/ajs/production/admin (SPA)
                      └── /v1/*           -> 127.0.0.1:2261 + per-operator bearer
                      └── /v1/events/stream -> SSE, buffering off
 ```
+
+### Public API origin: deny-by-default allowlist
+
+`api.example.com` is the control-plane edge for scoped keys. It is a *second*
+line, not the boundary: the daemon's `routeScopes` table stays the authority,
+so the edge can only ever be narrower than the daemon.
+
+- **41 paths, 54 operations.** The vhost lists every path that carries an
+  `x-required-scope` in `docs/openapi.json`, one location per path, with the
+  operation's methods enforced by `limit_except` (a method outside the set is
+  `403` at the edge and never reaches the daemon; `GET` implies `HEAD`).
+  `{id}` shapes are anchored regexes (`^/v1/leases/([^/]+)$`), literal paths are
+  exact `=` blocks, and `/v1/schedules/preview` has its own exact block so the
+  `{id}` shape cannot widen it to `PATCH`/`DELETE`.
+- **Deny by default.** `location / { return 404; }` is terminal. The 92
+  admin-only operations, `/v1/portal/*`, the payment callbacks,
+  `/v1/openapi.json` and `/v1/whoami` are not routed here.
+  `/v1/accounts/export`, `/v1/accounts/import` and `/v1/accounts/bulk-delete`
+  are additionally denied with an explicit `return 404`.
+- **No edge credential.** There is no `auth_basic`, no injected
+  `Authorization` header and no `X-AJS-Operator`: the customer's own
+  `Authorization: Bearer ajs_sk_...` is the only credential, and it reaches the
+  daemon untouched. Writes still need `X-AJS-CSRF: 1`; server-to-server clients
+  send no `Origin`.
+- **Static liveness.** `/healthz` is a static `200 "ok\n"`. The daemon's
+  `/healthz` reports global account counts and is never proxied on this origin;
+  `/readyz` stays on the portal origin.
+- **Long operations and SSE.** Normal API locations inherit
+  `proxy_read_timeout 150s`, which outlasts the 120s `timeoutSeconds` window of
+  `POST /v1/accounts/{id}/actions/select-node`; the SSE location
+  (`/v1/events/stream`) sets `proxy_buffering off` and a 1h read timeout.
+- **Separate access log.** `ajs_api` records method, path, status, request
+  time, upstream time and upstream status. No header is ever logged.
+
+**Drift is fail-closed in both directions.** A new scoped route that is missing
+from the vhost answers `404` at the edge (visible, not a hole); a route removed
+from the daemon but still in the vhost answers `403 scope_required`. `check.sh`
+asserts the mapping in both directions against `docs/openapi.json`, so either
+kind of drift fails the gate instead of silently widening the surface.
+
+Never "simplify" the allowlist to `location /v1/`: that single edit publishes
+all 92 admin-only operations, and only the daemon's `403` would remain between
+a scanner and `/v1/backup`, `/v1/users` and `/v1/lab/*`.
+
+#### Exposure matrix
+
+| Surface | Public | Loopback/VPN | Credential |
+|---|---|---|---|
+| `panel.example.com` `/portal*`, `/docs*`, `/llms.txt` | yes | — | portal cookie (HttpOnly) |
+| `panel.example.com` `/v1/portal/*`, payment callbacks | yes | — | portal cookie / provider signature |
+| `api.example.com` 41 allowlisted paths | yes | — | scoped key `ajs_sk_…` + `X-AJS-CSRF` on writes |
+| `api.example.com` everything else | yes (404) | — | none issued |
+| `admin.example.com` SPA + `/v1/*` | **no** | `127.0.0.1:8443` or VPN | HTTP Basic + mapped operator bearer |
+| daemon `127.0.0.1:2261` | **no** | loopback only | operator bearer / portal cookie / scoped key |
+| gate ports `127.0.0.1:13000+`, `:14000+` | **no** | loopback only | scoped key with `proxy:connect` |
+| `api.example.com` → gate data plane | **no** | — | not proxied by any vhost |
+
+The last row is the one customers discover at integration time: the API edge
+lets a customer provision, meter and automate, but it does **not** let them
+consume the proxy from their own network. The gate stays loopback (three
+independent checks in `daemon/internal/gate`) and the tunnel leg needs an
+SSH/VPN forward that is re-pointed whenever a lease rebinds.
+
+#### Precondition: strict RBAC, no insecure mode
+
+The API vhost may only be enabled while the daemon runs with
+`AJS_RBAC_STRICT=1` and `AJS_ALLOW_INSECURE` unset. With `AJS_ALLOW_INSECURE=1`
+(and non-strict RBAC) the auth middleware lets every non-tenant `/v1/` request
+through, so the allowlist would publish an unauthenticated API — every allowed
+path would be anonymous, and the allowlist itself would not help. Assert it
+before enabling the vhost, not after:
+
+```bash
+sudo grep -E '^(AJS_RBAC_STRICT|AJS_ALLOW_INSECURE)=' /etc/ajs/accountd.env
+# AJS_RBAC_STRICT=1 and no AJS_ALLOW_INSECURE line
+curl -sS -o /dev/null -w '%{http_code}\n' https://api.example.com/v1/leases
+# 401 without a bearer; 404 for /v1/users with a valid key
+```
+
+#### Rollout and rollback
+
+```bash
+# 1. stage (never install before the certificate carries the SAN)
+sudo cp deploy/production/nginx/sites-available/ajs-api.conf /etc/nginx/sites-available/
+sudo nginx -t                                    # ajs-api.conf is not yet enabled
+# 2. certificate already covers api.example.com (see TLS certificates)
+# 3. DNS: A/AAAA for api.example.com -> this host
+# 4. enable: reload, never restart
+sudo ln -s /etc/nginx/sites-available/ajs-api.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+# 5. canary one key
+curl -sS -H "Authorization: Bearer $AJS_SK" https://api.example.com/v1/leases
+```
+
+Rollback is one file and one reload; no daemon restart, no firewall change, no
+data change, no certificate revocation:
+
+```bash
+sudo rm /etc/nginx/sites-enabled/ajs-api.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Blast radius is the API edge alone: the portal, admin and default-deny vhosts
+and the gate keep their connections. Leave the DNS record in place; it then
+answers `421` from the default-deny listener until the vhost returns.
 
 ### Customer origin: token-free and portal-only
 
@@ -502,9 +642,15 @@ Two layers:
 - **nginx** (`nginx/nginx.conf`): `ajs_portal_auth` 12 r/min (burst 5 login,
   burst 3 signup), `ajs_portal_api` 120 r/min (burst 60), `ajs_admin_api`
   60 r/min (burst 30), plus a 20-connection cap per IP on the portal API.
-  Rejections are `429` (`limit_req_status 429`).
+  The public API edge uses `ajs_public_api` 120 r/min (burst 30), a
+  20-connection cap per IP (`ajs_public_conn`) and a 400-connection cap per
+  server (`ajs_public_total`), which bounds the single Go daemon across all
+  sources. Rejections are `429` (`limit_req_status` / `limit_conn_status`).
+  No zone is keyed on the Authorization header: that would copy customer
+  secrets into shared memory with unbounded cardinality.
 - **daemon**: per-IP portal buckets (120/min global, 5/min signup, 10/min
-  login) and per-email buckets, which return JSON with `Retry-After`.
+  login), per-email buckets, and a per-key token bucket (default 60/min,
+  `rateLimitPerMin` per key). All return JSON with `Retry-After`.
 
 The nginx zone is intentionally slightly looser so the daemon's JSON error is
 the authority for portal clients. The admin zone protects the single bearer
@@ -541,15 +687,17 @@ present on nginx-generated `401`/`404`/`502` responses.
 - No directive names a remote origin and there is no wildcard, so the policy
   cannot be widened by a stray hostname.
 
-Coverage is structural: the snippet is included at server level in all three
+Coverage is structural: the snippet is included at server level in all four
 vhosts and in every location that declares its own `add_header`, because nginx
 drops the inherited header set as soon as a location adds one. The portal's
 HTTP redirect server includes it too (HSTS is ignored over plain HTTP and ACME
 clients ignore headers, so it is inert there, but no response path can then
-lose the policy). `ajs-default.conf` serves no content — it answers only `444`
-(connection closed before any response) and `421` — and carries the same
-include so its `421` is not the one response without a policy. `check.sh`
-enforces all of that, then asserts the exact policy on the staged responses:
+lose the policy), and so does the API's, so a scoped-key client cannot be the
+one caller answered without HSTS. `ajs-default.conf` serves no content — it
+answers only `444` (connection closed before any response) and `421` — and
+carries the same include so its `421` is not the one response without a policy.
+`check.sh` enforces all of that, then asserts the exact policy on the staged
+responses:
 portal HTML, portal assets, the portal deep link and 404, admin HTML, the admin
 `401`, an admin API error (`502` from an upstream pinned to a closed port), and
 the default-deny `421`; it also proves an unknown Host is closed on the
@@ -649,9 +797,17 @@ state directory.
    HTTP `Host` must be closed (`444`), an unknown HTTPS `Host` and an
    IP-literal `Host` must answer `421`, the portal HTTP redirect must use the
    fixed `https://panel.example.com` origin, and the canonical portal `Host`
-   must still reach `/healthz` with `200`. The probe prefers an isolated
-   network namespace (`unshare -n` as root, `unshare -Urn` otherwise) so a
-   running host nginx does not conflict with the staged listeners;
+   must still reach `/healthz` with `200`. The same probe drives the public
+   API edge: `GET`/`POST /v1/leases` must be proxied (`502` with the
+   namespace's dead upstream, or a daemon status when one is listening on
+   `:2261`), `/v1/users`, `POST /v1/backup`, `POST /v1/accounts/export`,
+   `/v1/portal/session` and `/v1/whoami` must be `404`, `PATCH /v1/leases`
+   must be `403` from `limit_except`, `/healthz` must be a static `200 "ok"`,
+   an unknown Host carrying an API path must still be `421`, and the API HTTP
+   listener must `301` to the fixed `https://api.example.com`. The probe
+   prefers an isolated network namespace (`unshare -n` as root, `unshare -Urn`
+   otherwise) so a running host nginx does not conflict with the staged
+   listeners;
 6. a runtime per-operator auth probe: an unauthenticated request to a Basic
    vhost answers `401` and leaves the upstream log empty; two different
    operator credentials reach the upstream with distinct `X-AJS-Operator`
@@ -676,9 +832,10 @@ state directory.
    one line), the exact acceptance policy on the snippet, `script-src 'self'`
    with no `unsafe-*`, the documented `style-src` exception, no remote or
    wildcard origin, no other snippet adding headers, the policy reaching every
-   server and location of all three vhosts (a duplicate include is a failure),
-   and the named portal/admin response paths; the default-deny vhost must stay
-   content-free (no root/alias/index/try_files/proxy_* and only `444`/`421`);
+   server and location of all four vhosts (a duplicate include is a failure),
+   and the named portal/admin/API response paths; the default-deny vhost must
+   stay content-free (no root/alias/index/try_files/proxy_* and only
+   `444`/`421`);
 9. the CSP runtime fixture: the shipped vhosts staged on `127.0.0.1` ephemeral
    ports with a disposable document root and an upstream pinned to a closed
    port, asserting exactly one CSP header with the exact policy on portal HTML,
@@ -711,6 +868,21 @@ state directory.
     so this proof is why production mode must run via `sudo -E`. If the
     daemon group or user does not exist, or this host cannot switch identity
     to it, the proof is a required `FAIL`, never an omitted check.
+15. the public API allowlist (`ajs-api.conf`): the `:80` redirect is canonical,
+    the `:443` block includes the TLS and security-header snippets, the vhost
+    carries no `auth_basic`, no `proxy_set_header Authorization`, no
+    `X-AJS-Operator` and no admin/portal/payment path, it ends in the terminal
+    `location / { return 404; }`, `/healthz` is static, the SSE location turns
+    buffering off with a 1h read timeout, `proxy_read_timeout 150s` outlasts the
+    select-node window, the three admin-only account subpaths have explicit
+    `404`s, no generic `/v1/` location exists, and the three `ajs_public_*`
+    zones plus the `ajs_api` log format are wired. The drift assertion parses
+    the vhost's `location`/`limit_except` blocks with python3 and requires a
+    bidirectional match with `docs/openapi.json`: every one of the 54
+    `x-required-scope` operations (41 paths) has a location allowing exactly
+    its methods, every proxying location maps back to a scoped operation, and
+    every named `404` is an admin-only path. It prints the observed counts
+    (currently `COUNT paths=41 operations=54 proxying_locations=41`).
 
 In production mode every item above is required: a missing tool is a `FAIL`
 and the summary reports the required-skip count. Production mode also refuses
@@ -722,6 +894,26 @@ requirement.
 
 ## Recorded verification (2026-10-27)
 
+- **Public API edge (AJS-468), WSL2 Ubuntu 24.04, nginx 1.24.0 (Ubuntu):**
+  `bash deploy/production/check.sh --dev` →
+  `check: DEV-PASS (159 checks, 1 skipped; not a production gate)`. The single
+  skip is the root-only AJS-412 ownership proof. The staged `nginx -t` parsed
+  the portal, admin, api and default vhosts (`unshare -Urn nginx`), and the
+  runtime probe on the staged `:80`/`:443` listeners observed the new API
+  routing: `GET` and `POST /v1/leases` proxied (`502`, upstream refused inside
+  the probe namespace), `/v1/users`, `POST /v1/backup`,
+  `POST /v1/accounts/export`, `/v1/portal/session` and `/v1/whoami` all `404`,
+  `PATCH /v1/leases` `403` from `limit_except`, `/healthz` `200` with body
+  `ok`, an unknown Host carrying `/v1/leases` still `421`, and the API HTTP
+  listener `301` to `https://api.example.com/v1/leases`. The drift assertion
+  printed `COUNT paths=41 operations=54 proxying_locations=41`. Manual controls
+  on the extracted assertion (not part of the gate) failed closed: deleting the
+  `/v1/leases` location, widening its `limit_except` to `PATCH`, adding a
+  proxying `/v1/users` location, turning an admin-only deny into a scoped one,
+  and replacing the allowlist with `location /v1/` each produced the expected
+  `BAD` line. The CSP walk now covers 75 locations in all four vhosts. This is
+  a dev result; the production gate (`sudo -E`) is still required on the
+  release host.
 - **WSL2 Ubuntu development host, nginx 1.24.0 (Ubuntu), Google Chrome
   154.0.8037.57:** `bash deploy/production/check.sh --dev` →
   `check: DEV-PASS (121 checks, 1 skipped; not a production gate)`. The only
@@ -831,6 +1023,11 @@ before the next release.
 ## Limitations
 
 - **Single host, no HA.** One nginx, one daemon, one state directory.
+- **The API edge is not proxy ingress.** `api.example.com` serves the 54
+  scoped control-plane operations. It does not expose the gate data plane:
+  gate ports stay loopback and a customer still needs an SSH/VPN forward that
+  is re-pointed after every lease rebind. Treat the edge as the
+  provisioning/billing/automation surface, not as "the proxy is public".
 - **Strict daemon RBAC, restart-based revocation.** `viewer`, `operator` and
   `admin` are enforced per route. Operator files are outside panel backups;
   role/token removal takes effect after nginx reload and daemon restart.

@@ -43,8 +43,11 @@ table inet ajs_production {
         # SSH from the management LAN or VPN only.
         ip saddr @mgmt_sources tcp dport 22 accept comment "SSH management"
 
-        # Customer portal and ACME HTTP-01.
-        tcp dport { 80, 443 } accept comment "AJS portal HTTP/HTTPS"
+        # Customer portal, the public API origin (api.<domain>) and ACME
+        # HTTP-01. The API vhost is a third name on this same 443 listener, so
+        # it opens no new port: enabling it needs no firewall change. Gate
+        # ports stay loopback-only and are deliberately absent here.
+        tcp dport { 80, 443 } accept comment "AJS portal/API HTTP/HTTPS"
 
         # The repo-owned AJS LAN block — keep in sync with deploy/nftables/ajs-panel.nft.
         ip saddr 192.168.11.0/24 tcp dport { 2261, 18082 } accept

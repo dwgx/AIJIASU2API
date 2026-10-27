@@ -15,6 +15,23 @@ portal:
   listen: 443
   bundle_root: /var/lib/ajs/production/portal
 
+api:
+  # Public control-plane origin for the scoped-key API (ajs-api.conf). It
+  # proxies only the 54 scoped operations to 127.0.0.1:2261 and answers 404 for
+  # everything else. The gate data plane is not exposed here.
+  origin: https://api.example.com
+  domain: api.example.com
+  # Third name on the same public :443 listener; no new port, no firewall rule.
+  listen: 443
+  # Certificate: the panel pair with api.example.com added as a SAN, not a
+  # second issuance — HTTP-01 is answered by the portal vhost only. The
+  # directory below is normally a symlink to the panel directory:
+  #   /etc/ajs/tls/api.example.com -> panel.example.com
+  certificate: /etc/ajs/tls/api.example.com
+  certificate_names:
+    - panel.example.com
+    - api.example.com
+
 admin:
   # Private name; no public DNS record is required. Reach it through the
   # loopback listener or a VPN address.
