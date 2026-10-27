@@ -17,8 +17,8 @@ export const docsPages: DocsPage[] = [
     slug: 'overview',
     title: { en: 'Overview and quickstart', zh: '概览与快速上手' },
     summary: {
-      en: 'Read the catalog, create a lease for one account, and connect through the loopback gate.',
-      zh: '读取目录、为一个账号创建租约，并通过回环网关建立连接。',
+      en: 'Read the catalog, create a lease for one account, and connect through the public HTTPS CONNECT edge.',
+      zh: '读取目录、为一个账号创建租约，并通过公网 HTTPS CONNECT 入口建立连接。',
     },
     sections: [
       {
@@ -28,25 +28,36 @@ export const docsPages: DocsPage[] = [
           {
             kind: 'p',
             text: {
-              en: 'The control plane listens on `http://127.0.0.1:2261` by default (`AJS_LISTEN`). `GET /healthz` and `GET /readyz` are unauthenticated; every other route, including `/metrics`, needs a bearer.',
-              zh: '控制面默认监听 `http://127.0.0.1:2261`（`AJS_LISTEN`）。`GET /healthz` 与 `GET /readyz` 无需认证；其余路由（包括 `/metrics`）都需要 Bearer 凭据。',
+              en: 'The public scoped-key edge is `https://api.example.com` — a deployment placeholder from the production kit, not a host this archive deployed; replace it with the deployment’s own API origin. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. `GET /healthz` and `GET /readyz` are unauthenticated; every other route, including `/metrics`, needs a bearer.',
+              zh: '公网受限密钥入口是 `https://api.example.com`——生产套件中的部署占位符，本归档并未部署该主机；请替换为部署自己的 API 源。它只承载受限密钥白名单，其余路径一律返回 `404`。同主机客户端使用回环控制面 `http://127.0.0.1:2261`（`AJS_LISTEN`），它仍然是完整契约。`GET /healthz` 与 `GET /readyz` 无需认证；其余路由（包括 `/metrics`）都需要 Bearer 凭据。',
             },
           },
           {
             kind: 'callout',
             tone: 'pending',
-            title: { en: 'Loopback by default', zh: '默认仅回环' },
+            title: {
+              en: 'Public edges ship in the kit, not deployed live',
+              zh: '公网入口已随套件提供，但尚未上线',
+            },
             text: {
-              en: 'The API and the gate data plane are separate. This archive has no public proxy endpoint and no public ingress; a remote client needs an operator-provided tunnel or ingress, which is pending.',
-              zh: 'API 与网关数据面是两套东西。本归档没有公网代理端点，也没有公网入口；远程客户端需要运维提供隧道或入口，目前尚未启用。',
+              en: 'The API edge and the TLS HTTPS CONNECT proxy are public in the production kit; only the SOCKS5 gate stays loopback. Neither public edge has been deployed live, and `api.example.com` must be replaced before use.',
+              zh: '生产套件已提供公网 API 入口和 TLS HTTPS CONNECT 代理；只有 SOCKS5 网关保持在回环。两个公网入口都还没有真正上线，使用前必须替换 `api.example.com`。',
             },
           },
           {
             kind: 'code',
             lang: 'bash',
             label: { en: 'Health without a token', zh: '无需令牌的健康检查' },
-            code: `curl -sS http://127.0.0.1:2261/healthz
+            code: `curl -sS https://api.example.com/healthz
+curl -sS http://127.0.0.1:2261/healthz
 curl -sS http://127.0.0.1:2261/readyz`,
+          },
+          {
+            kind: 'p',
+            text: {
+              en: 'At the edge `/healthz` is a static `200 "ok"`; `/readyz` and the rest of the control plane stay on the loopback origin.',
+              zh: '在公网入口上，`/healthz` 是静态 `200 "ok"`；`/readyz` 以及控制面的其余部分仍在回环源上。',
+            },
           },
         ],
       },
@@ -57,8 +68,8 @@ curl -sS http://127.0.0.1:2261/readyz`,
           {
             kind: 'p',
             text: {
-              en: 'One user, one account, one node, one gate: `u-01`, `acc-02`, `node-04`, port `13003`. The values are illustrative and match the examples in the OpenAPI contract; substitute your own ids. The scoped key is assumed to exist already: an operator mints it in Settings → Access, and key management is not part of the scoped reference.',
-              zh: '示例固定使用一个用户、一个账号、一个节点和一个网关：`u-01`、`acc-02`、`node-04`、端口 `13003`。这些值仅作示例，与 OpenAPI 契约中的示例一致，请替换为你自己的 id。示例假定受限密钥已经存在：由管理员在 Settings → Access 中创建，密钥管理不在受限接口参考中。',
+              en: 'One user, one account, one node, one gate: `u-01`, `acc-02`, `node-04`, port `13003`. The values are illustrative and match the examples in the OpenAPI contract; substitute your own ids. In the shipped static map the same port is the loopback SOCKS5 listener and the public HTTPS CONNECT port. The scoped key is assumed to exist already: an operator mints it in Settings → Access, and key management is not part of the scoped reference.',
+              zh: '示例固定使用一个用户、一个账号、一个节点和一个网关：`u-01`、`acc-02`、`node-04`、端口 `13003`。这些值仅作示例，与 OpenAPI 契约中的示例一致，请替换为你自己的 id。在随套件提供的静态映射中，同一个端口既是回环 SOCKS5 监听，也是公网 HTTPS CONNECT 端口。示例假定受限密钥已经存在：由运维在 Settings → Access 中创建，密钥管理不在受限接口参考中。',
             },
           },
           {
@@ -79,8 +90,19 @@ curl -sS http://127.0.0.1:2261/readyz`,
               ],
               [
                 { en: '`BASE`', zh: '`BASE`' },
-                { en: '`http://127.0.0.1:2261`', zh: '`http://127.0.0.1:2261`' },
-                { en: 'Control-plane origin.', zh: '控制面地址。' },
+                { en: '`https://api.example.com`', zh: '`https://api.example.com`' },
+                {
+                  en: 'Public scoped-key edge; a deployment placeholder to replace.',
+                  zh: '公网受限密钥入口；需要替换的部署占位符。',
+                },
+              ],
+              [
+                { en: '`AJS_PROXY_PORT`', zh: '`AJS_PROXY_PORT`' },
+                { en: '`13003`', zh: '`13003`' },
+                {
+                  en: '`connection.port` from `GET /v1/leases/{id}`: the public HTTPS CONNECT port.',
+                  zh: '`GET /v1/leases/{id}` 返回的 `connection.port`：公网 HTTPS CONNECT 端口。',
+                },
               ],
               [
                 { en: '`u-01`', zh: '`u-01`' },
@@ -102,16 +124,8 @@ curl -sS http://127.0.0.1:2261/readyz`,
                 { en: '`node-04`', zh: '`node-04`' },
                 { en: 'Live node', zh: '在线节点' },
                 {
-                  en: 'A `LIVE` node on `acc-02`; its gate is the port a lease points at.',
-                  zh: '`acc-02` 上的 `LIVE` 节点；其网关端口就是租约指向的端口。',
-                },
-              ],
-              [
-                { en: '`13003`', zh: '`13003`' },
-                { en: 'Gate port', zh: '网关端口' },
-                {
-                  en: 'Loopback SOCKS5 listener for that node.',
-                  zh: '该节点对应的回环 SOCKS5 监听端口。',
+                  en: 'A `LIVE` node on `acc-02`; its gate port is what the lease and the public edge share.',
+                  zh: '`acc-02` 上的 `LIVE` 节点；其网关端口即租约与公网入口共用的端口。',
                 },
               ],
             ],
@@ -125,16 +139,23 @@ curl -sS http://127.0.0.1:2261/readyz`,
           {
             kind: 'p',
             text: {
-              en: 'A key for this walkthrough carries `catalog:read`, `leases:read`, `leases:write`, `proxy:connect` and `usage:read`, is bound to `u-01`, and names `acc-02` in `accountIds`. The secret is returned exactly once; only its SHA-256 is persisted, so store it in `$AJS_API_KEY` and never commit it.',
-              zh: '本演练使用的密钥带有 `catalog:read`、`leases:read`、`leases:write`、`proxy:connect` 和 `usage:read`，绑定到 `u-01`，并在 `accountIds` 中声明 `acc-02`。明文只在创建时返回一次，服务端只保存它的 SHA-256；请存入 `$AJS_API_KEY`，不要提交到仓库。',
+              en: 'There is no self-service: a customer cannot sign up, mint, widen or re-scope a key. An operator creates the `ajs_sk_` in the dashboard under Settings → Access, sets its scopes and its `accountIds`/`regions` grants, and distributes it once. The public edge only carries keys the operator already created.',
+              zh: '没有自助注册：客户无法自行注册、创建、扩权或重设密钥。运维在面板的 Settings → Access 中创建 `ajs_sk_`，设置其作用域以及 `accountIds`/`regions` 授权，然后一次性交付。公网入口只承载运维已经创建的密钥。',
+            },
+          },
+          {
+            kind: 'p',
+            text: {
+              en: 'A key for this walkthrough carries `catalog:read`, `leases:read`, `leases:write`, `proxy:connect` and `usage:read`, is bound to `u-01`, and names `acc-02` in `accountIds`. The secret is returned exactly once, to the operator; only its SHA-256 is persisted, so store it in `$AJS_API_KEY` and never commit it.',
+              zh: '本演练使用的密钥带有 `catalog:read`、`leases:read`、`leases:write`、`proxy:connect` 和 `usage:read`，绑定到 `u-01`，并在 `accountIds` 中声明 `acc-02`。明文只向运维返回一次，服务端只保存它的 SHA-256；请存入 `$AJS_API_KEY`，不要提交到仓库。',
             },
           },
           {
             kind: 'code',
             lang: 'bash',
             label: { en: 'Shell setup', zh: 'Shell 变量' },
-            code: `export BASE=http://127.0.0.1:2261
-export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
+            code: `export BASE=https://api.example.com   # deployment placeholder; replace it
+export AJS_API_KEY=ajs_sk_...         # operator-issued, shown once`,
           },
           {
             kind: 'p',
@@ -152,8 +173,8 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
           {
             kind: 'p',
             text: {
-              en: '`GET /v1/nodes` needs `catalog:read`. Filter by `state=LIVE` and `account_id=acc-02`; the row for `node-04` carries the `gatePort` a lease will point at. `limit` and `offset` page the result.',
-              zh: '`GET /v1/nodes` 需要 `catalog:read`。用 `state=LIVE` 和 `account_id=acc-02` 过滤；`node-04` 这一行会带上租约将指向的 `gatePort`。`limit` 与 `offset` 用于分页。',
+              en: '`GET /v1/nodes` needs `catalog:read`. Filter by `state=LIVE` and `account_id=acc-02`; the row for `node-04` carries the `gatePort` a lease will point at, and in the shipped static map that number is also the public HTTPS CONNECT port. `limit` and `offset` page the result.',
+              zh: '`GET /v1/nodes` 需要 `catalog:read`。用 `state=LIVE` 和 `account_id=acc-02` 过滤；`node-04` 这一行会带上租约将指向的 `gatePort`，而在随套件提供的静态映射中，该数字也是公网 HTTPS CONNECT 端口。`limit` 与 `offset` 用于分页。',
             },
           },
           {
@@ -234,8 +255,8 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
           {
             kind: 'p',
             text: {
-              en: '`GET /v1/leases/{id}` needs `leases:read` and returns the lease plus the loopback endpoint to dial. `port` follows the lease: a switch that rebinds it to another gate also moves the value. The secret is never returned — `credentialKind` only names the shape, and the password is the caller’s own key carrying `proxy:connect`.',
-              zh: '`GET /v1/leases/{id}` 需要 `leases:read`，返回租约以及可拨号的回环端点。`port` 跟随租约：切换到其他网关后该值也会变化。接口不会返回密钥明文——`credentialKind` 只说明凭据形态，密码就是调用方自己那张带 `proxy:connect` 的密钥。',
+              en: '`GET /v1/leases/{id}` needs `leases:read` and returns the lease plus its `connection` block. `port` follows the lease: a switch that rebinds it to another gate also moves the value. On the daemon host `host` is `127.0.0.1` and `protocol` is `socks5` — that is the loopback listener — while in the production kit’s static map (13000-13010) the same `port` is the public HTTPS CONNECT port; a port above 13010 has no public edge. The secret is never returned — `credentialKind` only names the shape, and the password is the caller’s own key carrying `proxy:connect`.',
+              zh: '`GET /v1/leases/{id}` 需要 `leases:read`，返回租约及其 `connection` 块。`port` 跟随租约：切换到其他网关后该值也会变化。在守护进程主机上 `host` 是 `127.0.0.1`、`protocol` 是 `socks5`——那是回环监听；而在生产套件的静态映射（13000-13010）中，同一个 `port` 就是公网 HTTPS CONNECT 端口，高于 13010 的端口没有公网入口。接口不会返回密钥明文——`credentialKind` 只说明凭据形态，密码就是调用方自己那张带 `proxy:connect` 的密钥。',
             },
           },
           {
@@ -271,30 +292,50 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
       },
       {
         id: 'dial-gate',
-        title: { en: '5. Dial the gate', zh: '5. 连接网关' },
+        title: { en: '5. Dial the public HTTPS CONNECT edge', zh: '5. 连接公网 HTTPS CONNECT 入口' },
         blocks: [
           {
             kind: 'p',
             text: {
-              en: 'Dial `127.0.0.1:<gatePort>` with SOCKS5. The username is the panel user id; the password is the scoped secret carrying `proxy:connect`. The gate re-checks the lease at `CONNECT`, so a revoked or expired lease refuses the flow instead of relaying it, and it also enforces the user’s allowlist and monthly quota.',
-              zh: '用 SOCKS5 连接 `127.0.0.1:<gatePort>`。用户名是面板用户 id，密码是带 `proxy:connect` 的受限密钥。网关会在 `CONNECT` 时重新校验租约，被撤销或已过期的租约会被拒绝而不是继续转发；网关还会执行该用户的允许列表和月度配额。',
+              en: 'Read `connection.port` and dial the public edge with an HTTPS proxy that speaks `CONNECT`: `https://api.example.com:<port>`. Admission is the same pipeline as the loopback gate: the gate re-checks the lease at `CONNECT`, so a revoked or expired lease refuses the flow instead of relaying it, and it also enforces the user’s allowlist and monthly quota.',
+              zh: '读取 `connection.port`，用支持 `CONNECT` 的 HTTPS 代理连接公网入口：`https://api.example.com:<port>`。准入流程与回环网关一致：网关会在 `CONNECT` 时重新校验租约，被撤销或已过期的租约会被拒绝而不是继续转发；网关还会执行该用户的允许列表和月度配额。',
             },
+          },
+          {
+            kind: 'list',
+            items: [
+              {
+                en: 'Port: `connection.port` from `GET /v1/leases/{id}`, in the shipped static map `13000-13010`. A switch that rebinds the lease moves the port with it; a port above `13010` has no public edge.',
+                zh: '端口：`GET /v1/leases/{id}` 返回的 `connection.port`，在随套件提供的静态映射 `13000-13010` 内。租约切换到其他网关时端口随之变化；高于 `13010` 的端口没有公网入口。',
+              },
+              {
+                en: 'User: the lease owner’s panel user id, for example `u-01`.',
+                zh: '用户名：租约所有者的面板用户 id，例如 `u-01`。',
+              },
+              {
+                en: 'Password: a scoped key secret (`ajs_sk_...`) carrying `proxy:connect` and granting the lease’s account.',
+                zh: '密码：带 `proxy:connect` 且授权了租约账号的受限密钥（`ajs_sk_...`）。',
+              },
+              {
+                en: 'Transport: TLS. The client dials `https://api.example.com:<port>` and speaks HTTP `CONNECT`; nginx terminates TLS and relays bytes without parsing or rewriting the request, so the credential never lands in an edge log.',
+                zh: '传输：TLS。客户端拨号 `https://api.example.com:<port>` 并使用 HTTP `CONNECT`；nginx 终止 TLS 后按字节转发，不解析也不改写请求，因此凭据不会落到入口日志里。',
+              },
+            ],
           },
           {
             kind: 'code',
             lang: 'bash',
-            label: { en: 'SOCKS5 through the gate', zh: '通过网关的 SOCKS5' },
-            code: `curl --socks5-hostname 127.0.0.1:13003 \\
-  -U "u-01:$AJS_API_KEY" \\
-  https://example.com/`,
+            label: { en: 'HTTPS CONNECT through the public edge', zh: '通过公网入口的 HTTPS CONNECT' },
+            code: `export AJS_PROXY_PORT=13003   # connection.port from GET /v1/leases/{id}
+curl -x "https://u-01:$AJS_API_KEY@api.example.com:$AJS_PROXY_PORT" https://example.com`,
           },
           {
             kind: 'callout',
             tone: 'warn',
-            title: { en: 'The gate is not a public proxy', zh: '网关不是公网代理' },
+            title: { en: 'SOCKS5 stays loopback', zh: 'SOCKS5 仍只走回环' },
             text: {
-              en: 'All gates bind `127.0.0.1`. There is no public listener, tunnel or router in this archive; a client on another host needs an operator-provided tunnel or ingress (pending). Do not assume the gate port is reachable off the daemon host.',
-              zh: '所有网关都绑定 `127.0.0.1`。本归档没有公网监听、隧道或路由；其他主机上的客户端需要运维提供隧道或入口（尚未启用）。不要假设网关端口可以从守护进程所在主机之外访问。',
+              en: 'The SOCKS5 gate binds `127.0.0.1:13000-13010` and is never published; a SOCKS5 client on another host still needs an operator-provided tunnel. The HTTPS CONNECT edge ships in the production kit but has not been deployed live, and `api.example.com` must be replaced first.',
+              zh: 'SOCKS5 网关绑定 `127.0.0.1:13000-13010`，从不对外发布；其他主机上的 SOCKS5 客户端仍然需要运维提供隧道。HTTPS CONNECT 入口已随生产套件提供，但尚未上线，使用前必须先替换 `api.example.com`。',
             },
           },
         ],
@@ -375,6 +416,13 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
                 },
               ],
             ],
+          },
+          {
+            kind: 'p',
+            text: {
+              en: 'Scoped keys are operator-issued: there is no self-service signup or key issuance. An operator creates the key in the dashboard under Settings → Access, sets its scopes and its `accountIds`/`regions` grants, and distributes it once; a customer cannot mint, widen or re-scope one, and the public edge only carries keys the operator already created.',
+              zh: '受限密钥由运维签发：没有自助注册或自助发钥。运维在面板的 Settings → Access 中创建密钥，设置其作用域与 `accountIds`/`regions` 授权，并一次性交付；客户无法自行创建、扩权或重设，公网入口也只承载运维已经创建的密钥。',
+            },
           },
           {
             kind: 'p',
@@ -531,8 +579,8 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
           {
             kind: 'p',
             text: {
-              en: '`proxy:connect` is the one scope with no HTTP route: it authorizes the loopback gate. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.',
-              zh: '`proxy:connect` 是唯一没有 HTTP 路由的作用域：它授权回环网关。管理员专属能力——设备池、用户、API 密钥、受限密钥管理、Webhook、备份、Lab 遥测——即使密钥带有受限授权也仍然只有管理员可用。',
+              en: '`proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the production kit’s public HTTPS CONNECT edge. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.',
+              zh: '`proxy:connect` 是唯一没有 HTTP 路由的作用域：它授权网关——回环 SOCKS5 监听以及生产套件的公网 HTTPS CONNECT 入口。管理员专属能力——设备池、用户、API 密钥、受限密钥管理、Webhook、备份、Lab 遥测——即使密钥带有受限授权也仍然只有管理员可用。',
             },
           },
         ],
@@ -615,12 +663,12 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
               [
                 { en: '`proxy:connect`', zh: '`proxy:connect`' },
                 {
-                  en: 'Authenticate at the loopback gate and connect through the key user’s lease.',
-                  zh: '在回环网关认证，并通过密钥所属用户的租约建立连接。',
+                  en: 'Authenticate at a gate and connect through the key user’s lease.',
+                  zh: '在网关上认证，并通过密钥所属用户的租约建立连接。',
                 },
                 {
-                  en: '`SOCKS5 127.0.0.1:<gatePort>`, `HTTP CONNECT 127.0.0.1:<gatePort+offset>`',
-                  zh: '`SOCKS5 127.0.0.1:<gatePort>`、`HTTP CONNECT 127.0.0.1:<gatePort+offset>`',
+                  en: '`SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT api.example.com:<port>`',
+                  zh: '`SOCKS5 127.0.0.1:<gatePort>`、`HTTPS CONNECT api.example.com:<port>`',
                 },
               ],
               [
@@ -725,8 +773,8 @@ export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface`,
           {
             kind: 'p',
             text: {
-              en: '`GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner first. A missing id and another user’s lease answer the same `404 NOT_FOUND`; the key’s own lease on an account outside its grant answers `403`. The detail read returns the lease and its loopback `connection` block and never the scoped-key secret. Accounts and nodes are operator assets: they are filtered by the key’s grants, never by `userId`, and no customer key owns them.',
-              zh: '`GET /v1/leases/{id}`、`DELETE /v1/leases/{id}` 和 `POST /v1/leases/{id}/actions/rotate` 会先解析所有者。不存在的 id 与其他用户的租约返回相同的 `404 NOT_FOUND`；密钥自己的租约若落在授权之外的账号上则返回 `403`。详情读取返回租约及其回环 `connection` 块，绝不会返回受限密钥明文。账号和节点属于运维资产：它们按键的授权过滤，而不是按 `userId`，客户密钥不拥有它们。',
+              en: '`GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner first. A missing id and another user’s lease answer the same `404 NOT_FOUND`; the key’s own lease on an account outside its grant answers `403`. The detail read returns the lease and its `connection` block and never the scoped-key secret. Accounts and nodes are operator assets: they are filtered by the key’s grants, never by `userId`, and no customer key owns them.',
+              zh: '`GET /v1/leases/{id}`、`DELETE /v1/leases/{id}` 和 `POST /v1/leases/{id}/actions/rotate` 会先解析所有者。不存在的 id 与其他用户的租约返回相同的 `404 NOT_FOUND`；密钥自己的租约若落在授权之外的账号上则返回 `403`。详情读取返回租约及其 `connection` 块，绝不会返回受限密钥明文。账号和节点属于运维资产：它们按键的授权过滤，而不是按 `userId`，客户密钥不拥有它们。',
             },
           },
         ],
@@ -1059,41 +1107,76 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
     slug: 'limits',
     title: { en: 'Honest limits', zh: '真实的限制' },
     summary: {
-      en: 'Loopback gates, no public ingress, one session slot, and the opt-in state journal.',
-      zh: '回环网关、没有公网入口、单会话槽位，以及需显式开启的状态日志。',
+      en: 'Loopback SOCKS5, the public HTTPS CONNECT gate and its preconditions, one session slot, and the opt-in state journal.',
+      zh: '回环 SOCKS5、公网 HTTPS CONNECT 网关及其前置条件、单会话槽位，以及需显式开启的状态日志。',
     },
     sections: [
       {
         id: 'data-plane',
-        title: { en: 'The gate binds 127.0.0.1', zh: '网关绑定 127.0.0.1' },
+        title: { en: 'SOCKS5 loopback, HTTPS CONNECT public', zh: 'SOCKS5 回环，HTTPS CONNECT 公网' },
         blocks: [
           {
             kind: 'p',
             text: {
-              en: 'All gates bind `127.0.0.1`. SOCKS5 is the documented protocol; `AJS_GATE_HTTP=1` adds an HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (default offset `1000`) with the same admission pipeline. There is no public listener, tunnel or router in this archive. A remote client needs an operator-provided tunnel or ingress — pending, and not something this API can enable.',
-              zh: '所有网关都绑定 `127.0.0.1`。文档化的协议是 SOCKS5；`AJS_GATE_HTTP=1` 会在 `gatePort + AJS_GATE_HTTP_OFFSET`（默认偏移 `1000`）上增加一个 HTTP `CONNECT` 监听，准入流程相同。本归档没有公网监听、隧道或路由。远程客户端需要运维提供隧道或入口——尚未启用，也不是这个 API 能开启的能力。',
+              en: 'The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. The production kit publishes only that HTTP listener, through nginx `stream` with TLS on 13000-13010 at the deployment’s API host — `api.example.com` in the templates, a placeholder to replace.',
+              zh: 'SOCKS5 网关绑定 `127.0.0.1:13000-13010`。`AJS_GATE_HTTP=1` 会在 `gatePort + AJS_GATE_HTTP_OFFSET`（偏移 `1000`，即 14000-14010）上增加一个回环 HTTP `CONNECT` 监听，准入流程相同。生产套件只发布这个 HTTP 监听：由 nginx `stream` 在 13000-13010 上以 TLS 提供，主机名为部署的 API 源——模板中为 `api.example.com`，需要替换。',
             },
           },
           {
-            kind: 'callout',
-            tone: 'pending',
-            title: { en: 'No public proxy endpoint', zh: '没有公网代理端点' },
+            kind: 'p',
             text: {
-              en: 'Do not treat `http://127.0.0.1:2261` or a gate port as a public endpoint. The admin API may be widened with `AJS_LISTEN` plus a bearer, or served through a private admin vhost, but the gate data plane stays loopback.',
-              zh: '不要把 `http://127.0.0.1:2261` 或网关端口当成公网端点。管理 API 可以通过 `AJS_LISTEN` 加 Bearer 扩大监听，或通过私有管理虚拟主机提供服务，但网关数据面始终保持回环。',
+              en: 'The public gate edge has four preconditions:',
+              zh: '公网网关入口有四个前置条件：',
+            },
+          },
+          {
+            kind: 'list',
+            items: [
+              {
+                en: '`AJS_GATE_HTTP=1` on the daemon; with `0` or unset the public ports complete the TLS handshake and then close, because nothing listens on the backend.',
+                zh: '守护进程上 `AJS_GATE_HTTP=1`；为 `0` 或未设置时，公网端口会完成 TLS 握手后立即关闭，因为后端没有监听。',
+              },
+              {
+                en: '`AJS_GATE_HTTP_OFFSET=1000`; the stream map hard-codes the backend at lease port + 1000 (14000-14010).',
+                zh: '`AJS_GATE_HTTP_OFFSET=1000`；stream 映射把后端硬编码为租约端口 + 1000（14000-14010）。',
+              },
+              {
+                en: 'The TLS certificate covers the name customers dial (`api.example.com` in the templates, a deployment placeholder).',
+                zh: 'TLS 证书覆盖客户拨号使用的主机名（模板中为 `api.example.com`，属于部署占位符）。',
+              },
+              {
+                en: 'TCP 13000-13010 are open to the internet; the daemon’s own SOCKS5 and HTTP `CONNECT` listeners stay on `127.0.0.1`.',
+                zh: 'TCP 13000-13010 对公网开放；守护进程自己的 SOCKS5 与 HTTP `CONNECT` 监听仍在 `127.0.0.1` 上。',
+              },
+            ],
+          },
+          {
+            kind: 'callout',
+            tone: 'warn',
+            title: { en: 'No public SOCKS5', zh: '没有公网 SOCKS5' },
+            text: {
+              en: 'SOCKS5 remains loopback and tunnel-only: nothing in the kit publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the static map (`13011+`) has no public edge at all. The HTTPS CONNECT edge ships in the kit but has not been deployed live.',
+              zh: 'SOCKS5 仍然只走回环与隧道：套件不会发布它，其他主机上的 SOCKS5 客户端仍需运维提供隧道。静态映射之外的租约端口（`13011+`）完全没有公网入口。HTTPS CONNECT 入口已随套件提供，但尚未真正上线。',
             },
           },
         ],
       },
       {
         id: 'ingress',
-        title: { en: 'No public ingress', zh: '没有公网入口' },
+        title: { en: 'Public edges ship, not deployed live', zh: '公网入口已随套件提供，但尚未上线' },
         blocks: [
           {
             kind: 'p',
             text: {
-              en: 'The remote-ingress credential store is experimental and store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, so no public ingress exists. Enabling the store does not create a proxy endpoint.',
-              zh: '远程入口凭据存储是实验性的，而且只做存储：`AJS_REMOTE_INGRESS=1` 加一个 32 字节 HMAC pepper 文件。没有任何 HTTP 路由、监听器或路由组件提供它，因此不存在公网入口。开启该存储并不会创建代理端点。',
+              en: 'The production kit ships two public edges: the scoped-key API vhost (`https://api.example.com`, an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map (13000-13010). Neither has been deployed live in this archive, and `api.example.com` is a placeholder that must be replaced.',
+              zh: '生产套件提供两个公网入口：受限密钥 API 虚拟主机（`https://api.example.com`，仅放行 41 条路径 / 54 个操作，`/healthz` 为静态响应）和 TLS HTTPS CONNECT stream 映射（13000-13010）。本归档中两者都还没有真正上线，且 `api.example.com` 是必须替换的占位符。',
+            },
+          },
+          {
+            kind: 'p',
+            text: {
+              en: 'The remote-ingress credential store is a different, experimental thing and stays store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, and enabling it creates no proxy endpoint.',
+              zh: '远程入口凭据存储是另一回事，属于实验性且只做存储：`AJS_REMOTE_INGRESS=1` 加一个 32 字节 HMAC pepper 文件。没有任何 HTTP 路由、监听器或路由组件提供它，开启它也不会创建代理端点。',
             },
           },
         ],

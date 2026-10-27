@@ -13,6 +13,8 @@ The core API accepts two kinds of bearer credential. They share the `Authorizati
 | Admin token | `AJS_ADMIN_TOKEN`, at least 32 characters | Every route. |
 | Scoped key | `ajs_sk_...`, returned once when the key is created | Only the routes its scopes name, narrowed by its account/region grants; the gate accepts it only with `proxy:connect`. |
 
+Scoped keys are operator-issued: there is no self-service signup or key issuance. An operator creates the key in the dashboard under Settings → Access, sets its scopes and its `accountIds`/`regions` grants, and distributes it once; a customer cannot mint, widen or re-scope one, and the public edge only carries keys the operator already created.
+
 In a strict-RBAC deployment (`AJS_RBAC_STRICT=1`) the shared admin token is retired; use an operator `admin` token instead. Scoped keys keep their own policy.
 
 **Authenticated read**

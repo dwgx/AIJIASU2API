@@ -29,8 +29,24 @@ describe('public docs surface', () => {
     expect(screen.queryByRole('complementary', { name: 'Primary navigation' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Console' })).toBeNull()
     expect(
+      screen.getAllByText(/curl -sS https:\/\/api\.example\.com\/healthz/).length,
+    ).toBeGreaterThan(0)
+    expect(
       screen.getAllByText(/curl -sS http:\/\/127\.0\.0\.1:2261\/healthz/).length,
     ).toBeGreaterThan(0)
+  })
+
+  it('states the public edges, the HTTPS CONNECT curl, and operator-issued keys', async () => {
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Overview and quickstart', level: 1 })
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('https://api.example.com')
+    expect(text).toContain(
+      'curl -x "https://u-01:$AJS_API_KEY@api.example.com:$AJS_PROXY_PORT" https://example.com',
+    )
+    expect(screen.getByText(/There is no self-service/)).toBeInTheDocument()
+    expect(text).not.toContain('no public ingress')
   })
 
   it('renders the customer-callable reference grouped by tag', async () => {
@@ -121,7 +137,7 @@ describe('public docs surface', () => {
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        expect.stringContaining('curl -sS http://127.0.0.1:2261/healthz'),
+        expect.stringContaining('curl -sS https://api.example.com/healthz'),
       ),
     )
   })

@@ -1,18 +1,27 @@
 # Honest limits
 
-> Loopback gates, no public ingress, one session slot, and the opt-in state journal.
+> Loopback SOCKS5, the public HTTPS CONNECT gate and its preconditions, one session slot, and the opt-in state journal.
 
 English mirror of this page; the console page carries the Chinese translation.
 
-## The gate binds 127.0.0.1
+## SOCKS5 loopback, HTTPS CONNECT public
 
-All gates bind `127.0.0.1`. SOCKS5 is the documented protocol; `AJS_GATE_HTTP=1` adds an HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (default offset `1000`) with the same admission pipeline. There is no public listener, tunnel or router in this archive. A remote client needs an operator-provided tunnel or ingress — pending, and not something this API can enable.
+The SOCKS5 gate binds `127.0.0.1:13000-13010`. `AJS_GATE_HTTP=1` adds a loopback HTTP `CONNECT` listener at `gatePort + AJS_GATE_HTTP_OFFSET` (offset `1000`, so 14000-14010) with the same admission pipeline. The production kit publishes only that HTTP listener, through nginx `stream` with TLS on 13000-13010 at the deployment’s API host — `api.example.com` in the templates, a placeholder to replace.
 
-> **No public proxy endpoint** — Do not treat `http://127.0.0.1:2261` or a gate port as a public endpoint. The admin API may be widened with `AJS_LISTEN` plus a bearer, or served through a private admin vhost, but the gate data plane stays loopback.
+The public gate edge has four preconditions:
 
-## No public ingress
+- `AJS_GATE_HTTP=1` on the daemon; with `0` or unset the public ports complete the TLS handshake and then close, because nothing listens on the backend.
+- `AJS_GATE_HTTP_OFFSET=1000`; the stream map hard-codes the backend at lease port + 1000 (14000-14010).
+- The TLS certificate covers the name customers dial (`api.example.com` in the templates, a deployment placeholder).
+- TCP 13000-13010 are open to the internet; the daemon’s own SOCKS5 and HTTP `CONNECT` listeners stay on `127.0.0.1`.
 
-The remote-ingress credential store is experimental and store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, so no public ingress exists. Enabling the store does not create a proxy endpoint.
+> **No public SOCKS5** — SOCKS5 remains loopback and tunnel-only: nothing in the kit publishes it, and a SOCKS5 client on another host still needs an operator-provided tunnel. A lease port above the static map (`13011+`) has no public edge at all. The HTTPS CONNECT edge ships in the kit but has not been deployed live.
+
+## Public edges ship, not deployed live
+
+The production kit ships two public edges: the scoped-key API vhost (`https://api.example.com`, an allowlist of 41 paths / 54 operations with a static `/healthz`) and the TLS HTTPS CONNECT stream map (13000-13010). Neither has been deployed live in this archive, and `api.example.com` is a placeholder that must be replaced.
+
+The remote-ingress credential store is a different, experimental thing and stays store-only: `AJS_REMOTE_INGRESS=1` plus a 32-byte HMAC pepper file. No HTTP route, listener or router serves it, and enabling it creates no proxy endpoint.
 
 ## One active lease per user and platform
 

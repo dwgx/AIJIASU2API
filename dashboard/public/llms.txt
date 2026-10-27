@@ -6,12 +6,12 @@ Links are root-relative; resolve them against the origin that serves `/docs`. Mi
 
 ## Start here
 
-- [Overview and quickstart](/docs/overview.md): Read the catalog, create a lease for one account, and connect through the loopback gate.
+- [Overview and quickstart](/docs/overview.md): Read the catalog, create a lease for one account, and connect through the public HTTPS CONNECT edge.
 - [Authentication](/docs/authentication.md): Bearer credentials, CSRF on unsafe methods, and the rate-limit headers a scoped key receives.
 - [Scopes and grants](/docs/scopes.md): The scope table, the key subject rule, and how accountIds/regions narrow every read and write.
 - [Errors](/docs/errors.md): One envelope, a closed code enum, and which failures are safe to retry.
 - [SDKs](/docs/sdks.md): The Go and TypeScript clients, their retry policy, and what has actually been run.
-- [Honest limits](/docs/limits.md): Loopback gates, no public ingress, one session slot, and the opt-in state journal.
+- [Honest limits](/docs/limits.md): Loopback SOCKS5, the public HTTPS CONNECT gate and its preconditions, one session slot, and the opt-in state journal.
 
 ## Reference
 

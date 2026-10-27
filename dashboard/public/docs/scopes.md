@@ -8,7 +8,7 @@ English mirror of this page; the console page carries the Chinese translation.
 
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the table, and the admin token bypasses it by definition. Every operation a scoped key can reach declares its grant in the spec as `x-required-scope`, together with the `403` and `429` responses and the `X-RateLimit-*` headers; an operation without that extension is not reachable with a scoped key.
 
-`proxy:connect` is the one scope with no HTTP route: it authorizes the loopback gate. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.
+`proxy:connect` is the one scope with no HTTP route: it authorizes the gate — the loopback SOCKS5 listener and the production kit’s public HTTPS CONNECT edge. Admin-only surfaces — device pool, users, API keys, scoped-key management, webhooks, backup, lab telemetry — stay admin-only even for a key that carries a scoped grant.
 
 ## Scope catalogue
 
@@ -20,7 +20,7 @@ A scoped key needs the exact scope of the matched route. A key carrying `admin` 
 | `catalog:write` | Selection and guarded switch; node drain/probe; operation cancel. | `PUT /v1/accounts/{id}/selection`, `POST /v1/accounts/{id}/actions/connect`, `POST /v1/nodes/{id}/actions/drain` |
 | `leases:read` | List and read the key user’s leases. | `GET /v1/leases`, `GET /v1/leases/{id}` |
 | `leases:write` | Create, rotate and revoke the key user’s leases. | `POST /v1/leases`, `POST /v1/leases/{id}/actions/rotate`, `DELETE /v1/leases/{id}` |
-| `proxy:connect` | Authenticate at the loopback gate and connect through the key user’s lease. | `SOCKS5 127.0.0.1:<gatePort>`, `HTTP CONNECT 127.0.0.1:<gatePort+offset>` |
+| `proxy:connect` | Authenticate at a gate and connect through the key user’s lease. | `SOCKS5 127.0.0.1:<gatePort>`, `HTTPS CONNECT api.example.com:<port>` |
 | `requests:read` | Read the request log. | `GET /v1/requests` |
 | `audit:read` | Read and export the audit log. | `GET /v1/audit`, `GET /v1/audit/export.csv` |
 | `metrics:read` | Prometheus and JSON metrics. | `GET /metrics`, `GET /v1/metrics` |
@@ -40,7 +40,7 @@ The gate accepts a scoped key only when the key is active, belongs to the gate u
 
 A non-admin scoped key is bound to its own `userId`. `GET /v1/leases` returns only leases whose `userId` equals the key’s user; naming another `user_id`/`userId` answers `403 FORBIDDEN` with `reason: "scoped_key_restricted"` and does not reveal whether that user holds a lease. `POST /v1/leases` fills an empty `userId` with the key’s user; a different id is refused with the same `403` before anything is allocated. An `Idempotency-Key` replay is re-checked against both the user and the account grant, so a retry never returns another user’s lease.
 
-`GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner first. A missing id and another user’s lease answer the same `404 NOT_FOUND`; the key’s own lease on an account outside its grant answers `403`. The detail read returns the lease and its loopback `connection` block and never the scoped-key secret. Accounts and nodes are operator assets: they are filtered by the key’s grants, never by `userId`, and no customer key owns them.
+`GET /v1/leases/{id}`, `DELETE /v1/leases/{id}` and `POST /v1/leases/{id}/actions/rotate` resolve the owner first. A missing id and another user’s lease answer the same `404 NOT_FOUND`; the key’s own lease on an account outside its grant answers `403`. The detail read returns the lease and its `connection` block and never the scoped-key secret. Accounts and nodes are operator assets: they are filtered by the key’s grants, never by `userId`, and no customer key owns them.
 
 ## Narrowing with accountIds and regions
 

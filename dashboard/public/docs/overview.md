@@ -1,51 +1,56 @@
 # Overview and quickstart
 
-> Read the catalog, create a lease for one account, and connect through the loopback gate.
+> Read the catalog, create a lease for one account, and connect through the public HTTPS CONNECT edge.
 
 English mirror of this page; the console page carries the Chinese translation.
 
 ## Base URL and health
 
-The control plane listens on `http://127.0.0.1:2261` by default (`AJS_LISTEN`). `GET /healthz` and `GET /readyz` are unauthenticated; every other route, including `/metrics`, needs a bearer.
+The public scoped-key edge is `https://api.example.com` — a deployment placeholder from the production kit, not a host this archive deployed; replace it with the deployment’s own API origin. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. `GET /healthz` and `GET /readyz` are unauthenticated; every other route, including `/metrics`, needs a bearer.
 
-> **Loopback by default** — The API and the gate data plane are separate. This archive has no public proxy endpoint and no public ingress; a remote client needs an operator-provided tunnel or ingress, which is pending.
+> **Public edges ship in the kit, not deployed live** — The API edge and the TLS HTTPS CONNECT proxy are public in the production kit; only the SOCKS5 gate stays loopback. Neither public edge has been deployed live, and `api.example.com` must be replaced before use.
 
 **Health without a token**
 
 ```bash
+curl -sS https://api.example.com/healthz
 curl -sS http://127.0.0.1:2261/healthz
 curl -sS http://127.0.0.1:2261/readyz
 ```
 
+At the edge `/healthz` is a static `200 "ok"`; `/readyz` and the rest of the control plane stay on the loopback origin.
+
 ## The story used by these examples
 
-One user, one account, one node, one gate: `u-01`, `acc-02`, `node-04`, port `13003`. The values are illustrative and match the examples in the OpenAPI contract; substitute your own ids. The scoped key is assumed to exist already: an operator mints it in Settings → Access, and key management is not part of the scoped reference.
+One user, one account, one node, one gate: `u-01`, `acc-02`, `node-04`, port `13003`. The values are illustrative and match the examples in the OpenAPI contract; substitute your own ids. In the shipped static map the same port is the loopback SOCKS5 listener and the public HTTPS CONNECT port. The scoped key is assumed to exist already: an operator mints it in Settings → Access, and key management is not part of the scoped reference.
 
 | Variable | Value | Meaning |
 | --- | --- | --- |
 | `AJS_API_KEY` | `ajs_sk_...` | The scoped secret, shown once when the key is minted. |
-| `BASE` | `http://127.0.0.1:2261` | Control-plane origin. |
+| `BASE` | `https://api.example.com` | Public scoped-key edge; a deployment placeholder to replace. |
+| `AJS_PROXY_PORT` | `13003` | `connection.port` from `GET /v1/leases/{id}`: the public HTTPS CONNECT port. |
 | `u-01` | Lease owner | The key subject; a non-admin key only sees its own leases. |
 | `acc-02` | Account grant | The account the key names in `accountIds`. |
-| `node-04` | Live node | A `LIVE` node on `acc-02`; its gate is the port a lease points at. |
-| `13003` | Gate port | Loopback SOCKS5 listener for that node. |
+| `node-04` | Live node | A `LIVE` node on `acc-02`; its gate port is what the lease and the public edge share. |
 
 ## 1. Know what the key can do
 
-A key for this walkthrough carries `catalog:read`, `leases:read`, `leases:write`, `proxy:connect` and `usage:read`, is bound to `u-01`, and names `acc-02` in `accountIds`. The secret is returned exactly once; only its SHA-256 is persisted, so store it in `$AJS_API_KEY` and never commit it.
+There is no self-service: a customer cannot sign up, mint, widen or re-scope a key. An operator creates the `ajs_sk_` in the dashboard under Settings → Access, sets its scopes and its `accountIds`/`regions` grants, and distributes it once. The public edge only carries keys the operator already created.
+
+A key for this walkthrough carries `catalog:read`, `leases:read`, `leases:write`, `proxy:connect` and `usage:read`, is bound to `u-01`, and names `acc-02` in `accountIds`. The secret is returned exactly once, to the operator; only its SHA-256 is persisted, so store it in `$AJS_API_KEY` and never commit it.
 
 **Shell setup**
 
 ```bash
-export BASE=http://127.0.0.1:2261
-export AJS_API_KEY=ajs_sk_...   # shown once by the key-management surface
+export BASE=https://api.example.com   # deployment placeholder; replace it
+export AJS_API_KEY=ajs_sk_...         # operator-issued, shown once
 ```
 
 Every request below sends `Authorization: Bearer $AJS_API_KEY`. Unsafe methods also send `X-AJS-CSRF: 1`.
 
 ## 2. Find a live node
 
-`GET /v1/nodes` needs `catalog:read`. Filter by `state=LIVE` and `account_id=acc-02`; the row for `node-04` carries the `gatePort` a lease will point at. `limit` and `offset` page the result.
+`GET /v1/nodes` needs `catalog:read`. Filter by `state=LIVE` and `account_id=acc-02`; the row for `node-04` carries the `gatePort` a lease will point at, and in the shipped static map that number is also the public HTTPS CONNECT port. `limit` and `offset` page the result.
 
 **List live nodes**
 
@@ -104,7 +109,7 @@ curl -sS -X POST "$BASE/v1/leases" \
 
 ## 4. Read the connection block
 
-`GET /v1/leases/{id}` needs `leases:read` and returns the lease plus the loopback endpoint to dial. `port` follows the lease: a switch that rebinds it to another gate also moves the value. The secret is never returned — `credentialKind` only names the shape, and the password is the caller’s own key carrying `proxy:connect`.
+`GET /v1/leases/{id}` needs `leases:read` and returns the lease plus its `connection` block. `port` follows the lease: a switch that rebinds it to another gate also moves the value. On the daemon host `host` is `127.0.0.1` and `protocol` is `socks5` — that is the loopback listener — while in the production kit’s static map (13000-13010) the same `port` is the public HTTPS CONNECT port; a port above 13010 has no public edge. The secret is never returned — `credentialKind` only names the shape, and the password is the caller’s own key carrying `proxy:connect`.
 
 **Read the lease**
 
@@ -135,19 +140,23 @@ curl -sS "$BASE/v1/leases/$LEASE_ID" \
 }
 ```
 
-## 5. Dial the gate
+## 5. Dial the public HTTPS CONNECT edge
 
-Dial `127.0.0.1:<gatePort>` with SOCKS5. The username is the panel user id; the password is the scoped secret carrying `proxy:connect`. The gate re-checks the lease at `CONNECT`, so a revoked or expired lease refuses the flow instead of relaying it, and it also enforces the user’s allowlist and monthly quota.
+Read `connection.port` and dial the public edge with an HTTPS proxy that speaks `CONNECT`: `https://api.example.com:<port>`. Admission is the same pipeline as the loopback gate: the gate re-checks the lease at `CONNECT`, so a revoked or expired lease refuses the flow instead of relaying it, and it also enforces the user’s allowlist and monthly quota.
 
-**SOCKS5 through the gate**
+- Port: `connection.port` from `GET /v1/leases/{id}`, in the shipped static map `13000-13010`. A switch that rebinds the lease moves the port with it; a port above `13010` has no public edge.
+- User: the lease owner’s panel user id, for example `u-01`.
+- Password: a scoped key secret (`ajs_sk_...`) carrying `proxy:connect` and granting the lease’s account.
+- Transport: TLS. The client dials `https://api.example.com:<port>` and speaks HTTP `CONNECT`; nginx terminates TLS and relays bytes without parsing or rewriting the request, so the credential never lands in an edge log.
+
+**HTTPS CONNECT through the public edge**
 
 ```bash
-curl --socks5-hostname 127.0.0.1:13003 \
-  -U "u-01:$AJS_API_KEY" \
-  https://example.com/
+export AJS_PROXY_PORT=13003   # connection.port from GET /v1/leases/{id}
+curl -x "https://u-01:$AJS_API_KEY@api.example.com:$AJS_PROXY_PORT" https://example.com
 ```
 
-> **The gate is not a public proxy** — All gates bind `127.0.0.1`. There is no public listener, tunnel or router in this archive; a client on another host needs an operator-provided tunnel or ingress (pending). Do not assume the gate port is reachable off the daemon host.
+> **SOCKS5 stays loopback** — The SOCKS5 gate binds `127.0.0.1:13000-13010` and is never published; a SOCKS5 client on another host still needs an operator-provided tunnel. The HTTPS CONNECT edge ships in the production kit but has not been deployed live, and `api.example.com` must be replaced first.
 
 ## 6. Read usage
 
