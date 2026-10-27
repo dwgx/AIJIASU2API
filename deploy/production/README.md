@@ -1197,6 +1197,98 @@ fails closed when its temporary directory cannot be created. Re-run
 `sudo -E bash deploy/production/check.sh` on a Linux host and update this list
 before the next release.
 
+## Live deployment (2026-10-27)
+
+The two public edges are live: `https://ajs.dwgx.top:2055` serves the
+scoped-key API and its `/docs`, and `gate.dwgx.top:13000-13010` serves
+TLS-terminated HTTP CONNECT. This section records the cutover that made them
+public — hosts, paths, ports and unit names as deployed. No token, key,
+password, hash or certificate material is written here.
+
+### Live topology
+
+```text
+client --TLS--> vps-v9hw3m-6114 (152.175.35.40)
+                 nginx :2055 --> chisel tunnel --> HMC nginx ajs.dwgx.top:80
+                                               --> 127.0.0.1:2261 ajs-accountd
+client --TLS--> vps-v9hw3m-6114 nginx stream 13000-13010
+                 --> chisel local 15000-15010 --> HMC 14000-14010 (HTTP CONNECT)
+```
+
+The chisel server runs on the HMC (`ajs-chisel`, `127.0.0.1:8080`) behind the
+HMC nginx `/tunnel` location; the client runs on the VPS
+(`ajs-chisel-client`) and owns both public listeners. The tunnel is dialed
+outbound from the VPS, so the HMC side adds no public port.
+
+### HMC
+
+- Daemon binary `ajs-accountd-61625b0`, built from commit `61625b0`, runs under
+  the systemd unit `ajs-accountd`.
+- Gate and access flags in the unit environment: `AJS_GATE_HTTP=1`,
+  `AJS_GATE_HTTP_OFFSET=1000` (the stream map's `port + 1000` backend), and
+  `AJS_AUTO_LOGIN=1` (which requires `AJS_ACCOUNT_LOGIN=1`).
+- State directory: `/srv/dwgxhomecloud/scratch/ajs-multimodule/daemon/data`.
+- Pre-cutover binary and state backup:
+  `/srv/dwgxhomecloud/scratch/ajs-cutover-20261027-140730`.
+- HMC nginx serves the internal vhost `ajs.dwgx.top` on `:80`, proxying to
+  `127.0.0.1:2261`.
+- The HMC chisel server listens on `127.0.0.1:8080` only and is published by
+  the HMC nginx `/tunnel` location; it never binds a public interface.
+
+### VPS
+
+`vps-v9hw3m-6114` at `152.175.35.40` terminates both public surfaces.
+
+| Surface | Listener | Backend |
+|---|---|---|
+| API + docs | nginx `:2055`, TLS | chisel tunnel -> HMC nginx `ajs.dwgx.top:80` -> `127.0.0.1:2261` |
+| Gate data plane | nginx stream `13000-13010`, TLS | chisel local `15000-15010` -> HMC `14000-14010` (daemon HTTP CONNECT) |
+
+- The systemd unit `ajs-chisel-client` keeps the tunnel up.
+- Certificate: `/etc/letsencrypt/live/ajs.dwgx.top`, issued through the
+  Cloudflare DNS-01 challenge. The SAN covers `ajs.dwgx.top` and
+  `gate.dwgx.top`, so one certificate serves the API/docs vhost and all 11
+  stream ports.
+- Firewall: inbound `2055/tcp` and `13000-13010/tcp`; no other port was opened
+  for this deployment.
+- DNS: `A` records for `ajs.dwgx.top` and `gate.dwgx.top` point at
+  `152.175.35.40` and are **DNS-only** (unproxied), so the VPS certificate
+  terminates TLS and no CDN sits in front of either edge.
+
+### Public names
+
+| Name | Ports | Serves |
+|---|---|---|
+| `https://ajs.dwgx.top:2055` | `2055` | scoped-key API and `/docs` over TLS |
+| `gate.dwgx.top` | `13000-13010` | HTTPS CONNECT, one port per gate node |
+
+`api.dwgx.top` was not changed: it remains the existing FurCDN origin and is
+not part of this deployment.
+
+### Smoke evidence
+
+Recorded at cutover with a scoped key issued for user `u-10` (account
+`acc-07`); identifiers only, no key material:
+
+| Check | Result |
+|---|---|
+| `GET https://ajs.dwgx.top:2055/v1/nodes` | `200` |
+| `POST https://ajs.dwgx.top:2055/v1/leases` | `201` |
+| `GET https://ajs.dwgx.top:2055/docs` | `200` |
+| HTTPS CONNECT to `example.com` through `gate.dwgx.top:13000-13010` | `200` |
+
+### Rollback
+
+1. VPS: `systemctl stop ajs-chisel-client`; remove the `:2055` vhost and the
+   gate stream symlink; `nginx -t` then reload nginx.
+2. HMC: stop the new `ajs-accountd`, restore the old binary and state from
+   `/srv/dwgxhomecloud/scratch/ajs-cutover-20261027-140730`, start the old
+   daemon.
+3. DNS: delete the two `A` records (`ajs.dwgx.top`, `gate.dwgx.top`).
+
+Rollback deletes no daemon data: the old state is restored from the backup and
+the new state tree is left in place for inspection.
+
 ## Limitations
 
 - **Single host, no HA.** One nginx, one daemon, one state directory.
