@@ -31,12 +31,24 @@ interface Parameter {
   name?: string
   in?: string
   $ref?: string
+  description?: string
   schema?: JsonSchema
 }
 
+interface ExampleObject {
+  summary?: string
+  value?: unknown
+}
+
+interface MediaType {
+  schema?: JsonSchema
+  examples?: Record<string, ExampleObject>
+}
+
 interface ResponseObject {
+  $ref?: string
   description?: string
-  content?: Record<string, { schema?: JsonSchema }>
+  content?: Record<string, MediaType>
   headers?: Record<string, unknown>
 }
 
@@ -45,10 +57,11 @@ interface Operation {
   summary?: string
   tags?: string[]
   'x-implementation-phase'?: string
+  'x-required-scope'?: string
   security?: unknown[]
   responses: Record<string, ResponseObject>
   parameters?: Parameter[]
-  requestBody?: unknown
+  requestBody?: { content?: Record<string, MediaType> }
 }
 
 interface OpenAPIDocument {
@@ -60,6 +73,8 @@ interface OpenAPIDocument {
   components: {
     securitySchemes: Record<string, { type?: string; scheme?: string; in?: string; name?: string }>
     schemas: Record<string, JsonSchema>
+    responses: Record<string, ResponseObject>
+    headers: Record<string, unknown>
   }
 }
 
@@ -86,6 +101,12 @@ const serverSource = readFileSync(
 // routes drift out of the document unnoticed.
 const ordersSource = readFileSync(
   `${cwd}/../daemon/internal/api/orders.go`,
+  'utf8',
+)
+// routeScopes is the daemon's least-privilege table. The document must mirror
+// it exactly, so the suite parses the Go map instead of trusting a copy.
+const scopedKeysSource = readFileSync(
+  `${cwd}/../daemon/internal/api/scoped_keys.go`,
   'utf8',
 )
 
@@ -146,6 +167,22 @@ function serverRoutes(): string[] {
       ([, method, path]) => `${method.toLowerCase()} ${path}`,
     ),
   )
+}
+
+/** The routeScopes map from scoped_keys.go as "get /v1/accounts" → "accounts:read". */
+function scopedRouteScopes(): Array<[string, string]> {
+  const pattern =
+    /http\.Method(Get|Post|Put|Patch|Delete)\s*\+\s*"([^"]+)":\s*model\.Scope([A-Za-z]+)/g
+  return [...scopedKeysSource.matchAll(pattern)].map(([, method, path, scope]) => [
+    `${method.toLowerCase()} ${path.trim()}`,
+    scopeName(scope),
+  ])
+}
+
+/** ScopeAccountsRead → accounts:read, ScopeProxyConnect → proxy:connect. */
+function scopeName(scope: string): string {
+  const parts = scope.replace(/^Scope/, '').match(/[A-Z][a-z0-9]*/g) ?? []
+  return parts.map((part) => part.toLowerCase()).join(':')
 }
 
 function parameterNames(operation: Operation): string[] {
@@ -268,7 +305,15 @@ describe('docs/openapi.json', () => {
     const input = schema('CreateLeaseInput')
     expect(input.required).toEqual(expect.arrayContaining(['userId', 'platform']))
     expect(input.properties?.platform).toEqual({ $ref: '#/components/schemas/Platform' })
-    expect(input.properties?.ttlSeconds).toMatchObject({ minimum: 60, maximum: 604800 })
+    // 0 is the sticky-TTL sentinel; 1-59 is refused, so the branch starts at 60.
+    const ttl = input.properties?.ttlSeconds
+    expect(String(ttl?.description)).toContain('sticky TTL')
+    expect(ttl?.oneOf).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'integer', const: 0 }),
+        expect.objectContaining({ type: 'integer', minimum: 60, maximum: 604800 }),
+      ]),
+    )
 
     const revoke = doc.paths['/v1/leases/{id}']?.delete
     expect(revoke).toBeDefined()
@@ -763,21 +808,144 @@ describe('docs/openapi.json', () => {
     expect(operation).toBeDefined()
     if (!operation) return
     const names = parameterNames(operation)
-    for (const name of ['q', 'region', 'status', 'selected', 'offset', 'limit', 'sort']) {
+    for (const name of [
+      'q', 'region', 'status', 'province', 'city', 'selected', 'offset', 'limit', 'sort',
+    ]) {
       expect(names, name).toContain(`query:${name}`)
     }
     expect(findParameter(operation, 'limit')?.schema)
       .toMatchObject({ type: 'integer', minimum: 1, maximum: 500, default: 50 })
     expect(findParameter(operation, 'sort')?.schema?.enum)
       .toEqual(['order', 'title', 'host', 'status', 'region'])
+    // 00 is the unresolved province bucket the handler documents.
+    expect(String(findParameter(operation, 'province')?.description)).toContain('00')
 
     expect(responseSchema(operation, '200')).toEqual({ $ref: '#/components/schemas/ServersView' })
     const view = schema('ServersView')
     expect(view.required).toEqual(expect.arrayContaining([
-      'total', 'offset', 'limit', 'nextOffset', 'hasMore', 'regions', 'servers',
+      'total', 'offset', 'limit', 'nextOffset', 'hasMore', 'regions', 'geo', 'servers',
     ]))
+    // snapshotId is the value the guard compares; it is omitted when no catalog
+    // connector is configured, so it must stay optional.
+    expect(view.properties?.snapshotId).toMatchObject({ type: 'string' })
+    expect(view.required).not.toContain('snapshotId')
     expect(view.properties?.servers?.items).toEqual({ $ref: '#/components/schemas/ServerView' })
     expect(view.properties?.regions?.items).toEqual({ $ref: '#/components/schemas/RegionCount' })
+    expect(view.properties?.geo).toEqual({ $ref: '#/components/schemas/CatalogGeo' })
+
+    const geo = schema('CatalogGeo')
+    expect(geo.required).toEqual(['total', 'unknown', 'provinces', 'current', 'live'])
+    expect(geo.properties?.provinces?.items).toEqual({
+      $ref: '#/components/schemas/CatalogGeoProvince',
+    })
+    expect(geo.properties?.current?.oneOf).toEqual(
+      expect.arrayContaining([
+        { $ref: '#/components/schemas/CatalogGeoRow' },
+        { type: 'null' },
+      ]),
+    )
+    expect(schema('CatalogGeoProvince').required).toEqual(['code', 'count', 'connected', 'cities'])
+    expect(schema('CatalogGeoCity').required).toEqual(['code', 'label', 'count'])
+    expect(schema('CatalogGeoRow').required).toEqual(['id', 'title', 'nodeState'])
+  })
+
+  it('documents the operation result and error as nullable', () => {
+    const operation = schema('Operation')
+    for (const name of ['result', 'error']) {
+      // Both keys are always serialized; only their value may be null.
+      expect(operation.required, name).toContain(name)
+      expect(operation.properties?.[name]?.oneOf, name).toEqual(
+        expect.arrayContaining([{ type: 'null' }]),
+      )
+    }
+    expect(operation.properties?.result?.oneOf).toEqual(
+      expect.arrayContaining([{ $ref: '#/components/schemas/SelectNodeResult' }]),
+    )
+    expect(operation.properties?.error?.oneOf).toEqual(
+      expect.arrayContaining([{ $ref: '#/components/schemas/OperationError' }]),
+    )
+  })
+
+  it('mirrors routeScopes as x-required-scope with a scoped 403, 429 and rate headers', () => {
+    const scoped = scopedRouteScopes()
+    expect(scoped.length).toBeGreaterThan(40)
+    const byRoute = new Map(
+      entries.map((entry) => [`${entry.method} ${entry.path}`, entry.operation]),
+    )
+    const scopeEnum = schema('Scope').enum ?? []
+    for (const [route, scope] of scoped) {
+      expect(scopeEnum, route).toContain(scope)
+      const operation = byRoute.get(route)
+      expect(operation, route).toBeDefined()
+      if (!operation) continue
+      expect(operation['x-required-scope'], route).toBe(scope)
+      expect(operation.responses['403'], route).toEqual({
+        $ref: '#/components/responses/ScopedKeyForbidden',
+      })
+      expect(operation.responses['429'], route).toEqual({
+        $ref: '#/components/responses/ScopedKeyRateLimited',
+      })
+      for (const [status, response] of Object.entries(operation.responses)) {
+        if (!status.startsWith('2')) continue
+        for (const header of [
+          'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset',
+        ]) {
+          expect(response.headers?.[header], `${route} ${status} ${header}`).toEqual({
+            $ref: `#/components/headers/${header.slice(2).replace(/-/g, '')}`,
+          })
+        }
+      }
+    }
+    // An invented grant would tell a generator it may reach an operator route.
+    const scopedRoutes = new Set(scoped.map(([route]) => route))
+    for (const { method, path, operation } of entries) {
+      if (!operation['x-required-scope']) continue
+      expect(scopedRoutes.has(`${method} ${path}`), `${method} ${path}`).toBe(true)
+    }
+    expect(doc.components.responses.ScopedKeyRateLimited?.headers?.['Retry-After']).toEqual({
+      $ref: '#/components/headers/RetryAfter',
+    })
+  })
+
+  it('carries a worked example for every customer journey call', () => {
+    const cases: Array<[string, string, string]> = [
+      ['post', '/v1/scoped-keys', 'request'],
+      ['post', '/v1/scoped-keys', '201'],
+      ['get', '/v1/nodes', '200'],
+      ['post', '/v1/leases', 'request'],
+      ['post', '/v1/leases', '201'],
+      ['get', '/v1/leases/{id}', '200'],
+      ['post', '/v1/accounts/{id}/actions/connect', 'request'],
+      ['post', '/v1/accounts/{id}/actions/connect', '200'],
+      ['post', '/v1/accounts/{id}/actions/select-node', '202'],
+      ['get', '/v1/usage', '200'],
+    ]
+    for (const [method, path, where] of cases) {
+      const operation = doc.paths[path]?.[method]
+      expect(operation, `${method} ${path}`).toBeDefined()
+      if (!operation) continue
+      const media = where === 'request'
+        ? operation.requestBody?.content?.['application/json']
+        : operation.responses[where]?.content?.['application/json']
+      const examples = media?.examples ?? {}
+      expect(Object.keys(examples).length, `${method} ${path} ${where}`).toBeGreaterThan(0)
+      for (const [name, example] of Object.entries(examples)) {
+        expect(example.summary, `${method} ${path} ${where} ${name}`).toBeTruthy()
+        expect(example.value, `${method} ${path} ${where} ${name}`).toBeDefined()
+      }
+    }
+
+    // The queued 202 is the nullability contract in one object.
+    const queued = doc.paths['/v1/accounts/{id}/actions/select-node']?.post
+      ?.responses['202']?.content?.['application/json']?.examples
+    const value = Object.values(queued ?? {})[0]?.value as Record<string, unknown> | undefined
+    expect(value?.result).toBeNull()
+    expect(value?.error).toBeNull()
+
+    // Both scoped-key denial reasons are worked examples on the shared response.
+    const forbidden = doc.components.responses.ScopedKeyForbidden
+      ?.content?.['application/json']?.examples ?? {}
+    expect(Object.keys(forbidden).sort()).toEqual(['account-restricted', 'scope-required'])
   })
 
   it('documents the platform surfaces as P0 with one-time webhook secrets', () => {
@@ -890,12 +1058,34 @@ describe('docs/openapi.json', () => {
     expect(detail.required).toEqual(['code', 'message'])
     expect(detail.properties?.code?.enum).toEqual(expect.arrayContaining([
       'INVALID_ARGUMENT', 'NOT_FOUND', 'CONFLICT', 'UPSTREAM_UNAVAILABLE',
-      'QUOTA_EXCEEDED', 'RATE_LIMITED', 'UNAUTHORIZED', 'METHOD_NOT_ALLOWED', 'INTERNAL',
+      'QUOTA_EXCEEDED', 'RATE_LIMITED', 'UNAUTHORIZED', 'FORBIDDEN',
+      'METHOD_NOT_ALLOWED', 'INTERNAL',
+      // Emitted by the tenant-invite chain and the destructive schedule paths.
+      'INVITE_EXPIRED', 'INVITE_REDEEMED', 'CONFIRMATION_REQUIRED',
+      // Emitted by the event ring, the waited switch and the schedule patch.
+      'CURSOR_EXPIRED', 'OPERATION_TIMEOUT', 'PRECONDITION_FAILED',
     ]))
     // A scoped-key denial is machine-readable: the dashboard branches on these
     // two reasons instead of parsing the message.
     const reason = String(detail.properties?.reason?.description)
     expect(reason).toContain('scope_required')
     expect(reason).toContain('scoped_key_restricted')
+
+    // 412 is emitted by the conditional schedule patch (stale_revision) and by
+    // a waited switch whose operation ended with a changed snapshot.
+    for (const [method, path] of [
+      ['patch', '/v1/schedules/{id}'],
+      ['post', '/v1/accounts/{id}/actions/select-node'],
+    ] as Array<[string, string]>) {
+      expect(doc.paths[path]?.[method]?.responses['412'], `${method} ${path}`).toEqual({
+        $ref: '#/components/responses/PreconditionFailed',
+      })
+    }
+    expect(doc.paths['/v1/events']?.get?.responses['410']).toBeDefined()
+
+    // Creating a key for an unknown user is a documented 404, not a 400.
+    expect(doc.paths['/v1/scoped-keys']?.post?.responses['404']?.$ref).toBe(
+      '#/components/responses/NotFound',
+    )
   })
 })

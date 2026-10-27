@@ -4,7 +4,7 @@
     "title": "ajs-accountd Admin API",
     "version": "0.1.0",
     "summary": "Loopback admin contract for the ajs-accountd control plane.",
-    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the interfaces added after P0. The daemon binds 127.0.0.1 by default; a token-authenticated deployment may widen AJS_LISTEN, and the production kit publishes only the customer portal through nginx TLS while keeping the admin vhost private. The gate data plane stays loopback-only, so a remote tenant needs an operator-provided tunnel or ingress. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz, GET /readyz, the signed payment callbacks and the portal entry points; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never contain credentials. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 marks the interfaces added after P0; they are registered in this build (the scheduler itself stays off unless AJS_SCHEDULES=1). See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too. Scoped-key requests are rate limited per key: every response except 401 carries X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset, and an exhausted bucket answers 429 RATE_LIMITED with Retry-After. An operation reachable by a scoped key declares the exact grant in x-required-scope; a key lacking it answers 403 FORBIDDEN with error.reason=scope_required, and a key whose accountIds/regions exclude the target answers the same status with error.reason=scoped_key_restricted. An operation without x-required-scope is admin-only: only the admin token or a key carrying the admin scope may call it.",
+    "description": "OpenAPI 3.1 contract for the ajs-accountd HTTP surface. Every route registered in daemon/internal/api/server.go is documented, together with the interfaces added after P0. The daemon binds 127.0.0.1 by default; a token-authenticated deployment may widen AJS_LISTEN, and the production kit publishes only the customer portal through nginx TLS while keeping the admin vhost private. The gate data plane stays loopback-only, so a remote tenant needs an operator-provided tunnel or ingress. Requests carry Authorization: Bearer $AJS_ADMIN_TOKEN or an ajs_sk_ scoped key except GET /healthz, GET /readyz, the signed payment callbacks and the portal entry points; AJS_ALLOW_INSECURE=1 disables the check on a loopback bind. Responses never echo a stored credential; the only secret-bearing bodies are the one-time secrets of POST /v1/apikeys, POST /v1/scoped-keys and POST /v1/portal/keys, plus POST /v1/accounts/export when plaintext export is explicitly enabled. Errors share the {\"error\":{\"code\",\"message\",\"reason?\",\"details?\"}} envelope.\n\nEvery operation carries x-implementation-phase: P0 operations are served by the current daemon; P1 marks the interfaces added after P0; they are registered in this build (the scheduler itself stays off unless AJS_SCHEDULES=1). See docs/PANEL.md for the design and docs/openapi.json as the source of truth.\n\nThe customer portal is a separate chain. With AJS_TENANT_PORTAL=1, /v1/portal/* authenticates only the opaque __Host-ajs_portal cookie plus X-CSRF-Token; an admin token or scoped key cannot act as a tenant, and a portal cookie grants no dashboard route. /v1/admin/tenants* requires the admin token or a scoped key carrying the admin scope, even when AJS_ALLOW_INSECURE=1. The portal routes are not registered while the flag is off and answer 404.\n\nEvery unsafe admin operation (POST, PUT, PATCH or DELETE outside the customer portal and the payment provider callbacks) also requires the X-AJS-CSRF: 1 header; when an Origin header is present it must exactly match AJS_ADMIN_ORIGINS. Requests without Origin (CLI/SDK clients) must send the header too. Scoped-key requests are rate limited per key: every response except 401 carries X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset, and an exhausted bucket answers 429 RATE_LIMITED with Retry-After. An operation reachable by a scoped key declares the exact grant in x-required-scope; a key lacking it answers 403 FORBIDDEN with error.reason=scope_required, and a key whose accountIds/regions exclude the target answers the same status with error.reason=scoped_key_restricted. An operation without x-required-scope is not reachable with a scoped key: it needs the admin token, a provider signature or the portal cookie, whichever that route documents.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -1031,6 +1031,22 @@
             }
           },
           {
+            "name": "province",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Province code from geo.provinces[].code, or `00` for rows whose title does not resolve. Applied after the geography summary is computed, so geo keeps every province the search matches."
+          },
+          {
+            "name": "city",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "City code from geo.provinces[].cities[].code. Narrows within province; sent alone it filters on the city code."
+          },
+          {
             "name": "selected",
             "in": "query",
             "schema": {
@@ -1922,6 +1938,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConnectResult"
+                },
+                "examples": {
+                  "switched": {
+                    "summary": "The guarded switch moved acc-02 to srv-042 and reports the gate it opened.",
+                    "value": {
+                      "accountId": "acc-02",
+                      "serverId": "srv-042",
+                      "nodeId": "acc-02#1:srv-042",
+                      "nodeState": "LIVE",
+                      "gatePort": 13020,
+                      "egressIp": "198.51.100.22",
+                      "switchedFrom": "srv-017",
+                      "durationMs": 1840,
+                      "warnings": [],
+                      "auditId": "aud-01",
+                      "alreadyConnected": false
+                    }
+                  }
                 }
               }
             },
@@ -1976,6 +2010,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ConnectRequest"
+              },
+              "examples": {
+                "guarded-switch": {
+                  "summary": "confirm is mandatory; snapshotId rejects a catalog that moved since it was read.",
+                  "value": {
+                    "serverId": "srv-042",
+                    "snapshotId": "sha256:6f1c0d9a",
+                    "confirm": true
+                  }
+                }
               }
             }
           }
@@ -2061,6 +2105,27 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Operation"
+                },
+                "examples": {
+                  "queued": {
+                    "summary": "202; result and error are serialized as null until the executor reaches them.",
+                    "value": {
+                      "id": "op-01",
+                      "type": "account.switch",
+                      "state": "queued",
+                      "accountId": "acc-02",
+                      "target": {
+                        "serverId": "srv-042"
+                      },
+                      "requestedBy": "key:ajs_sk_9f2c1d4e6",
+                      "createdAt": "2026-10-27T09:16:00Z",
+                      "startedAt": "",
+                      "finishedAt": "",
+                      "steps": [],
+                      "result": null,
+                      "error": null
+                    }
+                  }
                 }
               }
             }
@@ -2079,6 +2144,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
           },
           "429": {
             "$ref": "#/components/responses/ScopedKeyRateLimited"
@@ -2713,6 +2781,31 @@
                   "items": {
                     "$ref": "#/components/schemas/ProxyNode"
                   }
+                },
+                "examples": {
+                  "live-node": {
+                    "summary": "One LIVE node on acc-02; gatePort is the loopback listener a lease points at.",
+                    "value": [
+                      {
+                        "id": "node-04",
+                        "accountId": "acc-02",
+                        "accountLabel": "Field Lab",
+                        "label": "jp-tyo-01",
+                        "region": "jp-tyo",
+                        "country": "JP",
+                        "city": "Tokyo",
+                        "state": "LIVE",
+                        "latencyMs": 96,
+                        "successRate": 99.1,
+                        "inUse": 2,
+                        "capacity": 8,
+                        "egressIp": "198.51.100.21",
+                        "protocol": "socks5",
+                        "gatePort": 13003,
+                        "lastProbeAt": "2026-10-27T09:14:30Z"
+                      }
+                    ]
+                  }
                 }
               }
             },
@@ -3048,6 +3141,17 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateLeaseInput"
+              },
+              "examples": {
+                "sticky-ttl": {
+                  "summary": "ttlSeconds 0 uses u-01's sticky TTL; accountId pins the account the key may use.",
+                  "value": {
+                    "userId": "u-01",
+                    "platform": "ios",
+                    "accountId": "acc-02",
+                    "ttlSeconds": 0
+                  }
+                }
               }
             }
           }
@@ -3059,6 +3163,36 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreateLeaseResult"
+                },
+                "examples": {
+                  "created": {
+                    "summary": "201 with the lease; replayed is true only on an Idempotency-Key retry.",
+                    "value": {
+                      "lease": {
+                        "id": "lease-09",
+                        "userId": "u-01",
+                        "userName": "ada.ops",
+                        "accountId": "acc-02",
+                        "accountLabel": "Field Lab",
+                        "platform": "ios",
+                        "nodeId": "node-04",
+                        "nodeLabel": "jp-tyo-01",
+                        "region": "jp-tyo",
+                        "egressIp": "198.51.100.21",
+                        "protocol": "socks5",
+                        "gatePort": 13003,
+                        "ttlSeconds": 28800,
+                        "expiresAt": "2026-10-27T17:15:00Z",
+                        "requests": 0,
+                        "bytes": 0,
+                        "sticky": true,
+                        "status": "active",
+                        "idempotencyKey": "",
+                        "createdAt": "2026-10-27T09:15:00Z"
+                      },
+                      "replayed": false
+                    }
+                  }
                 }
               }
             },
@@ -3185,6 +3319,42 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LeaseDetail"
+                },
+                "examples": {
+                  "connection": {
+                    "summary": "The lease plus the loopback gate to dial; the secret is never returned.",
+                    "value": {
+                      "lease": {
+                        "id": "lease-09",
+                        "userId": "u-01",
+                        "userName": "ada.ops",
+                        "accountId": "acc-02",
+                        "accountLabel": "Field Lab",
+                        "platform": "ios",
+                        "nodeId": "node-04",
+                        "nodeLabel": "jp-tyo-01",
+                        "region": "jp-tyo",
+                        "egressIp": "198.51.100.21",
+                        "protocol": "socks5",
+                        "gatePort": 13003,
+                        "ttlSeconds": 28800,
+                        "expiresAt": "2026-10-27T17:15:00Z",
+                        "requests": 0,
+                        "bytes": 0,
+                        "sticky": true,
+                        "status": "active",
+                        "idempotencyKey": "",
+                        "createdAt": "2026-10-27T09:15:00Z"
+                      },
+                      "connection": {
+                        "host": "127.0.0.1",
+                        "port": 13003,
+                        "protocol": "socks5",
+                        "username": "u-01",
+                        "credentialKind": "ajs_sk"
+                      }
+                    }
+                  }
                 }
               }
             },
@@ -4723,6 +4893,9 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
           "429": {
             "$ref": "#/components/responses/ScopedKeyRateLimited"
           },
@@ -5200,6 +5373,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ScopedKeyCreated"
+                },
+                "examples": {
+                  "created": {
+                    "summary": "201; secret is returned once and only its SHA-256 is persisted.",
+                    "value": {
+                      "key": {
+                        "id": "sk-01",
+                        "userId": "u-01",
+                        "userName": "ada.ops",
+                        "label": "ci-runner",
+                        "prefix": "ajs_sk_9f2c1d4e6",
+                        "scopes": [
+                          "catalog:read",
+                          "leases:read",
+                          "leases:write",
+                          "proxy:connect",
+                          "usage:read"
+                        ],
+                        "accountIds": [
+                          "acc-02"
+                        ],
+                        "regions": [],
+                        "rateLimitPerMin": 60,
+                        "createdAt": "2026-10-27T09:15:00Z",
+                        "expiresAt": null,
+                        "lastUsedAt": null,
+                        "revokedAt": null
+                      },
+                      "secret": "ajs_sk_9f2c1d4e6a8b0c2d4e6f8a0b1c3d5e7f"
+                    }
+                  }
                 }
               }
             }
@@ -5212,6 +5416,10 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound",
+            "description": "userId names no stored user; nothing was minted."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -5226,6 +5434,27 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ScopedKeyCreateRequest"
+              },
+              "examples": {
+                "customer-key": {
+                  "summary": "A key for u-01 granted exactly acc-02; the account grant is required for leases and proxy:connect.",
+                  "value": {
+                    "userId": "u-01",
+                    "label": "ci-runner",
+                    "scopes": [
+                      "catalog:read",
+                      "leases:read",
+                      "leases:write",
+                      "proxy:connect",
+                      "usage:read"
+                    ],
+                    "accountIds": [
+                      "acc-02"
+                    ],
+                    "regions": [],
+                    "rateLimitPerMin": 60
+                  }
+                }
               }
             }
           }
@@ -5437,6 +5666,69 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UsageSummary"
+                },
+                "examples": {
+                  "per-user": {
+                    "summary": "A scoped key is served its own user's rows only; account roll-ups cover the accounts those rows touched.",
+                    "value": {
+                      "from": "2026-09-27T00:00:00Z",
+                      "to": "2026-10-27T09:20:00Z",
+                      "requests": 24636,
+                      "bytes": 5300000000,
+                      "errors": 52,
+                      "accounts": [
+                        {
+                          "account": "Northwind Ops",
+                          "requests": 18432,
+                          "bytes": 4200000000,
+                          "errors": 37,
+                          "avgLatencyMs": 212,
+                          "buckets": [
+                            {
+                              "day": "2026-10-27",
+                              "requests": 18432,
+                              "bytes": 4200000000,
+                              "errors": 37,
+                              "avgLatencyMs": 212
+                            }
+                          ],
+                          "trafficBudgetBytes": 200000000000,
+                          "usedBytes": 4200000000,
+                          "remainingBytes": 195800000000
+                        }
+                      ],
+                      "users": [
+                        {
+                          "userId": "u-01",
+                          "userName": "ada.ops",
+                          "requests": 24636,
+                          "bytes": 5300000000,
+                          "quotaBytesMonth": 200000000000,
+                          "usedBytes": 5300000000
+                        }
+                      ],
+                      "days": [
+                        {
+                          "day": "2026-10-27",
+                          "requests": 24636,
+                          "bytes": 5300000000,
+                          "errors": 52,
+                          "avgLatencyMs": 203
+                        }
+                      ],
+                      "topTargets": [
+                        {
+                          "target": "example.com",
+                          "requests": 1200,
+                          "bytes": 90000000
+                        }
+                      ],
+                      "truncated": false,
+                      "rowsRetained": 10000,
+                      "retentionDays": 31,
+                      "quotaEnforced": true
+                    }
+                  }
                 }
               }
             },
@@ -8547,11 +8839,26 @@
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
             },
-            "example": {
-              "error": {
-                "code": "FORBIDDEN",
-                "message": "scoped key is restricted to named accounts; the audit log is not available",
-                "reason": "scoped_key_restricted"
+            "examples": {
+              "scope-required": {
+                "summary": "The key does not carry the route's scope.",
+                "value": {
+                  "error": {
+                    "code": "FORBIDDEN",
+                    "message": "credential lacks the permission required by this route",
+                    "reason": "scope_required"
+                  }
+                }
+              },
+              "account-restricted": {
+                "summary": "The key's accountIds/regions exclude the targeted account or global surface.",
+                "value": {
+                  "error": {
+                    "code": "FORBIDDEN",
+                    "message": "scoped key is restricted to named accounts; the audit log is not available",
+                    "reason": "scoped_key_restricted"
+                  }
+                }
               }
             }
           }
@@ -8664,6 +8971,16 @@
             "$ref": "#/components/headers/RateLimitReset"
           }
         },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "PreconditionFailed": {
+        "description": "PRECONDITION_FAILED: a conditional request lost a race and nothing was mutated. PATCH /v1/schedules/{id} answers reason=stale_revision with details.currentRevision when If-Match names an older revision; a waited select-node answers this status when the operation ended with SNAPSHOT_CHANGED (the catalog moved since it was read) or PRECONDITION_FAILED.",
         "content": {
           "application/json": {
             "schema": {
@@ -9118,6 +9435,7 @@
         "properties": {
           "code": {
             "type": "string",
+            "description": "Envelope code. Clients branch on code plus reason and treat an unknown value as generic. FROZEN maps to 423 Locked but is not produced by any current route.",
             "enum": [
               "INVALID_ARGUMENT",
               "NOT_FOUND",
@@ -9127,6 +9445,8 @@
               "RATE_LIMITED",
               "UNAUTHORIZED",
               "FORBIDDEN",
+              "INVITE_EXPIRED",
+              "INVITE_REDEEMED",
               "METHOD_NOT_ALLOWED",
               "INTERNAL",
               "BACKUP_BUSY",
@@ -9137,7 +9457,8 @@
               "OPERATION_TIMEOUT",
               "FROZEN",
               "PRECONDITION_FAILED",
-              "PROVIDER_REFUND_UNSUPPORTED"
+              "PROVIDER_REFUND_UNSUPPORTED",
+              "CONFIRMATION_REQUIRED"
             ]
           },
           "message": {
@@ -9381,7 +9702,8 @@
           "successRate": {
             "type": "number",
             "minimum": 0,
-            "maximum": 1
+            "maximum": 100,
+            "description": "Vendor-reported success percentage (0-100), not a 0-1 ratio; 0 means never measured."
           },
           "inUse": {
             "type": "integer"
@@ -9595,10 +9917,19 @@
             "description": "Optional account pin for an operator caller. It must be active and match platform. Required for a non-admin scoped key, and it must be an account the key's accountIds/regions name."
           },
           "ttlSeconds": {
-            "type": "integer",
-            "minimum": 60,
-            "maximum": 604800,
-            "description": "Lease lifetime. 0 or absent uses the user's sticky TTL, then the panel lease TTL."
+            "description": "Lease lifetime in seconds. 0 or absent uses the user's sticky TTL, then the panel lease TTL; 1-59 is refused with 400 INVALID_ARGUMENT; the ceiling is 604800 (7 days).",
+            "oneOf": [
+              {
+                "type": "integer",
+                "const": 0,
+                "description": "Use the user's sticky TTL, then the panel lease TTL."
+              },
+              {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 604800
+              }
+            ]
           },
           "idempotencyKey": {
             "type": "string",
@@ -11085,6 +11416,10 @@
           "accountId": {
             "type": "string"
           },
+          "snapshotId": {
+            "type": "string",
+            "description": "Catalog identity the selection/connect guard compares. Empty when no catalog connector is configured; echo it as snapshotId on connect/selection so a changed catalog is refused."
+          },
           "fetchedAt": {
             "type": "string",
             "description": "RFC 3339 timestamp; empty when unset."
@@ -11113,6 +11448,9 @@
               "$ref": "#/components/schemas/RegionCount"
             }
           },
+          "geo": {
+            "$ref": "#/components/schemas/CatalogGeo"
+          },
           "servers": {
             "type": "array",
             "items": {
@@ -11131,9 +11469,10 @@
           "nextOffset",
           "hasMore",
           "regions",
+          "geo",
           "servers"
         ],
-        "description": "One page of the filtered catalog. total and regions count every row matching the filters."
+        "description": "One page of the filtered catalog. total and regions count every row matching the filters. geo is the server-side geography summary and is present on every page, empty when the catalog is empty. snapshotId is omitted when no catalog connector is configured."
       },
       "DevicePoolView": {
         "type": "object",
@@ -12219,10 +12558,26 @@
             }
           },
           "result": {
-            "$ref": "#/components/schemas/SelectNodeResult"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SelectNodeResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Switch outcome, or null while the operation has not produced one (queued/running, or a failure that carried no result). The property is always serialized."
           },
           "error": {
-            "$ref": "#/components/schemas/OperationError"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Terminal failure, or null while queued/running and after a success. The property is always serialized."
           }
         },
         "required": [
@@ -15935,6 +16290,133 @@
           "name",
           "strictRbac",
           "kind"
+        ]
+      },
+      "CatalogGeo": {
+        "type": "object",
+        "description": "Server-side geography summary of the catalog page. provinces counts the rows matching q/region/status before the province/city filter narrows the table; current and live describe every running row of the account regardless of those filters. unknown counts scope rows whose title does not resolve; they belong to the `00` province bucket.",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows in the q/region/status scope, before the province/city filter."
+          },
+          "unknown": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Scope rows whose title does not resolve; the `00` province bucket."
+          },
+          "provinces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGeoProvince"
+            }
+          },
+          "current": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CatalogGeoRow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The account's current running row, or null when no row is LIVE."
+          },
+          "live": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGeoRow"
+            }
+          }
+        },
+        "required": [
+          "total",
+          "unknown",
+          "provinces",
+          "current",
+          "live"
+        ]
+      },
+      "CatalogGeoProvince": {
+        "type": "object",
+        "description": "One province bucket of the map, aggregated over the q/region/status scope.",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Province code resolved from the vendor title; pass it as the province query parameter."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "connected": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows in this province whose node is LIVE or DRAINING."
+          },
+          "cities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGeoCity"
+            }
+          }
+        },
+        "required": [
+          "code",
+          "count",
+          "connected",
+          "cities"
+        ]
+      },
+      "CatalogGeoCity": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "City code resolved from the vendor title; pass it as the city query parameter."
+          },
+          "label": {
+            "type": "string",
+            "description": "Vendor title prefix the operator sees."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "code",
+          "label",
+          "count"
+        ]
+      },
+      "CatalogGeoRow": {
+        "type": "object",
+        "description": "One running catalog row named by the map.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "nodeState": {
+            "$ref": "#/components/schemas/NodeState"
+          },
+          "cityCode": {
+            "type": "string",
+            "description": "Omitted when the title does not resolve."
+          },
+          "provinceCode": {
+            "type": "string",
+            "description": "Omitted when the title does not resolve."
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "nodeState"
         ]
       }
     },

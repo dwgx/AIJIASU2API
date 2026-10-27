@@ -52,17 +52,18 @@ curl -sS -X POST "$BASE/v1/scoped-keys" \
   -H "X-AJS-CSRF: 1" \
   -H "Content-Type: application/json" \
   -d '{
-    "userId": "usr-1",
-    "label": "monitor",
-    "scopes": ["accounts:read", "catalog:read", "leases:read", "health:read"],
-    "accountIds": ["acc-07"],
-    "regions": ["cn"],
+    "userId": "u-01",
+    "label": "ci-runner",
+    "scopes": ["catalog:read", "leases:read", "leases:write", "proxy:connect", "usage:read"],
+    "accountIds": ["acc-02"],
+    "regions": [],
     "rateLimitPerMin": 60
   }'
 ```
 
 The response is `{"key": {...}, "secret": "ajs_sk_..."}`. The secret is shown exactly once; only
-its SHA-256 is persisted. Revoke with `DELETE /v1/scoped-keys/{id}` (204), also admin-only.
+its SHA-256 is persisted. An unknown `userId` answers `404 NOT_FOUND` before anything is minted.
+Revoke with `DELETE /v1/scoped-keys/{id}` (204), also admin-only.
 
 The key is bound to `userId` and must name at least one `accountIds` or `regions` entry when its
 scopes include an `accounts:*`, `catalog:*`, `leases:*` or `proxy:connect` grant; without one the
@@ -72,7 +73,11 @@ create answers `400 INVALID_ARGUMENT`. See [Key subject and grants](#key-subject
 
 A scoped key needs the exact scope of the matched route. A key carrying `admin` bypasses the
 table, and the admin token bypasses it by definition. Routes absent from the table are admin-only.
-`proxy:connect` is the one scope with no HTTP route: it authorizes the loopback gate.
+`proxy:connect` is the one scope with no HTTP route: it authorizes the loopback gate. Every
+operation a scoped key can reach declares its grant in the spec as `x-required-scope`, together
+with the `403` and `429` responses and the `X-RateLimit-*` headers; an operation without the
+extension is not reachable with a scoped key (it needs the admin token, a provider signature or
+the portal cookie, as that route documents).
 
 | Scope | Grants | Representative routes |
 |---|---|---|
@@ -199,21 +204,28 @@ Secrets are never returned.
 ### Read the catalog
 
 ```bash
-curl -sS "$BASE/v1/accounts/acc-07/servers?region=cn&limit=50&offset=0&sort=order" \
+curl -sS "$BASE/v1/accounts/acc-02/servers?region=jp-tyo&limit=50&offset=0&sort=order" \
   -H "Authorization: Bearer $AJS_TOKEN"
 ```
 
 Returns one page plus `snapshotId`, `fetchedAt`, `stale`, `total`, `nextOffset`, `hasMore`,
-`regions` and `servers[]` (`id`, `title`, `region`, `host`, `port`, `status`, `nodeId`,
+`regions`, `geo` and `servers[]` (`id`, `title`, `region`, `host`, `port`, `status`, `nodeId`,
 `nodeState`, `selected`, `blockingMarks`, `latencyMs`). `q`, `region`, `status`, `province`,
 `city`, `selected`, `offset`, `limit` (1–500, default 50) and `sort` (`order`, `title`, `host`,
 `status`, `region`) are accepted. Echo `snapshotId` on connect/selection so a changed catalog is
 rejected instead of silently switching to a different server.
 
+`geo` is the server-side map aggregate: `total`, `unknown` (rows whose title does not resolve),
+`provinces[]` (`code`, `count`, `connected`, `cities[]` of `code`/`label`/`count`), `current` (the
+account's running row, or `null`) and `live[]`. It is computed over the `q`/`region`/`status`
+scope, so the map keeps every province the search matches while `province` (a `geo.provinces[].code`,
+or `00` for the unresolved bucket) and `city` narrow only the table. `total`, `regions` and the
+page always describe the filtered rows.
+
 ### Connect or switch
 
 ```bash
-curl -sS -X POST "$BASE/v1/accounts/acc-07/actions/connect" \
+curl -sS -X POST "$BASE/v1/accounts/acc-02/actions/connect" \
   -H "Authorization: Bearer $AJS_TOKEN" \
   -H "X-AJS-CSRF: 1" \
   -H "Content-Type: application/json" \
@@ -230,11 +242,11 @@ cooldown and rejects a stale `snapshotId`. `200` returns `accountId`, `serverId`
 For an asynchronous, idempotent switch:
 
 ```bash
-curl -sS -X POST "$BASE/v1/accounts/acc-07/actions/select-node" \
+curl -sS -X POST "$BASE/v1/accounts/acc-02/actions/select-node" \
   -H "Authorization: Bearer $AJS_TOKEN" \
   -H "X-AJS-CSRF: 1" \
   -H "Content-Type: application/json" \
-  -d '{"target":{"region":"cn"},"wait":true,"timeoutSeconds":60,"ifCurrent":"noop"}'
+  -d '{"target":{"region":"jp-tyo"},"wait":true,"timeoutSeconds":60,"ifCurrent":"noop"}'
 ```
 
 `target` accepts `serverId`, `nodeId`, `region` and `strategy` (`next`, `first`). A `200` means the
@@ -247,7 +259,7 @@ OPERATION_TIMEOUT` with `details.operationId`.
 
 ```bash
 # List, optionally for one user
-curl -sS "$BASE/v1/leases?user_id=usr-1&limit=50&offset=0" \
+curl -sS "$BASE/v1/leases?user_id=u-01&limit=50&offset=0" \
   -H "Authorization: Bearer $AJS_TOKEN"
 
 # Create (idempotent)
@@ -256,7 +268,7 @@ curl -sS -X POST "$BASE/v1/leases" \
   -H "X-AJS-CSRF: 1" \
   -H "Idempotency-Key: $(openssl rand -hex 16)" \
   -H "Content-Type: application/json" \
-  -d '{"userId":"usr-1","platform":"linux","ttlSeconds":3600}'
+  -d '{"userId":"u-01","platform":"ios","accountId":"acc-02","ttlSeconds":3600}'
 
 # Detail: the lease plus the loopback endpoint to dial
 curl -sS "$BASE/v1/leases/$LEASE_ID" \
@@ -270,8 +282,8 @@ curl -sS -X DELETE "$BASE/v1/leases/$LEASE_ID" \
   -d '{"confirm":true}'
 ```
 
-Detail answers `200 {"lease": {...}, "connection": {"host": "127.0.0.1", "port": 13012,
-"protocol": "socks5", "username": "usr-1", "credentialKind": "ajs_sk"}}`. `port` is the gate the
+Detail answers `200 {"lease": {...}, "connection": {"host": "127.0.0.1", "port": 13003,
+"protocol": "socks5", "username": "u-01", "credentialKind": "ajs_sk"}}`. `port` is the gate the
 lease currently points at, so a switch that rebinds the lease also moves it. The secret is never
 returned: `credentialKind` names the shape, and the password is the caller's own `ajs_sk_` key
 carrying `proxy:connect`. A missing id and another user's lease are both `404` for a non-admin
@@ -279,8 +291,9 @@ scoped key; a lease on an account outside its grant is `403`.
 
 Create answers `201 {"lease": {...}, "warning"?: "...", "replayed"?: true}`. `accountId` is an
 optional pin for an operator caller (must be active and match the platform); a non-admin scoped
-key must name one, and it must be an account the key names. `ttlSeconds` is 60–604800, and
-`0`/absent uses the user's sticky TTL then the panel lease TTL. One active lease per user and
+key must name one, and it must be an account the key names. `ttlSeconds` accepts `0` (or absent)
+for the user's sticky TTL, then the panel lease TTL; `1`–`59` is refused with `400
+INVALID_ARGUMENT`, and the ceiling is 604800 (7 days). One active lease per user and
 platform; a second is `409`, an exhausted quota or account slot is `429`. An `Idempotency-Key`
 (header or body `idempotencyKey`, max 128 characters, both must agree) replays the original lease.
 A non-admin scoped key is bound to its own `userId`: an empty `userId` becomes the key's user, a
@@ -295,7 +308,7 @@ one slot.
 ### Nodes
 
 ```bash
-curl -sS "$BASE/v1/nodes?state=LIVE&account_id=acc-07&limit=50&offset=0" \
+curl -sS "$BASE/v1/nodes?state=LIVE&account_id=acc-02&limit=50&offset=0" \
   -H "Authorization: Bearer $AJS_TOKEN"
 ```
 
@@ -310,7 +323,7 @@ Returns nodes with `id`, `accountId`, `label`, `region`, `country`, `city`, `sta
 curl -sS "$BASE/v1/requests?limit=200&offset=0" \
   -H "Authorization: Bearer $AJS_TOKEN"
 
-curl -sS "$BASE/v1/usage?from=2026-10-01&to=2026-10-31&account=acc-07" \
+curl -sS "$BASE/v1/usage?from=2026-10-01&to=2026-10-31&account=acc-02" \
   -H "Authorization: Bearer $AJS_TOKEN"
 ```
 
@@ -362,11 +375,11 @@ The API is the control plane. A lease names the data plane:
 {
   "lease": {
     "id": "lease-...",
-    "userId": "usr-1",
-    "accountId": "acc-07",
-    "nodeId": "acc-07:<server-id>",
+    "userId": "u-01",
+    "accountId": "acc-02",
+    "nodeId": "node-04",
     "protocol": "socks5",
-    "gatePort": 13012,
+    "gatePort": 13003,
     "egressIp": "<vendor-claimed-egress>",
     "expiresAt": "2026-10-27T12:00:00Z",
     "status": "active"
@@ -379,12 +392,12 @@ with the endpoint to dial:
 
 ```json
 {
-  "lease": { "id": "lease-...", "nodeId": "acc-07:srv-a", "gatePort": 13012, "...": "..." },
+  "lease": { "id": "lease-09", "nodeId": "node-04", "gatePort": 13003, "...": "..." },
   "connection": {
     "host": "127.0.0.1",
-    "port": 13012,
+    "port": 13003,
     "protocol": "socks5",
-    "username": "usr-1",
+    "username": "u-01",
     "credentialKind": "ajs_sk"
   }
 }
@@ -397,7 +410,7 @@ Dial `127.0.0.1:<gatePort>` with SOCKS5. With the default `AJS_GATE_AUTH=userpas
 the panel user id and the password is a **scoped key secret** carrying `proxy:connect`:
 
 ```bash
-curl --socks5-hostname 127.0.0.1:13012 -U "usr-1:$SCOPED_KEY_SECRET" https://example.com/
+curl --socks5-hostname 127.0.0.1:13003 -U "u-01:$SCOPED_KEY_SECRET" https://example.com/
 ```
 
 The key must be active, belong to that user, carry `proxy:connect` and allow the gate's account
@@ -419,13 +432,12 @@ allowlist and no user quota, intended only for a same-host operator process.
 offset 1000) with the same admission pipeline and Basic credentials:
 
 ```bash
-curl -x http://127.0.0.1:14012 -U "usr-1:$SCOPED_KEY_SECRET" https://example.com/
+curl -x http://127.0.0.1:14003 -U "u-01:$SCOPED_KEY_SECRET" https://example.com/
 ```
 
-**All gates bind `127.0.0.1`.** There is no public listener, tunnel or router in this archive, and
-the experimental `AJS_REMOTE_INGRESS` credential store is not wired to one. A remote client needs
-an operator-provided tunnel or ingress; do not assume the base URL is reachable off the daemon
-host. The admin API itself may be widened with `AJS_LISTEN` plus a bearer, or served through the
+**All gates bind `127.0.0.1`.** There is no public listener, tunnel or router in this archive.
+A remote client needs an operator-provided tunnel or ingress; do not assume the base URL is
+reachable off the daemon host. The admin API itself may be widened with `AJS_LISTEN` plus a bearer, or served through the
 production kit's private admin vhost, but the gate data plane stays loopback.
 
 ## Errors
@@ -444,10 +456,12 @@ Every failure uses one envelope:
 ```
 
 `code` is a closed enum: `INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, `UPSTREAM_UNAVAILABLE`,
-`QUOTA_EXCEEDED`, `RATE_LIMITED`, `UNAUTHORIZED`, `FORBIDDEN`, `METHOD_NOT_ALLOWED`, `INTERNAL`,
-`BACKUP_BUSY`, `BACKUP_LIVE_NODE`, `BACKUP_DAEMON_RUNNING`, `BACKUP_UNAVAILABLE`,
-`CURSOR_EXPIRED`, `OPERATION_TIMEOUT`, `FROZEN`, `PRECONDITION_FAILED`,
-`PROVIDER_REFUND_UNSUPPORTED`. `reason` is optional; treat an unknown or missing value as generic.
+`QUOTA_EXCEEDED`, `RATE_LIMITED`, `UNAUTHORIZED`, `FORBIDDEN`, `INVITE_EXPIRED`,
+`INVITE_REDEEMED`, `METHOD_NOT_ALLOWED`, `INTERNAL`, `BACKUP_BUSY`, `BACKUP_LIVE_NODE`,
+`BACKUP_DAEMON_RUNNING`, `BACKUP_UNAVAILABLE`, `CURSOR_EXPIRED`, `OPERATION_TIMEOUT`,
+`PRECONDITION_FAILED`, `PROVIDER_REFUND_UNSUPPORTED`, `CONFIRMATION_REQUIRED`. `FROZEN` maps to
+`423` but is reserved: no current route produces it. `reason` is optional; treat an unknown or
+missing value as generic.
 `details` carries small non-secret context (current `snapshotId`, `operationId`, `ineligibleReason`).
 
 Status mapping and stable reasons:
@@ -458,7 +472,10 @@ Status mapping and stable reasons:
 | 401 | `UNAUTHORIZED` | missing/invalid bearer, revoked key |
 | 403 | `FORBIDDEN` | `scope_required` (key lacks the route scope), `scoped_key_restricted` (accountIds/regions exclude the target, a lease or `user_id` belongs to another user, or the key predates the account-grant rule) |
 | 404 | `NOT_FOUND` | `unknown_server`, `no_target`, unknown account/user/lease/operation; a lease owned by another user answers as unknown |
-| 409 | `CONFLICT` | `login_disabled`, `login_required`, `account_state`, `snapshot_changed`, `server_ineligible`, `switch_in_progress`, `slot_multiple_sessions`, `port_unavailable`, `ALREADY_CURRENT`, `SERVER_UNAVAILABLE`, `NO_ALTERNATE_SERVER`, `lease_publish_failed` |
+| 409 | `CONFLICT` / `CONFIRMATION_REQUIRED` | `login_disabled`, `login_required`, `account_state`, `snapshot_changed`, `server_ineligible`, `switch_in_progress`, `slot_multiple_sessions`, `port_unavailable`, `ALREADY_CURRENT`, `SERVER_UNAVAILABLE`, `NO_ALTERNATE_SERVER`, `lease_publish_failed`; `confirmation_required` when a destructive schedule needs `confirm:"ARM"`/`"RUN"` |
+| 410 | `CURSOR_EXPIRED` / `INVITE_EXPIRED` | the event cursor fell out of the ring (restart from `oldestCursor`), or an invitation expired before it was redeemed |
+| 412 | `PRECONDITION_FAILED` | `stale_revision` on `PATCH /v1/schedules/{id}` (with `details.currentRevision`), `SNAPSHOT_CHANGED` on a waited `select-node`; nothing was mutated |
+| 413 | `INVALID_ARGUMENT` | the request body exceeds the route limit |
 | 429 | `QUOTA_EXCEEDED` / `RATE_LIMITED` | `account_slots_exhausted`, user quota, `connect_cooldown` (with `Retry-After`), scoped-key rate limit |
 | 500 | `INTERNAL` | `store_failed`, unclassified internal failure |
 | 502 | `UPSTREAM_UNAVAILABLE` | `session_open_failed`, `gate_start_failed`, `session_unverified` |
@@ -474,7 +491,8 @@ Both clients are hand-written against `docs/openapi.json`, dependency-free, and 
 catalog, select-node operations, leases, usage and events. They send `Authorization: Bearer` and
 `X-AJS-CSRF: 1` on unsafe methods, omit `Origin`, retry transport/429/5xx with backoff and honour
 `Retry-After`, poll a `202` to a terminal operation, and generate an `Idempotency-Key` for
-`CreateLease`. They call the admin API, not the proxy gate.
+`CreateLease`. The Go client retries 500/502/503/504 and the TypeScript client every 5xx. They
+call the admin API, not the proxy gate.
 
 - Go (`sdk/go`, module `ajssdk`): `ListAccounts`, `CreateAccount`, `GetAccount`, `PatchAccount`,
   `DeleteAccount`, `LoginAccount`, `LogoutAccount`, `ListAccountServers`, `SelectNode`,
@@ -486,9 +504,9 @@ catalog, select-node operations, leases, usage and events. They send `Authorizat
 client, err := ajs.New("http://127.0.0.1:2261", os.Getenv("AJS_ADMIN_TOKEN"))
 accounts, err := client.ListAccounts(ctx, ajs.ListAccountsOptions{State: ajs.AccountActive})
 result, err := client.SelectNode(ctx, accounts[0].ID, ajs.SelectNodeRequest{
-    Target: &ajs.OperationTarget{Region: "cn"},
+    Target: &ajs.OperationTarget{Region: "jp-tyo"},
 })
-lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "usr-1", Platform: ajs.PlatformLinux})
+lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "u-01", Platform: ajs.PlatformIOS})
 ```
 
 - TypeScript (`sdk/ts`, package `@ajs/sdk`): the same methods in camelCase, plus `ApiError`,
@@ -498,8 +516,8 @@ lease, err := client.CreateLease(ctx, ajs.CreateLeaseInput{UserID: "usr-1", Plat
 import { Client } from "@ajs/sdk";
 const ajs = new Client({ baseUrl: "http://127.0.0.1:2261", token: process.env.AJS_ADMIN_TOKEN! });
 const [account] = await ajs.listAccounts({ state: "active" });
-const result = await ajs.selectNode(account.id, { target: { region: "cn" } });
-const { lease } = await ajs.createLease({ userId: "usr-1", platform: "linux" });
+const result = await ajs.selectNode(account.id, { target: { region: "jp-tyo" } });
+const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });
 ```
 
 Details, error types and the retry policy are in [`sdk/README.md`](../sdk/README.md). Live as of
