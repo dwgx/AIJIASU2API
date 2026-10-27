@@ -6,7 +6,7 @@ English mirror of this page; the console page carries the Chinese translation.
 
 ## Base URL and health
 
-The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. At the public edge only `GET /healthz` is served without a bearer, as a static `200 "ok"`. `GET /readyz` and `GET /metrics` are **not** routed there and answer `404`; readiness is on the loopback origin (and on the portal origin only if that optional template is installed), and `/v1/metrics` (scope `metrics:read`) is the working metrics route.
+The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. At the public edge only `GET /healthz` is served without a bearer, as a static `200 "ok"`. `GET /readyz` is **not** routed there and answers `404`; readiness is on the loopback origin (and on the portal origin only if that optional template is installed). `GET /metrics` and `GET /v1/metrics` are routed at the edge and require a key with the `metrics:read` scope, answering `401` without one.
 
 > **The public edges are live** — The scoped-key API and this documentation are live at `https://ajs.dwgx.top:2055` (`/docs`), and the TLS HTTPS CONNECT stream map is live on `gate.dwgx.top:13000-13010` — one port per running gate, so only ports with a live node serve. Only the SOCKS5 gate stays loopback.
 
@@ -18,7 +18,7 @@ curl -sS http://127.0.0.1:2261/healthz
 curl -sS http://127.0.0.1:2261/readyz
 ```
 
-At the edge `/healthz` is a static `200 "ok"`; `/readyz`, `/metrics` and the rest of the control plane stay on the loopback origin. The generated reference lists the contract, so it still shows both operations; at this edge they are `404`.
+At the edge `/healthz` is a static `200 "ok"`; `/readyz` stays on the loopback origin and answers `404` there. `/metrics` is routed at the edge and requires a key with the `metrics:read` scope, answering `401` without one. The generated reference lists the contract, so it still shows both operations.
 
 ## The story used by these examples
 

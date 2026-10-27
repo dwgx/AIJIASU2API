@@ -19,7 +19,7 @@ The public gate edge has four preconditions:
 
 ## Public edges live on ajs.dwgx.top and gate.dwgx.top
 
-Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge currently serves 53 of the 54 end-to-end: `GET /metrics` answers `404` because the origin proxies only `/v1/`, so use `/v1/metrics`. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.
+Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge routes that scoped set end-to-end; `GET /metrics` and `GET /v1/metrics` require a key with the `metrics:read` scope and answer `401` without one. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.
 
 The API hop is plaintext HTTP inside WireGuard: the VPS terminates TLS and proxies to the HMC’s WireGuard address (`10.99.0.2:80`). The HMC internal vhost proxies every `/v1/` path to the daemon, so the allowlist is an edge control, not an origin control. The gate hop uses a chisel forward (`13000-13010` to `15000-15010`); the SOCKS5 listener is never published.
 

@@ -28,8 +28,8 @@ export const docsPages: DocsPage[] = [
           {
             kind: 'p',
             text: {
-              en: 'The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. At the public edge only `GET /healthz` is served without a bearer, as a static `200 "ok"`. `GET /readyz` and `GET /metrics` are **not** routed there and answer `404`; readiness is on the loopback origin (and on the portal origin only if that optional template is installed), and `/v1/metrics` (scope `metrics:read`) is the working metrics route.',
-              zh: '公网受限密钥 API 已在 `https://ajs.dwgx.top:2055` 上线，同一源也在 `https://ajs.dwgx.top:2055/docs` 提供本指南。它只承载受限密钥白名单，其余路径一律返回 `404`。同主机客户端使用回环控制面 `http://127.0.0.1:2261`（`AJS_LISTEN`），它仍然是完整契约。公网入口上只有 `GET /healthz` 无需凭据，返回静态 `200 "ok"`。`GET /readyz` 与 `GET /metrics` **没有**在该入口路由，会返回 `404`；就绪检查在回环源上（只有安装可选门户模板时才在门户源上），可用的指标路由是 `/v1/metrics`（作用域 `metrics:read`）。',
+              en: 'The public scoped-key API is live at `https://ajs.dwgx.top:2055`, and the same origin serves this guide at `https://ajs.dwgx.top:2055/docs`. It carries only the scoped-key allowlist and answers `404` for every other path. Same-host clients use the loopback control plane at `http://127.0.0.1:2261` (`AJS_LISTEN`), which stays the full contract. At the public edge only `GET /healthz` is served without a bearer, as a static `200 "ok"`. `GET /readyz` is **not** routed there and answers `404`; readiness is on the loopback origin (and on the portal origin only if that optional template is installed). `GET /metrics` and `GET /v1/metrics` are routed at the edge and require a key with the `metrics:read` scope, answering `401` without one.',
+              zh: '公网受限密钥 API 已在 `https://ajs.dwgx.top:2055` 上线，同一源也在 `https://ajs.dwgx.top:2055/docs` 提供本指南。它只承载受限密钥白名单，其余路径一律返回 `404`。同主机客户端使用回环控制面 `http://127.0.0.1:2261`（`AJS_LISTEN`），它仍然是完整契约。公网入口上只有 `GET /healthz` 无需凭据，返回静态 `200 "ok"`。`GET /readyz` **没有**在该入口路由，会返回 `404`；就绪检查在回环源上（只有安装可选门户模板时才在门户源上）。`GET /metrics` 与 `GET /v1/metrics` 在该入口已路由，需要带 `metrics:read` 作用域的密钥，没有则返回 `401`。',
             },
           },
           {
@@ -55,8 +55,8 @@ curl -sS http://127.0.0.1:2261/readyz`,
           {
             kind: 'p',
             text: {
-              en: 'At the edge `/healthz` is a static `200 "ok"`; `/readyz`, `/metrics` and the rest of the control plane stay on the loopback origin. The generated reference lists the contract, so it still shows both operations; at this edge they are `404`.',
-              zh: '在公网入口上，`/healthz` 是静态 `200 "ok"`；`/readyz`、`/metrics` 以及控制面的其余部分仍在回环源上。生成的参考按契约列出操作，因此仍会显示这两项；在该入口上它们是 `404`。',
+              en: 'At the edge `/healthz` is a static `200 "ok"`; `/readyz` stays on the loopback origin and answers `404` there. `/metrics` is routed at the edge and requires a key with the `metrics:read` scope, answering `401` without one. The generated reference lists the contract, so it still shows both operations.',
+              zh: '在公网入口上，`/healthz` 是静态 `200 "ok"`；`/readyz` 仍在回环源上，在该入口返回 `404`。`/metrics` 已在入口路由，需要带 `metrics:read` 作用域的密钥，没有则返回 `401`。生成的参考按契约列出操作，因此仍会显示这两项。',
             },
           },
         ],
@@ -1181,8 +1181,8 @@ const { lease } = await ajs.createLease({ userId: "u-01", platform: "ios" });`,
           {
             kind: 'p',
             text: {
-              en: 'Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge currently serves 53 of the 54 end-to-end: `GET /metrics` answers `404` because the origin proxies only `/v1/`, so use `/v1/metrics`. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.',
-              zh: '两个公网入口已上线：受限密钥 API 与本指南位于 `https://ajs.dwgx.top:2055`（默认拒绝的白名单；只有 `/healthz` 是静态且无需凭据），TLS HTTPS CONNECT stream 映射位于 `gate.dwgx.top`（13000-13010）。评审过的 vhost 放行 `docs/openapi.json` 中的受限操作集合——54 个操作、41 条路径，可用 `python` 直接统计。线上入口目前端到端提供其中 53 个：`GET /metrics` 返回 `404`，因为源只代理 `/v1/`，请使用 `/v1/metrics`。SOCKS5 与管理源保持私有，门户路由在本版本中未安装。',
+              en: 'Two public edges are live: the scoped-key API and this documentation at `https://ajs.dwgx.top:2055` (a deny-by-default allowlist; only `/healthz` is static and token-free) and the TLS HTTPS CONNECT stream map on `gate.dwgx.top` (13000-13010). The reviewed vhost allowlists the scoped set from `docs/openapi.json` — 54 operations on 41 paths, countable with `python` over that file. The live edge routes that scoped set end-to-end; `GET /metrics` and `GET /v1/metrics` require a key with the `metrics:read` scope and answer `401` without one. SOCKS5 and the admin origin stay private, and the portal routes are not installed in this release.',
+              zh: '两个公网入口已上线：受限密钥 API 与本指南位于 `https://ajs.dwgx.top:2055`（默认拒绝的白名单；只有 `/healthz` 是静态且无需凭据），TLS HTTPS CONNECT stream 映射位于 `gate.dwgx.top`（13000-13010）。评审过的 vhost 放行 `docs/openapi.json` 中的受限操作集合——54 个操作、41 条路径，可用 `python` 直接统计。线上入口端到端路由该受限集合；`GET /metrics` 与 `GET /v1/metrics` 需要带 `metrics:read` 作用域的密钥，没有则返回 `401`。SOCKS5 与管理源保持私有，门户路由在本版本中未安装。',
             },
           },
           {
