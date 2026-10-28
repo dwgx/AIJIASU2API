@@ -1,72 +1,69 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="AIJIASU2API — protocol research control plane, not a proxy service">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="AIJIASU2API — 把代理接入，做成基础设施">
   <defs>
-    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M40 0H0V40" fill="none" stroke="#f7f4ed" stroke-opacity="0.055" stroke-width="1"/>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path d="M60 0H0V60" fill="none" stroke="#7dffc6" stroke-opacity="0.055" stroke-width="1"/>
     </pattern>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7dffc6" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#7dffc6" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame">
+      <rect x="0" y="0" width="1200" height="630"/>
+    </clipPath>
   </defs>
 
-  <rect width="1200" height="630" fill="#0c1b2a"/>
+  <rect width="1200" height="630" fill="#05090b"/>
   <rect width="1200" height="630" fill="url(#grid)"/>
-  <circle cx="1080" cy="70" r="180" fill="#0f6b63" opacity="0.18"/>
-  <circle cx="90" cy="610" r="150" fill="#c8f0df" opacity="0.05"/>
+  <circle cx="985" cy="270" r="280" fill="url(#halo)"/>
 
-  <g>
-    <rect x="80" y="62" width="46" height="46" rx="12" fill="#132b3d" stroke="#c8f0df" stroke-opacity="0.28"/>
-    <path d="M92 96V84a11 11 0 0 1 22 0v12" fill="none" stroke="#c8f0df" stroke-width="3.4" stroke-linecap="round"/>
-    <path d="M98 96V85a5 5 0 0 1 10 0v11" fill="none" stroke="#0f6b63" stroke-width="3.4" stroke-linecap="round"/>
-    <circle cx="103" cy="96" r="2.6" fill="#f0654a"/>
-    <text x="142" y="94" fill="#f7f4ed" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="23" font-weight="700" letter-spacing="-0.6">AIJIASU2API</text>
+  <!-- instrument composition -->
+  <g clip-path="url(#frame)">
+    <circle cx="985" cy="270" r="222" fill="none" stroke="#7dffc6" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="2 14"/>
+    <circle cx="985" cy="270" r="190" fill="none" stroke="#7dffc6" stroke-opacity="0.42" stroke-width="1"/>
+    <circle cx="985" cy="270" r="120" fill="none" stroke="#7dffc6" stroke-opacity="0.28" stroke-width="1"/>
+    <path d="M985 390a120 120 0 0 0 120-120h-24a96 96 0 0 1-96 96z" fill="#ffb45c" fill-opacity="0.92"/>
+    <path d="M985 80v-18M985 460v18M795 270h-18M1175 270h18" stroke="#7dffc6" stroke-opacity="0.6" stroke-width="1"/>
+    <circle cx="985" cy="270" r="4" fill="#7dffc6"/>
+    <rect x="1128" y="148" width="9" height="9" fill="#ffb45c"/>
+    <path d="M1104 64h24M1128 64v24" stroke="#7dffc6" stroke-opacity="0.5" stroke-width="1"/>
   </g>
 
-  <text x="80" y="182" fill="#c8f0df" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" letter-spacing="3.2">PROTOCOL RESEARCH CONTROL PLANE</text>
-
-  <text x="78" y="288" fill="#f7f4ed" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="104" font-weight="800" letter-spacing="-6">AIJIASU<tspan fill="#f0654a">2</tspan>API</text>
-
-  <text x="80" y="352" fill="#f7f4ed" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="38" font-weight="600" letter-spacing="-1.2">Not a proxy service.</text>
-
-  <text x="80" y="398" fill="#f7f4ed" fill-opacity="0.66" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="17">Scoped keys, lease-bound gates, and a documented HTTPS CONNECT edge.</text>
-
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
-    <rect x="80" y="446" width="112" height="34" rx="17" fill="#c8f0df"/>
-    <text x="100" y="468" fill="#0c1b2a" font-weight="700">v0.1.0-pre</text>
-    <rect x="202" y="446" width="64" height="34" rx="17" fill="none" stroke="#f7f4ed" stroke-opacity="0.28"/>
-    <text x="224" y="468" fill="#f7f4ed" fill-opacity="0.8">MIT</text>
-    <rect x="276" y="446" width="126" height="34" rx="17" fill="none" stroke="#f7f4ed" stroke-opacity="0.28"/>
-    <text x="296" y="468" fill="#f7f4ed" fill-opacity="0.8">Go 1.26.10</text>
-    <rect x="412" y="446" width="254" height="34" rx="17" fill="none" stroke="#f7f4ed" stroke-opacity="0.28"/>
-    <text x="432" y="468" fill="#f7f4ed" fill-opacity="0.8">120 paths / 148 operations</text>
-  </g>
-
-  <text x="80" y="548" fill="#c8f0df" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="1.6">475 DASHBOARD TESTS · 54 SCOPED OPERATIONS · 0 REACHABLE VULNS</text>
-
-  <g>
-    <rect x="812" y="88" width="308" height="454" rx="30" fill="#c8f0df"/>
-    <rect x="840" y="116" width="252" height="398" rx="20" fill="#0c1b2a" stroke="#0c1b2a" stroke-width="1"/>
-    <circle cx="862" cy="140" r="4" fill="#f0654a"/>
-    <circle cx="876" cy="140" r="4" fill="#c8f0df" fill-opacity="0.55"/>
-    <circle cx="890" cy="140" r="4" fill="#c8f0df" fill-opacity="0.28"/>
-    <text x="862" y="172" fill="#c8f0df" fill-opacity="0.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.4">AJS · LIVE EDGE</text>
-
-    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
-      <text x="862" y="216" fill="#f0654a">$</text>
-      <text x="880" y="216" fill="#dff2e9">curl /v1/nodes</text>
-      <text x="880" y="242" fill="#c8f0df">200 OK</text>
-
-      <text x="862" y="292" fill="#f0654a">$</text>
-      <text x="880" y="292" fill="#dff2e9">CONNECT :13000</text>
-      <text x="880" y="318" fill="#c8f0df">200 OK</text>
-
-      <text x="862" y="368" fill="#f0654a">$</text>
-      <text x="880" y="368" fill="#dff2e9">lease · key</text>
-      <text x="880" y="394" fill="#c8f0df">scope checked</text>
+  <!-- brand -->
+  <g transform="translate(72 44)">
+    <g fill="none" stroke="#7dffc6" stroke-width="1.6">
+      <rect x="0.8" y="0.8" width="34.4" height="34.4"/>
+      <circle cx="18" cy="18" r="9"/>
     </g>
-
-    <line x1="862" y1="424" x2="1070" y2="424" stroke="#f7f4ed" stroke-opacity="0.14"/>
-    <text x="862" y="452" fill="#f7f4ed" fill-opacity="0.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1.2">TLS TERMINATED</text>
-    <text x="862" y="472" fill="#f7f4ed" fill-opacity="0.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1.2">RATE LIMITED</text>
-    <text x="862" y="492" fill="#f7f4ed" fill-opacity="0.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1.2">INVITE ONLY</text>
-
-    <circle cx="1104" cy="108" r="14" fill="#f0654a"/>
-    <circle cx="1104" cy="108" r="5" fill="#0c1b2a"/>
+    <path d="M18 27a9 9 0 0 0 9-9h-4a5 5 0 0 1-5 5z" fill="#ffb45c"/>
+    <circle cx="18" cy="18" r="1.3" fill="#7dffc6"/>
+    <text x="52" y="26" fill="#e8f3ef" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="19" font-weight="700" letter-spacing="2.6">AIJIASU<tspan fill="#ffb45c">2</tspan>API</text>
   </g>
+  <text x="1128" y="70" text-anchor="end" fill="#6f8581" font-family="Consolas, 'SFMono-Regular', monospace" font-size="11" letter-spacing="2">AJS-CP-01 / 2026-10-28</text>
+  <path d="M72 106h1056" stroke="#7dffc6" stroke-opacity="0.2" stroke-width="1"/>
+
+  <!-- copy -->
+  <text x="72" y="192" fill="#7dffc6" font-family="Consolas, 'SFMono-Regular', monospace" font-size="12" letter-spacing="3.4">CONTROL PLANE / 0.1.0-PRE</text>
+  <text x="70" y="300" fill="#e8f3ef" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="74" font-weight="700" letter-spacing="-2">把代理接入，</text>
+  <text x="70" y="388" fill="#7dffc6" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="74" font-weight="700" letter-spacing="-2">做成基础设施。</text>
+  <text x="72" y="440" fill="#9ab0ab" font-family="'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif" font-size="20" letter-spacing="0.4">密钥 · 租约 · 出口 · 审计，在同一条链路上闭环。</text>
+
+  <!-- release facts -->
+  <g font-family="Consolas, 'SFMono-Regular', monospace">
+    <text x="72" y="530" fill="#e8f3ef" font-size="30" font-weight="600" letter-spacing="-1">120</text>
+    <text x="72" y="552" fill="#6f8581" font-size="10" letter-spacing="1.6">API 路径</text>
+
+    <text x="242" y="530" fill="#e8f3ef" font-size="30" font-weight="600" letter-spacing="-1">148</text>
+    <text x="242" y="552" fill="#6f8581" font-size="10" letter-spacing="1.6">操作</text>
+
+    <text x="412" y="530" fill="#e8f3ef" font-size="30" font-weight="600" letter-spacing="-1">54</text>
+    <text x="412" y="552" fill="#6f8581" font-size="10" letter-spacing="1.6">受限操作</text>
+
+    <text x="582" y="530" fill="#ffb45c" font-size="30" font-weight="600" letter-spacing="-1">10s</text>
+    <text x="582" y="552" fill="#6f8581" font-size="10" letter-spacing="1.6">复检周期</text>
+  </g>
+
+  <!-- frame marks -->
+  <path d="M72 580h1056" stroke="#7dffc6" stroke-opacity="0.16" stroke-width="1"/>
+  <text x="72" y="608" fill="#6f8581" font-family="Consolas, 'SFMono-Regular', monospace" font-size="10" letter-spacing="1.4">dwgx.github.io/AIJIASU2API</text>
+  <text x="1128" y="608" text-anchor="end" fill="#6f8581" font-family="Consolas, 'SFMono-Regular', monospace" font-size="10" letter-spacing="1.4">INVITE-ONLY · MIT · NO PUBLIC SOCKS5</text>
 </svg>

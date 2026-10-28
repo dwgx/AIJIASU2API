@@ -1,5 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="AIJIASU2API">
-  <rect width="32" height="32" rx="8" fill="#0c1b2a"/>
-  <path d="M8 24V15a8 8 0 0 1 16 0v9" fill="none" stroke="#c8f0df" stroke-width="3" stroke-linecap="round"/>
-  <circle cx="16" cy="23" r="2.5" fill="#f0654a"/>
+  <rect width="32" height="32" fill="#05090b"/>
+  <g fill="none" stroke="#7dffc6" stroke-width="1.4">
+    <rect x="2.7" y="2.7" width="26.6" height="26.6"/>
+    <circle cx="16" cy="16" r="8"/>
+  </g>
+  <path d="M16 24A8 8 0 0 0 24 16H21A5 5 0 0 1 16 21Z" fill="#ffb45c"/>
+  <circle cx="16" cy="16" r="1.2" fill="#7dffc6"/>
 </svg>
