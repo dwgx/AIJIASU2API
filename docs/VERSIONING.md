@@ -1,0 +1,126 @@
+# Versioning
+
+Status: current for `v0.1.0-pre` (2026-10-28). This page defines how versions are named, which
+artefact carries which version, when `:latest` moves, and what compatibility a caller may rely
+on. The release procedure itself is [`docs/RELEASE.md`](RELEASE.md).
+
+## Scheme
+
+Releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), tagged with a
+`v` prefix: `vMAJOR.MINOR.PATCH`, optionally with a hyphenated pre-release suffix
+(`v0.1.0-pre`). Build metadata is not used in tags.
+
+- **`0.y.z` is not stable.** While the major version is `0`, a MINOR bump may contain a breaking
+  change to the HTTP contract. A PATCH bump is fixes only.
+- **A hyphen marks a pre-release.** `v0.1.0-pre` sorts *before* `v0.1.0` under SemVer precedence
+  and is not a stable release: no `:latest` movement, no "latest release" claim, no compatibility
+  promise beyond the contract in `docs/openapi.json`.
+- **The public line starts at `v0.1.0-pre`.** The eight older tags
+  (`v0.1.0-archive` … `v0.7.0-live`) are milestone checkpoints in the project's own history, not
+  releases of the public line. They exist only in the local clone, so there is no earlier public
+  release and no upgrade or compatibility path from a milestone checkout. Do not order them
+  against the public line: SemVer compares pre-release identifiers lexically, so `v0.1.0-pre`
+  versus `v0.1.0-archive` or `v0.7.0-live` is not a meaningful comparison.
+
+Check the tag state before quoting a version:
+
+```bash
+git tag --list 'v*' | wc -l              # 9: eight local milestones plus v0.1.0-pre
+git ls-remote --tags origin | wc -l      # 1: only v0.1.0-pre is on the remote
+```
+
+## Which artefact carries which version
+
+| Identity | Value in this release | Authority |
+|---|---|---|
+| Release | `v0.1.0-pre` | the git tag |
+| Contract | `0.1.0` | `info.version` in [`docs/openapi.json`](openapi.json) |
+| Binary | `0.1.0` | `daemon/internal/api/server.go` `DefaultVersion`; the build carries no `-X` injection |
+| Artefact set | `MANIFEST.txt` + `SHA256SUMS` | `deploy/package.sh` at build time |
+
+The binary version is deliberately *not* the release identity: a `v0.1.0-pre` binary still
+reports `0.1.0` from `/healthz`. Identify a release by its tag and the `MANIFEST.txt` shipped with
+it, never by the version string the process prints.
+
+The contract version moves when the contract moves, not on every tag. A docs-only release can
+keep `0.1.0`; a change to paths, operations, schemas or scope metadata must bump it.
+
+## Tags and release assets
+
+A tag names a commit. A release attaches build output to that tag:
+
+| Item | Produced by | Covered by `SHA256SUMS` |
+|---|---|---|
+| `ajs-accountd-linux-amd64`, `-windows-amd64.exe`, `-darwin-arm64` | `deploy/package.sh` | yes |
+| `dashboard-dist.tar.gz` | `deploy/package.sh` | yes |
+| `MANIFEST.txt` | `deploy/package.sh` | yes |
+| `SHA256SUMS` | `deploy/package.sh` | — (it is the manifest) |
+| `deploy-kit.tar.gz` | `deploy/package.sh` | transitively, via its digest in `MANIFEST.txt` |
+
+Verify on the receiving host before installing:
+
+```bash
+sha256sum -c SHA256SUMS        # or: shasum -a 256 -c SHA256SUMS
+```
+
+No checksum is published in prose: the values differ per build and per `SOURCE_DATE_EPOCH`. A
+published checksum that was not regenerated from the exact artefact set is worse than none.
+
+The current remote state, as observed:
+
+```bash
+curl -sS https://api.github.com/repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre \
+  | python -c "import sys,json;d=json.load(sys.stdin);print(d['prerelease'],len(d['assets']))"
+# -> True 6
+```
+
+A tag containing `-` produces a GitHub Release marked **prerelease** and never moves `:latest`.
+The release body also names `ghcr.io/dwgx/ajs-accountd:v0.1.0-pre` and
+`ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre`; image presence was not verified from the release
+workstation, so treat it as `[UNVERIFIED]` until `docker manifest inspect` answers for that tag.
+
+## `:latest`
+
+`:latest` is a moving alias for the last **final** release, and it moves only for a tag without a
+hyphen. The image workflow (`release.yml`) gates the promotion step on
+`!contains(github.ref_name, '-')` and aliases the already-pushed manifest with
+`docker buildx imagetools create` rather than rebuilding.
+
+Consequences:
+
+- `v0.1.0-pre` publishes `:v0.1.0-pre` only. Since there is no earlier final release, this
+  pre-release does not create or move `:latest`.
+- `deploy/update.sh` defaults to `latest`. Pass `--tag v0.1.0-pre` explicitly for a pre-release;
+  do not assume `latest` means "newest tag".
+- A dash tag is never a rollback target for `latest`, and a final tag never rewrites an existing
+  versioned image.
+
+## Compatibility and deprecation
+
+During `0.y.z`:
+
+- **The contract is the promise.** `docs/openapi.json` (mirrored byte-for-byte at
+  `daemon/internal/api/openapi.json`) defines paths, operations, schemas and the
+  `x-required-scope` metadata. Prose in `docs/` describes behaviour; the contract defines shape.
+- **Additive first.** New optional fields, new operations and new enum values are MINOR changes.
+  A client must ignore unknown fields and treat an unknown `error.reason` as generic.
+- **Breaking changes** — removing or renaming an operation, changing a required field, changing a
+  status code or error code — bump MINOR while the major version is `0`, and are called out under
+  "Changed" in [`CHANGELOG.md`](../CHANGELOG.md).
+- **Deprecation** is announced in `CHANGELOG.md` and marked with `deprecated: true` on the
+  operation or schema. A deprecated element stays for at least one MINOR release before removal;
+  it is never removed in a PATCH.
+- **The state snapshot is versioned, not additive.** This build writes version 2 and accepts
+  version 1 by migrating it in place. A version 2 `state.json` read by a version 1 binary is
+  rejected, so a downgrade requires restoring the pre-upgrade state files — see
+  [`docs/OPERATIONS.md`](OPERATIONS.md#upgrade-and-rollback).
+
+Pre-releases make no promise that a later pre-release keeps the same shape; read the release
+notes for the delta.
+
+## Pointers
+
+- [`docs/RELEASE.md`](RELEASE.md) — gates, tag creation, artefacts, rollback
+- [`CHANGELOG.md`](../CHANGELOG.md) — what changed per release
+- [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — release notes and known limitations
+- [`deploy/packaging.md`](../deploy/packaging.md) — artefact build and verification

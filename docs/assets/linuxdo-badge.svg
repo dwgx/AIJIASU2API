@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="132" height="32" viewBox="0 0 132 32" role="img" aria-labelledby="t">
+  <title id="t">LINUX DO</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+  </defs>
+  <rect width="132" height="32" rx="6" fill="url(#g)"/>
+  <rect x="0.5" y="0.5" width="131" height="31" rx="5.5" fill="none" stroke="#0b2f1f" stroke-opacity="0.25"/>
+  <text x="66" y="21" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="700" letter-spacing="1.6" fill="#ffffff">LINUX DO</text>
+</svg>
