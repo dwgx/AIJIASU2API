@@ -4,7 +4,7 @@ Scoped proxy access control plane — an authorised account becomes a lease-boun
 CONNECT egress, with operator-issued keys.
 把授权账号接入，做成可计量、可吊销的代理 API。
 
-[![release v0.1.0-pre](https://img.shields.io/badge/release-v0.1.0--pre-blue)](https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre)
+[![release v0.1.0-pre.2](https://img.shields.io/badge/release-v0.1.0--pre.2-blue)](https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2)
 [![license MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Go 1.26.10](https://img.shields.io/badge/Go-1.26.10-00ADD8?logo=go&logoColor=white)](daemon/go.mod)
 [![LINUX DO](docs/assets/linuxdo-badge.svg)](https://linux.do)
@@ -35,7 +35,7 @@ and the demo may be withdrawn at any time.
 - **Website:** <https://dwgx.github.io/AIJIASU2API/> — static landing page, source in [`site/`](site/)
 - **Live docs and API:** <https://ajs.dwgx.top:2055/docs> — rendered reference plus the scoped-key API
 - **HTTPS CONNECT:** `gate.dwgx.top`, live map `13000-13010`
-- **Release:** <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre>
+- **Release:** <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2>
 
 The public edge applies 120 requests/min with burst 60 per IP, 20 connections/IP, 400 total and a
 2 MB body cap; `/metrics` and `/v1/metrics` require a `metrics:read` key.
@@ -55,10 +55,13 @@ boundaries.
 
 ## Release status
 
-`v0.1.0-pre` is a **pre-release**: usable for evaluation and research, not production-stable. What
-changed and what is intentionally absent is in [CHANGELOG.md](CHANGELOG.md); the near-term plan is
-in [ROADMAP.md](ROADMAP.md); the full notes, verified checks and known limitations are in
-[docs/releases/v0.1.0-pre.md](docs/releases/v0.1.0-pre.md).
+`v0.1.0-pre.2` is the current **pre-release**: usable for evaluation and research, not
+production-stable. The tag is cut from the release-prep commit and pushed after it; the previous
+published release remains `v0.1.0-pre`. What changed and what is intentionally absent is in
+[CHANGELOG.md](CHANGELOG.md); the near-term plan is in [ROADMAP.md](ROADMAP.md); the full notes,
+verified checks and known limitations are in
+[docs/releases/v0.1.0-pre.2.md](docs/releases/v0.1.0-pre.2.md). The release also documents the
+read-only `ajs` CLI, built from source — see [docs/CLI.md](docs/CLI.md).
 
 The live binary is `ajs-accountd-61625b0`, which predates the gate's entitlement watch: on the
 live host, revoking a key or lease stops new handshakes but does not close an established flow.
@@ -67,10 +70,10 @@ see [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md#known-limitations).
 
 ## What is implemented
 
-Counts below were measured at this tag. Re-run the commands in [Evidence](#evidence) if you need
-today's number.
+Counts below were measured on the release-prep commit. Re-run the commands in [Evidence](#evidence)
+if you need today's number.
 
-| Capability | State in `v0.1.0-pre` | Authority |
+| Capability | State in `v0.1.0-pre.2` | Authority |
 |---|---|---|
 | Scoped keys (`ajs_sk_`) | Served; per-route scopes, account/region grants, per-key rate limits. 54 operations carry `x-required-scope`. | [docs/API-GUIDE.md](docs/API-GUIDE.md), [docs/openapi.json](docs/openapi.json) |
 | Leases | Served; create/revoke, idempotency keys, quota, concurrency, and capacity refusals. | [docs/API-GUIDE.md](docs/API-GUIDE.md) |
@@ -80,9 +83,9 @@ today's number.
 | OpenAPI 3.1 contract | 120 paths, 148 operations and 200 schemas. | [docs/openapi.json](docs/openapi.json) |
 | Test suites | The daemon, emulator, dashboard, and SDK suites run offline. The dashboard suite is 54 test files; the Go SDK has 38 test functions; the TypeScript SDK has 24 tests. | commands in [Evidence](#evidence) |
 
-The live smoke recorded in [docs/releases/v0.1.0-pre.md](docs/releases/v0.1.0-pre.md) exercised
-one scoped-key read, one lease create, `/docs`, and one HTTPS CONNECT. Everything else in the
-table is covered offline.
+The live smoke recorded for `v0.1.0-pre` in
+[docs/releases/v0.1.0-pre.md](docs/releases/v0.1.0-pre.md) exercised one scoped-key read, one
+lease create, `/docs`, and one HTTPS CONNECT. Everything else in the table is covered offline.
 
 ## Documentation
 
@@ -187,10 +190,10 @@ public SOCKS5 ingress. The demo's availability is best effort and may be withdra
 ## Experimental and disabled surfaces
 
 The tenant portal (`AJS_TENANT_PORTAL`), orders, and the 易支付 (epay) / Stripe adapters are
-experimental, AI-generated research paths. In `v0.1.0-pre` they are disabled and are **not routed
-by the public edge**. They are not a payment service: no card is charged, no money is transferred,
-and no support is offered. The code exists in the tree behind flags; do not deploy it as a payment
-system. See [docs/EPAY-STATUS.md](docs/EPAY-STATUS.md).
+experimental, AI-generated research paths. In `v0.1.0-pre.2` they are disabled and are **not
+routed by the public edge**. They are not a payment service: no card is charged, no money is
+transferred, and no support is offered. The code exists in the tree behind flags; do not deploy
+it as a payment system. See [docs/EPAY-STATUS.md](docs/EPAY-STATUS.md).
 
 The remote-ingress credential store described by older documents was removed from the code; there
 is no `AJS_REMOTE_INGRESS` surface in this release. SOCKS5 gates bind loopback, and the public
@@ -226,7 +229,7 @@ credentials or vendor artifacts, and no AI attribution in commits. Security repo
 - **Invite-only demo.** The live instance is operator-run; keys are admin-issued, there is no
   signup, no SLA, and no resale. The demo may be withdrawn at any time.
 - **Experimental payments.** The epay/Stripe/orders/tenant-portal paths are experimental research
-  code, disabled and not on the public edge in `v0.1.0-pre`; no charges, no support.
+  code, disabled and not on the public edge in `v0.1.0-pre.2`; no charges, no support.
 - **MIT, no warranty.** The licence covers this repository's code only — not any vendor's software,
   service, data, or marks.
 - **Private security reports.** Do not open a public issue; see [SECURITY.md](SECURITY.md).

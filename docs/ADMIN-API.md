@@ -1,8 +1,9 @@
 # Admin API
 
-Status: current for `v0.1.0-pre` (2026-10-28). Audience: operators. This page is a map of the
-operator-only surface and the rules that apply to it. The generated reference is authoritative
-for request and response schemas; this page does not repeat them.
+Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; tag not yet pushed). Audience:
+operators. This page is a map of the operator-only surface and the rules that apply to it. The
+generated reference is authoritative for request and response schemas; this page does not repeat
+them.
 
 ## What "admin" means here
 

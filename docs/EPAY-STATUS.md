@@ -1,14 +1,15 @@
 # EPAY / payments status
 
-Status: **experimental, disabled in `v0.1.0-pre`** (2026-10-28). This page is the single answer
-to "can I pay, or be paid, through this software?" The answer is **no**.
+Status: **experimental, disabled in `v0.1.0-pre.2`** (release prep, 2026-10-29; tag not yet
+pushed). This page is the single answer to "can I pay, or be paid, through this software?" The
+answer is **no**.
 
 ## What this is not
 
 - It is **not a payment service**, payment processor, merchant of record or escrow.
 - It does **not** charge a card, a wallet or a bank account.
 - It does **not** hold, transfer or settle funds.
-- It is **not** a shipping feature of `v0.1.0-pre`.
+- It is **not** a shipping feature of `v0.1.0-pre.2`.
 
 The code is AI-generated and reviewed like the rest of the tree. Treat it as an experimental
 integration surface, not as audited financial software.
@@ -34,7 +35,7 @@ Safety properties that are implemented and tested offline:
 - Refund and chargeback record evidence and revoke the grant; they transfer nothing.
 - No route stores card data or sends a payment request.
 
-## State in `v0.1.0-pre`
+## State in `v0.1.0-pre.2`
 
 - `AJS_TENANT_PORTAL=0` in the shipped environment example. The portal, order, plan and payment
   routes are **not registered**, so they answer `404`.

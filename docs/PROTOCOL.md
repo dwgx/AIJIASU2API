@@ -1,8 +1,8 @@
 # Protocol summary
 
-Status: current for `v0.1.0-pre` (2026-10-28). Audience: operators and integrators who need to
-know what moves over the wire and what the transport actually protects. This is a summary, not a
-specification; the research record is
+Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; tag not yet pushed). Audience:
+operators and integrators who need to know what moves over the wire and what the transport
+actually protects. This is a summary, not a specification; the research record is
 [`research/40-protocol/PROTOCOL.md`](../research/40-protocol/PROTOCOL.md).
 
 > **Protocol obfuscation is not encryption.** The vendor transport wraps its payload in

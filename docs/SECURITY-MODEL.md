@@ -1,10 +1,10 @@
 # Security model
 
-Status: current for `v0.1.0-pre` (2026-10-28). This page states what the system enforces, where
-it enforces it, and what it does **not** protect. It is derived from the release's three
-read-only audits (edge, authorization, supply chain; 2026-10-28) and from source review of the
-commit in this tree; the live posture was observed with read-only probes and no privileged
-credential. No secret value appears here.
+Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; tag not yet pushed). This page
+states what the system enforces, where it enforces it, and what it does **not** protect. It is
+derived from the release's three read-only audits (edge, authorization, supply chain;
+2026-10-28) and from source review of the commit in this tree; the live posture was observed
+with read-only probes and no privileged credential. No secret value appears here.
 
 ## Trust boundaries
 
@@ -141,7 +141,7 @@ numbers are given where one exists.
    `15000-15010`, with HMC-side forwards anchored to `127.0.0.1:14000-14010`; the kit maps
    `13000-13010` directly to `14000-14010`. The live HSTS also lacks `includeSubDomains`. See
    [`deploy/production/README.md`](../deploy/production/README.md#live-deployment-2026-10-27).
-7. **EPAY, orders and the customer portal are experimental and off** in `v0.1.0-pre`. With
+7. **EPAY, orders and the customer portal are experimental and off** in `v0.1.0-pre.2`. With
    `AJS_TENANT_PORTAL=0` the routes are not registered, and the live environment has no
    `AJS_EPAY_*` values. See [`docs/EPAY-STATUS.md`](EPAY-STATUS.md). No route charges a card.
 

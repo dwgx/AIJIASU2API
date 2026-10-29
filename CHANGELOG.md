@@ -1,11 +1,67 @@
 # Changelog
 
 This file is an index, not the authority. A tag and its attached artifacts are authoritative for
-what shipped. Counts below were measured at the tag; re-run the commands in
-[README.md](README.md#evidence) if you need today's number.
+what shipped. Counts below were measured at the tag, or on the release-prep commit for an entry
+that is not tagged yet; re-run the commands in [README.md](README.md#evidence) if you need
+today's number.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [v0.1.0-pre.2] — 2026-10-29
+
+Second public pre-release, prepared on the release-prep commit; **not production-stable.** The tag
+is pushed after that commit. `v0.1.0-pre` remains the previous published release at `fd949ce`;
+it is not moved, and its assets were not rebuilt. See
+[docs/releases/v0.1.0-pre.2.md](docs/releases/v0.1.0-pre.2.md).
+
+### Added
+
+- Read-only `ajs` operator CLI in `sdk/go/cmd/ajs`: `status`, `nodes`, `leases`, `lease <id>` and
+  `doctor` over `GET` only, built from source. It is not a release asset. See
+  [docs/CLI.md](docs/CLI.md).
+- `ajs-accountd -version`, printing `ajs-accountd <version> (<commit>)` before any state, secret
+  or network access.
+- Public docs: [docs/CLI.md](docs/CLI.md), [docs/ADMIN-API.md](docs/ADMIN-API.md),
+  [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md),
+  [docs/RELEASE.md](docs/RELEASE.md), [docs/VERSIONING.md](docs/VERSIONING.md) and the
+  [docs index](docs/README.md); the README first screen and the bilingual site were rewritten in
+  the same window.
+
+### Changed
+
+- `deploy/package.sh` stamps the release version and packaged commit into the binaries
+  (`-X main.buildVersion`, `-X main.buildCommitValue`) and validates both before invoking the
+  linker.
+- `daemon/Dockerfile` takes `AJS_VERSION`/`AJS_COMMIT` build args, and `release.yml` passes the
+  pushed tag and commit SHA, so a released accountd image names its own tag and commit.
+- Release identity in docs is the tag plus `MANIFEST.txt`; the binary string is a build label.
+
+### Fixed
+
+- `ajs status` and `ajs doctor` print `SKIP` for an HTTP 404 from `/readyz` (edge does not expose
+  it) instead of failing; `/healthz` remains required and every other non-2xx answer still fails.
+- Go SDK `APIError.Error()` redacts a server-reflected `Bearer <token>` to `Bearer [REDACTED]`;
+  the typed `Reason` field is unchanged.
+- The Go SDK client and the CLI reject a base URL carrying a bare trailing `?` (`url.ForceQuery`)
+  as well as a query or fragment.
+
+### Release assets
+
+The tag workflows attach the same six files as `v0.1.0-pre`: the three daemon binaries
+(linux/amd64, windows/amd64, darwin/arm64), `dashboard-dist.tar.gz`, `MANIFEST.txt` and
+`SHA256SUMS`. `deploy-kit.tar.gz` is digested by `package.sh` but not attached. No asset exists
+for this tag until `package.yml` runs on the push.
+
+### Known limitations
+
+- The CLI is source-only: no binary asset, no separate tag, no `:latest` image.
+- The live daemon remains `ajs-accountd-61625b0`; this release does not update the live host, and
+  the live binary still predates the 10 s entitlement watch.
+- The Docker image build is `[UNVERIFIED]` locally (no Docker daemon); images are built in CI
+  after the push and have not been pulled or exercised here.
+- No written vendor authorization is on file for the live multi-user CONNECT edge.
+- The demo is invite-only with no SLA, no signup and no resale, and may be withdrawn.
 
 ## [v0.1.0-pre] — 2026-10-28
 
