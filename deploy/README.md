@@ -110,17 +110,18 @@ still come from `compose.yml`. With it layered on, `docker compose up` pulls ins
 
 ```bash
 cd deploy
-./update.sh --tag v0.1.0   # or: ./update.sh  (uses AJS_IMAGE_TAG, default latest)
+./update.sh --tag v0.1.0   # or: ./update.sh --allow-latest  (AJS_IMAGE_TAG=latest is refused by default)
 ```
 
-`update.sh` sources `.env` (never printing its values), records the currently deployed image IDs
-to `update-state.json`, then `pull`s and `up -d --no-build`s, and waits with bounded retries for
-`/healthz` on `2261` and the dashboard on `18081` to answer `200`. On failure it exits non-zero
-with the step that failed.
+`update.sh` sources `.env` (never printing its values), checks that `gh` can verify attestations
+(unless `--allow-unverified`), `pull`s the release images, resolves their digests and verifies both
+images, writes the previous image IDs and the verified digests to `update-state.json` atomically
+(mode 0600), then runs `up -d --no-build` pinned to those digests and waits with bounded retries
+for `/healthz` on `2261` and the dashboard on `18081` to answer `200`. A failure before `up` leaves
+the running deployment untouched; a failed health check exits non-zero with the step that failed.
 
-Every update verifies the build provenance of both images with `gh attestation verify` before any
-container is switched; `--verify` is the default and `--allow-unverified` is the only opt-out
-(the state file then records `"verified": false`). To check a release before deploying it, run
+`--verify` is the default and `--allow-unverified` is the only opt-out (the state file then records
+`"verified": false`). To check a release before deploying it, run
 `./verify-release.sh --tag <tag> --require-attestation`.
 
 Rollback restores the previous image IDs by re-tagging them over the current references:
@@ -129,10 +130,13 @@ Rollback restores the previous image IDs by re-tagging them over the current ref
 ./update.sh --rollback    # refuses if update-state.json is missing or empty
 ```
 
-The state file records `updated_at`, `tag`, and the two image IDs that were deployed *before* the
-update — it is written before pulling, so it exists even if the update fails midway. Each update
-overwrites it, so rollback is exactly one step: after a rollback you are on the pre-update
-images; run `./update.sh --tag <older>` to go further back (the GHCR tags still exist upstream).
+The state file records `updated_at`, `tag`, `verified`, the attestation scope, and the two image
+IDs plus digests that were deployed *before* the update. The previous IDs are captured before
+pulling and written after verification, before `up`, so rollback has a target even if the switch
+or a health check fails. Each update overwrites it, so rollback is exactly one step: after a
+rollback you are on the pre-update images; run `./update.sh --tag <older>` to go further back
+(the GHCR tags still exist upstream), adding `--allow-unverified` for tags that predate
+attestations (e.g. `v0.1.0-pre.2`), which otherwise fail image verification.
 
 The dashboard's **Settings → Updates** card surfaces the latest GitHub release and offers two
 copy-only commands — `./verify-release.sh --tag <tag> --require-attestation` and
