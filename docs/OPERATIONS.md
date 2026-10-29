@@ -1,6 +1,6 @@
 # Operations
 
-Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; tag not yet pushed). This is the
+Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). This is the
 operator runbook: build, install, health, backup, rotation and rollback. It contains no secrets
 and no credential values.
 
@@ -37,7 +37,7 @@ VITE_USE_MOCK=false VITE_API_BASE= npm run build
 
 # release artifacts (six files + deploy kit)
 cd ..
-SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre.2 --out /tmp/ajs-pkg
+SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre.3 --out /tmp/ajs-pkg
 (cd /tmp/ajs-pkg && sha256sum -c SHA256SUMS)
 ```
 
@@ -47,8 +47,10 @@ It refuses a dashboard bundle that is not `mode: live`, `mock: false`, `panelTok
 `--version` is not just a manifest label: the script stamps it into the binaries with
 `-X main.buildVersion=<version>`, and stamps the packaged commit with
 `-X main.buildCommitValue=<commit>` (`git rev-parse HEAD`, or `unknown`). A binary built by
-`package.sh` from `v0.1.0-pre.2` therefore reports `v0.1.0-pre.2` from `/healthz` and prints
-`ajs-accountd v0.1.0-pre.2 (<commit>)` for `-version`; a plain `go build`, `go run` or `go test`
+`package.sh` from a release tag therefore reports that tag from `/healthz` and prints
+`ajs-accountd <tag> (<commit>)` for `-version` — the published `v0.1.0-pre.2` build reported
+`v0.1.0-pre.2` and its commit; the `v0.1.0-pre.3` build will be stamped the same way when the tag
+exists. A plain `go build`, `go run` or `go test`
 keeps the fallback `0.1.0`. The accountd container image takes the same two values as the
 `AJS_VERSION`/`AJS_COMMIT` build args: `release.yml` passes the tag and the commit SHA, and a
 local `docker build` that passes neither gets `0.1.0` / `unknown`. The stamped values are a
@@ -89,7 +91,7 @@ The portal and payment surfaces are **off** in this release: the env example shi
 daemon does not register `/v1/portal/*`, `/v1/admin/tenants*`, `/v1/admin/orders*` or
 `/v1/admin/plans*`, so those paths answer `404` even if a vhost proxies them. Install
 `ajs-api.conf`, `ajs-admin.conf` and `ajs-default.conf`; do not install `ajs-portal.conf` on a
-`v0.1.0-pre.2` host unless you are running the production gate's staged fixture.
+`v0.1.0-pre.3` host unless you are running the production gate's staged fixture.
 
 ## systemd
 

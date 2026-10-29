@@ -1,6 +1,6 @@
 # Architecture
 
-Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; tag not yet pushed). This page
+Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). This page
 describes what runs, where the trust boundaries are, and which parts of the tree are actually
 deployed. It is not a design proposal: anything marked *live* was observed read-only on
 2026-10-27/28 or applied to the live hosts on 2026-10-28, and is recorded in
@@ -108,7 +108,7 @@ divergence is the single largest reproducibility gap in this release and is stat
 
 ## Components
 
-| Component | Path | Role in `v0.1.0-pre.2` |
+| Component | Path | Role in `v0.1.0-pre.3` |
 |---|---|---|
 | `ajs-accountd` | `daemon/` | control plane, gate, scheduler, webhooks, backup; Go 1.26 module, JSON snapshot |
 | dashboard | `dashboard/` | operator console (15 admin routes) and the public `/docs` bundle; same JS for portal and admin, only the nginx route surface differs |

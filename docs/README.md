@@ -4,10 +4,10 @@ Which door is yours? If you only want to run the service, you need nothing from 
 "Understand the evidence" table. If you are calling the API, start with the guide and treat the
 contract as the authority.
 
-Status key: **current** — describes `v0.1.0-pre.2` and is maintained; **historical** — a snapshot
-of an earlier design, kept for the record; **generated** — produced from another file, never
-edited by hand; **internal** — research or working material, not part of the public release
-surface.
+Status key: **current** — describes `v0.1.0-pre.3` (prepared; tag pending) and is maintained;
+**historical** — a snapshot of an earlier design, kept for the record; **generated** — produced
+from another file, never edited by hand; **internal** — research or working material, not part of
+the public release surface.
 
 ## Run and operate it
 
@@ -17,14 +17,15 @@ surface.
 | [`docs/OPERATIONS.md`](OPERATIONS.md) | current | install, health, backup, rotation, upgrade, rollback |
 | [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) | current | three deployment modes, release verification, update and rollback; 简体中文 at [`DEPLOYMENT.zh-CN.md`](DEPLOYMENT.zh-CN.md) |
 | [`docs/RELEASE.md`](RELEASE.md) | current | version scheme, release gates, artefacts, checksums, rollback |
-| [`docs/releases/`](releases/) | current | one notes file per release; `v0.1.0-pre.2` is current |
+| [`docs/releases/`](releases/) | current | one notes file per release; `v0.1.0-pre.3` is current (prepared; tag pending) |
 | [`docs/VERSIONING.md`](VERSIONING.md) | current | SemVer policy, tag vs assets, `:latest`, deprecation |
 | [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | current | 407/429/409/404/401/403/502/504 triage with commands |
 | [`deploy/production/README.md`](../deploy/production/README.md) | current | reviewed production kit and the live deployment record |
 | [`deploy/README.md`](../deploy/README.md) | current | compose deployment |
 | [`deploy/packaging.md`](../deploy/packaging.md) | current | artefact build, manifest, checksums |
-| [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) | current | release notes, verified checks, known limitations |
-| [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) | historical | previous release notes and limitations |
+| [`docs/releases/v0.1.0-pre.3.md`](releases/v0.1.0-pre.3.md) | current | release notes, verified checks, known limitations |
+| [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) | historical | previous release notes and limitations |
+| [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) | historical | first release notes and limitations |
 | [`CHANGELOG.md`](../CHANGELOG.md) | current | release index |
 
 ## Call it

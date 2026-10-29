@@ -7,6 +7,79 @@ what shipped. Counts below were measured at the tag; re-run the commands in
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.0-pre.3] — 2026-10-29
+
+Third public pre-release, **prepared 2026-10-29 and not yet tagged** (tag `v0.1.0-pre.3`, target
+= the release-prep commit built on base `9966822`); **not production-stable.** `v0.1.0-pre.2`
+remains the latest published release at `d80fee7` and is not moved; its six assets were not
+rebuilt. This is the first release prepared with release verification, build attestations and
+immutable draft-first publishing — none of which has run for this tag yet. See
+[docs/releases/v0.1.0-pre.3.md](docs/releases/v0.1.0-pre.3.md).
+
+### Added
+
+- `deploy/verify-release.sh`: downloads the six assets with `gh release download` into a fresh
+  mode-700 `mktemp -d`, refuses `latest`, enforces `SHA256SUMS` and `MANIFEST.txt`, and verifies
+  build provenance. `--require-attestation` additionally requires the release attestation;
+  `--allow-unverified` skips attestations only. Exit `0` verified, `1` failed, `2` usage.
+- Build attestations: `package.yml` attests the six release files with
+  `actions/attest-build-provenance`; `release.yml` attests each pushed image digest with
+  `push-to-registry: true`.
+- Draft-first publishing: `package.yml` creates the release as a draft, attaches all six assets,
+  then publishes with `gh release edit --draft=false`; `release.yml` never creates a release and
+  only updates its notes after waiting for the draft. This is the only order an immutable
+  release accepts.
+- Windows scripts under `deploy/windows/`: `install.ps1`, `update.ps1`, `run.ps1`,
+  `verify-release.ps1` and a manual — verify, install under `C:\ProgramData\AIJIASU2API`,
+  register the `AJSAccountd` scheduled task, update with automatic rollback, `-Rollback`,
+  `-WhatIf`, and `run.ps1 -Smoke`. Attestations are required by default; `-AllowUnverified` is
+  the only opt-out and never skips a hash.
+- Bilingual deployment docs: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and
+  [docs/DEPLOYMENT.zh-CN.md](docs/DEPLOYMENT.zh-CN.md) — three install modes, the four
+  verification layers, digest pinning, draft-first publishing, the update card, rollback, and
+  the observed/`[UNVERIFIED]` split for the Windows scripts.
+- Documented smoke coverage: the HMC Compose/release-pipeline checks recorded 2026-10-23
+  (`update.sh` exercised against a fake `docker` shim, no pull/up/push) and the Windows script
+  runs against `v0.1.0-pre.2` (verify, `-NoService` install, update without auto-start,
+  `-Rollback`, `run.ps1 -Smoke` under PowerShell 5.1 and 7). Neither exercised the attested
+  pipeline.
+- Settings → Updates now offers two copy-only commands (`verify-release.sh --require-attestation`
+  and `update.sh --verify`) for a human to run on the host; the dashboard executes neither.
+
+### Changed
+
+- `deploy/update.sh` resolves each pulled image's digest, verifies the attestation for that
+  digest, records both digests in `deploy/update-state.json`, and exports
+  `AJS_ACCOUNTD_DIGEST` / `AJS_DASHBOARD_DIGEST`; `deploy/compose.release.yml` accepts them.
+  `--verify` is the default, `--allow-unverified` is the only opt-out, and `--rollback` restores
+  the recorded image IDs.
+- The repository's immutable-releases setting is enabled, so this release is intended to be the
+  first whose tag, assets and release attestation are enforced by GitHub. Pending until tagged.
+- `deploy/README.md` states the correct `update.sh` tag requirement, the enforced step order and
+  the unverified-tag path.
+- README, release/versioning docs, docs index, current-release status lines and the project page
+  point at `v0.1.0-pre.3`; `v0.1.0-pre.2` notes are unchanged and historical.
+
+### Release assets
+
+Six files, the same shape as `v0.1.0-pre.2`: the three daemon binaries (linux/amd64,
+windows/amd64, darwin/arm64), `dashboard-dist.tar.gz`, `MANIFEST.txt` and `SHA256SUMS`.
+`deploy-kit.tar.gz` is digested by `package.sh` but not attached. The six `v0.1.0-pre.3` assets
+do not exist until the tag is pushed; the `v0.1.0-pre.2` set remains as published.
+
+### Known limitations
+
+- Not tagged or published: no tag, release, asset, image or attestation exists yet, so the
+  attested/immutable behavior is expected, not observed.
+- The live daemon remains `ajs-accountd-61625b0`; this release does not update the live host.
+- No Authenticode: every asset is unsigned and SmartScreen may warn.
+- The elevated Windows path (task registration, SYSTEM launch, update-time health check with
+  rollback) is `[UNVERIFIED]`; the non-elevated paths were run against `v0.1.0-pre.2`.
+- The Compose/image path is `[UNVERIFIED]` here (no Docker daemon); no image was pulled.
+- `v0.1.0-pre.2` has no attestations and is mutable (`"immutable": false`); it fails closed under
+  the strict verifier.
+- The demo is invite-only with no SLA, no signup and no resale, and may be withdrawn.
+
 ## [v0.1.0-pre.2] — 2026-10-29
 
 Second public pre-release, published 2026-10-29 (tag `v0.1.0-pre.2`, target `d80fee7`);

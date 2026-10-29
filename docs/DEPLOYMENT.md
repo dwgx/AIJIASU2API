@@ -1,6 +1,7 @@
 # Deployment
 
-Status: current for `v0.1.0-pre.2`, published 2026-10-29. 简体中文：
+Status: current for `v0.1.0-pre.3`, prepared 2026-10-29 and **not yet tagged**. The latest
+published release is `v0.1.0-pre.2`, published 2026-10-29. 简体中文：
 [`DEPLOYMENT.zh-CN.md`](DEPLOYMENT.zh-CN.md).
 
 Three shapes are supported and they are not interchangeable: a hardened Linux/systemd install,
@@ -70,7 +71,9 @@ mutable:
 gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.2 --jq .immutable   # false
 ```
 
-So `v0.1.0-pre.2` is immutable by project policy only. Future releases are enforced by GitHub.
+So `v0.1.0-pre.2` is immutable by project policy only. `v0.1.0-pre.3` is prepared after the
+setting was enabled and is intended to be the first release GitHub enforces; it is not tagged
+yet, so that is **pending until tagged**, not an observed property.
 
 ### Artifact attestations
 
@@ -90,9 +93,11 @@ gh release verify-asset <tag> ./ajs-accountd-linux-amd64 --repo dwgx/AIJIASU2API
 
 `gh release verify-asset` checks the release attestation, which only immutable releases have.
 
-The current release predates all of this: at the `v0.1.0-pre.2` tag the release workflow contains
-no attestation step (`git show v0.1.0-pre.2:.github/workflows/release.yml | grep -c attest` → `0`).
-Verification therefore fails closed for it, as it should.
+The latest published release, `v0.1.0-pre.2`, predates all of this: at that tag the release
+workflow contains no attestation step (`git show v0.1.0-pre.2:.github/workflows/release.yml |
+grep -c attest` → `0`). Verification therefore fails closed for it, as it should. `v0.1.0-pre.3`
+is the first release cut with these steps; it has not been tagged, so no attestation has been
+produced or verified for it yet.
 
 ### Release pipeline: draft, then publish
 
@@ -111,8 +116,10 @@ the notes afterwards is still allowed because an immutable release keeps its tit
 editable.
 
 Consequence for verification: a tag cut after this pipeline lands is an immutable release, which
-automatically carries a release attestation, so `gh release verify-asset` reports `verified` for
-it. `v0.1.0-pre.2` and earlier were published by the previous flow (the image workflow created the
+automatically carries a release attestation, so `gh release verify-asset` should report
+`verified` for it. `v0.1.0-pre.3` is the first such tag and is **pending** — the tag has not been
+pushed, so neither the immutability nor the release attestation has been observed.
+`v0.1.0-pre.2` and earlier were published by the previous flow (the image workflow created the
 release) and have no release attestation.
 
 ### Digest pinning
@@ -169,8 +176,11 @@ below is the same procedure as [`OPERATIONS.md`](OPERATIONS.md#install-from-the-
 
 ```bash
 # 1. Verify the release; note the "dir:" path it prints.
+#    This is the latest published release, which has no attestations:
 (cd deploy && ./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified)
 # -> dir: /tmp/ajs-release-verify.Ab12Cd   (a fresh mktemp -d, mode 700)
+#    Once v0.1.0-pre.3 is tagged, use the default/strict form:
+#    (cd deploy && ./verify-release.sh --tag v0.1.0-pre.3 --require-attestation)
 
 # 2. Identity, directories, binary (as root).
 useradd --system --user-group --home /var/lib/ajs --shell /usr/sbin/nologin ajs
@@ -198,12 +208,13 @@ only `/var/lib/ajs` writable; `/etc/ajs` is read-only to the daemon.
 
 ```bash
 cd deploy
-./verify-release.sh --tag <tag> --require-attestation   # future releases
-./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified  # current release
+./verify-release.sh --tag v0.1.0-pre.3 --require-attestation   # once tagged
+./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified      # latest published release
 ```
 
-For a future release, `--require-attestation` is the strict form: it additionally requires the
-release attestation that only an immutable release carries.
+For `v0.1.0-pre.3`, `--require-attestation` is the strict form: it additionally requires the
+release attestation that only an immutable release carries. It cannot pass before the tag is
+pushed.
 
 ### Update
 
@@ -274,8 +285,11 @@ cp .env.example .env
 # edit .env: AJS_ADMIN_TOKEN, AJS_MASTER_KEY; set AJS_IMAGE_TAG to a release tag,
 # or pass --tag to update.sh (the shipped value "latest" is refused without --allow-latest)
 
-# First install from the published images. The current release predates attestations:
+# First install from the latest published images. v0.1.0-pre.2 predates attestations:
 ./update.sh --tag v0.1.0-pre.2 --allow-unverified
+
+# v0.1.0-pre.3 is the first attested release; once tagged, the default form applies:
+# ./update.sh --tag v0.1.0-pre.3
 
 # Or run compose directly, without the script's verification and state file
 # (set AJS_IMAGE_TAG to the release tag first; the shipped "latest" is an alias):
@@ -304,7 +318,8 @@ has nothing to restore.
 cd deploy
 ./update.sh --tag <new>                    # verification is on by default
 ./update.sh --tag <new> --verify           # the explicit spelling of the default
-./update.sh --tag v0.1.0-pre.2 --allow-unverified   # current release only
+./update.sh --tag v0.1.0-pre.3              # once tagged; attestations verified by default
+./update.sh --tag v0.1.0-pre.2 --allow-unverified   # latest published release only (no attestations)
 ./update.sh --tag latest --allow-latest     # only if you deliberately want the alias
 ```
 
@@ -388,8 +403,10 @@ dashboard is a separate static bundle or container.
 
 ```powershell
 cd deploy\windows
-.\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified -WhatIf   # plan only, writes nothing
+.\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified -WhatIf   # latest published; plan only, writes nothing
 .\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified            # verify, install, start, health
+# Once v0.1.0-pre.3 is tagged, drop -AllowUnverified (attestations are required by default):
+# .\install.ps1 -Tag v0.1.0-pre.3 -WhatIf
 ```
 
 The layout under `-InstallDir` (default `C:\ProgramData\AIJIASU2API`) is below; the previous
@@ -414,8 +431,8 @@ replaces the binary in place and still never overwrites `ajs.env`.
 ### Verify
 
 ```powershell
-.\verify-release.ps1 -Tag <tag>                         # future releases
-.\verify-release.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # current release
+.\verify-release.ps1 -Tag v0.1.0-pre.3                   # once tagged
+.\verify-release.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # latest published release
 ```
 
 The checksum chain (`SHA256SUMS`), the `MANIFEST.txt` version and the binary's stamped
@@ -429,8 +446,8 @@ the caller.
 ### Update
 
 ```powershell
-.\update.ps1 -Tag <new>                            # future releases
-.\update.ps1 -Tag v0.1.0-pre.2 -AllowUnverified    # current release
+.\update.ps1 -Tag v0.1.0-pre.3                   # once tagged
+.\update.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # latest published release
 ```
 
 `update.ps1` verifies the release, stops the scheduled task and any running daemon, keeps the
@@ -470,9 +487,10 @@ bearer and the master key, and the state holds the sealed values those keys prot
 
 What was observed for these scripts: verify, `install.ps1 -NoService`, `update.ps1` without
 auto-start, `-Rollback` and `run.ps1 -Smoke` under PowerShell 5.1 and 7 against `v0.1.0-pre.2`.
-The elevated path — task registration, the SYSTEM launch, and the update-time health check with
-automatic rollback — is a code path, not an observed run here: `[UNVERIFIED]` on this
-workstation. Re-run it on the target host before relying on auto-start.
+No `v0.1.0-pre.3` asset exists to exercise yet. The elevated path — task registration, the SYSTEM
+launch, and the update-time health check with automatic rollback — is a code path, not an
+observed run here: `[UNVERIFIED]` on this workstation. Re-run it on the target host before
+relying on auto-start.
 
 ## Dashboard: Settings → Updates
 
@@ -487,7 +505,7 @@ Both commands are copied for a human to run on the host; the dashboard executes 
 states this: *"The dashboard never executes a root update. It checks the release, offers the
 verify step and copies the host command — run it on the host."*
 
-The check calls GitHub's `/releases/latest`, which excludes pre-releases. Both releases on this
+The check calls GitHub's `/releases/latest`, which excludes pre-releases. All releases on this
 repository are pre-releases, so when `AJS_UPDATE_REPO` points here the check answers
 `502 UPSTREAM_UNAVAILABLE` and the two copy rows stay hidden; they appear once a final
 (non-hyphen) release exists. The commands in this page work regardless.
@@ -499,23 +517,25 @@ socket, or a host API) and is a **non-goal** for this release: it would turn a p
 into host root. Automatic update and rollback are not implemented.
 
 One consequence worth knowing: the copied verify command is the strict form
-(`--require-attestation`), and the current release cannot satisfy it. For `v0.1.0-pre.2`, run the
-checksum path instead: `./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified`, which still
-enforces `SHA256SUMS` and `MANIFEST.txt`.
+(`--require-attestation`), and the latest published release cannot satisfy it. For
+`v0.1.0-pre.2`, run the checksum path instead:
+`./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified`, which still enforces `SHA256SUMS`
+and `MANIFEST.txt`. `v0.1.0-pre.3` is the first release prepared to satisfy the strict form; that
+is pending until it is tagged.
 
 ## Current release state
 
-| Item | `v0.1.0-pre.2` | Future releases |
+| Item | `v0.1.0-pre.3` (prepared; not yet tagged) | `v0.1.0-pre.2` (latest published) |
 |---|---|---|
-| Tag / commit | `v0.1.0-pre.2` on `d80fee7`, published 2026-10-29 | — |
-| Assets | six files, GitHub prerelease; `:latest` not moved | six files |
-| Immutable release | **no** (`"immutable": false`); repository setting enabled for future releases | yes |
-| Build provenance | **none** (the workflow at the tag has no attestation step) | yes, for files and image digests |
-| Release attestation | **none** | yes, generated by the immutable release |
-| Release pipeline | previous flow: `release.yml` created the release | `package.yml` draft → publish; `release.yml` notes only |
-| Linux verification | `--allow-unverified` (checksums + MANIFEST still enforced) | default or `--require-attestation` |
-| Windows verification | `-AllowUnverified` required (attestations are enforced by default) | default, or `-RequireAttestation` explicitly |
-| Live daemon | `ajs-accountd-61625b0`, older than this release; the live host is not upgraded by it | — |
+| Tag / commit | will be an annotated tag on the release-prep commit built on `9966822` | `v0.1.0-pre.2` on `d80fee7`, published 2026-10-29 |
+| Assets | six files once the tag is pushed | six files, GitHub prerelease; `:latest` not moved |
+| Immutable release | intended: **yes** — first release after the setting was enabled; **pending until tagged** | **no** (`"immutable": false`); project policy only |
+| Build provenance | workflow steps landed (`package.yml` for the six files, `release.yml` per image digest); **none produced for this tag yet** | **none** (the workflow at the tag has no attestation step) |
+| Release attestation | expected on publication of the immutable release; **pending** | **none** |
+| Release pipeline | `package.yml` draft → attach six → publish; `release.yml` attests images and updates notes | previous flow: `release.yml` created the release |
+| Linux verification | `--require-attestation` once tagged; checksums and `MANIFEST.txt` always enforced | `--allow-unverified` (checksums and `MANIFEST.txt` still enforced) |
+| Windows verification | default (attestations required) once tagged | `-AllowUnverified` required |
+| Live daemon | `ajs-accountd-61625b0`, older than this release; the live host is not upgraded by it | same |
 
 Evidence for the table:
 
@@ -524,10 +544,12 @@ gh api repos/dwgx/AIJIASU2API/immutable-releases --jq .enabled            # true
 gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.2 --jq .immutable  # false
 gh release view v0.1.0-pre.2 --json assets --jq '.assets | length'         # 6
 git show v0.1.0-pre.2:.github/workflows/release.yml | grep -c attest       # 0
+git tag --list 'v0.1.0-pre.3' | wc -l                                      # 0 (not tagged)
 ```
 
-In short: `v0.1.0-pre.2` has no attestations, is not an immutable release, and is not what the
-live host runs.
+In short: `v0.1.0-pre.3` is prepared to be the first attested and immutable release, but nothing
+has run for it; `v0.1.0-pre.2` has no attestations, is not an immutable release, and is not what
+the live host runs.
 
 ## Pointers
 

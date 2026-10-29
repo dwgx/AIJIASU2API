@@ -1,22 +1,24 @@
 # Release procedure
 
-Status: current for `v0.1.0-pre.2`, published 2026-10-29. The previous published release remains
-`v0.1.0-pre` on `fd949ce`. This page defines the version scheme, the gates that must pass, how
-the artifacts are built and verified, and how to roll back. It contains no checksum values: a
-checksum is only meaningful for a specific build, so it is generated and verified at build time,
-never copied into prose.
+Status: current for `v0.1.0-pre.3`, prepared 2026-10-29 and **not yet tagged**. The latest
+published release is `v0.1.0-pre.2` on `d80fee7`; `v0.1.0-pre` on `fd949ce` is the release before
+it. This page defines the version scheme, the gates that must pass, how the artifacts are built
+and verified, and how to roll back. It contains no checksum values: a checksum is only meaningful
+for a specific build, so it is generated and verified at build time, never copied into prose.
 
 ## Version scheme
 
 - Releases are semver: `vMAJOR.MINOR.PATCH`, with a hyphenated pre-release suffix. The first
-  public pre-release was **`v0.1.0-pre`**; the current pre-release is **`v0.1.0-pre.2`**,
-  published 2026-10-29 from commit `d80fee7`. Both sort before `v0.1.0`, and `v0.1.0-pre.2`
-  sorts after `v0.1.0-pre`.
+  public pre-release was **`v0.1.0-pre`**; the current pre-release is **`v0.1.0-pre.3`**,
+  prepared 2026-10-29 from base `9966822` and not yet tagged. The latest published pre-release is
+  **`v0.1.0-pre.2`**, published 2026-10-29 from commit `d80fee7`. All three sort before
+  `v0.1.0`, and each `-pre.N` sorts after `-pre.(N-1)`.
 - A pre-release is not a stable release: no compatibility promise beyond the contract in
   `docs/openapi.json`, no `:latest` movement, no "latest release" claim.
 - The eight existing tags (`v0.1.0-archive` … `v0.7.0-live`) are **milestone checkpoints** in
   the project's own history, not semver releases of the public line. They are local and
-  unpushed. `v0.1.0-pre` and `v0.1.0-pre.2` are the only tags on `origin`. Do not present the
+  unpushed. `v0.1.0-pre` and `v0.1.0-pre.2` are the only tags on `origin`; `v0.1.0-pre.3` exists
+  locally only after it is cut, and on `origin` only after it is pushed. Do not present the
   milestones as releases, and do not infer ordering from them: semver compares pre-release
   identifiers lexically, so ordering `v0.1.0-pre` against names like `v0.1.0-archive` or
   `v0.7.0-live` is meaningless. The public line starts at `v0.1.0-pre`.
@@ -39,43 +41,50 @@ never copied into prose.
 ```bash
 git remote -v                           # origin https://github.com/dwgx/AIJIASU2API.git
 git ls-remote --symref origin HEAD      # ref: refs/heads/main
-git rev-parse --short 'v0.1.0-pre.2^{}' # d80fee7, the tagged commit
-git tag --list 'v*' | wc -l             # 10: eight local milestones plus both prereleases
+git rev-parse --short HEAD              # 9966822 at prep time; the tag names the prep commit
+git tag --list 'v*' | wc -l             # 10 before the pre.3 tag; 11 after
 git ls-remote --tags origin             # v0.1.0-pre and v0.1.0-pre.2
-git status --porcelain                  # docs edits after the tag do not change it
+git status --porcelain                  # docs edits before the tag do not change it
 ```
 
-These are the observed values on 2026-10-29. The tag count is 10: eight local milestone tags
-plus the two published prereleases, `v0.1.0-pre` and `v0.1.0-pre.2`.
+These are the observed values on 2026-10-29. The tag count is **10 before** `v0.1.0-pre.3` is cut
+and **11 after**: eight local milestone tags plus the two published prereleases, plus the new one.
+`v0.1.0-pre.3` is not among them yet.
 
 The published state, as observed:
 
 - `origin` is `https://github.com/dwgx/AIJIASU2API.git`; the default branch is `main`.
 - `v0.1.0-pre` is an annotated tag (tagger date 2026-10-27T20:25:37Z) on commit `fd949ce`,
-  pushed to `origin`. It remains the previous published release and does not move.
+  pushed to `origin`. It remains the first published release and does not move.
 - `v0.1.0-pre.2` is an annotated tag object `95f7930` on commit `d80fee7`, pushed to `origin`.
-  `git ls-remote --tags origin` lists both tags (tag object plus `^{}` dereference).
+  It is the latest published release and does not move. `git ls-remote --tags origin` lists both
+  tags (tag object plus `^{}` dereference).
+- `v0.1.0-pre.3` has not been created. It will be an annotated tag on the release-prep commit
+  built on `9966822`; until it is cut it appears in neither `git tag` nor `git ls-remote`.
 - `main` may be ahead of a published tag. `main` may move; a tag does not. Only the tag is the
   release identity, and later commits are not part of that release.
 - The GitHub Release for `v0.1.0-pre.2` is a **prerelease** with six assets:
-  <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2>. The previous release
-  `v0.1.0-pre` remains a prerelease with its six assets.
+  <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2>. The earlier release
+  `v0.1.0-pre` remains a prerelease with its six assets. The `v0.1.0-pre.3` release does not
+  exist yet; <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.3> is pending.
 - The `release` workflow pushed `ghcr.io/dwgx/ajs-accountd:v0.1.0-pre.2` and
   `ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre.2`; the `:latest` promotion steps were skipped. The
-  `v0.1.0-pre` images remain as published.
+  `v0.1.0-pre` images remain as published. No `:v0.1.0-pre.3` image exists yet.
 - The project page <https://dwgx.github.io/AIJIASU2API/> is published from `main`.
 
 Tag only after every gate below is green, then push; the push is what runs the workflows.
-`v0.1.0-pre.2` was cut that way and is now published:
+`v0.1.0-pre.2` was cut that way and is published. `v0.1.0-pre.3` is prepared but **not tagged**:
 
 ```bash
-git tag -a v0.1.0-pre.2 -m "v0.1.0-pre.2: second public pre-release" d80fee7
-git tag -n --list 'v0.1.0-pre.2'
-git push origin v0.1.0-pre.2        # already done; tag object 95f7930
+git tag -a v0.1.0-pre.3 -m "v0.1.0-pre.3: third public pre-release" <release-prep commit>
+git tag -n --list 'v0.1.0-pre.3'
+git push origin v0.1.0-pre.3        # not run: this release is not published yet
 ```
 
-`v0.1.0-pre` was cut the same way on `fd949ce` (`-m "v0.1.0-pre: first public pre-release"`) and
-remains the previous published release; do not move it.
+`v0.1.0-pre.2` was cut the same way on `d80fee7` (`-m "v0.1.0-pre.2: second public pre-release"`),
+producing tag object `95f7930`; it does not move. `v0.1.0-pre` was cut on `fd949ce`
+(`-m "v0.1.0-pre: first public pre-release"`) and remains the first published release; do not
+move it.
 
 Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
 
@@ -83,12 +92,13 @@ Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
   `ghcr.io/<owner>/ajs-dashboard:<tag>`, then moves `:latest` for both with
   `docker buildx imagetools create`, which aliases the already-pushed manifest rather than
   rebuilding.
-- A tag **containing `-`** (for example `v0.1.0-pre.2`) pushes only the `:<tag>` images and
+- A tag **containing `-`** (for example `v0.1.0-pre.3`) pushes only the `:<tag>` images and
   leaves `:latest` on the last final release. The two promotion steps are gated on
   `if: ${{ !contains(github.ref_name, '-') }}`.
-- Both workflows mark the GitHub Release with
+- `package.yml` marks the release it creates with
   `prerelease: ${{ contains(github.ref_name, '-') }}`: a `-` tag creates a prerelease, a final
-  tag a normal release. `package.yml` attaches the six artifacts to that release either way.
+  tag a normal release, and it attaches the six artifacts either way. `release.yml` never
+  creates a release; it only updates notes after `package.yml` publishes.
 - The accountd image is built with `build-args: AJS_VERSION=${{ github.ref_name }}` and
   `AJS_COMMIT=${{ github.sha }}`, so `/healthz` and `ajs-accountd -version` inside a `:<tag>`
   image name that tag and commit. The dashboard image takes only `VITE_USE_MOCK=false` and
@@ -97,7 +107,31 @@ Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
   these args and report `0.1.0` (their contents were not pulled and inspected); the published
   `v0.1.0-pre.2` accountd image was built with the tag and commit.
 
-Observed for the published releases:
+## Attestations, immutability and draft-first publishing
+
+`v0.1.0-pre.3` is the first release cut with this procedure. **It has not run yet**: the tag is
+not pushed, so no attestation exists and the immutable flag has never been observed for it.
+
+- `package.yml` signs a build-provenance statement for exactly the six release files with
+  `actions/attest-build-provenance` (`id-token: write`, `attestations: write`). It creates the
+  GitHub release as a **draft**, attaches all six assets, and only then publishes it with
+  `gh release edit "$TAG" --draft=false`.
+- `release.yml` attests each pushed image **by digest** with `push-to-registry: true`, never
+  creates a release and never attaches assets. It waits up to 10 minutes (`gh release view`) for
+  the draft, then updates the notes with `gh release edit --notes-file`; if the release never
+  appears, the job fails.
+- Draft-first is the only order an immutable release accepts: assets are locked at publication,
+  so a release published before its assets exist could never accept them. Title and notes stay
+  editable after publication.
+- The repository's immutable-releases setting is enabled
+  (`gh api repos/dwgx/AIJIASU2API/immutable-releases --jq .enabled` → `true`). A release
+  published while it is enabled locks the tag and assets and automatically carries a **release
+  attestation**, which `gh release verify-asset` checks.
+- `v0.1.0-pre.2` and earlier were published by the previous flow (the image workflow created the
+  release): they have no build provenance and no release attestation, and the API reports
+  `"immutable": false` for `v0.1.0-pre.2`. The strict verifier fails closed for them by design.
+
+Workflow state for the published releases and the prepared one:
 
 | Workflow | Ref | Result |
 |---|---|---|
@@ -108,11 +142,16 @@ Observed for the published releases:
 | `ci` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170300 |
 | `package` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170289; six assets attached |
 | `release` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170280; both `:v0.1.0-pre.2` images pushed, `:latest` skipped |
+| `ci` | tag `v0.1.0-pre.3` | **pending** — tag not pushed |
+| `package` | tag `v0.1.0-pre.3` | **pending** — will attest the six files, create the draft, attach, publish |
+| `release` | tag `v0.1.0-pre.3` | **pending** — will attest both image digests and update the notes |
 
 One earlier `package` run on the `v0.1.0-pre` tag at `8847db6` failed; that tag now points at
 `fd949ce` and the historical rows above are its published state. A tag may be moved while it is
 still unpublished; once published it is immutable, because the assets and images are bound to the
-commit they were built from. Neither `v0.1.0-pre` nor `v0.1.0-pre.2` may be moved.
+commit they were built from. Neither `v0.1.0-pre` nor `v0.1.0-pre.2` may be moved, and
+`v0.1.0-pre.3` will be locked by GitHub once its immutable release is published. Nothing has run
+for `v0.1.0-pre.3` yet; the three pending rows are expectations, not results.
 
 ## Release gates
 
@@ -130,7 +169,7 @@ control), but a CI runner is not the release host.
 | Live build | `VITE_USE_MOCK=false VITE_API_BASE= npm run build` | a live, token-free bundle |
 | Contract mirror | `cmp docs/openapi.json daemon/internal/api/openapi.json` | one contract, no drift |
 | Production kit | `sudo -E bash deploy/production/check.sh` | root Linux gate: nginx, systemd, firewall, TLS, CSP |
-| Packaging | `SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre.2 --out /tmp/ajs-pkg` then `sha256sum -c` and `./ajs-accountd-linux-amd64 -version` | reproducible artifact set whose binary prints the stamped tag and commit |
+| Packaging | `SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre.3 --out /tmp/ajs-pkg` then `sha256sum -c` and `./ajs-accountd-linux-amd64 -version` | reproducible artifact set whose binary prints the stamped tag and commit |
 | Secret scan | `git grep -nE 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|AJS_(ADMIN_TOKEN|MASTER_KEY|EPAY_KEY|STRIPE_WEBHOOK_SECRET)=[^[:space:]]'` | no committed credentials |
 
 Notes that matter:
@@ -148,10 +187,11 @@ Notes that matter:
 - The dashboard suite is timing-sensitive under load (release audit R9). Run it serial and
   unloaded; a failure under parallel audit load is not a pass.
 - GitHub Actions ran for both published tags (table above): `ci`, `package` and `release` are
-  green on `v0.1.0-pre.2`, and `package` attached six assets. Still `[UNVERIFIED]`: pulling
-  either GHCR image from this workstation (no Docker daemon, and a direct registry manifest
-  request failed here: HTTP 400 with an anonymous token, HTTP 401 with the local GitHub token),
-  and `deploy/update.sh` / `deploy/compose.release.yml` against the published images. The pushes
+  green on `v0.1.0-pre.2`, and `package` attached six assets. Nothing has run for
+  `v0.1.0-pre.3`; its workflow rows are pending. Still `[UNVERIFIED]`: pulling either GHCR image
+  from this workstation (no Docker daemon, and a direct registry manifest request failed here:
+  HTTP 400 with an anonymous token, HTTP 401 with the local GitHub token), and
+  `deploy/update.sh` / `deploy/compose.release.yml` against the published images. The pushes
   themselves are evidenced by the `release` job logs.
 
 ## Artifacts and checksums
@@ -173,9 +213,10 @@ The GitHub Release attaches the six files — the three binaries, `dashboard-dis
 is **not** an attached asset; the digest in `MANIFEST.txt` only lets you compare a kit built
 locally from the same commit.
 
-The six assets are attached to the published `v0.1.0-pre.2` release. The published set was
-verified against `SHA256SUMS` on 2026-10-29: **5/5 entries OK**. The six assets
-published for `v0.1.0-pre` were **not rebuilt** and remain as published. The `ajs` CLI is
+The six assets are attached to the published `v0.1.0-pre.2` release. That published set was
+verified against `SHA256SUMS` on 2026-10-29: **5/5 entries OK**. The six assets published for
+`v0.1.0-pre` were **not rebuilt** and remain as published. The six `v0.1.0-pre.3` assets do not
+exist yet: `package.yml` builds and attaches them when the tag is pushed. The `ajs` CLI is
 source-only and is not among the assets.
 
 For the previous `v0.1.0-pre` release, the assets were downloaded and checked on 2026-10-29 with
@@ -207,9 +248,14 @@ Known packaging limitations for this release:
   the three bare binaries ship without adjacent notice files. Verify the built set before
   calling it license-complete; the two container images are built by `release.yml` and their
   contents have not been inspected here.
+- Attestations and immutability are new and unexercised: the six-file provenance statement, the
+  per-digest image attestations, the draft-first publish and the immutable release have never run
+  for `v0.1.0-pre.3`. `v0.1.0-pre.2` has none of them (`"immutable": false`), and the strict
+  verifier fails closed for it.
 - The compose/GHCR path is unexercised: both `:v0.1.0-pre` and `:v0.1.0-pre.2` images were pushed
   by the `release` workflow, but no pull, `update.sh` run or compose render has been performed
-  against them. Pulling either tag from this workstation is `[UNVERIFIED]` (no Docker daemon).
+  against them. No `:v0.1.0-pre.3` image exists yet. Pulling any of these tags from this
+  workstation is `[UNVERIFIED]` (no Docker daemon).
 
 ## Rollback
 
@@ -221,19 +267,23 @@ Release rollback is a redeploy of the previous artifact set, not a git operation
 4. Start the daemon; check `/readyz` and one authenticated scoped-key read.
 5. Do not move a published tag: `v0.1.0-pre.2` (tag object `95f7930` on `d80fee7`) and
    `v0.1.0-pre` are immutable in practice because the assets and images are bound to the commits
-   they were built from. If this release is wrong, cut a new `-pre` tag and a new release
-   instead of rewriting either tag.
+   they were built from, and `v0.1.0-pre.3` will be locked by GitHub once its immutable release
+   is published. If this release is wrong, cut a new `-pre` tag and a new release instead of
+   rewriting any tag.
 
 Data is never rolled back by deleting the new state tree; leave it for inspection.
 
 ## Pointers
 
-- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2> — the current published
+- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.3> — the prepared release; pending
+  until the tag is pushed
+- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2> — the latest published
   prerelease
-- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre> — the previous published
-  prerelease
+- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre> — the first published prerelease
 - [`docs/OPERATIONS.md`](OPERATIONS.md) — install, health, backup, rotation
-- [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) — current release notes
-- [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — previous release notes, historical
+- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — install, verification, update, rollback
+- [`docs/releases/v0.1.0-pre.3.md`](releases/v0.1.0-pre.3.md) — current release notes
+- [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) — previous release notes, historical
+- [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — first release notes, historical
 - [`deploy/packaging.md`](../deploy/packaging.md) — artifact build details
 - [`SECURITY.md`](../SECURITY.md) — disclosure policy

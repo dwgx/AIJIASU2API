@@ -1,43 +1,47 @@
 # Versioning
 
-Status: current for `v0.1.0-pre.2`, published 2026-10-29. `v0.1.0-pre` remains the previous
-published release. This page defines how versions are named, which artefact carries which
-version, when `:latest` moves, and what compatibility a caller may rely on. The release
-procedure itself is [`docs/RELEASE.md`](RELEASE.md).
+Status: current for `v0.1.0-pre.3`, prepared 2026-10-29 and **not yet tagged**. The latest
+published release is `v0.1.0-pre.2`; `v0.1.0-pre` remains the first published release. This page
+defines how versions are named, which artefact carries which version, when `:latest` moves, and
+what compatibility a caller may rely on. The release procedure itself is
+[`docs/RELEASE.md`](RELEASE.md).
 
 ## Scheme
 
 Releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), tagged with a
 `v` prefix: `vMAJOR.MINOR.PATCH`, optionally with a hyphenated pre-release suffix
-(`v0.1.0-pre.2`). Build metadata is not used in tags.
+(`v0.1.0-pre.3`). Build metadata is not used in tags.
 
 - **`0.y.z` is not stable.** While the major version is `0`, a MINOR bump may contain a breaking
   change to the HTTP contract. A PATCH bump is fixes only.
-- **A hyphen marks a pre-release.** `v0.1.0-pre.2` sorts *after* `v0.1.0-pre` and *before*
-  `v0.1.0` under SemVer precedence and is not a stable release: no `:latest` movement, no
-  "latest release" claim, no compatibility promise beyond the contract in `docs/openapi.json`.
-- **The public line starts at `v0.1.0-pre`** (published 2026-10-27). The current pre-release is
-  `v0.1.0-pre.2`, published 2026-10-29 from commit `d80fee7`. The eight older tags
-  (`v0.1.0-archive` … `v0.7.0-live`) are milestone checkpoints in the project's own history, not
-  releases of the public line. They exist only in the local clone, so there is no earlier public
-  release and no upgrade or compatibility path from a milestone checkout. Do not order them
-  against the public line: SemVer compares pre-release identifiers lexically, so `v0.1.0-pre`
-  versus `v0.1.0-archive` or `v0.7.0-live` is not a meaningful comparison.
+- **A hyphen marks a pre-release.** `v0.1.0-pre.3` sorts *after* `v0.1.0-pre.2`, which sorts
+  after `v0.1.0-pre`, and all three sort *before* `v0.1.0` under SemVer precedence. A
+  pre-release is not a stable release: no `:latest` movement, no "latest release" claim, no
+  compatibility promise beyond the contract in `docs/openapi.json`.
+- **The public line starts at `v0.1.0-pre`** (published 2026-10-27). The latest published
+  pre-release is `v0.1.0-pre.2`, published 2026-10-29 from commit `d80fee7`; the current
+  pre-release is `v0.1.0-pre.3`, prepared 2026-10-29 from base `9966822` and **not yet tagged**.
+  The eight older tags (`v0.1.0-archive` … `v0.7.0-live`) are milestone checkpoints in the
+  project's own history, not releases of the public line. They exist only in the local clone, so
+  there is no earlier public release and no upgrade or compatibility path from a milestone
+  checkout. Do not order them against the public line: SemVer compares pre-release identifiers
+  lexically, so `v0.1.0-pre` versus `v0.1.0-archive` or `v0.7.0-live` is not a meaningful
+  comparison.
 
 Check the tag state before quoting a version:
 
 ```bash
-git tag --list 'v*' | wc -l              # 10: eight milestones plus both prereleases
-git ls-remote --tags origin              # v0.1.0-pre and v0.1.0-pre.2
+git tag --list 'v*' | wc -l              # 10 before the pre.3 tag; 11 after
+git ls-remote --tags origin              # v0.1.0-pre and v0.1.0-pre.2 (before the pre.3 push)
 ```
 
 ## Which artefact carries which version
 
 | Identity | Value in this release | Authority |
 |---|---|---|
-| Release | `v0.1.0-pre.2` (published; `v0.1.0-pre` is the previous published release) | the git tag |
+| Release | `v0.1.0-pre.3` (prepared; not yet tagged. `v0.1.0-pre.2` is the latest published release, `v0.1.0-pre` the first) | the git tag |
 | Contract | `0.1.0` | `info.version` in [`docs/openapi.json`](openapi.json) |
-| Binary | `v0.1.0-pre.2 (<commit>)` when stamped, else `0.1.0` | `-X` flags from `deploy/package.sh` or the Docker build args; else `DefaultVersion` |
+| Binary | `v0.1.0-pre.3 (<commit>)` when stamped, else `0.1.0` | `-X` flags from `deploy/package.sh` or the Docker build args; else `DefaultVersion` |
 | Artefact set | `MANIFEST.txt` + `SHA256SUMS` | `deploy/package.sh` at build time |
 
 The binary version is a build label, not the release identity. A `package.sh` build and a
@@ -45,8 +49,10 @@ released accountd image report the tag they were stamped with plus the packaged 
 without those flags — `go run`, `go test`, a plain `go build`, or `docker build` with default
 args — reports `0.1.0`. Identify a release by its tag and the `MANIFEST.txt` shipped with it,
 never by the version string the process prints. The published `v0.1.0-pre.2` Windows asset prints
-`ajs-accountd v0.1.0-pre.2 (d80fee76af2103052069a7278338d808b8aa8d6c)`. The previous
-`v0.1.0-pre` assets and images predate the stamping and report `0.1.0`; they were not rebuilt.
+`ajs-accountd v0.1.0-pre.2 (d80fee76af2103052069a7278338d808b8aa8d6c)`. No `v0.1.0-pre.3` asset
+has been built yet; a `package.sh --version v0.1.0-pre.3` build will print that tag and the
+packaged commit. The `v0.1.0-pre` assets and images predate the stamping and report `0.1.0`; they
+were not rebuilt.
 
 The contract version moves when the contract moves, not on every tag. A docs-only release can
 keep `0.1.0`; a change to paths, operations, schemas or scope metadata must bump it.
@@ -76,18 +82,24 @@ The published remote state, as observed on 2026-10-29:
 
 ```bash
 curl -sS https://api.github.com/repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.2 \
-  | python -c "import sys,json;d=json.load(sys.stdin);print(d['prerelease'],len(d['assets']))"
-# -> True 6
+  | python -c "import sys,json;d=json.load(sys.stdin);print(d['prerelease'],len(d['assets']),d['immutable'])"
+# -> True 6 False
+
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://api.github.com/repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.3
+# -> 404 (prepared, not tagged)
 ```
 
-The previous `v0.1.0-pre` release still answers `True 6` and keeps its six assets. The tag list
-shows both prereleases.
+The first `v0.1.0-pre` release still answers `True 6` and keeps its six assets. Before the
+`v0.1.0-pre.3` tag is pushed, `git ls-remote --tags origin` shows both earlier prereleases and
+nothing else.
 
 A tag containing `-` produces a GitHub Release marked **prerelease** and never moves `:latest`.
 The `v0.1.0-pre.2` image tags are `ghcr.io/dwgx/ajs-accountd:v0.1.0-pre.2` and
-`ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre.2`; both were pushed by the `release` workflow.
-Image presence was not verified from this workstation, so pulling either tag remains
-`[UNVERIFIED]` until `docker manifest inspect` answers here. The previous `v0.1.0-pre` images
+`ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre.2`; both were pushed by the `release` workflow. No
+`:v0.1.0-pre.3` image exists yet; `release.yml` will build and attest both digests when the tag is
+pushed. Image presence was not verified from this workstation, so pulling any of these tags
+remains `[UNVERIFIED]` until `docker manifest inspect` answers here. The `v0.1.0-pre` images
 remain as published.
 
 ## `:latest`
@@ -99,10 +111,12 @@ hyphen. The image workflow (`release.yml`) gates the promotion step on
 
 Consequences:
 
-- `v0.1.0-pre` publishes `:v0.1.0-pre` only, and `v0.1.0-pre.2` publishes `:v0.1.0-pre.2` only.
-  Since there is no final release, neither pre-release creates or moves `:latest`.
-- `deploy/update.sh` defaults to `latest`. Pass `--tag v0.1.0-pre.2` explicitly for a
-  pre-release; do not assume `latest` means "newest tag".
+- `v0.1.0-pre` publishes `:v0.1.0-pre` only, `v0.1.0-pre.2` publishes `:v0.1.0-pre.2` only, and
+  `v0.1.0-pre.3` will publish `:v0.1.0-pre.3` only. Since there is no final release, no
+  pre-release creates or moves `:latest`.
+- `deploy/update.sh` requires a release tag; the shipped `.env.example` value `latest` is refused
+  unless `--allow-latest` is given. Pass `--tag v0.1.0-pre.3` explicitly for this pre-release once
+  it is published; do not assume `latest` means "newest tag".
 - A dash tag is never a rollback target for `latest`, and a final tag never rewrites an existing
   versioned image.
 
@@ -133,6 +147,7 @@ notes for the delta.
 
 - [`docs/RELEASE.md`](RELEASE.md) — gates, tag creation, artefacts, rollback
 - [`CHANGELOG.md`](../CHANGELOG.md) — what changed per release
-- [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) — current release notes
-- [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — previous release notes, historical
+- [`docs/releases/v0.1.0-pre.3.md`](releases/v0.1.0-pre.3.md) — current release notes
+- [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) — previous release notes, historical
+- [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — first release notes, historical
 - [`deploy/packaging.md`](../deploy/packaging.md) — artefact build and verification
