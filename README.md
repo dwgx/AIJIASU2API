@@ -24,6 +24,9 @@ No vendor account, no vendor network and no Docker are needed for that. `AJS_ALL
 a loopback-only lab switch; startup refuses it on a non-loopback bind. Next:
 [`docs/API-GUIDE.md`](docs/API-GUIDE.md) for keys, leases and the gate, or the hosted demo below.
 
+**CLI:** `cd sdk/go && go build -o ajs ./cmd/ajs`, then `./ajs status` — `status`, `nodes`,
+`leases`, `lease <id>` and `doctor`; see [`docs/CLI.md`](docs/CLI.md).
+
 ## Live demo
 
 Operator-run and invite-only: keys are admin-issued `ajs_sk_` keys, there is no signup, no SLA,

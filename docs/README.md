@@ -34,6 +34,7 @@ by hand; **internal** — research or working material, not part of the public r
 | [`docs/openapi.json`](openapi.json) | current | OpenAPI 3.1 contract — the source of truth for shapes |
 | [`dashboard/public/docs/reference.md`](../dashboard/public/docs/reference.md) | generated | rendered reference, generated from the contract by `dashboard/scripts/gen-docs.mjs` |
 | [`sdk/README.md`](../sdk/README.md) | current | Go and TypeScript clients |
+| [`docs/CLI.md`](CLI.md) | current | source-built `ajs` command: status, nodes, leases, lease, doctor |
 | [`dashboard/README.md`](../dashboard/README.md) | current | operator console manual |
 
 ## Understand the evidence
