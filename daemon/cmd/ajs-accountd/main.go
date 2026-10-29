@@ -48,6 +48,14 @@ import (
 	"ajsproxy/fvfacade"
 )
 
+// buildVersion is the daemon release identity reported by /healthz and the Lab
+// overview. A release build stamps the tag in with
+// -X main.buildVersion=<tag> (deploy/package.sh); a `go run`, `go test` or
+// otherwise unstamped build keeps api.DefaultVersion, which is the version the
+// HTTP contract advertises. The value never carries a credential, so -version
+// prints it verbatim.
+var buildVersion = api.DefaultVersion
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("ajs-accountd failed", "error", err)
@@ -65,6 +73,7 @@ func run() error {
 	corsOrigins := flag.String("cors-origins", envOr("AJS_CORS_ORIGINS", strings.Join(api.DefaultCORSOrigins, ",")), "comma-separated allowed CORS origins")
 	adminOrigins := flag.String("admin-origins", os.Getenv("AJS_ADMIN_ORIGINS"), "comma-separated exact browser origins allowed on unsafe admin requests (env AJS_ADMIN_ORIGINS; default AJS_CORS_ORIGINS)")
 	logLevel := flag.String("log-level", envOr("AJS_LOG_LEVEL", "info"), "debug, info, warn or error")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	journalEnabled := flag.Bool("journal", os.Getenv("AJS_JOURNAL") == "1", "recover and append to the state journal (env AJS_JOURNAL=1; default: state.json snapshots)")
 	resinURL := flag.String("resin-url", envOr(resin.EnvBaseURL, resin.DefaultBaseURL), "Resin admin API base URL (env AJS_RESIN_URL)")
 	resinToken := flag.String("resin-token", os.Getenv(resin.EnvAdminToken), "Resin admin bearer token (env AJS_RESIN_ADMIN_TOKEN); empty disables the integration")
@@ -83,6 +92,15 @@ func run() error {
 	epayNotifyURL := flag.String("epay-notify-url", os.Getenv("AJS_EPAY_NOTIFY_URL"), "public 易支付 notify URL (env AJS_EPAY_NOTIFY_URL); empty derives from AJS_TENANT_ORIGIN")
 	epayReturnURL := flag.String("epay-return-url", os.Getenv("AJS_EPAY_RETURN_URL"), "public browser return URL (env AJS_EPAY_RETURN_URL); empty derives from AJS_TENANT_ORIGIN")
 	flag.Parse()
+
+	// -version is the release-identity probe: it prints the injected tag and
+	// the VCS revision, then exits 0. It runs before any state, secret or
+	// network access so a downloaded binary can identify itself on a host with
+	// no configuration.
+	if *showVersion {
+		fmt.Println(versionLine())
+		return nil
+	}
 
 	// The HTTPS admin listener is opt-in (AJS-276): AJS_TLS_CERT and
 	// AJS_TLS_KEY together enable it on AJS_TLS_LISTEN (default
@@ -566,7 +584,7 @@ func run() error {
 		nodeLimitFlag = strconv.Itoa(nodeLimitValue)
 	}
 	labView := runtime.NewLabView(runtime.LabConfig{
-		Version:      api.DefaultVersion,
+		Version:      buildVersion,
 		Commit:       buildCommit(),
 		Started:      started,
 		Store:        st,
@@ -653,7 +671,7 @@ func run() error {
 		AllowInsecure:        *insecure,
 		CORSOrigins:          splitList(*corsOrigins),
 		AdminOrigins:         adminOriginValues,
-		Version:              api.DefaultVersion,
+		Version:              buildVersion,
 		StateDir:             envOr("AJS_STATE_DIR", "./data"),
 		StatePath:            statePath,
 		AllowBackupRestore:   os.Getenv("AJS_BACKUP_ALLOW_RESTORE") == "1",
@@ -2389,6 +2407,19 @@ func buildCommit() string {
 		}
 	}
 	return ""
+}
+
+// versionLine renders the -version output. The commit is the VCS revision the
+// toolchain embedded; a build with -buildvcs=false (deploy/package.sh) has
+// none, and "unknown" keeps the line a stable two-field shape. The version is
+// the tag deploy/package.sh injected, or api.DefaultVersion for an unstamped
+// build.
+func versionLine() string {
+	commit := buildCommit()
+	if commit == "" {
+		commit = "unknown"
+	}
+	return fmt.Sprintf("ajs-accountd %s (%s)", buildVersion, commit)
 }
 
 func parseLevel(value string) slog.Level {

@@ -103,7 +103,7 @@ Each target is built from `daemon/` with:
 ```bash
 CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> GOTOOLCHAIN=local \
   go build -trimpath -buildvcs=false -mod=readonly \
-  -ldflags="-s -w -buildid=" -o <artifact> ./cmd/ajs-accountd
+  -ldflags="-s -w -buildid= -X main.buildVersion=<version>" -o <artifact> ./cmd/ajs-accountd
 ```
 
 - `CGO_ENABLED=0` — no C toolchain and no third-party C libraries. The Linux binary is fully
@@ -114,8 +114,14 @@ CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> GOTOOLCHAIN=local \
   dirty worktree cannot silently change the build metadata).
 - `-mod=readonly` — never rewrites `go.mod`/`go.sum` while packaging.
 - `GOTOOLCHAIN=local` — never downloads a toolchain mid-build.
-- `-ldflags="-s -w -buildid="` — strips the symbol table and DWARF data and zeroes the Go build
-  ID.
+- `-ldflags="-s -w -buildid= -X main.buildVersion=<version>"` — `-s -w -buildid=` strips the
+  symbol table and DWARF data and zeroes the Go build ID; `-X main.buildVersion=<version>`
+  injects the release tag (the `--version` value) into `main.buildVersion`, so `/healthz` and
+  `ajs-accountd -version` name the tag a binary was cut from instead of the compiled-in
+  default.
+- The version is validated to `A-Za-z0-9._+/-` before any build starts, so it cannot split the
+  linker argument or change how the Go command parses `-ldflags`; whitespace, quotes and
+  backslashes are rejected rather than truncated.
 - `SOURCE_DATE_EPOCH` — defaults to the HEAD commit time (or the current time outside Git). It
   is recorded as `source_date_epoch`/`built_utc` and used as the normalized mtime for every file
   in `dashboard-dist.tar.gz` and `deploy-kit.tar.gz`.

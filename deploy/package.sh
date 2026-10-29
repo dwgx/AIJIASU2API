@@ -16,13 +16,13 @@
 # ../emulator, so both module trees must be present in this checkout.
 #
 # Reproducibility: binaries are built with -trimpath, -buildvcs=false,
-# -ldflags="-s -w -buildid=", -mod=readonly and GOTOOLCHAIN=local. Both tar
-# archives are staged with normalized mtimes and a sorted file list, and every
-# text file in them is rewritten to LF before the tar is created. That last
-# step matters on Windows: core.autocrlf=true turns .nft/.conf files into
-# CRLF, and nft(8) rejects CRLF line terminators. SOURCE_DATE_EPOCH defaults
-# to the HEAD commit time, so the same Go toolchain, clean tree and tar
-# implementation produce byte-identical artifacts.
+# -ldflags="-s -w -buildid= -X main.buildVersion=<version>", -mod=readonly and
+# GOTOOLCHAIN=local. Both tar archives are staged with normalized mtimes and a
+# sorted file list, and every text file in them is rewritten to LF before the
+# tar is created. That last step matters on Windows: core.autocrlf=true turns
+# .nft/.conf files into CRLF, and nft(8) rejects CRLF line terminators.
+# SOURCE_DATE_EPOCH defaults to the HEAD commit time, so the same Go toolchain,
+# clean tree and tar implementation produce byte-identical artifacts.
 
 set -euo pipefail
 
@@ -40,7 +40,8 @@ usage() {
   cat >&2 <<'EOF'
 usage: deploy/package.sh [options]
 
-  --version <version>       release version recorded in MANIFEST.txt
+  --version <version>       release version stamped into the binaries as
+                            main.buildVersion and recorded in MANIFEST.txt
                             (default: git describe --tags --always --dirty,
                             else 0.0.0-dev)
   --out <dir>               output directory (default: <repo>/dist)
@@ -119,6 +120,18 @@ if [ -z "$VERSION" ]; then
   [ -n "$VERSION" ] || VERSION=0.0.0-dev
 fi
 
+# The version is also the linker value: -X main.buildVersion=<version> is one
+# linker argument, so whitespace would split it and a quote or backslash would
+# change how the Go command parses -ldflags. Reject those before any build
+# starts instead of failing with a confusing linker error or, worse, stamping a
+# truncated version into the binary.
+case "$VERSION" in
+  *[[:space:]]*) die "version must not contain whitespace: '$VERSION'" ;;
+esac
+case "$VERSION" in
+  *[!A-Za-z0-9._+/-]*) die "version may contain only letters, digits, '.', '_', '+', '/' and '-': '$VERSION'" ;;
+esac
+
 COMMIT=unknown
 WORKTREE=unknown
 if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -156,7 +169,12 @@ if [ -f "$ROOT/dashboard/package.json" ]; then
   DASHBOARD_VERSION=$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$ROOT/dashboard/package.json")
   [ -n "$DASHBOARD_VERSION" ] || DASHBOARD_VERSION=unknown
 fi
-LDFLAGS='-s -w -buildid='
+# -X main.buildVersion=<version> is the release identity (AJS-506): the daemon
+# reports it from /healthz and `ajs-accountd -version`, so a downloaded binary
+# names the tag it was cut from instead of api.DefaultVersion. $VERSION is
+# validated above, so it cannot split or alter this linker argument. The
+# remaining flags keep the build reproducible.
+LDFLAGS="-s -w -buildid= -X main.buildVersion=$VERSION"
 BUILD_FLAGS='CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -buildvcs=false -mod=readonly'
 
 ARTIFACT_NAMES=(

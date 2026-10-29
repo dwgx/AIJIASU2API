@@ -17,9 +17,16 @@ specific build, so it is generated and verified at build time, never copied into
   not infer ordering from them: semver compares pre-release identifiers lexically, so ordering
   `v0.1.0-pre` against names like `v0.1.0-archive` or `v0.7.0-live` is meaningless. The public
   line starts at `v0.1.0-pre`.
-- `docs/openapi.json` and `daemon/internal/api/server.go` both say `0.1.0`. The binary has no
-  build-time version injection (`-ldflags` carries no `-X`), so a `v0.1.0-pre` binary still
-  reports `0.1.0`. The release identity is the **tag plus `MANIFEST.txt`**, not `/healthz`.
+- `docs/openapi.json` and `daemon/internal/api/server.go` both say `0.1.0`. That is the
+  fallback (`api.DefaultVersion`), not the release identity: release builds inject the tag into
+  the binary (`deploy/package.sh` passes `-X main.buildVersion=<version>`), so a binary built
+  from `v0.1.0-pre` reports `v0.1.0-pre` in `/healthz` and prints
+  `ajs-accountd v0.1.0-pre (<commit>)` for `ajs-accountd -version`. A `go run`, `go test` or
+  otherwise unstamped build still reports `0.1.0`.
+- The assets already published for `v0.1.0-pre` were built **before** that injection existed and
+  were not rebuilt, so those binaries still report `0.1.0` in `/healthz`. For the published
+  assets the release identity remains the **tag plus `MANIFEST.txt`**, not `/healthz`; only a
+  build from a later tag reports its own tag.
 
 ## Repository state at this release
 
