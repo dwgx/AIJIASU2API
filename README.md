@@ -55,11 +55,10 @@ boundaries.
 
 ## Release status
 
-`v0.1.0-pre.2` is the current **pre-release**: usable for evaluation and research, not
-production-stable. The tag is cut from the release-prep commit and pushed after it; the previous
-published release remains `v0.1.0-pre`. What changed and what is intentionally absent is in
-[CHANGELOG.md](CHANGELOG.md); the near-term plan is in [ROADMAP.md](ROADMAP.md); the full notes,
-verified checks and known limitations are in
+`v0.1.0-pre.2` is the current **pre-release**, published 2026-10-29: usable for evaluation and
+research, not production-stable. The previous published release remains `v0.1.0-pre`. What
+changed and what is intentionally absent is in [CHANGELOG.md](CHANGELOG.md); the near-term plan
+is in [ROADMAP.md](ROADMAP.md); the full notes, verified checks and known limitations are in
 [docs/releases/v0.1.0-pre.2.md](docs/releases/v0.1.0-pre.2.md). The release also documents the
 read-only `ajs` CLI, built from source — see [docs/CLI.md](docs/CLI.md).
 
@@ -70,8 +69,8 @@ see [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md#known-limitations).
 
 ## What is implemented
 
-Counts below were measured on the release-prep commit. Re-run the commands in [Evidence](#evidence)
-if you need today's number.
+Counts below were measured at the tag. Re-run the commands in [Evidence](#evidence) if you need
+today's number.
 
 | Capability | State in `v0.1.0-pre.2` | Authority |
 |---|---|---|

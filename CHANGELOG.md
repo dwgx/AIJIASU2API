@@ -1,17 +1,16 @@
 # Changelog
 
 This file is an index, not the authority. A tag and its attached artifacts are authoritative for
-what shipped. Counts below were measured at the tag, or on the release-prep commit for an entry
-that is not tagged yet; re-run the commands in [README.md](README.md#evidence) if you need
-today's number.
+what shipped. Counts below were measured at the tag; re-run the commands in
+[README.md](README.md#evidence) if you need today's number.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [v0.1.0-pre.2] — 2026-10-29
 
-Second public pre-release, prepared on the release-prep commit; **not production-stable.** The tag
-is pushed after that commit. `v0.1.0-pre` remains the previous published release at `fd949ce`;
+Second public pre-release, published 2026-10-29 (tag `v0.1.0-pre.2`, target `d80fee7`);
+**not production-stable.** `v0.1.0-pre` remains the previous published release at `fd949ce`;
 it is not moved, and its assets were not rebuilt. See
 [docs/releases/v0.1.0-pre.2.md](docs/releases/v0.1.0-pre.2.md).
 
@@ -48,18 +47,17 @@ it is not moved, and its assets were not rebuilt. See
 
 ### Release assets
 
-The tag workflows attach the same six files as `v0.1.0-pre`: the three daemon binaries
+The published release carries the same six files as `v0.1.0-pre`: the three daemon binaries
 (linux/amd64, windows/amd64, darwin/arm64), `dashboard-dist.tar.gz`, `MANIFEST.txt` and
-`SHA256SUMS`. `deploy-kit.tar.gz` is digested by `package.sh` but not attached. No asset exists
-for this tag until `package.yml` runs on the push.
+`SHA256SUMS` (5/5 entries OK). `deploy-kit.tar.gz` is digested by `package.sh` but not attached.
 
 ### Known limitations
 
 - The CLI is source-only: no binary asset, no separate tag, no `:latest` image.
 - The live daemon remains `ajs-accountd-61625b0`; this release does not update the live host, and
   the live binary still predates the 10 s entitlement watch.
-- The Docker image build is `[UNVERIFIED]` locally (no Docker daemon); images are built in CI
-  after the push and have not been pulled or exercised here.
+- The Docker images were built and pushed in CI; pulling them is `[UNVERIFIED]` locally (no
+  Docker daemon), and they have not been exercised here.
 - No written vendor authorization is on file for the live multi-user CONNECT edge.
 - The demo is invite-only with no SLA, no signup and no resale, and may be withdrawn.
 

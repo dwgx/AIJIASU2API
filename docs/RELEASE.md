@@ -1,84 +1,81 @@
 # Release procedure
 
-Status: current for `v0.1.0-pre.2` (release prep, 2026-10-29; the tag is not yet created or
-pushed). The previous published release remains `v0.1.0-pre` on `fd949ce`. This page defines the
-version scheme, the gates that must pass, how the artifacts are built and verified, and how to
-roll back. It contains no checksum values: a checksum is only meaningful for a specific build, so
-it is generated and verified at build time, never copied into prose.
+Status: current for `v0.1.0-pre.2`, published 2026-10-29. The previous published release remains
+`v0.1.0-pre` on `fd949ce`. This page defines the version scheme, the gates that must pass, how
+the artifacts are built and verified, and how to roll back. It contains no checksum values: a
+checksum is only meaningful for a specific build, so it is generated and verified at build time,
+never copied into prose.
 
 ## Version scheme
 
 - Releases are semver: `vMAJOR.MINOR.PATCH`, with a hyphenated pre-release suffix. The first
-  public pre-release was **`v0.1.0-pre`**; the current pre-release is **`v0.1.0-pre.2`**, to be
-  cut from the release-prep commit. Both sort before `v0.1.0`, and `v0.1.0-pre.2` sorts after
-  `v0.1.0-pre`.
+  public pre-release was **`v0.1.0-pre`**; the current pre-release is **`v0.1.0-pre.2`**,
+  published 2026-10-29 from commit `d80fee7`. Both sort before `v0.1.0`, and `v0.1.0-pre.2`
+  sorts after `v0.1.0-pre`.
 - A pre-release is not a stable release: no compatibility promise beyond the contract in
   `docs/openapi.json`, no `:latest` movement, no "latest release" claim.
 - The eight existing tags (`v0.1.0-archive` … `v0.7.0-live`) are **milestone checkpoints** in
   the project's own history, not semver releases of the public line. They are local and
-  unpushed. `v0.1.0-pre` is the only tag on `origin` until `v0.1.0-pre.2` is pushed. Do not
-  present the milestones as releases, and do not infer ordering from them: semver compares
-  pre-release identifiers lexically, so ordering `v0.1.0-pre` against names like
-  `v0.1.0-archive` or `v0.7.0-live` is meaningless. The public line starts at `v0.1.0-pre`.
+  unpushed. `v0.1.0-pre` and `v0.1.0-pre.2` are the only tags on `origin`. Do not present the
+  milestones as releases, and do not infer ordering from them: semver compares pre-release
+  identifiers lexically, so ordering `v0.1.0-pre` against names like `v0.1.0-archive` or
+  `v0.7.0-live` is meaningless. The public line starts at `v0.1.0-pre`.
 - `docs/openapi.json` and `daemon/internal/api/server.go` both say `0.1.0`. That is the
   fallback (`api.DefaultVersion`), not the release identity: release builds inject the tag and
   the commit into the binary (`deploy/package.sh` passes `-X main.buildVersion=<version>` and
   `-X main.buildCommitValue=<commit>`; `daemon/Dockerfile` takes the same two values as the
-  `AJS_VERSION`/`AJS_COMMIT` build args). A binary built from `v0.1.0-pre.2` therefore reports
-  `v0.1.0-pre.2` in `/healthz` and prints `ajs-accountd v0.1.0-pre.2 (<commit>)` for
-  `ajs-accountd -version`, where `<commit>` is the `git rev-parse HEAD` the package was cut from
-  (`unknown` when Git is unavailable). A `go run`, `go test` or otherwise unstamped build still
-  reports `0.1.0`, and its commit field is the toolchain VCS revision or `unknown`.
+  `AJS_VERSION`/`AJS_COMMIT` build args). The published `v0.1.0-pre.2` Windows binary prints
+  `ajs-accountd v0.1.0-pre.2 (d80fee76af2103052069a7278338d808b8aa8d6c)` for
+  `ajs-accountd -version`; `/healthz` reports the version but not the commit. A `go run`,
+  `go test` or otherwise unstamped build still reports `0.1.0`, and its commit field is the
+  toolchain VCS revision or `unknown`.
 - The assets already published for `v0.1.0-pre` were built **before** either injection existed
   and were not rebuilt, so those binaries still report `0.1.0` in `/healthz` and print no
   commit. For those published assets the release identity remains the **tag plus
-  `MANIFEST.txt`**, not `/healthz`; a build from `v0.1.0-pre.2` reports its own tag and commit
-  once it is built from the tag.
+  `MANIFEST.txt`**, not `/healthz`.
 
 ## Repository state at this release
 
 ```bash
-git remote -v                       # origin https://github.com/dwgx/AIJIASU2API.git
-git ls-remote --symref origin HEAD  # ref: refs/heads/main
-git rev-parse --short HEAD          # the release-prep commit you tag; do not copy a hash
-git tag --list 'v*' | wc -l         # 9 before the new tag, 10 after
-git ls-remote --tags origin         # v0.1.0-pre only until v0.1.0-pre.2 is pushed
-git status --porcelain              # must be empty before tagging
+git remote -v                           # origin https://github.com/dwgx/AIJIASU2API.git
+git ls-remote --symref origin HEAD      # ref: refs/heads/main
+git rev-parse --short 'v0.1.0-pre.2^{}' # d80fee7, the tagged commit
+git tag --list 'v*' | wc -l             # 10: eight local milestones plus both prereleases
+git ls-remote --tags origin             # v0.1.0-pre and v0.1.0-pre.2
+git status --porcelain                  # docs edits after the tag do not change it
 ```
 
-These are the observed shapes on 2026-10-29; re-run them on the commit you actually tag. The tag
-count is 9 before the new tag (eight local milestones plus the published `v0.1.0-pre`) and 10
-after `v0.1.0-pre.2` exists locally.
+These are the observed values on 2026-10-29. The tag count is 10: eight local milestone tags
+plus the two published prereleases, `v0.1.0-pre` and `v0.1.0-pre.2`.
 
 The published state, as observed:
 
 - `origin` is `https://github.com/dwgx/AIJIASU2API.git`; the default branch is `main`.
 - `v0.1.0-pre` is an annotated tag (tagger date 2026-10-27T20:25:37Z) on commit `fd949ce`,
-  pushed to `origin`. That tag is the published release identity and does not move.
-- `v0.1.0-pre.2` is **not yet tagged or pushed**. Its target is the release-prep commit that
-  contains this page and the new release notes; `git rev-parse HEAD` at tag time is the value,
-  not a hash copied into prose.
-- `main` may be ahead of the published tag. `main` may move; a tag does not. Only the tag is the
+  pushed to `origin`. It remains the previous published release and does not move.
+- `v0.1.0-pre.2` is an annotated tag object `95f7930` on commit `d80fee7`, pushed to `origin`.
+  `git ls-remote --tags origin` lists both tags (tag object plus `^{}` dereference).
+- `main` may be ahead of a published tag. `main` may move; a tag does not. Only the tag is the
   release identity, and later commits are not part of that release.
-- The GitHub Release for `v0.1.0-pre` is a **prerelease** with six assets:
-  <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre>. The `v0.1.0-pre.2` release does
-  not exist yet; it is created when the tag is pushed.
-- The `release` workflow pushed `ghcr.io/dwgx/ajs-accountd:v0.1.0-pre` and
-  `ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre`; the `:latest` promotion steps were skipped. The
-  `v0.1.0-pre.2` images are pending the push.
+- The GitHub Release for `v0.1.0-pre.2` is a **prerelease** with six assets:
+  <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2>. The previous release
+  `v0.1.0-pre` remains a prerelease with its six assets.
+- The `release` workflow pushed `ghcr.io/dwgx/ajs-accountd:v0.1.0-pre.2` and
+  `ghcr.io/dwgx/ajs-dashboard:v0.1.0-pre.2`; the `:latest` promotion steps were skipped. The
+  `v0.1.0-pre` images remain as published.
 - The project page <https://dwgx.github.io/AIJIASU2API/> is published from `main`.
 
-Tag only after every gate below is green, then push; the push is what runs the workflows. The
-current tag is cut that way:
+Tag only after every gate below is green, then push; the push is what runs the workflows.
+`v0.1.0-pre.2` was cut that way and is now published:
 
 ```bash
-git tag -a v0.1.0-pre.2 -m "v0.1.0-pre.2: second public pre-release"
+git tag -a v0.1.0-pre.2 -m "v0.1.0-pre.2: second public pre-release" d80fee7
 git tag -n --list 'v0.1.0-pre.2'
-git push origin v0.1.0-pre.2        # not yet done; the push runs the workflows
+git push origin v0.1.0-pre.2        # already done; tag object 95f7930
 ```
 
 `v0.1.0-pre` was cut the same way on `fd949ce` (`-m "v0.1.0-pre: first public pre-release"`) and
-is already published; do not move it.
+remains the previous published release; do not move it.
 
 Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
 
@@ -97,11 +94,10 @@ Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
   image name that tag and commit. The dashboard image takes only `VITE_USE_MOCK=false` and
   `VITE_API_BASE=`. The `:latest` promotion aliases the already-built `:<tag>` manifest, so the
   alias carries the same stamped identity. The published `v0.1.0-pre` images were built without
-  these args and report `0.1.0` (their contents were not pulled and inspected); the
-  `v0.1.0-pre.2` image is built with them once the tag is pushed.
+  these args and report `0.1.0` (their contents were not pulled and inspected); the published
+  `v0.1.0-pre.2` accountd image was built with the tag and commit.
 
-Observed for the published release (2026-10-27, re-checked 2026-10-29), and pending for the
-current one:
+Observed for the published releases:
 
 | Workflow | Ref | Result |
 |---|---|---|
@@ -109,15 +105,14 @@ current one:
 | `package` | tag `v0.1.0-pre` (`fd949ce`) | success; six assets attached (historical) |
 | `release` | tag `v0.1.0-pre` (`fd949ce`) | success; both `:v0.1.0-pre` images pushed, `:latest` steps skipped (historical) |
 | `pages` | `main` | success on the published commit; the site answers `200` (historical) |
-| `ci` | tag `v0.1.0-pre.2` | **pending** — runs on push |
-| `package` | tag `v0.1.0-pre.2` | **pending** — six assets after push |
-| `release` | tag `v0.1.0-pre.2` | **pending** — `:v0.1.0-pre.2` images after push, `:latest` gated off |
-| `pages` | `main` (release-prep commit) | **pending** until the commit is pushed |
+| `ci` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170300 |
+| `package` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170289; six assets attached |
+| `release` | tag `v0.1.0-pre.2` (`d80fee7`) | success — run 40817170280; both `:v0.1.0-pre.2` images pushed, `:latest` skipped |
 
 One earlier `package` run on the `v0.1.0-pre` tag at `8847db6` failed; that tag now points at
 `fd949ce` and the historical rows above are its published state. A tag may be moved while it is
 still unpublished; once published it is immutable, because the assets and images are bound to the
-commit they were built from. Do not move `v0.1.0-pre`.
+commit they were built from. Neither `v0.1.0-pre` nor `v0.1.0-pre.2` may be moved.
 
 ## Release gates
 
@@ -152,11 +147,12 @@ Notes that matter:
   commit you tag.
 - The dashboard suite is timing-sensitive under load (release audit R9). Run it serial and
   unloaded; a failure under parallel audit load is not a pass.
-- GitHub Actions ran for `v0.1.0-pre` (table above); the `v0.1.0-pre.2` runs are **pending** the
-  push. Still `[UNVERIFIED]`: pulling either GHCR image from this workstation (no Docker daemon,
-  and a direct registry manifest request failed here: HTTP 400 with an anonymous token, HTTP 401
-  with the local GitHub token), and `deploy/update.sh` / `deploy/compose.release.yml` against the
-  published images. The `v0.1.0-pre` push itself is evidenced by the `release` job log.
+- GitHub Actions ran for both published tags (table above): `ci`, `package` and `release` are
+  green on `v0.1.0-pre.2`, and `package` attached six assets. Still `[UNVERIFIED]`: pulling
+  either GHCR image from this workstation (no Docker daemon, and a direct registry manifest
+  request failed here: HTTP 400 with an anonymous token, HTTP 401 with the local GitHub token),
+  and `deploy/update.sh` / `deploy/compose.release.yml` against the published images. The pushes
+  themselves are evidenced by the `release` job logs.
 
 ## Artifacts and checksums
 
@@ -177,11 +173,12 @@ The GitHub Release attaches the six files — the three binaries, `dashboard-dis
 is **not** an attached asset; the digest in `MANIFEST.txt` only lets you compare a kit built
 locally from the same commit.
 
-No asset exists for `v0.1.0-pre.2` yet: `package.yml` builds and attaches the six files when the
-tag is pushed. The six assets published for `v0.1.0-pre` were **not rebuilt** and remain as
-published. The `ajs` CLI is source-only and is not among the assets.
+The six assets are attached to the published `v0.1.0-pre.2` release. The published set was
+verified against `SHA256SUMS` on 2026-10-29: **5/5 entries OK**. The six assets
+published for `v0.1.0-pre` were **not rebuilt** and remain as published. The `ajs` CLI is
+source-only and is not among the assets.
 
-For the published `v0.1.0-pre` release, the assets were downloaded and checked on 2026-10-29 with
+For the previous `v0.1.0-pre` release, the assets were downloaded and checked on 2026-10-29 with
 `sha256sum -c SHA256SUMS` (GNU coreutils 8.32): **5/5 entries OK**, and `MANIFEST.txt` in that set
 records `commit: fd949ce…`, `worktree: clean`, `source_date_epoch: 1793132727`. Re-verify
 against the files you actually hold; the values are not copied into this page.
@@ -202,17 +199,17 @@ Known packaging limitations for this release:
   path), so two `--build-dashboard` runs are byte-identical (verified 2026-10-28).
 - Version stamping (AJS-506/AJS-510): `package.sh` injects `-X main.buildVersion=<version>` and
   `-X main.buildCommitValue=<commit>`; `release.yml` passes `AJS_VERSION`/`AJS_COMMIT` to the
-  accountd image. A `v0.1.0-pre.2` build therefore names its tag and commit, while the published
+  accountd image. The published `v0.1.0-pre.2` Windows binary prints
+  `ajs-accountd v0.1.0-pre.2 (d80fee76af2103052069a7278338d808b8aa8d6c)`, while the previous
   `v0.1.0-pre` assets and images predate the injection and still report `0.1.0`.
 - Redistribution notices: at this commit `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.md` are
   enforced inside `dashboard-dist.tar.gz` and `deploy-kit.tar.gz` and listed in `MANIFEST.txt`;
   the three bare binaries ship without adjacent notice files. Verify the built set before
   calling it license-complete; the two container images are built by `release.yml` and their
   contents have not been inspected here.
-- The compose/GHCR path is unexercised: the two `:v0.1.0-pre` images were pushed by the
-  `release` workflow, but no pull, `update.sh` run or compose render has been performed against
-  them. The `:v0.1.0-pre.2` images do not exist until the tag is pushed. Pulling either tag from
-  this workstation is `[UNVERIFIED]` (no Docker daemon).
+- The compose/GHCR path is unexercised: both `:v0.1.0-pre` and `:v0.1.0-pre.2` images were pushed
+  by the `release` workflow, but no pull, `update.sh` run or compose render has been performed
+  against them. Pulling either tag from this workstation is `[UNVERIFIED]` (no Docker daemon).
 
 ## Rollback
 
@@ -222,19 +219,19 @@ Release rollback is a redeploy of the previous artifact set, not a git operation
 2. Stop the daemon; restore the previous binary and the pre-upgrade state files.
 3. Restore the previous nginx/stream configs, `nginx -t`, reload.
 4. Start the daemon; check `/readyz` and one authenticated scoped-key read.
-5. If the new tag is wrong and still unpublished, delete it on both sides
-   (`git tag -d v0.1.0-pre.2 && git push --delete origin v0.1.0-pre.2`) and delete the GitHub
-   Release and its package versions. A published tag is immutable in practice: the assets and
-   images are bound to the commit they were built from, so moving it silently changes what a
-   downloader gets. Do not move the published `v0.1.0-pre` tag; cut a new `-pre` tag instead.
+5. Do not move a published tag: `v0.1.0-pre.2` (tag object `95f7930` on `d80fee7`) and
+   `v0.1.0-pre` are immutable in practice because the assets and images are bound to the commits
+   they were built from. If this release is wrong, cut a new `-pre` tag and a new release
+   instead of rewriting either tag.
 
 Data is never rolled back by deleting the new state tree; leave it for inspection.
 
 ## Pointers
 
-- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre> — the published prerelease
-- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2> — pending; created when the tag
-  is pushed
+- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre.2> — the current published
+  prerelease
+- <https://github.com/dwgx/AIJIASU2API/releases/tag/v0.1.0-pre> — the previous published
+  prerelease
 - [`docs/OPERATIONS.md`](OPERATIONS.md) — install, health, backup, rotation
 - [`docs/releases/v0.1.0-pre.2.md`](releases/v0.1.0-pre.2.md) — current release notes
 - [`docs/releases/v0.1.0-pre.md`](releases/v0.1.0-pre.md) — previous release notes, historical
