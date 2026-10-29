@@ -216,7 +216,11 @@ export default function Settings() {
   const transportReason = t('settings.transport.storedReason')
   const healthReason = t('settings.health.storedReason')
   const subscriptionReason = t('settings.subscription.storedReason')
-  const deployCommand = (tag: string) => `cd deploy && ./update.sh --tag ${tag}`
+  // Both commands are copied for the host to run. The dashboard never executes
+  // a root update: the panel has no update/verify endpoint by design.
+  const verifyCommand = (tag: string) =>
+    `cd deploy && ./verify-release.sh --tag ${tag} --require-attestation`
+  const updateCommand = (tag: string) => `cd deploy && ./update.sh --tag ${tag} --verify`
 
   return (
     <div className="stack-lg">
@@ -654,27 +658,41 @@ export default function Settings() {
                   </dl>
                 ) : null}
                 {updateInfo && updateInfo.enabled && updateInfo.latest ? (
-                  <div className="update-card__command">
-                    <code className="mono">{deployCommand(updateInfo.latest)}</code>
-                    <CopyButton
-                      value={deployCommand(updateInfo.latest)}
-                      label={t('settings.updates.copyCommand')}
-                      toastMessage={t('settings.updates.copied')}
-                      withLabel
-                    />
-                    {updateInfo.url ? (
-                      <a
-                        className="update-card__link"
-                        href={updateInfo.url}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                      >
-                        <ExternalLink size={12} aria-hidden="true" />{' '}
-                        {t('settings.updates.releaseNotes')}
-                      </a>
-                    ) : null}
-                  </div>
+                  <>
+                    <div className="update-card__command">
+                      <code className="mono">{verifyCommand(updateInfo.latest)}</code>
+                      <CopyButton
+                        value={verifyCommand(updateInfo.latest)}
+                        label={t('settings.updates.verifyCommand')}
+                        toastMessage={t('settings.updates.verifyCopied')}
+                        withLabel
+                      />
+                    </div>
+                    <div className="update-card__command">
+                      <code className="mono">{updateCommand(updateInfo.latest)}</code>
+                      <CopyButton
+                        value={updateCommand(updateInfo.latest)}
+                        label={t('settings.updates.updateCommand')}
+                        toastMessage={t('settings.updates.updateCopied')}
+                        withLabel
+                      />
+                      {updateInfo.url ? (
+                        <a
+                          className="update-card__link"
+                          href={updateInfo.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          <ExternalLink size={12} aria-hidden="true" />{' '}
+                          {t('settings.updates.releaseNotes')}
+                        </a>
+                      ) : null}
+                    </div>
+                  </>
                 ) : null}
+                <p className="setting-note">
+                  {t('settings.updates.hostOnly')} <code>deploy/README.md</code>
+                </p>
                 {updateInfo?.checkedAt ? (
                   <p className="setting-note">
                     {t('settings.updates.checked', { time: formatDateTime(updateInfo.checkedAt) })}

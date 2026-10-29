@@ -118,6 +118,11 @@ to `update-state.json`, then `pull`s and `up -d --no-build`s, and waits with bou
 `/healthz` on `2261` and the dashboard on `18081` to answer `200`. On failure it exits non-zero
 with the step that failed.
 
+Every update verifies the build provenance of both images with `gh attestation verify` before any
+container is switched; `--verify` is the default and `--allow-unverified` is the only opt-out
+(the state file then records `"verified": false`). To check a release before deploying it, run
+`./verify-release.sh --tag <tag> --require-attestation`.
+
 Rollback restores the previous image IDs by re-tagging them over the current references:
 
 ```bash
@@ -129,8 +134,11 @@ update — it is written before pulling, so it exists even if the update fails m
 overwrites it, so rollback is exactly one step: after a rollback you are on the pre-update
 images; run `./update.sh --tag <older>` to go further back (the GHCR tags still exist upstream).
 
-The dashboard's **Settings → Updates** card surfaces the latest GitHub release and this exact
-command (read-only check; the daemon never updates itself). See
+The dashboard's **Settings → Updates** card surfaces the latest GitHub release and offers two
+copy-only commands — `./verify-release.sh --tag <tag> --require-attestation` and
+`./update.sh --tag <tag> --verify` — for the operator to run on the host. The card never executes
+a root update: it checks the release and copies the commands, and the daemon has no endpoint that
+applies an update. See
 [`../dashboard/README.md`](../dashboard/README.md#update-check-settings--updates).
 
 ## Start

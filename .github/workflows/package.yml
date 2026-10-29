@@ -4,6 +4,12 @@
 # GHCR images and the update path, and attaches no assets of its own so these
 # six files (and their SHA256SUMS) stay the complete, consistent set.
 #
+# This workflow also owns the release lifecycle on a tag: the release is
+# created as a draft, the six assets are attached to that draft, and only then
+# is it published (`gh release edit --draft=false`). Immutable releases lock
+# their assets at publication, so a published-first release could never accept
+# the assets. release.yml waits for this release and edits only its notes.
+#
 # Nothing is built until the `verify` job passes: it calls the reusable
 # verify.yml full gate (pins, notices, govulncheck, lockfile/audit, live
 # build, production kit) and the `package` job needs it, so a red suite cannot
@@ -12,7 +18,10 @@
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # The same set is uploaded as a workflow artifact on every run, including
-# workflow_dispatch runs that are not tags.
+# workflow_dispatch runs that are not tags. Every run also attests the six
+# files with actions/attest-build-provenance, so a consumer can require
+# `gh attestation verify <asset> --repo <owner>/<repo>` before deploying;
+# deploy/verify-release.sh does exactly that.
 #
 # Artifacts:
 #   ajs-accountd-linux-amd64
@@ -44,6 +53,13 @@ jobs:
     name: Package artifacts
     needs: verify
     runs-on: ubuntu-latest
+    # contents: write attaches the release assets; id-token/attestations let
+    # actions/attest-build-provenance sign the provenance statement for the
+    # six files with the workflow's OIDC identity.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -77,9 +93,13 @@ jobs:
           echo "value=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package
+        # The version comes from the tag on tag runs, so it is untrusted shell
+        # input; env keeps it out of the script text.
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
           bash deploy/package.sh \
-            --version "${{ steps.version.outputs.value }}" \
+            --version "$VERSION" \
             --out dist \
             --build-dashboard
 
@@ -96,6 +116,20 @@ jobs:
           done
           echo 'release archive notices: OK'
 
+      - name: Attest release assets
+        # Signs a SLSA build-provenance statement for exactly the six files
+        # below, so deploy/verify-release.sh can require `gh attestation
+        # verify` to pass for every downloaded asset.
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/ajs-accountd-linux-amd64
+            dist/ajs-accountd-windows-amd64.exe
+            dist/ajs-accountd-darwin-arm64
+            dist/dashboard-dist.tar.gz
+            dist/MANIFEST.txt
+            dist/SHA256SUMS
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -109,11 +143,16 @@ jobs:
             dist/MANIFEST.txt
             dist/SHA256SUMS
 
-      - name: Attach artifacts to the GitHub Release
+      # Immutable releases lock their assets at publication, so the release is
+      # created as a draft, all six assets are attached here, and only the
+      # step below publishes it. release.yml never creates a release; it waits
+      # for this one and edits the notes.
+      - name: Create the draft release with the six assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
@@ -126,3 +165,12 @@ jobs:
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$REF_NAME" --draft=false
+          echo "published ${REF_NAME}"

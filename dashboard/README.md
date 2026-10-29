@@ -874,17 +874,20 @@ clicks **Check** (`GET /v1/system/update`, one request, no polling).
 |---|---|
 | Before a check | current version + **Check** button |
 | `enabled: false` | explanation that `AJS_UPDATE_REPO` is not configured on the daemon |
-| `updateAvailable: true` | **Update available** badge, latest tag, published date, release-notes link, and a **Copy** button for the exact deploy command |
-| `updateAvailable: false` | **Up to date** badge, latest tag, published date, release-notes link, deploy command |
+| `updateAvailable: true` | **Update available** badge, latest tag, published date, release-notes link, and **Copy verify command** / **Copy update command** buttons |
+| `updateAvailable: false` | **Up to date** badge, latest tag, published date, release-notes link, both copy buttons |
 | Request failure | an inline alert with the error; the previous result (if any) is not cleared |
 
-The deploy command is exactly:
+The card copies two host commands and nothing else:
 
 ```bash
-cd deploy && ./update.sh --tag <latest>
+cd deploy && ./verify-release.sh --tag <tag> --require-attestation   # Copy verify command
+cd deploy && ./update.sh --tag <tag> --verify                        # Copy update command
 ```
 
-The dashboard never executes an update — `update.sh` is the host's job. Mock mode returns
+`--verify` is `update.sh`'s default; `--allow-unverified` is the explicit opt-out. The dashboard
+never executes a root update — both commands are copied for the host to run, and the panel has no
+endpoint that applies an update or runs verification. Mock mode returns
 `{enabled: false, current: "0.1.0"}`, so the mock build renders the disabled state; tests mock
 `api.getUpdate` for the other states.
 
@@ -974,9 +977,10 @@ placeholder. The component is `src/components/settings/WebhooksSection.tsx`.
   param changes.
   `tests/update-card.test.tsx` covers the Settings **Updates** card: no fetch on page load
   (check runs only on **Check**), the disabled state explaining `AJS_UPDATE_REPO`, the
-  update-available state with tag/date, copying the exact deploy command
-  (`cd deploy && ./update.sh --tag v0.2.0`), the release-notes link target, the up-to-date
-  badge and the error state (alert, no badge, cleared by a later successful check).
+  update-available state with tag/date, copying both host commands
+  (`cd deploy && ./verify-release.sh --tag v0.2.0 --require-attestation` and
+  `cd deploy && ./update.sh --tag v0.2.0 --verify`), the release-notes link target, the
+  up-to-date badge and the error state (alert, no badge, cleared by a later successful check).
   The platform wave adds five files. `tests/usage.test.tsx` drives the 7/30/90/366 window, the
   account filter, the baseline request with its explicit end-of-day bound, the summary tiles with
   previous-window deltas, the zero-filled chart, the three retention-note variants plus the

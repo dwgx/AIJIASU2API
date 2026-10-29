@@ -53,10 +53,10 @@ describe('updates card', () => {
     expect(await screen.findByText(/AJS_UPDATE_REPO/)).toBeInTheDocument()
     expect(screen.getByText(/not configured on the daemon/)).toBeInTheDocument()
     expect(screen.queryByText('Update available')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Copy deploy command/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Copy (verify|update) command/ })).not.toBeInTheDocument()
   })
 
-  it('shows the update-available state and copies the deploy command', async () => {
+  it('shows the update-available state and copies the verify and update commands', async () => {
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
     vi.spyOn(api, 'getUpdate').mockResolvedValue(release)
@@ -67,11 +67,21 @@ describe('updates card', () => {
     expect(await screen.findByText('Update available')).toBeInTheDocument()
     expect(screen.getByText('v0.2.0')).toBeInTheDocument()
 
-    const copy = await screen.findByRole('button', { name: 'Copy deploy command' })
-    await user.click(copy)
+    const verify = await screen.findByRole('button', { name: 'Copy verify command' })
+    await user.click(verify)
+    expect(writeText).toHaveBeenCalledWith(
+      'cd deploy && ./verify-release.sh --tag v0.2.0 --require-attestation',
+    )
+    expect(await screen.findByText('Verify command copied')).toBeInTheDocument()
 
-    expect(writeText).toHaveBeenCalledWith('cd deploy && ./update.sh --tag v0.2.0')
-    expect(await screen.findByText('Deploy command copied')).toBeInTheDocument()
+    const update = await screen.findByRole('button', { name: 'Copy update command' })
+    await user.click(update)
+    expect(writeText).toHaveBeenCalledWith('cd deploy && ./update.sh --tag v0.2.0 --verify')
+    expect(await screen.findByText('Update command copied')).toBeInTheDocument()
+
+    // Copy-only: the card states the dashboard never runs a root update.
+    expect(screen.getByText(/never executes a root update/)).toBeInTheDocument()
+    expect(screen.getByText('deploy/README.md')).toBeInTheDocument()
   })
 
   it('links to the release notes', async () => {

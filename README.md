@@ -96,6 +96,7 @@ The index with audience and status is [docs/README.md](docs/README.md). The shor
 | [docs/ADMIN-API.md](docs/ADMIN-API.md) | the operator-only surface and its credential rules |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, ports, storage, live topology |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | install, health, backup, rotation, upgrade, rollback |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | three install modes (systemd, Compose, Windows EXE), release verification, update, rollback — also in 简体中文 |
 | [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | what is enforced, where, and what is not protected |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 407/429/409/404/401/403/502/504 triage |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | the vendor protocol in brief, and why obfuscation is not encryption |

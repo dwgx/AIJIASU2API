@@ -31,6 +31,10 @@ state.json
 secrets.json
 config.json
 
+# deploy/update.sh runtime state: the image IDs and digests of the last
+# update, machine-local and regenerated on every run.
+deploy/update-state.json
+
 # Python caches
 __pycache__/
 .pytest_cache/

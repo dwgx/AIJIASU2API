@@ -10,9 +10,17 @@
 #   ghcr.io/<owner>/ajs-dashboard:<tag>  (:latest only for final tags)
 # A pre-release tag (one containing "-") never moves :latest.
 #
+# Each pushed image digest is attested with actions/attest-build-provenance
+# (subject-name without a tag, subject-digest from the build-push outputs,
+# bundle pushed to the registry), so deploy/update.sh can require
+# `gh attestation verify oci://<image>@<digest>` before switching containers.
+#
 # Platform binaries and the dashboard bundle are built and attached by
-# package.yml on the same tag. This workflow attaches no release assets, so
-# that workflow's SHA256SUMS always describes the complete asset set.
+# package.yml on the same tag. package.yml owns the release itself: it creates
+# it as a draft, attaches the six assets, then publishes it, which is the only
+# order immutable releases accept. This workflow never creates a release and
+# never attaches assets; it waits (bounded) for package.yml's release and then
+# updates its notes with `gh release edit --notes-file`.
 #
 # The `release` job needs the `verify` job (the reusable verify.yml full
 # gate: pins, notices, govulncheck, lockfile/audit, live build, production
@@ -28,6 +36,10 @@ on:
 permissions:
   contents: write
   packages: write
+  # Image attestations: the OIDC token identifies this workflow run and
+  # attestations: write lets the attestation be stored for the repository.
+  id-token: write
+  attestations: write
 
 env:
   # GHCR requires lowercase image namespaces even when the owner has
@@ -62,6 +74,7 @@ jobs:
       # daemon/go.mod replaces ajsproxy => ../emulator, so the accountd
       # build context is the repository root, not daemon/.
       - name: Build and push accountd image
+        id: accountd
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -75,9 +88,21 @@ jobs:
           tags: |
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}
 
+      # Attests the manifest digest that was just pushed, not the tag: the
+      # subject is the immutable digest, and push-to-registry stores the
+      # bundle next to the image so `gh attestation verify oci://...` works
+      # from a host that only has the digest (deploy/update.sh).
+      - name: Attest accountd image
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd
+          subject-digest: ${{ steps.accountd.outputs.digest }}
+          push-to-registry: true
+
       # The dashboard image also needs the root LICENSE/NOTICE files, so its
       # build context is the repository root too.
       - name: Build and push dashboard image
+        id: dashboard
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -89,46 +114,88 @@ jobs:
           tags: |
             ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}
 
+      - name: Attest dashboard image
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard
+          subject-digest: ${{ steps.dashboard.outputs.digest }}
+          push-to-registry: true
+
       # A pre-release tag (for example v0.1.0-pre) must not move :latest: the
       # alias stays on the last stable image. Only a final tag promotes the
       # immutable tag image to :latest, and it does so by adding an alias to
       # the already-pushed manifest rather than rebuilding.
       - name: Move accountd :latest (final releases only)
         if: ${{ !contains(github.ref_name, '-') }}
+        # The ref name is untrusted shell input (a tag may contain $, backticks
+        # or quotes), so it travels through env instead of being interpolated
+        # into the script.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ steps.owner.outputs.lower }}
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest \
-            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}
+            -t "ghcr.io/${OWNER}/ajs-accountd:latest" \
+            "ghcr.io/${OWNER}/ajs-accountd:${REF_NAME}"
 
       - name: Move dashboard :latest (final releases only)
         if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ steps.owner.outputs.lower }}
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest \
-            ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}
+            -t "ghcr.io/${OWNER}/ajs-dashboard:latest" \
+            "ghcr.io/${OWNER}/ajs-dashboard:${REF_NAME}"
 
-      - name: Generate release notes
-        id: notes
+      # package.yml owns release creation: it creates the release as a draft,
+      # attaches the six assets, then publishes. Immutable releases cannot
+      # accept assets after publication, so this workflow never creates a
+      # release and never attaches anything; it waits for that release and
+      # only edits the notes (title/notes stay editable on immutable
+      # releases).
+      - name: Wait for the package workflow's release
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          case "${GITHUB_REF_NAME}" in
+          attempt=0
+          while [ "$attempt" -lt 60 ]; do
+            if gh release view "$REF_NAME" >/dev/null 2>&1; then
+              echo "release ${REF_NAME} exists"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+          echo "release ${REF_NAME} did not appear within 10 minutes; package.yml creates and publishes it" >&2
+          exit 1
+
+      - name: Update release notes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ steps.owner.outputs.lower }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "$REF_NAME" in
             *-*) is_prerelease=1 ;;
             *)   is_prerelease=0 ;;
           esac
+          notes_file="${RUNNER_TEMP:-/tmp}/release-notes.md"
           {
-            echo 'body<<RELEASE_NOTES_EOF'
             echo "## Images"
             echo ''
-            echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:${{ github.ref_name }}`'
-            echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:${{ github.ref_name }}`'
+            echo "- \`ghcr.io/${OWNER}/ajs-accountd:${REF_NAME}\`"
+            echo "- \`ghcr.io/${OWNER}/ajs-dashboard:${REF_NAME}\`"
             if [ "$is_prerelease" = 0 ]; then
-              echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-accountd:latest`'
-              echo '- `ghcr.io/${{ steps.owner.outputs.lower }}/ajs-dashboard:latest`'
+              echo "- \`ghcr.io/${OWNER}/ajs-accountd:latest\`"
+              echo "- \`ghcr.io/${OWNER}/ajs-dashboard:latest\`"
             fi
             echo ''
             echo '## Update on HMC'
             echo ''
             echo '```bash'
-            echo 'cd deploy && ./update.sh --tag ${{ github.ref_name }}'
+            echo "cd deploy && ./update.sh --tag ${REF_NAME}"
             echo '```'
             echo ''
             echo 'Roll back with `./update.sh --rollback`.'
@@ -142,13 +209,6 @@ jobs:
             echo 'The package workflow attaches `ajs-accountd-linux-amd64`,'
             echo '`ajs-accountd-windows-amd64.exe`, `ajs-accountd-darwin-arm64`,'
             echo '`dashboard-dist.tar.gz`, `MANIFEST.txt` and `SHA256SUMS` to this release.'
-            echo 'RELEASE_NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          body: ${{ steps.notes.outputs.body }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          } > "$notes_file"
+          gh release edit "$REF_NAME" --notes-file "$notes_file"
+          echo "release notes updated for ${REF_NAME}"

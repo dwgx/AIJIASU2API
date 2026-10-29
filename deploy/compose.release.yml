@@ -11,11 +11,18 @@
 # AJS_GHCR_OWNER defaults to dwgx (the GHCR namespace this repo publishes
 # to) and AJS_IMAGE_TAG defaults to latest; both live in .env so update.sh
 # can pin a release tag without editing this file.
+#
+# Digest pinning: AJS_ACCOUNTD_DIGEST and AJS_DASHBOARD_DIGEST append an
+# @sha256:... reference to the tag, so the container starts from exactly
+# those bytes even if the tag is later moved. update.sh sets both from the
+# images it pulled and verified, and clears anything inherited from the
+# environment first. For a direct `docker compose` run, set them in .env,
+# e.g. AJS_ACCOUNTD_DIGEST=sha256:<64 hex>; leave them unset to track the tag.
 services:
   accountd:
     build: !reset null
-    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-accountd:${AJS_IMAGE_TAG:-latest}
+    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-accountd:${AJS_IMAGE_TAG:-latest}${AJS_ACCOUNTD_DIGEST:+@${AJS_ACCOUNTD_DIGEST}}
 
   dashboard:
     build: !reset null
-    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-dashboard:${AJS_IMAGE_TAG:-latest}
+    image: ghcr.io/${AJS_GHCR_OWNER:-dwgx}/ajs-dashboard:${AJS_IMAGE_TAG:-latest}${AJS_DASHBOARD_DIGEST:+@${AJS_DASHBOARD_DIGEST}}

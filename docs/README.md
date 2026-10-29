@@ -15,6 +15,7 @@ surface.
 |---|---|---|
 | [`README.md`](../README.md) | current | front door: what this is, quick start, use boundary |
 | [`docs/OPERATIONS.md`](OPERATIONS.md) | current | install, health, backup, rotation, upgrade, rollback |
+| [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) | current | three deployment modes, release verification, update and rollback; 简体中文 at [`DEPLOYMENT.zh-CN.md`](DEPLOYMENT.zh-CN.md) |
 | [`docs/RELEASE.md`](RELEASE.md) | current | version scheme, release gates, artefacts, checksums, rollback |
 | [`docs/releases/`](releases/) | current | one notes file per release; `v0.1.0-pre.2` is current |
 | [`docs/VERSIONING.md`](VERSIONING.md) | current | SemVer policy, tag vs assets, `:latest`, deprecation |
