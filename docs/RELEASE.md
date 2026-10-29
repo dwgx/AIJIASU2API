@@ -18,15 +18,18 @@ specific build, so it is generated and verified at build time, never copied into
   `v0.1.0-pre` against names like `v0.1.0-archive` or `v0.7.0-live` is meaningless. The public
   line starts at `v0.1.0-pre`.
 - `docs/openapi.json` and `daemon/internal/api/server.go` both say `0.1.0`. That is the
-  fallback (`api.DefaultVersion`), not the release identity: release builds inject the tag into
-  the binary (`deploy/package.sh` passes `-X main.buildVersion=<version>`), so a binary built
-  from `v0.1.0-pre` reports `v0.1.0-pre` in `/healthz` and prints
-  `ajs-accountd v0.1.0-pre (<commit>)` for `ajs-accountd -version`. A `go run`, `go test` or
-  otherwise unstamped build still reports `0.1.0`.
-- The assets already published for `v0.1.0-pre` were built **before** that injection existed and
-  were not rebuilt, so those binaries still report `0.1.0` in `/healthz`. For the published
-  assets the release identity remains the **tag plus `MANIFEST.txt`**, not `/healthz`; only a
-  build from a later tag reports its own tag.
+  fallback (`api.DefaultVersion`), not the release identity: release builds inject the tag and
+  the commit into the binary (`deploy/package.sh` passes `-X main.buildVersion=<version>` and
+  `-X main.buildCommitValue=<commit>`; `daemon/Dockerfile` takes the same two values as the
+  `AJS_VERSION`/`AJS_COMMIT` build args). A binary built from `v0.1.0-pre` therefore reports
+  `v0.1.0-pre` in `/healthz` and prints `ajs-accountd v0.1.0-pre (<commit>)` for
+  `ajs-accountd -version`, where `<commit>` is the `git rev-parse HEAD` the package was cut from
+  (`unknown` when Git is unavailable). A `go run`, `go test` or otherwise unstamped build still
+  reports `0.1.0`, and its commit field is the toolchain VCS revision or `unknown`.
+- The assets already published for `v0.1.0-pre` were built **before** either injection existed
+  and were not rebuilt, so those binaries still report `0.1.0` in `/healthz` and print no
+  commit. For the published assets the release identity remains the **tag plus `MANIFEST.txt`**,
+  not `/healthz`; only a build from a later tag reports its own tag and commit.
 
 ## Repository state at this release
 
@@ -75,6 +78,13 @@ Both `release.yml` and `package.yml` fire on a pushed `v*` tag:
 - Both workflows mark the GitHub Release with
   `prerelease: ${{ contains(github.ref_name, '-') }}`: a `-` tag creates a prerelease, a final
   tag a normal release. `package.yml` attaches the six artifacts to that release either way.
+- The accountd image is built with `build-args: AJS_VERSION=${{ github.ref_name }}` and
+  `AJS_COMMIT=${{ github.sha }}`, so `/healthz` and `ajs-accountd -version` inside a `:<tag>`
+  image name that tag and commit. The dashboard image takes only `VITE_USE_MOCK=false` and
+  `VITE_API_BASE=`. The `:latest` promotion aliases the already-built `:<tag>` manifest, so the
+  alias carries the same stamped identity. The published `v0.1.0-pre` images were built without
+  these args and report `0.1.0` (their contents were not pulled and inspected); a later tag's
+  image reports its own tag.
 
 Observed for this release (2026-10-27, re-checked 2026-10-29):
 
@@ -106,7 +116,7 @@ control), but a CI runner is not the release host.
 | Live build | `VITE_USE_MOCK=false VITE_API_BASE= npm run build` | a live, token-free bundle |
 | Contract mirror | `cmp docs/openapi.json daemon/internal/api/openapi.json` | one contract, no drift |
 | Production kit | `sudo -E bash deploy/production/check.sh` | root Linux gate: nginx, systemd, firewall, TLS, CSP |
-| Packaging | `SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre --out /tmp/ajs-pkg` then `sha256sum -c` | reproducible artifact set |
+| Packaging | `SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre --out /tmp/ajs-pkg` then `sha256sum -c` and `./ajs-accountd-linux-amd64 -version` | reproducible artifact set whose binary prints the stamped tag and commit |
 | Secret scan | `git grep -nE 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|AJS_(ADMIN_TOKEN|MASTER_KEY|EPAY_KEY|STRIPE_WEBHOOK_SECRET)=[^[:space:]]'` | no committed credentials |
 
 Notes that matter:

@@ -73,7 +73,7 @@ where `daemon/` and `emulator/` are siblings.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--version <version>` | `git describe --tags --always --dirty`, else `0.0.0-dev` | version recorded in `MANIFEST.txt` |
+| `--version <version>` | `git describe --tags --always --dirty`, else `0.0.0-dev` | release version; stamped into the binaries and recorded in `MANIFEST.txt` |
 | `--out <dir>` | `<repo>/dist` | output directory; created if absent |
 | `--dashboard-dist <dir>` | `<repo>/dashboard/dist` | prebuilt live, token-free bundle to tar |
 | `--build-dashboard` | off | run `deploy/production/build-bundles.sh` (live recipe) before packaging |
@@ -103,25 +103,31 @@ Each target is built from `daemon/` with:
 ```bash
 CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> GOTOOLCHAIN=local \
   go build -trimpath -buildvcs=false -mod=readonly \
-  -ldflags="-s -w -buildid= -X main.buildVersion=<version>" -o <artifact> ./cmd/ajs-accountd
+  -ldflags="-s -w -buildid= -X main.buildVersion=<version> -X main.buildCommitValue=<commit>" \
+  -o <artifact> ./cmd/ajs-accountd
 ```
 
 - `CGO_ENABLED=0` — no C toolchain and no third-party C libraries. The Linux binary is fully
   static; the macOS binary still links the system `libSystem`, as every macOS process does.
   This is what makes the three targets build from any host.
 - `-trimpath` — removes absolute source paths from the binary.
-- `-buildvcs=false` — no VCS stamping (the commit is recorded in `MANIFEST.txt` instead, and a
-  dirty worktree cannot silently change the build metadata).
+- `-buildvcs=false` — no VCS stamping (the commit is stamped explicitly with `-X
+  main.buildCommitValue` and also recorded in `MANIFEST.txt`, and a dirty worktree cannot
+  silently change the build metadata).
 - `-mod=readonly` — never rewrites `go.mod`/`go.sum` while packaging.
 - `GOTOOLCHAIN=local` — never downloads a toolchain mid-build.
-- `-ldflags="-s -w -buildid= -X main.buildVersion=<version>"` — `-s -w -buildid=` strips the
-  symbol table and DWARF data and zeroes the Go build ID; `-X main.buildVersion=<version>`
-  injects the release tag (the `--version` value) into `main.buildVersion`, so `/healthz` and
-  `ajs-accountd -version` name the tag a binary was cut from instead of the compiled-in
-  default.
-- The version is validated to `A-Za-z0-9._+/-` before any build starts, so it cannot split the
-  linker argument or change how the Go command parses `-ldflags`; whitespace, quotes and
-  backslashes are rejected rather than truncated.
+- `-ldflags="-s -w -buildid= -X main.buildVersion=<version> -X main.buildCommitValue=<commit>"`
+  — `-s -w -buildid=` strips the symbol table and DWARF data and zeroes the Go build ID;
+  `-X main.buildVersion=<version>` injects the release tag (the `--version` value) into
+  `main.buildVersion`, so `/healthz` and `ajs-accountd -version` name the tag a binary was cut
+  from instead of the compiled-in default; `-X main.buildCommitValue=<commit>` injects the
+  commit (`git rev-parse HEAD`, or `unknown` outside Git) into `main.buildCommitValue`, which
+  `ajs-accountd -version` and the Lab overview print — without it `-buildvcs=false` would leave
+  the commit empty.
+- Both linker values are validated before any build starts: the version to `A-Za-z0-9._+/-`,
+  the commit to lowercase hex or `unknown`. Neither can split the linker argument or change how
+  the Go command parses `-ldflags`; whitespace, quotes and backslashes are rejected (version) or
+  replaced with `unknown` (commit) rather than truncated.
 - `SOURCE_DATE_EPOCH` — defaults to the HEAD commit time (or the current time outside Git). It
   is recorded as `source_date_epoch`/`built_utc` and used as the normalized mtime for every file
   in `dashboard-dist.tar.gz` and `deploy-kit.tar.gz`.
@@ -206,8 +212,8 @@ treat the directory as tampered and rebuild; do not trust either file alone.
 `MANIFEST.txt` fields:
 
 ```text
-version              the --version value
-commit               HEAD commit, or unknown outside Git
+version              the --version value, also stamped into the binaries as main.buildVersion
+commit               HEAD commit, or unknown outside Git; stamped into the binaries too
 worktree             clean or dirty (tracked files only)
 source_date_epoch    Unix timestamp used for reproducible metadata
 built_utc            that timestamp as UTC ISO-8601
@@ -365,6 +371,10 @@ does not build or push container images; that is
 it logs in to GHCR, so a red suite cannot push a tag image or move `:latest`. A pre-release tag
 (one containing `-`) pushes only `:<tag>`; only a final tag promotes that image to `:latest`.
 `release.yml` attaches no release assets, so `SHA256SUMS` always describes the complete asset set.
+The accountd image is built from `daemon/Dockerfile` with `AJS_VERSION=<tag>` and
+`AJS_COMMIT=<sha>`, which become the same two `-X` flags inside the image, so `/healthz` and
+`ajs-accountd -version` in a `:<tag>` image name that release; a local `docker build` without
+those args gets `0.1.0` / `unknown`.
 
 Run the same suites locally before tagging:
 

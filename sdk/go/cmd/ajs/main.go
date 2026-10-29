@@ -179,7 +179,10 @@ func normalizeBaseURL(raw string) (string, bool, error) {
 	if u.Host == "" {
 		return "", false, errors.New("invalid URL: no host")
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery catches a bare trailing "?", which url.Parse records as an
+	// empty RawQuery; without it "https://host:2055?" would yield
+	// "https://host:2055?/healthz" once a path is appended.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", false, errors.New("invalid URL: drop the query or fragment")
 	}
 	dropped := u.User != nil

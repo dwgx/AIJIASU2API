@@ -131,7 +131,9 @@ func New(baseURL, token string, opts ...Option) (*Client, error) {
 	if u.User != nil {
 		return nil, errors.New("ajs: base URL must not carry credentials")
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery covers a bare trailing "?", which url.Parse records with an
+	// empty RawQuery; it would otherwise become "?/healthz" on the first join.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return nil, errors.New("ajs: base URL must not carry a query or fragment")
 	}
 	if strings.TrimSpace(token) == "" {

@@ -20,8 +20,17 @@ COPY emulator/go.mod ./emulator/go.mod
 COPY daemon ./daemon
 COPY emulator ./emulator
 
+# Release identity stamped into the binary. release.yml passes the pushed tag
+# and the commit SHA, so `ajs-accountd -version` and /healthz inside a released
+# image name that tag; a local `docker build` keeps the defaults, and the daemon
+# then reports api.DefaultVersion (0.1.0) with commit "unknown". Declared after
+# the COPY layers so changing an argument only invalidates the build step.
+ARG AJS_VERSION=0.1.0
+ARG AJS_COMMIT=unknown
+
 WORKDIR /src/daemon
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -X main.buildVersion=${AJS_VERSION} -X main.buildCommitValue=${AJS_COMMIT}" \
       -o /out/ajs-accountd ./cmd/ajs-accountd
 
 FROM alpine:3.22 AS runtime

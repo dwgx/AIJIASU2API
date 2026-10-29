@@ -105,6 +105,47 @@ func TestAPIErrorIsTypedAndLeaksNoToken(t *testing.T) {
 	}
 }
 
+func TestAPIErrorRedactsReflectedBearer(t *testing.T) {
+	// A misbehaving server reflects the credential it received in the error
+	// envelope, in both message and reason. Error() must not carry it onward.
+	const token = "ajs_sk_reflected_secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusUnauthorized, `{"error":{"code":"UNAUTHORIZED","message":"rejected `+
+			r.Header.Get("Authorization")+`","reason":"bad Bearer `+token+`"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	client, err := New(srv.URL, token)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = client.ListAccounts(context.Background(), ListAccountsOptions{})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	text := err.Error()
+	if strings.Contains(text, token) {
+		t.Fatalf("error leaked the reflected token: %s", text)
+	}
+	if got := strings.Count(text, "Bearer [REDACTED]"); got != 2 {
+		t.Fatalf("redactions = %d, want 2 (message and reason): %s", got, text)
+	}
+	// The rest of the error survives: code, status, path and the surrounding
+	// words are untouched.
+	for _, want := range []string{"UNAUTHORIZED", "HTTP 401", "/v1/accounts", "rejected Bearer [REDACTED]", "(bad Bearer [REDACTED])"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error missing %q: %s", want, text)
+		}
+	}
+	if apiErr.Code != "UNAUTHORIZED" || apiErr.Reason != "bad Bearer "+token {
+		t.Errorf("the typed fields must stay unmodified: %+v", apiErr)
+	}
+}
+
 func TestRetriesServerErrorThenSucceeds(t *testing.T) {
 	var attempts atomic.Int32
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +364,14 @@ func TestNewValidatesInput(t *testing.T) {
 	}
 	if _, err := New("http://example.com?x=1", testToken); err == nil {
 		t.Fatal("query base URL accepted")
+	}
+	// A bare trailing "?" carries no RawQuery but still forces one, which would
+	// turn "http://host:2055?" into "http://host:2055?/healthz".
+	if _, err := New("http://example.com?", testToken); err == nil {
+		t.Fatal("bare question-mark base URL accepted")
+	}
+	if _, err := New("http://example.com#readyz", testToken); err == nil {
+		t.Fatal("fragment base URL accepted")
 	}
 }
 

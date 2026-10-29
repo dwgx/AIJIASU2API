@@ -4,13 +4,27 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 )
 
+// bearerToken matches a bearer credential in text that came from outside this
+// package, such as a daemon-supplied error message. The token charset is
+// restricted so the punctuation around it survives the replacement.
+var bearerToken = regexp.MustCompile(`(?i)bearer[ \t]+[A-Za-z0-9._~+/=:-]+`)
+
+// redactBearer removes a bearer credential from s. APIError carries the
+// daemon's own message and reason, and a server that reflects the request can
+// echo the Authorization header back; Error() must stay safe to log.
+func redactBearer(s string) string {
+	return bearerToken.ReplaceAllString(s, "Bearer [REDACTED]")
+}
+
 // APIError is a non-2xx answer from the daemon. It carries the machine-readable
 // code, the optional stable reason and the non-secret details map. The request
-// method and path are recorded; headers and bodies are never included, so an
-// error can be logged without leaking the bearer token.
+// method and path are recorded; headers and bodies are never included, and a
+// bearer credential reflected into the message or reason is redacted by
+// Error(), so an error can be logged without leaking the bearer token.
 type APIError struct {
 	StatusCode int
 	Code       string
@@ -22,7 +36,8 @@ type APIError struct {
 	Path       string
 }
 
-// Error implements error.
+// Error implements error. Every server-supplied field is redacted at the
+// single exit point, so a reflected Authorization header cannot escape.
 func (e *APIError) Error() string {
 	msg := e.Code
 	if msg == "" {
@@ -35,7 +50,7 @@ func (e *APIError) Error() string {
 	if e.Reason != "" {
 		out += " (" + e.Reason + ")"
 	}
-	return out
+	return redactBearer(out)
 }
 
 // Retryable reports whether the status class is transient.

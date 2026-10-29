@@ -28,8 +28,12 @@ third-party dependency and the build needs no network.
 | `--key` | `AJS_API_KEY` | admin token or scoped `ajs_sk_` key |
 
 A flag always wins over its environment variable. The key is sent only as
-`Authorization: Bearer …`; it is never printed, never written to a file, and never appears in an
-error message. `ajs status` accepts no key because it sends no credential.
+`Authorization: Bearer …`; the CLI never formats it into output, never writes it to a file, and
+redacts any `Bearer <token>` a server reflects back into an error (see Security notes).
+`ajs status` accepts no key because it sends no credential.
+
+A key passed as `--key` is visible in the process arguments (`ps`, Task Manager) to every local
+user; prefer `AJS_API_KEY` except for a throwaway key.
 
 `AJS_API_KEY` in the environment is readable by every child process of that shell. For an admin
 token prefer a dedicated shell or a secret store that injects the variable per command.
@@ -59,7 +63,7 @@ endpoint http://127.0.0.1:2261
 CHECK    HTTP  RESULT  VERSION
 healthz  200   PASS    0.1.0
 readyz   503   FAIL    0.1.0
-readyz: reasons: state_not_writable
+readyz: reasons: state: state directory is not writable
 ```
 
 An edge that does not expose `/readyz` answers 404 there; the check is skipped and the command
@@ -236,10 +240,14 @@ Data goes to stdout, notes and errors to stderr, so `ajs … --json | jq` stays 
 
 ## Security notes
 
-- **The key is never printed.** It is read from `--key` or `AJS_API_KEY`, sent only in the
-  `Authorization` header, and absent from tables, JSON, and error text. SDK errors carry the
-  method, path, status and the daemon's machine-readable `code`/`reason` — never headers or
-  request bodies.
+- **The CLI never prints the key itself.** It is read from `--key` or `AJS_API_KEY`, sent only in
+  the `Authorization` header, and absent from tables, JSON, and every line the CLI formats. SDK
+  errors carry the method, path, status and the daemon's machine-readable `code`/`reason` — never
+  headers or request bodies — and a `Bearer <token>` that a server reflects into `error.message`
+  or `error.reason` is replaced with `Bearer [REDACTED]` before the error is printed. The typed
+  `Reason` field itself is unchanged, so `IsScopeRequired`-style checks keep working.
+- **`--key` is visible in the process arguments.** Any local user can read it from `ps` or Task
+  Manager while the command runs; prefer `AJS_API_KEY` except for a throwaway key.
 - **URL credentials are dropped.** `https://user:pass@host` is accepted, the userinfo is removed
   before any request is built, and a one-line note goes to stderr. The CLI does not speak HTTP
   Basic auth. A malformed URL fails with a fixed message that does not echo what was typed, so a
@@ -280,8 +288,9 @@ go build -o ajs ./cmd/ajs
 ./ajs status --url http://127.0.0.1:1 --json   # exit 1, report printed, no panic
 ```
 
-The CLI suite (`sdk/go/cmd/ajs/main_test.go`, 21 tests) is hermetic: every case drives `run` against
+The CLI suite (`sdk/go/cmd/ajs/main_test.go`, 24 tests) is hermetic: every case drives `run` against
 an `httptest` server and covers status pass/fail/skip/JSON/unreachable, node sort/table/JSON and
 filters, lease list and detail, doctor pass/fail/skip/missing-key, the `Authorization` header,
-environment fallbacks and flag precedence, and secret redaction (API errors and URL userinfo). It
-needs no daemon, no network and no vendor account.
+environment fallbacks and flag precedence, URL validation (query, bare `?`, fragment), and secret
+redaction (API errors, server-reflected Bearer tokens and URL userinfo). It needs no daemon, no
+network and no vendor account.

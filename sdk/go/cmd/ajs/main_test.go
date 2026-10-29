@@ -214,7 +214,8 @@ func TestStatusFailsOnNotReady(t *testing.T) {
 	rec := &recorder{}
 	srv := newServer(t, rec, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" {
-			writeBody(w, 503, `{"status":"unready","reasons":["state_not_writable"]}`)
+			// The daemon emits "check: reason"; see daemon/internal/api/readyz.go.
+			writeBody(w, 503, `{"status":"not_ready","reasons":["state: state directory is not writable"]}`)
 			return
 		}
 		writeBody(w, 200, `{"status":"ok","version":"0.1.0"}`)
@@ -224,7 +225,7 @@ func TestStatusFailsOnNotReady(t *testing.T) {
 	if code != exitRuntime {
 		t.Fatalf("exit = %d, want %d", code, exitRuntime)
 	}
-	for _, want := range []string{"readyz", "503", "FAIL", "state_not_writable"} {
+	for _, want := range []string{"readyz", "503", "FAIL", "reasons: state: state directory is not writable"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout)
 		}
@@ -617,7 +618,7 @@ func TestDoctorFails(t *testing.T) {
 	rec := &recorder{}
 	srv := newServer(t, rec, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" {
-			writeBody(w, 503, `{"status":"unready","reasons":["state_not_writable"]}`)
+			writeBody(w, 503, `{"status":"not_ready","reasons":["state: state directory is not writable"]}`)
 			return
 		}
 		if r.URL.Path == "/v1/nodes" {
@@ -631,7 +632,7 @@ func TestDoctorFails(t *testing.T) {
 	if code != exitRuntime {
 		t.Fatalf("exit = %d, want %d", code, exitRuntime)
 	}
-	if !strings.Contains(stdout, "FAIL") || !strings.Contains(stdout, "state_not_writable") {
+	if !strings.Contains(stdout, "FAIL") || !strings.Contains(stdout, "state directory is not writable") {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 	if strings.Count(stdout, "PASS") != 2 {
@@ -704,6 +705,32 @@ func TestAPIErrorNeverEchoesKey(t *testing.T) {
 	}
 }
 
+// TestAPIErrorRedactsReflectedBearer covers the CLI surface of the SDK fix: a
+// server that copies the Authorization header into error.message must not turn
+// the CLI into a leak.
+func TestAPIErrorRedactsReflectedBearer(t *testing.T) {
+	clearEnv(t)
+	rec := &recorder{}
+	srv := newServer(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		writeBody(w, 401, `{"error":{"code":"UNAUTHORIZED","message":"rejected `+auth+`"}}`)
+	})
+
+	code, stdout, stderr := runCLI(t, "nodes", "--url", srv.URL, "--key", testKey)
+	if code != exitRuntime {
+		t.Fatalf("exit = %d, want %d", code, exitRuntime)
+	}
+	if strings.Contains(stdout+stderr, testKey) {
+		t.Fatalf("the reflected key reached the output:\n%s%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Bearer [REDACTED]") {
+		t.Errorf("stderr = %q, want a redaction marker", stderr)
+	}
+	if !strings.Contains(stderr, "401") || !strings.Contains(stderr, "UNAUTHORIZED") {
+		t.Errorf("stderr = %q, want the status and code preserved", stderr)
+	}
+}
+
 func TestURLUserinfoIsRedacted(t *testing.T) {
 	clearEnv(t)
 	rec := &recorder{}
@@ -731,6 +758,64 @@ func TestURLUserinfoIsRedacted(t *testing.T) {
 	}
 	if strings.Contains(stdout+stderr, "hunter2") {
 		t.Errorf("parse error echoed the password: %s%s", stdout, stderr)
+	}
+}
+
+func TestBaseURLRejectsQueryAndFragment(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{"plain", "https://ajs.example:2055", "https://ajs.example:2055", ""},
+		{"trailing slash trimmed", "https://ajs.example:2055/", "https://ajs.example:2055", ""},
+		{"bare question mark", "https://ajs.example:2055?", "", "query or fragment"},
+		{"query", "https://ajs.example:2055/?probe=1", "", "query or fragment"},
+		{"fragment", "https://ajs.example:2055/#readyz", "", "query or fragment"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, dropped, err := normalizeBaseURL(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				if base != "" {
+					t.Errorf("base = %q, want empty on error", base)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if base != tc.want {
+				t.Errorf("base = %q, want %q", base, tc.want)
+			}
+			if dropped {
+				t.Error("dropped = true, want false")
+			}
+		})
+	}
+}
+
+// TestStatusRejectsBareQuestionMark guards the ForceQuery case end to end: a
+// base URL ending in "?" must fail before any request, not become a request to
+// "/" with a "/healthz" query string.
+func TestStatusRejectsBareQuestionMark(t *testing.T) {
+	clearEnv(t)
+	rec := &recorder{}
+	srv := newServer(t, rec, healthy)
+
+	code, stdout, stderr := runCLI(t, "status", "--url", srv.URL+"?")
+	if code != exitUsage {
+		t.Fatalf("exit = %d, want %d (stdout %q stderr %q)", code, exitUsage, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "query or fragment") {
+		t.Errorf("stderr = %q, want the URL cause", stderr)
+	}
+	if got := rec.count("/"); got != 0 {
+		t.Errorf("%d requests reached the daemon, want 0", got)
 	}
 }
 

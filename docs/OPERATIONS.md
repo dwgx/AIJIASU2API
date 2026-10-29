@@ -43,9 +43,15 @@ SOURCE_DATE_EPOCH=0 bash deploy/package.sh --version v0.1.0-pre --out /tmp/ajs-p
 `package.sh` cross-compiles linux/amd64, windows/amd64 and darwin/arm64 with
 `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, `-mod=readonly` and `GOTOOLCHAIN=local`.
 It refuses a dashboard bundle that is not `mode: live`, `mock: false`, `panelToken: false`.
-`--version` only labels `MANIFEST.txt`; the binary still reports `0.1.0`
-(`daemon/internal/api/server.go:59`). Do not use `/healthz` version output as the release
-identity — use the tag and `MANIFEST.txt`.
+`--version` is not just a manifest label: the script stamps it into the binaries with
+`-X main.buildVersion=<version>`, and stamps the packaged commit with
+`-X main.buildCommitValue=<commit>` (`git rev-parse HEAD`, or `unknown`). A binary built by
+`package.sh` from `v0.1.0-pre` therefore reports `v0.1.0-pre` from `/healthz` and prints
+`ajs-accountd v0.1.0-pre (<commit>)` for `-version`; a plain `go build`, `go run` or `go test`
+keeps the fallback `0.1.0`. The accountd container image takes the same two values as the
+`AJS_VERSION`/`AJS_COMMIT` build args: `release.yml` passes the tag and the commit SHA, and a
+local `docker build` that passes neither gets `0.1.0` / `unknown`. The stamped values are a
+convenience, not authority: identify a release by its tag and `MANIFEST.txt`.
 
 ## Install from the kit
 

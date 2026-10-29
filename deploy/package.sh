@@ -16,8 +16,9 @@
 # ../emulator, so both module trees must be present in this checkout.
 #
 # Reproducibility: binaries are built with -trimpath, -buildvcs=false,
-# -ldflags="-s -w -buildid= -X main.buildVersion=<version>", -mod=readonly and
-# GOTOOLCHAIN=local. Both tar archives are staged with normalized mtimes and a
+# -ldflags="-s -w -buildid= -X main.buildVersion=<version>
+# -X main.buildCommitValue=<commit>", -mod=readonly and GOTOOLCHAIN=local. Both
+# tar archives are staged with normalized mtimes and a
 # sorted file list, and every text file in them is rewritten to LF before the
 # tar is created. That last step matters on Windows: core.autocrlf=true turns
 # .nft/.conf files into CRLF, and nft(8) rejects CRLF line terminators.
@@ -169,12 +170,24 @@ if [ -f "$ROOT/dashboard/package.json" ]; then
   DASHBOARD_VERSION=$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$ROOT/dashboard/package.json")
   [ -n "$DASHBOARD_VERSION" ] || DASHBOARD_VERSION=unknown
 fi
+# The commit is a linker value too, so it is constrained the same way as the
+# version: a git revision is hex (full or abbreviated), and anything else
+# becomes "unknown" instead of reaching -ldflags. Without this the packaged
+# binary would have no commit to print, because -buildvcs=false leaves the
+# toolchain with no VCS metadata to embed.
+case "$COMMIT" in
+  ''|unknown) COMMIT=unknown ;;
+  *[!0-9a-f]*) COMMIT=unknown ;;
+esac
+
 # -X main.buildVersion=<version> is the release identity (AJS-506): the daemon
 # reports it from /healthz and `ajs-accountd -version`, so a downloaded binary
-# names the tag it was cut from instead of api.DefaultVersion. $VERSION is
-# validated above, so it cannot split or alter this linker argument. The
-# remaining flags keep the build reproducible.
-LDFLAGS="-s -w -buildid= -X main.buildVersion=$VERSION"
+# names the tag it was cut from instead of api.DefaultVersion. -X
+# main.buildCommitValue=<commit> (AJS-510) supplies the commit -version and the
+# Lab overview print: with -buildvcs=false the toolchain embeds none. Both
+# values are validated above, so they cannot split or alter the linker
+# arguments. The remaining flags keep the build reproducible.
+LDFLAGS="-s -w -buildid= -X main.buildVersion=$VERSION -X main.buildCommitValue=$COMMIT"
 BUILD_FLAGS='CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -buildvcs=false -mod=readonly'
 
 ARTIFACT_NAMES=(

@@ -35,12 +35,15 @@ git ls-remote --tags origin | wc -l      # 1: only v0.1.0-pre is on the remote
 |---|---|---|
 | Release | `v0.1.0-pre` | the git tag |
 | Contract | `0.1.0` | `info.version` in [`docs/openapi.json`](openapi.json) |
-| Binary | `0.1.0` | `daemon/internal/api/server.go` `DefaultVersion`; the build carries no `-X` injection |
+| Binary | `v0.1.0-pre (<commit>)` when stamped, else `0.1.0` | `-X` flags from `deploy/package.sh` or the Docker build args; else `DefaultVersion` |
 | Artefact set | `MANIFEST.txt` + `SHA256SUMS` | `deploy/package.sh` at build time |
 
-The binary version is deliberately *not* the release identity: a `v0.1.0-pre` binary still
-reports `0.1.0` from `/healthz`. Identify a release by its tag and the `MANIFEST.txt` shipped with
-it, never by the version string the process prints.
+The binary version is a build label, not the release identity. A `package.sh` build and a
+released accountd image report the tag they were stamped with plus the packaged commit; a build
+without those flags — `go run`, `go test`, a plain `go build`, or `docker build` with default
+args — reports `0.1.0`. Identify a release by its tag and the `MANIFEST.txt` shipped with it,
+never by the version string the process prints. The already-published `v0.1.0-pre` assets and
+images predate the stamping and report `0.1.0`.
 
 The contract version moves when the contract moves, not on every tag. A docs-only release can
 keep `0.1.0`; a change to paths, operations, schemas or scope metadata must bump it.

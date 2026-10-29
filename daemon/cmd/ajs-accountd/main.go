@@ -50,10 +50,10 @@ import (
 
 // buildVersion is the daemon release identity reported by /healthz and the Lab
 // overview. A release build stamps the tag in with
-// -X main.buildVersion=<tag> (deploy/package.sh); a `go run`, `go test` or
-// otherwise unstamped build keeps api.DefaultVersion, which is the version the
-// HTTP contract advertises. The value never carries a credential, so -version
-// prints it verbatim.
+// -X main.buildVersion=<tag> (deploy/package.sh, daemon/Dockerfile); a `go
+// run`, `go test` or otherwise unstamped build keeps api.DefaultVersion, which
+// is the version the HTTP contract advertises. The value never carries a
+// credential, so -version prints it verbatim.
 var buildVersion = api.DefaultVersion
 
 func main() {
@@ -2394,9 +2394,20 @@ func splitList(value string) []string {
 	return items
 }
 
-// buildCommit reports the VCS revision embedded by the Go toolchain. It is
-// empty for a build without VCS metadata, which the Lab overview shows as "".
+// buildCommitValue is the commit a release build stamps in with
+// -X main.buildCommitValue=<commit> (deploy/package.sh and daemon/Dockerfile).
+// Both build with -buildvcs=false, so the toolchain embeds no VCS metadata;
+// without this value a packaged binary could not name the commit it was cut
+// from. An empty value keeps the toolchain lookup below.
+var buildCommitValue = ""
+
+// buildCommit reports the stamped commit, falling back to the VCS revision the
+// Go toolchain embedded. It is empty for a build with neither, which the Lab
+// overview shows as "".
 func buildCommit() string {
+	if buildCommitValue != "" {
+		return buildCommitValue
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return ""
@@ -2409,11 +2420,11 @@ func buildCommit() string {
 	return ""
 }
 
-// versionLine renders the -version output. The commit is the VCS revision the
-// toolchain embedded; a build with -buildvcs=false (deploy/package.sh) has
-// none, and "unknown" keeps the line a stable two-field shape. The version is
-// the tag deploy/package.sh injected, or api.DefaultVersion for an unstamped
-// build.
+// versionLine renders the -version output. The commit is the value
+// deploy/package.sh or daemon/Dockerfile stamped in, or the VCS revision the
+// toolchain embedded; a build with neither has none, and "unknown" keeps the
+// line a stable two-field shape. The version is the tag the build injected, or
+// api.DefaultVersion for an unstamped build.
 func versionLine() string {
 	commit := buildCommit()
 	if commit == "" {
