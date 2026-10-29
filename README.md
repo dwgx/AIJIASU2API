@@ -55,14 +55,14 @@ boundaries.
 
 ## Release status
 
-`v0.1.0-pre.3` is the current **pre-release**, prepared 2026-10-29 and **not yet tagged**: the tag
-is cut from the release-prep commit and pushed after it. The latest published release remains
-`v0.1.0-pre.2`; `v0.1.0-pre` is the one before that. What changed and what is intentionally absent
-is in [CHANGELOG.md](CHANGELOG.md); the near-term plan is in [ROADMAP.md](ROADMAP.md); the full
-notes, verified checks and known limitations are in
-[docs/releases/v0.1.0-pre.3.md](docs/releases/v0.1.0-pre.3.md). This is the first release prepared
-with release verification (`deploy/verify-release.sh`), build attestations and immutable
-draft-first publishing; install, verification, update and rollback are in
+`v0.1.0-pre.3` is the current **pre-release**, published 2026-10-29: usable for evaluation and
+research, not production-stable. The previous published release remains `v0.1.0-pre.2`;
+`v0.1.0-pre` is the one before that. What changed and what is intentionally absent is in
+[CHANGELOG.md](CHANGELOG.md); the near-term plan is in [ROADMAP.md](ROADMAP.md); the full notes,
+verified checks and known limitations are in
+[docs/releases/v0.1.0-pre.3.md](docs/releases/v0.1.0-pre.3.md). This is the first release
+published with release verification (`deploy/verify-release.sh`), build attestations and
+immutable draft-first publishing; install, verification, update and rollback are in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (also in 简体中文). The read-only `ajs` CLI is built from
 source — see [docs/CLI.md](docs/CLI.md).
 

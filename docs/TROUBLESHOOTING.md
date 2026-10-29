@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). Every row
+Status: current for `v0.1.0-pre.3` (published 2026-10-29). Every row
 below names the layer that produced the status, the likely cause, and a read-only command that
 distinguishes the cases. No command here prints a secret: credentials stay in environment
 variables, and the daemon never returns a key secret after creation.

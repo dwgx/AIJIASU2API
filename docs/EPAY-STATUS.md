@@ -1,7 +1,7 @@
 # EPAY / payments status
 
-Status: **experimental, disabled in `v0.1.0-pre.3`** (release prep, 2026-10-29; tag not yet
-created). This page is the single answer to "can I pay, or be paid, through this software?" The
+Status: **experimental, disabled in `v0.1.0-pre.3`** (published 2026-10-29). This page is the
+single answer to "can I pay, or be paid, through this software?" The
 answer is **no**.
 
 ## What this is not

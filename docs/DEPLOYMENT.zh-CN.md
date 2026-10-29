@@ -1,7 +1,7 @@
 # 部署
 
-状态：适用于 `v0.1.0-pre.3`（2026-10-29 准备；**尚未打 tag**）。当前已发布版本为
-`v0.1.0-pre.2`（2026-10-29 发布）。English：
+状态：适用于 `v0.1.0-pre.3`（2026-10-29 发布）。上一已发布版本为 `v0.1.0-pre.2`
+（2026-10-29 发布）。English：
 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 支持三种部署形态，彼此不可混用：加固的 Linux/systemd 安装、基于已发布镜像的 Docker Compose
@@ -63,9 +63,12 @@ gh api repos/dwgx/AIJIASU2API/immutable-releases --jq .enabled   # true
 gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.2 --jq .immutable   # false
 ```
 
-因此 `v0.1.0-pre.2` 只是项目约定上的不可变。`v0.1.0-pre.3` 在设置开启之后准备，目标是成为
-第一个由 GitHub 强制执行的发布；它尚未打 tag，因此这一点在打 tag 前属于**待定**，不是已观察
-到的属性。
+因此 `v0.1.0-pre.2` 只是项目约定上的不可变。`v0.1.0-pre.3` 在设置开启之后发布，是第一个由
+GitHub 强制执行的发布：
+
+```bash
+gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.3 --jq .immutable   # true
+```
 
 ### 构建产物证明
 
@@ -84,10 +87,10 @@ gh release verify-asset <tag> ./ajs-accountd-linux-amd64 --repo dwgx/AIJIASU2API
 
 `gh release verify-asset` 校验发布证明，只有不可变发布才有。
 
-当前已发布版本 `v0.1.0-pre.2` 早于以上全部机制：在 `v0.1.0-pre.2` 这个 tag 上，发布工作流没有
-任何证明步骤（`git show v0.1.0-pre.2:.github/workflows/release.yml | grep -c attest` → `0`）。
-因此对它做证明校验会按设计失败关闭。`v0.1.0-pre.3` 是第一个带这些步骤切出的发布；它尚未打
-tag，因此还没有为它生成或校验任何证明。
+`v0.1.0-pre.2` 早于以上全部机制：在 `v0.1.0-pre.2` 这个 tag 上，发布工作流没有任何证明步骤
+（`git show v0.1.0-pre.2:.github/workflows/release.yml | grep -c attest` → `0`）。因此对它做
+证明校验会按设计失败关闭。`v0.1.0-pre.3` 是第一个带这些步骤发布的版本：六个产物都有构建来源
+证明，两个镜像摘要都有证明，发布证明也通过校验。
 
 ### 发布流程：先草稿，再发布
 
@@ -102,9 +105,8 @@ tag，因此还没有为它生成或校验任何证明。
 可以先把文件附齐再发布。之后仍可更新说明，因为不可变发布保留标题与发布说明的编辑权。
 
 对校验的影响：在该流程落地之后切出的 tag 是不可变发布，会自动带有发布证明，因此
-`gh release verify-asset` 对它应当报告 `verified`。`v0.1.0-pre.3` 是第一个这样的 tag，目前
-**待定**——tag 尚未推送，因此不可变性和发布证明都还没有被观察到。`v0.1.0-pre.2` 及更早版本由
-旧流程（镜像工作流创建发布）发布，没有发布证明。
+`gh release verify-asset` 对它报告 `verified`。`v0.1.0-pre.3` 是第一个通过该流程发布的版本，
+`immutable: true`。`v0.1.0-pre.2` 及更早版本由旧流程（镜像工作流创建发布）发布，没有发布证明。
 
 ### 摘要锁定
 
@@ -155,10 +157,10 @@ Windows 校验器只下载 Windows 可执行文件、`MANIFEST.txt` 和 `SHA256S
 
 ```bash
 # 1. 校验发布；记下脚本打印的 "dir:" 路径。
-#    这是当前已发布版本，没有证明：
+#    这是上一已发布版本，没有证明：
 (cd deploy && ./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified)
 # -> dir: /tmp/ajs-release-verify.Ab12Cd   （新建的 mktemp -d，模式 700）
-#    v0.1.0-pre.3 打 tag 之后改用默认/严格形式：
+#    v0.1.0-pre.3 已发布，改用默认/严格形式：
 #    (cd deploy && ./verify-release.sh --tag v0.1.0-pre.3 --require-attestation)
 
 # 2. 身份、目录、二进制（以 root 执行）。
@@ -187,12 +189,13 @@ curl -fsS http://127.0.0.1:2261/healthz
 
 ```bash
 cd deploy
-./verify-release.sh --tag v0.1.0-pre.3 --require-attestation   # 打 tag 之后
-./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified      # 当前已发布版本
+./verify-release.sh --tag v0.1.0-pre.3 --require-attestation   # 当前版本
+./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified      # 上一版本（无证明）
 ```
 
 对 `v0.1.0-pre.3`，`--require-attestation` 是严格形式：额外要求只有不可变发布才有的发布证明。
-在 tag 推送之前它无法通过。
+已发布版本通过校验：退出码 0，`SHA256SUMS` 5/5，`MANIFEST.txt` commit `5479a3a`，构建来源
+证明与发布证明均通过。
 
 ### 更新
 
@@ -260,11 +263,11 @@ cp .env.example .env
 # 编辑 .env：AJS_ADMIN_TOKEN、AJS_MASTER_KEY；把 AJS_IMAGE_TAG 设为发布 tag，
 # 或给 update.sh 传 --tag（自带值 "latest" 在没有 --allow-latest 时会被拒绝）
 
-# 首次从当前已发布镜像安装。v0.1.0-pre.2 早于证明机制：
-./update.sh --tag v0.1.0-pre.2 --allow-unverified
+# 首次从当前已发布镜像安装。v0.1.0-pre.3 带证明：
+./update.sh --tag v0.1.0-pre.3
 
-# v0.1.0-pre.3 是第一个带证明的发布；打 tag 之后用默认形式：
-# ./update.sh --tag v0.1.0-pre.3
+# 上一版本 v0.1.0-pre.2 早于证明机制：
+# ./update.sh --tag v0.1.0-pre.2 --allow-unverified
 
 # 或者直接运行 compose，不使用脚本的校验与状态文件
 # （先把 AJS_IMAGE_TAG 设为发布 tag；自带的 "latest" 只是别名）：
@@ -291,8 +294,8 @@ docker compose -f compose.yml -f compose.release.yml up -d --no-build
 cd deploy
 ./update.sh --tag <new>                    # 默认开启校验
 ./update.sh --tag <new> --verify           # 默认行为的显式写法
-./update.sh --tag v0.1.0-pre.3              # 打 tag 之后；默认校验证明
-./update.sh --tag v0.1.0-pre.2 --allow-unverified   # 仅当前已发布版本（无证明）
+./update.sh --tag v0.1.0-pre.3              # 当前版本；默认校验证明
+./update.sh --tag v0.1.0-pre.2 --allow-unverified   # 仅上一版本（无证明）
 ./update.sh --tag latest --allow-latest     # 仅当你确实要部署浮动别名
 ```
 
@@ -371,9 +374,9 @@ tag、证明范围，以及供 `--rollback` 使用的旧镜像 ID 与摘要。
 
 ```powershell
 cd deploy\windows
-.\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified -WhatIf   # 当前已发布版本；只打印计划，不写入
+.\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified -WhatIf   # 上一版本；只打印计划，不写入
 .\install.ps1 -Tag v0.1.0-pre.2 -AllowUnverified            # 校验、安装、启动、健康检查
-# v0.1.0-pre.3 打 tag 之后去掉 -AllowUnverified（默认要求证明）：
+# v0.1.0-pre.3 带证明；默认要求证明：
 # .\install.ps1 -Tag v0.1.0-pre.3 -WhatIf
 ```
 
@@ -398,8 +401,8 @@ cd deploy\windows
 ### 校验
 
 ```powershell
-.\verify-release.ps1 -Tag v0.1.0-pre.3                   # 打 tag 之后
-.\verify-release.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # 当前已发布版本
+.\verify-release.ps1 -Tag v0.1.0-pre.3                   # 当前版本
+.\verify-release.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # 上一版本
 ```
 
 校验和链（`SHA256SUMS`）、`MANIFEST.txt` 版本和二进制内嵌 `-version` 始终检查，且默认要求
@@ -410,8 +413,8 @@ cd deploy\windows
 ### 更新
 
 ```powershell
-.\update.ps1 -Tag v0.1.0-pre.3                   # 打 tag 之后
-.\update.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # 当前已发布版本
+.\update.ps1 -Tag v0.1.0-pre.3                   # 当前版本
+.\update.ps1 -Tag v0.1.0-pre.2 -AllowUnverified  # 上一版本
 ```
 
 `update.ps1` 先校验发布，停止计划任务和正在运行的守护进程，把当前二进制保留为
@@ -447,9 +450,10 @@ Get-Content .\logs\*.log -Tail 50
 bearer 与主密钥，状态里有这些密钥保护的密封值。
 
 这些脚本实际观察到的是：针对 `v0.1.0-pre.2` 的校验、`install.ps1 -NoService`、不启用自启动的
-`update.ps1`、`-Rollback` 以及 PowerShell 5.1/7 下的 `run.ps1 -Smoke`。`v0.1.0-pre.3` 还没有
-产物可供实测。提升权限路径——任务注册、SYSTEM 启动、更新时健康检查与自动回滚——是代码路径
-而非本机实测：本工作站上为 `[UNVERIFIED]`。依赖自启动前，请在目标主机上重跑。
+`update.ps1`、`-Rollback` 以及 PowerShell 5.1/7 下的 `run.ps1 -Smoke`。已发布的
+`v0.1.0-pre.3` Windows 二进制已校验，`-version` 输出 `ajs-accountd v0.1.0-pre.3 (5479a3a)`。
+提升权限路径——任务注册、SYSTEM 启动、更新时健康检查与自动回滚——是代码路径而非本机实测：
+本工作站上为 `[UNVERIFIED]`。依赖自启动前，请在目标主机上重跑。
 
 ## 面板：设置 → 更新
 
@@ -473,37 +477,39 @@ pre-release，因此当 `AJS_UPDATE_REPO` 指向本仓库时，该检查返回 `
 socket 或主机 API），在本版本中是**非目标**：那会把面板失陷升级为主机 root。自动更新与回滚
 尚未实现。
 
-有一个需要知道的后果：复制出的校验命令是严格形式（`--require-attestation`），当前已发布版本
+有一个需要知道的后果：复制出的校验命令是严格形式（`--require-attestation`），上一已发布版本
 无法满足它。对 `v0.1.0-pre.2`，请走校验和路径：
 `./verify-release.sh --tag v0.1.0-pre.2 --allow-unverified`，它仍然强制 `SHA256SUMS` 与
-`MANIFEST.txt`。`v0.1.0-pre.3` 是第一个准备满足严格形式的发布；在打 tag 之前这属于待定。
+`MANIFEST.txt`。`v0.1.0-pre.3` 满足严格形式：
+`./verify-release.sh --tag v0.1.0-pre.3 --require-attestation` 退出码为 0。
 
 ## 当前发布状态
 
-| 项目 | `v0.1.0-pre.3`（已准备；尚未打 tag） | `v0.1.0-pre.2`（当前已发布） |
+| 项目 | `v0.1.0-pre.3`（2026-10-29 发布） | `v0.1.0-pre.2`（上一版本） |
 |---|---|---|
-| Tag / commit | 将在基于 `9966822` 的发布准备提交上打 annotated tag | `v0.1.0-pre.2` 指向 `d80fee7`，2026-10-29 发布 |
-| 产物 | tag 推送后生成六个文件 | 六个文件，GitHub prerelease；`:latest` 未移动 |
-| 不可变发布 | 目标：**是**——设置开启后的第一个发布；**打 tag 前待定** | **否**（`"immutable": false`）；仅项目约定 |
-| 构建来源证明 | 工作流步骤已落地（`package.yml` 覆盖六个文件，`release.yml` 覆盖镜像摘要）；**尚未为本 tag 生成** | **无**（该 tag 的工作流没有证明步骤） |
-| 发布证明 | 预期随不可变发布生成；**待定** | **无** |
-| 发布流程 | `package.yml` 草稿 → 附加六个产物 → 发布；`release.yml` 生成镜像证明并更新说明 | 旧流程：`release.yml` 创建发布 |
-| Linux 校验 | 打 tag 后用 `--require-attestation`；校验和与 `MANIFEST.txt` 始终强制 | `--allow-unverified`（校验和与 `MANIFEST.txt` 仍强制） |
-| Windows 校验 | 打 tag 后默认强制证明 | 需要 `-AllowUnverified` |
+| Tag / commit | tag 对象 `753122c`，指向 `5479a3a` | `v0.1.0-pre.2` 指向 `d80fee7`，2026-10-29 发布 |
+| 产物 | 六个文件，GitHub prerelease；`:latest` 未移动 | 六个文件，GitHub prerelease；`:latest` 未移动 |
+| 不可变发布 | **是**（`"immutable": true`） | **否**（`"immutable": false`）；仅项目约定 |
+| 构建来源证明 | **有**——`package.yml` 覆盖六个文件，`release.yml` 覆盖两个镜像摘要；已校验 | **无**（该 tag 的工作流没有证明步骤） |
+| 发布证明 | **有**——由不可变发布生成；`gh release verify-asset` 通过 | **无** |
+| 发布流程 | `package.yml` 草稿 → 附加六个产物 → 发布；`release.yml` 生成镜像证明并更新说明（GHCR 一次瞬时重试） | 旧流程：`release.yml` 创建发布 |
+| Linux 校验 | `--require-attestation` 通过（校验和与 `MANIFEST.txt` 始终强制） | `--allow-unverified`（校验和与 `MANIFEST.txt` 仍强制） |
+| Windows 校验 | 默认强制证明；已发布二进制输出 `v0.1.0-pre.3 (5479a3a)` | 需要 `-AllowUnverified` |
 | 线上守护进程 | `ajs-accountd-61625b0`，早于本版本；本次发布不升级线上主机 | 同上 |
 
 上表的核对命令：
 
 ```bash
 gh api repos/dwgx/AIJIASU2API/immutable-releases --jq .enabled            # true
+gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.3 --jq .immutable  # true
 gh api repos/dwgx/AIJIASU2API/releases/tags/v0.1.0-pre.2 --jq .immutable  # false
-gh release view v0.1.0-pre.2 --json assets --jq '.assets | length'         # 6
+gh release view v0.1.0-pre.3 --json assets --jq '.assets | length'         # 6
+(cd deploy && ./verify-release.sh --tag v0.1.0-pre.3 --require-attestation) # 退出码 0
 git show v0.1.0-pre.2:.github/workflows/release.yml | grep -c attest       # 0
-git tag --list 'v0.1.0-pre.3' | wc -l                                      # 0（尚未打 tag）
 ```
 
-一句话：`v0.1.0-pre.3` 已准备成为第一个带证明且不可变的发布，但尚未运行；`v0.1.0-pre.2`
-没有证明、不是不可变发布，也不是线上主机运行的版本。
+一句话：`v0.1.0-pre.3` 是第一个带证明且不可变的发布，六个产物与两个镜像摘要均已校验；
+`v0.1.0-pre.2` 没有证明、不是不可变发布，也不是线上主机运行的版本。
 
 ## 相关文档
 

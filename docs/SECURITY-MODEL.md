@@ -1,6 +1,6 @@
 # Security model
 
-Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). This page
+Status: current for `v0.1.0-pre.3` (published 2026-10-29). This page
 states what the system enforces, where it enforces it, and what it does **not** protect. It is
 derived from the release's three read-only audits (edge, authorization, supply chain;
 2026-10-28) and from source review of the commit in this tree; the live posture was observed

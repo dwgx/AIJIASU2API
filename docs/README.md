@@ -4,10 +4,10 @@ Which door is yours? If you only want to run the service, you need nothing from 
 "Understand the evidence" table. If you are calling the API, start with the guide and treat the
 contract as the authority.
 
-Status key: **current** — describes `v0.1.0-pre.3` (prepared; tag pending) and is maintained;
-**historical** — a snapshot of an earlier design, kept for the record; **generated** — produced
-from another file, never edited by hand; **internal** — research or working material, not part of
-the public release surface.
+Status key: **current** — describes `v0.1.0-pre.3` and is maintained; **historical** — a snapshot
+of an earlier design, kept for the record; **generated** — produced from another file, never
+edited by hand; **internal** — research or working material, not part of the public release
+surface.
 
 ## Run and operate it
 
@@ -17,7 +17,7 @@ the public release surface.
 | [`docs/OPERATIONS.md`](OPERATIONS.md) | current | install, health, backup, rotation, upgrade, rollback |
 | [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) | current | three deployment modes, release verification, update and rollback; 简体中文 at [`DEPLOYMENT.zh-CN.md`](DEPLOYMENT.zh-CN.md) |
 | [`docs/RELEASE.md`](RELEASE.md) | current | version scheme, release gates, artefacts, checksums, rollback |
-| [`docs/releases/`](releases/) | current | one notes file per release; `v0.1.0-pre.3` is current (prepared; tag pending) |
+| [`docs/releases/`](releases/) | current | one notes file per release; `v0.1.0-pre.3` is current |
 | [`docs/VERSIONING.md`](VERSIONING.md) | current | SemVer policy, tag vs assets, `:latest`, deprecation |
 | [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | current | 407/429/409/404/401/403/502/504 triage with commands |
 | [`deploy/production/README.md`](../deploy/production/README.md) | current | reviewed production kit and the live deployment record |

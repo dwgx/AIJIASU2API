@@ -1,6 +1,6 @@
 # Operations
 
-Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). This is the
+Status: current for `v0.1.0-pre.3` (published 2026-10-29). This is the
 operator runbook: build, install, health, backup, rotation and rollback. It contains no secrets
 and no credential values.
 

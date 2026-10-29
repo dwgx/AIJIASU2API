@@ -1,6 +1,6 @@
 # Admin API
 
-Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). Audience:
+Status: current for `v0.1.0-pre.3` (published 2026-10-29). Audience:
 operators. This page is a map of the operator-only surface and the rules that apply to it. The
 generated reference is authoritative for request and response schemas; this page does not repeat
 them.

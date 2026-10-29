@@ -1,6 +1,6 @@
 # Privacy
 
-Status: current for `v0.1.0-pre.3` (release prep, 2026-10-29; tag not yet created). This page
+Status: current for `v0.1.0-pre.3` (published 2026-10-29). This page
 describes the data the software stores, how long it keeps it, who can read it, and what it does
 not do. It is a technical description, not legal advice.
 
